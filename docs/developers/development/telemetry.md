@@ -632,7 +632,7 @@ The following events are logged:
 #### Tool Events
 
 - `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`. A missing `execution_status` is normalized to `unknown` and is never inferred from the terminal `status`.
-  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `started_at_ms` (int, optional — epoch ms at which `duration_ms` started counting, including any approval wait; absent when the call never ran), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -716,6 +716,12 @@ The following events are logged:
 - `qwen-code.subagent_execution`: Subagent lifecycle event.
   - **Attributes**: `subagent_name` (string), `status` ("started", "completed", "failed", "cancelled"), `terminate_reason` (optional), `result` (optional), `execution_summary` (optional)
 
+#### Goal Events
+
+- `qwen-code.goal_state`: A reported Goal runtime transition, not one event per transcript record. Emitted for `create`, `replace`, `edit`, `pause`, `resume`, `clear`, `complete`, `blocked`, `usage_limited`, and `verifier_reject`. Per-turn `turn_finished` and `checkpoint` are not reported, and neither is the state a resumed session recovers from its transcript. A checkpoint check following a verifier rejection may be journaled as `verifier_reject` while broadcasting the excluded `checkpoint` cause; only the rejection transition is reported. The objective, the stop reason, and checkpoint failure text are never included in this event, whatever `telemetry.logPrompts` is set to. Tool-call events can still carry objectives and model-authored reasons in `function_args`.
+  - **Scope**: `replace` describes the successor Goal and does not settle the outgoing Goal. `pause` includes both user and automatic no-progress pauses. `no_progress_turns` carries the raw consecutive no-progress count when available; it does not classify the stop or add a metric dimension. Outcome histograms include only `complete`, `blocked`, and `usage_limited`; they do not measure the final spend of every removed or paused Goal.
+  - **Attributes**: `cause` (string), `goal_id` (string), `revision` (int), `status` ("active", "paused", "blocked", "usage_limited", "complete"; absent on `clear`), `limit_kind` ("evidence_catalog", "checkpoint_request", "token_budget", "turn_budget", "time_budget"; optional; the first two are no longer produced and can appear only on a Goal an earlier build stopped, since the verifier reads the transcript tail and no evidence checkpoint runs), `turn_count` (int, optional), `tokens_used` (int, optional; legacy transcripts without spend tracking restore this as 0, not as an absent value), `no_progress_turns` (int, optional), `token_budget` (int, optional), `turn_budget` (int, optional), `active_time_ms` (int, optional), `active_time_budget_ms` (int, optional), `objective_length` (int, optional; code points)
+
 #### Arena Events
 
 - `qwen-code.arena_session_started`: Arena session begins.
@@ -733,6 +739,9 @@ The following events are logged:
 
 - `qwen-code.workflow_run`: Workflow run reached terminal state.
   - **Attributes**: `status` (string), `agents_dispatched` (int), `agents_completed` (int, all settled dispatches), `agents_failed` (int, settled dispatches with failed status), `agents_cached` (int, settled dispatches served from a prior run), `agents_respawned` (int, dispatched calls re-run after a prior failed or interrupted attempt), `phase_count` (int), `tokens_spent` (int), `duration_ms` (int). `agents_failed` and `agents_cached` are subsets of `agents_completed`, while `agents_respawned` describes provenance and is not an additional outcome count.
+
+- `qwen-code.workflow_size_warning`: A running workflow crossed its large-run threshold; emitted at most once per run.
+  - **Attributes**: `axis` (string: "agents"/"tokens", the threshold crossed first), `scheduled_agents` (int, dispatches excluding journal replays), `total_tokens` (int), `projected_tokens` (int), `agent_cap` (int), `token_cap` (int), `cap_from_guideline` (boolean, whether the agent threshold came from `tools.workflowSizeGuideline`)
 
 #### Auto-Memory Events
 
@@ -815,6 +824,19 @@ Metrics are numerical measurements of behavior over time. Metric names use the `
 - `qwen-code.chat.content_retry_failure.count` (Counter, Int): All content retries exhausted.
 
 - `qwen-code.chat.invalid_chunk.count` (Counter, Int): Invalid chunks from stream.
+
+#### Goal Metrics
+
+- `qwen-code.goal.transition.count` (Counter, Int): Goal state transitions, one per `qwen-code.goal_state` event.
+  - **Attributes**: `cause`, `status` (optional), `limit_kind` (optional)
+
+- `qwen-code.goal.tokens_used` (Histogram, `{token}`): Cumulative tokens spent at each completion, blocking, or usage-limit stop. Legacy transcripts without spend tracking restore an initial spend of 0; unknown prior spend is not distinguishable from measured zero.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
+
+- `qwen-code.goal.turn_count` (Histogram, `{turn}`): Cumulative turns finished at each of the same three stops.
+  - **Attributes**: `cause` ("complete", "blocked", "usage_limited"), `limit_kind` (optional)
+
+A resumed Goal can contribute multiple stop observations, each containing its lifetime cumulative meters. Histogram `_count` counts stops, not distinct Goals, and `_sum` is not total Goal spend. Token buckets extend through 600 million and turn buckets through 50,000 to distinguish larger resumed runs. Values above those finite boundaries share the `+Inf` bucket; observation count and sum still retain those values.
 
 #### Arena Metrics
 

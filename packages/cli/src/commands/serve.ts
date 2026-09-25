@@ -213,6 +213,7 @@ interface ServeArgs {
   web: boolean;
   open: boolean;
   'open-with-auth': boolean;
+  'token-qr'?: boolean;
   'local-control': boolean;
   'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -392,6 +393,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
       })
+      .option('token-qr', {
+        type: 'boolean',
+        description:
+          'Print the token-bearing QR even when stdout is captured (not an interactive terminal) and the bearer is an operator-supplied (stable) token, which is withheld by default to keep stable credentials out of collected logs. Enable only when the log pipeline is as trusted as the daemon host. Can also be set via the serve.tokenQr setting (user, system, and system-defaults scopes only); the flag wins when passed. --no-token-qr suppresses the startup quickstart token QR for that run on every quickstart path — interactive terminal and generated token included. It does not govern the Local Control pairing QR, which --local-control prints by design.',
+      })
       .option('local-control', {
         type: 'boolean',
         default: false,
@@ -497,8 +503,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. It does not change how any `qwen --acp` child is sized; the ' +
-          'one consumer today is adaptive live-journal growth: one ' +
+          'way. In `admit` and `enforce` modes it determines managed ACP ' +
+          'child capacity; `enforce` also applies the modeled per-child ' +
+          'old-space ceiling. It also sizes one ' +
           'daemon-wide pool of ' +
           JOURNAL_GROWTH_POOL_FRACTION * 100 +
           '% of the effective budget (capped at ' +
@@ -524,7 +531,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe'] as const,
+        choices: ['off', 'observe', 'admit', 'enforce'] as const,
         default: 'observe' as const,
         description:
           'Whether the daemon models a per-child heap partition of the ' +
@@ -536,7 +543,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refusal count of 0 does NOT mean the partition would be safe to ' +
           'apply; children still run on the much larger host-derived ' +
           'ceiling, so a workload needing more old space than the modeled ' +
-          'ceiling looks healthy here.',
+          'ceiling looks healthy here. `admit` rejects starts past the modeled ' +
+          'process limit but keeps the existing child heap arguments. ' +
+          'Experimental `enforce` also applies the fixed modeled old-space ' +
+          'ceiling to each managed child; it does not cap total process RSS.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -882,6 +892,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['token-qr'] !== undefined
+          ? { tokenQr: argv['token-qr'] }
+          : {}),
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),

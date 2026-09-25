@@ -10,6 +10,13 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 820;
 const MIN_WIDTH: u32 = 900;
 const MIN_HEIGHT: u32 = 600;
+// Same step and bounds as the Electron shell this one replaced, whose zoom
+// handlers moved the webContents zoom factor by 0.1 within [0.5, 3.0].
+pub const DEFAULT_ZOOM: f64 = 1.0;
+const MIN_ZOOM: f64 = 0.5;
+const MAX_ZOOM: f64 = 3.0;
+const ZOOM_STEP: f64 = 0.1;
+const ZOOM_GRID: f64 = 10.0;
 const DISABLE_SETTINGS_PERSISTENCE_ENV: &str = "QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE";
 static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -18,6 +25,7 @@ static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 pub struct DesktopSettings {
     pub workspace: Option<PathBuf>,
     pub window: Option<WindowState>,
+    pub zoom: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,6 +70,18 @@ impl SettingsStore {
         self.with_settings(|settings| settings.window.clone())
     }
 
+    pub fn zoom(&self) -> Option<f64> {
+        self.with_settings(|settings| settings.zoom.map(|zoom| zoom.clamp(MIN_ZOOM, MAX_ZOOM)))
+    }
+
+    /// Records a new zoom factor without writing it. Holding a zoom shortcut
+    /// repeats far faster than the settings file should be rewritten, so the
+    /// caller marks the window dirty and the existing flusher persists it
+    /// together with the window geometry.
+    pub fn stage_zoom(&self, zoom: f64) {
+        self.with_settings_mut(|settings| settings.zoom = Some(zoom));
+    }
+
     pub fn save_window(&self, window: &WebviewWindow) -> Result<(), String> {
         let position = window
             .outer_position()
@@ -86,22 +106,29 @@ impl SettingsStore {
         if settings_persistence_disabled() {
             return Ok(());
         }
+        // Serialize *and* replace the file while holding the lock: the flusher
+        // thread, the exit-path save and `set_workspace` all reach `update`, so
+        // releasing the guard before the rename lets two writers land their
+        // snapshots in the opposite order and persist the older settings over
+        // the newer one.
+        self.with_settings_mut(|settings| {
+            update(settings);
+            let serialized = serde_json::to_string_pretty(&*settings)
+                .map_err(|error| format!("Failed to serialize desktop settings: {error}"))?;
+            write_atomic(&self.path, format!("{serialized}\n").as_bytes())
+        })
+    }
+
+    fn with_settings<T>(&self, read: impl FnOnce(&DesktopSettings) -> T) -> T {
+        self.with_settings_mut(|settings| read(&*settings))
+    }
+
+    fn with_settings_mut<T>(&self, update: impl FnOnce(&mut DesktopSettings) -> T) -> T {
         let mut settings = match self.settings.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        update(&mut settings);
-        let serialized = serde_json::to_string_pretty(&*settings)
-            .map_err(|error| format!("Failed to serialize desktop settings: {error}"))?;
-        write_atomic(&self.path, format!("{serialized}\n").as_bytes())
-    }
-
-    fn with_settings<T>(&self, read: impl FnOnce(&DesktopSettings) -> T) -> T {
-        let settings = match self.settings.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        read(&settings)
+        update(&mut settings)
     }
 }
 
@@ -139,6 +166,13 @@ pub fn restore_window(window: &WebviewWindow, state: Option<&WindowState>) {
 
 pub fn default_window_size() -> (f64, f64) {
     (f64::from(DEFAULT_WIDTH), f64::from(DEFAULT_HEIGHT))
+}
+
+/// Applies `steps` zoom steps to `current`, snapping the result back onto the
+/// 0.1 grid so repeated steps do not accumulate binary float drift.
+pub fn zoom_after(current: f64, steps: i32) -> f64 {
+    let next = current + f64::from(steps) * ZOOM_STEP;
+    ((next * ZOOM_GRID).round() / ZOOM_GRID).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -221,7 +255,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 mod tests {
     use super::{
         parse_settings, saved_window_state, settings_persistence_disabled_value, write_atomic,
-        DesktopSettings, WindowState,
+        zoom_after, DesktopSettings, WindowState, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -232,6 +266,7 @@ mod tests {
         let settings: DesktopSettings = serde_json::from_str("{}").expect("settings");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
+        assert!(settings.zoom.is_none());
     }
 
     #[test]
@@ -239,6 +274,22 @@ mod tests {
         let settings = parse_settings("{");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
+        assert!(settings.zoom.is_none());
+    }
+
+    #[test]
+    fn zoom_steps_snap_to_the_grid_and_stay_in_bounds() {
+        assert_eq!(zoom_after(DEFAULT_ZOOM, 1), 1.1);
+        assert_eq!(zoom_after(1.1, -1), DEFAULT_ZOOM);
+        assert_eq!(zoom_after(MAX_ZOOM, 1), MAX_ZOOM);
+        assert_eq!(zoom_after(MIN_ZOOM, -1), MIN_ZOOM);
+        assert_eq!(zoom_after(2.95, 1), MAX_ZOOM);
+
+        let mut zoom = DEFAULT_ZOOM;
+        for _ in 0..3 {
+            zoom = zoom_after(zoom, 1);
+        }
+        assert_eq!(zoom, 1.3);
     }
 
     #[test]

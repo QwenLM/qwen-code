@@ -6,6 +6,7 @@
 
 import {
   SessionNotFoundError,
+  AcpChildCapacityExceededError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -25,11 +26,18 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import express from 'express';
+import request from 'supertest';
+import type { DaemonLogger } from '../daemon-logger.js';
+import { registerStandaloneSessionRoutes } from '../routes/standalone-sessions.js';
+import { sendBridgeError } from '../server/error-response.js';
+import * as daemonTracing from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
 import {
   StandaloneSessionService,
+  StandaloneSessionServiceError,
   type StandaloneSessionServiceOptions,
 } from './standalone-session-service.js';
 import type {
@@ -65,6 +73,7 @@ const identity = {
 
 interface Harness {
   service: StandaloneSessionService;
+  warn: ReturnType<typeof vi.fn>;
   runtime: WorkspaceRuntime;
   bridge: {
     [K in keyof Pick<
@@ -232,7 +241,9 @@ function createHarness(): Harness {
   const confirmStandaloneRootDurability = vi.fn(async () => undefined);
   const assertExactRoot = vi.fn(async () => root);
   const lifecycle = new SessionArchiveCoordinator();
+  const warn = vi.fn();
   const options: StandaloneSessionServiceOptions = {
+    daemonLog: { warn },
     ensureRuntime,
     assertRuntimeCurrent: vi.fn(() => {
       if (runtimeQuarantined) {
@@ -271,6 +282,7 @@ function createHarness(): Harness {
   const service = new StandaloneSessionService(options);
   return {
     service,
+    warn,
     runtime,
     bridge,
     reservation,
@@ -1865,6 +1877,16 @@ describe('StandaloneSessionService', () => {
       sessionId: childSessionId,
     });
 
+    expect(harness.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      expect.objectContaining({
+        sessionId: childSessionId,
+        relatedSessionId: sessionId,
+        phase: 'model_selection',
+        dispatchState: 'dispatched',
+        cleanupOutcome: 'rolled_back',
+      }),
+    );
     expect(harness.bridge.killSession).toHaveBeenCalledWith(childSessionId, {
       requireZeroAttaches: true,
     });
@@ -3641,6 +3663,69 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalledOnce();
   });
 
+  it('retains capacity only after a pre-dispatch absence check', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({
+      code: 'standalone_creation_rolled_back',
+      retryable: true,
+      capacity: {
+        code: 'acp_child_capacity_exhausted',
+        maxConcurrentChildren: 1,
+        committedAcpChildren: 1,
+      },
+    });
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps quarantine precedence when capacity rollback cannot verify absence', async () => {
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+    expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a post-dispatch capacity cause as safe rollback', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        true,
+        new AcpChildCapacityExceededError(1, 1),
+      ),
+    );
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+  });
+
   it('cleanly rolls back a failure before newSession dispatch', async () => {
     vi.spyOn(
       SessionService.prototype,
@@ -3853,5 +3938,384 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
     expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
     expect(harness.reservation.release).not.toHaveBeenCalled();
+  });
+});
+
+describe('creation failure diagnostics', () => {
+  it('attributes runtime acquisition failure before dispatch', async () => {
+    const h = createHarness();
+    const original = new ConversationRuntimeOwnershipError(
+      'conversation_runtime_unavailable',
+      true,
+    );
+    h.ensureRuntime.mockRejectedValueOnce(original);
+    await expect(h.service.create({ sessionId })).rejects.toBe(original);
+    expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      {
+        sessionId,
+        phase: 'runtime',
+        reason: 'runtime_changed',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
+    );
+    expect(h.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+    expect(h.quarantineRuntime).not.toHaveBeenCalled();
+  });
+
+  it('attributes failed durable validation after confirmed source persistence', async () => {
+    mockDurableStandalone();
+    const original = new Error('SECRET_DURABLE');
+    vi.mocked(
+      SessionService.prototype.readCreationMetadataIfReadable,
+    ).mockRejectedValueOnce(original);
+    const h = createHarness();
+    await expect(h.service.create({ sessionId })).rejects.toMatchObject({
+      code: 'standalone_creation_outcome_unknown',
+      cause: original,
+    });
+    expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      {
+        sessionId,
+        workspaceId: 'conversations',
+        phase: 'durable_validation',
+        reason: 'unknown',
+        dispatchState: 'dispatched',
+        cleanupOutcome: 'quarantined',
+      },
+    );
+    expect(h.bridge.commitManagedConversationBinding).not.toHaveBeenCalled();
+    expect(h.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_DURABLE');
+  });
+
+  it.each(['pre-dispatch', 'source-persistence'] as const)(
+    'preserves the HTTP contract and safely diagnoses %s through the real route',
+    async (mode) => {
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(undefined);
+      vi.spyOn(SessionService.prototype, 'removeSession').mockResolvedValue(
+        true,
+      );
+      const traceError = vi
+        .spyOn(daemonTracing, 'recordDaemonError')
+        .mockImplementation(() => undefined);
+      const traceLog = vi
+        .spyOn(daemonTracing, 'emitDaemonLog')
+        .mockImplementation(() => undefined);
+      const h = createHarness();
+      const siblingId = '33333333-3333-4333-8333-333333333333';
+      const sibling = { sessionId: siblingId, sourceType: 'standalone' };
+      h.bridge.getSessionSummary.mockImplementation((id: string) => {
+        if (id === siblingId) return sibling;
+        throw new SessionNotFoundError(id);
+      });
+      const original = new Error('SECRET_SENTINEL', {
+        cause: { token: 'SECRET_SENTINEL' },
+      });
+      const spawnError = new StandaloneSessionSpawnError(false, original);
+      if (mode === 'pre-dispatch')
+        h.bridge.spawnStandaloneSession.mockRejectedValueOnce(spawnError);
+      else
+        h.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+          sessionId,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: false,
+        });
+      const routeWarn = vi.fn();
+      let caught: unknown;
+      const app = express();
+      app.use(express.json());
+      registerStandaloneSessionRoutes(app, {
+        service: h.service,
+        mutate: () => (_req, _res, next) => next(),
+        isWorkspaceTrusted: () => true,
+        sendBridgeError: (res, error, context) => {
+          caught = error;
+          sendBridgeError(res, error, context, {
+            warn: routeWarn,
+          } as unknown as DaemonLogger);
+        },
+      });
+      const response = await request(app)
+        .post('/standalone/sessions')
+        .send({ sessionId });
+      expect(response.status).toBe(500);
+      expect(response.headers['retry-after']).toBe('5');
+      expect(response.body).toEqual({
+        error:
+          'Standalone session creation failed before durable source persistence and was rolled back.',
+        code: 'standalone_creation_rolled_back',
+        errorKind: 'standalone_creation_rolled_back',
+        retryable: true,
+        sessionId,
+      });
+      expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+        'Standalone session creation failed.',
+        {
+          sessionId,
+          workspaceId: 'conversations',
+          phase:
+            mode === 'pre-dispatch'
+              ? 'spawn_pre_dispatch'
+              : 'source_persistence',
+          reason: mode === 'pre-dispatch' ? 'unknown' : 'source_not_confirmed',
+          dispatchState:
+            mode === 'pre-dispatch' ? 'not_dispatched' : 'dispatched',
+          cleanupOutcome: 'rolled_back',
+        },
+      );
+      expect(routeWarn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ sessionId }),
+      );
+      expect(h.bridge.sendPrompt).not.toHaveBeenCalled();
+      expect(h.bridge.getSessionSummary(siblingId)).toBe(sibling);
+      expect(h.quarantineRuntime).not.toHaveBeenCalled();
+      expect(
+        h.bridge.killSession.mock.calls.every(([id]) => id === sessionId),
+      ).toBe(true);
+      expect(traceError).toHaveBeenCalled();
+      expect(traceLog).toHaveBeenCalledWith(
+        'Standalone session creation failed.',
+        expect.objectContaining({
+          'session.id': sessionId,
+          'creation.cleanup_outcome': 'rolled_back',
+        }),
+      );
+      expect(caught).toBeInstanceOf(StandaloneSessionServiceError);
+      if (mode === 'pre-dispatch') {
+        expect((caught as Error).cause).toBe(spawnError);
+        expect(((caught as Error).cause as Error).cause).toBe(original);
+      }
+      for (const [, safeError] of traceError.mock.calls) {
+        expect(safeError).toBeInstanceOf(Error);
+        expect((safeError as Error).cause).toBeUndefined();
+        expect((safeError as Error).stack).not.toContain('SECRET_SENTINEL');
+      }
+      expect(
+        JSON.stringify([
+          response.body,
+          h.warn.mock.calls,
+          routeWarn.mock.calls,
+          traceError.mock.calls,
+          traceLog.mock.calls,
+        ]),
+      ).not.toContain('SECRET_SENTINEL');
+    },
+  );
+
+  it.each([false, true])(
+    'keeps the source failure when cleanup fails (quarantine rejects=%s)',
+    async (rejectQuarantine) => {
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(undefined);
+      const h = createHarness();
+      h.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+        sessionId,
+        attached: false,
+        sourceType: 'standalone',
+        sourcePersisted: false,
+      });
+      h.bridge.killSession.mockRejectedValueOnce(new Error('SECRET_CLEANUP'));
+      if (rejectQuarantine)
+        h.quarantineRuntime.mockRejectedValueOnce(
+          new Error('SECRET_QUARANTINE'),
+        );
+      const error = await h.service
+        .create({ sessionId })
+        .catch((error: unknown) => error);
+      expect(error).toMatchObject({
+        code: 'standalone_creation_outcome_unknown',
+        cause: { code: 'standalone_creation_rolled_back' },
+      });
+      expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.objectContaining({
+          sessionId,
+          phase: 'source_persistence',
+          reason: 'source_not_confirmed',
+          dispatchState: 'dispatched',
+          cleanupOutcome: rejectQuarantine ? 'unknown' : 'quarantined',
+        }),
+      );
+      expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_');
+    },
+  );
+
+  it('correlates direct child parent-validation failure to the child', async () => {
+    const parentSessionId = '22222222-2222-4222-8222-222222222222';
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const h = createHarness();
+    await expect(
+      h.service.createChildWithInitialPrompt(
+        { sessionId, parentSessionId, promptId: 'private-prompt-id' },
+        'SECRET_PROMPT',
+      ),
+    ).rejects.toMatchObject({ sessionId: parentSessionId });
+    expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String),
+      expect.objectContaining({
+        sessionId,
+        relatedSessionId: parentSessionId,
+        phase: 'parent_validation',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      }),
+    );
+    expect(h.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_PROMPT');
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain(
+      'private-prompt-id',
+    );
+  });
+
+  it('retains the first dispatched cause when quarantine itself fails', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const h = createHarness();
+    const original = new StandaloneSessionSpawnError(
+      true,
+      new Error('SECRET_FIRST'),
+    );
+    h.bridge.spawnStandaloneSession.mockRejectedValueOnce(original);
+    h.quarantineRuntime.mockRejectedValueOnce(new Error('SECRET_SECOND'));
+    await expect(h.service.create({ sessionId })).rejects.toMatchObject({
+      cause: original,
+    });
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        phase: 'spawn_dispatched',
+        dispatchState: 'dispatched',
+        cleanupOutcome: 'unknown',
+      }),
+    );
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_');
+  });
+
+  it.each(['binding', 'initial_prompt'] as const)(
+    'retains the first %s failure through cleanup',
+    async (phase) => {
+      mockDurableStandalone();
+      const h = createHarness();
+      const original = new Error('SECRET_FIRST');
+      if (phase === 'binding')
+        h.bridge.commitManagedConversationBinding
+          .mockRejectedValueOnce(original)
+          .mockRejectedValueOnce(new Error('SECRET_RETRY'));
+      else
+        h.bridge.sendPrompt.mockImplementationOnce(() => {
+          throw original;
+        });
+      h.bridge.killSession.mockRejectedValueOnce(new Error('SECRET_CLEANUP'));
+      await expect(
+        h.service.createWithInitialPrompt({ sessionId }, 'SECRET_PROMPT'),
+      ).rejects.toMatchObject({
+        code: 'standalone_creation_outcome_unknown',
+        cause: original,
+      });
+      expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.objectContaining({
+          phase,
+          cleanupOutcome: 'quarantined',
+          dispatchState: 'dispatched',
+        }),
+      );
+      expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_');
+    },
+  );
+
+  it('retains an asynchronous initial admission failure without logging its payload', async () => {
+    mockDurableStandalone();
+    const h = createHarness();
+    const original = new Error('SECRET_ADMISSION');
+    h.bridge.sendPrompt.mockRejectedValueOnce(original);
+    const outcome = await h.service
+      .createWithInitialPrompt({ sessionId }, 'SECRET_PROMPT')
+      .catch((error: unknown) => error);
+    expect(outcome).toMatchObject({
+      code: 'standalone_creation_outcome_unknown',
+      cause: { cause: original },
+    });
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        phase: 'initial_prompt',
+        cleanupOutcome: 'closed',
+      }),
+    );
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_');
+  });
+
+  it('does not diagnose healthy creation as failure', async () => {
+    mockDurableStandalone();
+    const h = createHarness();
+    await expect(h.service.create({ sessionId })).resolves.toMatchObject({
+      session: { sessionId },
+    });
+    expect(h.warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['SECRET_PARENT', undefined, null])(
+    'omits invalid parent identity %s from direct-child diagnostics',
+    async (parentSessionId) => {
+      const h = createHarness();
+      await expect(
+        h.service.createChildWithInitialPrompt(
+          {
+            sessionId,
+            parentSessionId: parentSessionId as string,
+            promptId: 'private',
+          },
+          'SECRET_PROMPT',
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(h.warn).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        sessionId,
+        phase: 'parent_validation',
+        reason: 'unknown',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      });
+      expect(h.ensureRuntime).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the creation result when every diagnostic sink throws', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    vi.spyOn(daemonTracing, 'recordDaemonError').mockImplementation(() => {
+      throw new Error('telemetry unavailable');
+    });
+    const h = createHarness();
+    h.warn.mockImplementation(() => {
+      throw new Error('logger unavailable');
+    });
+    const original = new StandaloneSessionSpawnError(
+      false,
+      new Error('original'),
+    );
+    h.bridge.spawnStandaloneSession.mockRejectedValueOnce(original);
+    await expect(h.service.create({ sessionId })).rejects.toMatchObject({
+      code: 'standalone_creation_rolled_back',
+      cause: original,
+    });
+    expect(h.reservation.release).toHaveBeenCalledOnce();
   });
 });

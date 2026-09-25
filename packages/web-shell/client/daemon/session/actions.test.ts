@@ -1,21 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
   type DaemonCapabilities,
   type DaemonContinueSessionResult,
-  type DaemonSessionClient,
+  DaemonSessionClient,
   type DaemonSessionContextStatus,
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
+import { AcpHttpTransport } from '@qwen-code/sdk/daemon/transports';
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
   getWorkspaceModelsAfterSessionClear,
   resolveSessionRestoreTimeouts,
 } from './actions';
+import { updateConnectionFromDaemonEvent } from './mappers';
+import { createAndAttachSessionForPrompt } from '../../utils/sessionPreparation';
 import type {
   ActivePrompt,
   DaemonActivePromptState,
@@ -177,6 +181,25 @@ describe('context usage counter reconciliation', () => {
 });
 
 describe('getConnectionAfterSessionClear', () => {
+  it('uses the current provider mode for mid-turn admission', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi.fn(async () => ({ accepted: true })),
+    };
+    let mode: 'full' | 'summary' = 'summary';
+    const { actions } = createActionsHarness({
+      session,
+      getEventDetailMode: () => mode,
+    });
+    await actions.enqueueMidTurnMessage('one');
+    mode = 'full';
+    await actions.enqueueMidTurnMessage('two', { messageId: 'two' });
+    expect(session.enqueueMidTurnMessage.mock.calls).toEqual([
+      ['one', { eventDetailMode: 'summary' }],
+      ['two', { messageId: 'two', eventDetailMode: 'full' }],
+    ]);
+  });
+
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'preserves declared text before host and attachment expansion through %s',
     async (method) => {
@@ -198,6 +221,30 @@ describe('getConnectionAfterSessionClear', () => {
     },
   );
 
+  it.each(['sendPrompt', 'submitPrompt'] as const)(
+    'uses the current provider detail mode through %s',
+    async (method) => {
+      const session = createMockSession('session-a');
+      let mode: 'full' | 'summary' = 'full';
+      const { actions } = createActionsHarness({
+        session,
+        getEventDetailMode: () => mode,
+      });
+      for (const nextMode of ['full', 'summary'] as const) {
+        mode = nextMode;
+        session.submitPrompt.mockClear();
+        const pending = actions[method]('Review this');
+        await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+        expect(session.submitPrompt).toHaveBeenCalledWith(
+          expect.objectContaining({ eventDetailMode: mode }),
+          ...(method === 'sendPrompt' ? [expect.any(AbortSignal)] : []),
+        );
+        if (method === 'sendPrompt') await actions.cancel();
+        await pending;
+      }
+    },
+  );
+
   it('clears session fields for the session being detached', () => {
     const next = getConnectionAfterSessionClear(
       {
@@ -209,6 +256,13 @@ describe('getConnectionAfterSessionClear', () => {
         titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
+        backgroundTurn: {
+          turnId: 'background-a',
+          taskId: 'task-a',
+          kind: 'agent',
+          startedAt: 100,
+        },
+        finishedBackgroundTurnId: 'background-old',
         commands: [commandInfo('old-command')],
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
@@ -237,6 +291,8 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
+    expect(next).not.toHaveProperty('backgroundTurn');
+    expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
@@ -473,6 +529,213 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  describe('background live-state request ordering', () => {
+    const owner = { workspaceCwd: '/workspace', sessionId: 'session-1' };
+    const oldTurn = {
+      turnId: 'A',
+      taskId: 'task-A',
+      kind: 'agent' as const,
+      startedAt: 1,
+    };
+    const newTurn = {
+      turnId: 'B',
+      taskId: 'task-B',
+      kind: 'agent' as const,
+      startedAt: 10,
+    };
+
+    function startBackgroundTurn(previousActive?: boolean) {
+      const daemonActivePromptRef: {
+        current: DaemonActivePromptState | undefined;
+      } = {
+        current:
+          previousActive === undefined
+            ? undefined
+            : { active: previousActive, ...owner },
+      };
+      const harness = createActionsHarness({
+        session: createMockSession(owner.sessionId),
+        daemonActivePromptRef,
+        connection: {
+          status: 'connected',
+          ...owner,
+          finishedBackgroundTurnId: oldTurn.turnId,
+        },
+      });
+      const applyEvent = (
+        event: Parameters<typeof updateConnectionFromDaemonEvent>[0],
+      ) => {
+        updateConnectionFromDaemonEvent(event, (update) => {
+          harness.replaceConnection(
+            typeof update === 'function'
+              ? update(harness.getConnection())
+              : update,
+          );
+        });
+      };
+      applyEvent({
+        v: 1,
+        id: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn: newTurn,
+            },
+          },
+        },
+      });
+      expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+      const observedAt = harness.getConnection().backgroundTurnObservedAt;
+      expect(observedAt).toEqual(expect.any(Number));
+      return {
+        ...harness,
+        applyEvent,
+        daemonActivePromptRef,
+        observedAt: observedAt!,
+      };
+    }
+
+    it.each([true, false])(
+      'ignores an older active=%s response after SSE starts B',
+      (active) => {
+        const harness = startBackgroundTurn(true);
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        harness.actions.setDaemonActivePrompt(
+          active,
+          owner,
+          active ? oldTurn : undefined,
+          harness.observedAt - 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([undefined, true])(
+      'allows a newer idle response to settle B (previous authority: %s)',
+      (previousActive) => {
+        const harness = startBackgroundTurn(previousActive);
+        harness.actions.setDaemonActivePrompt(
+          false,
+          owner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.daemonActivePromptRef.current).toMatchObject({
+          active: false,
+        });
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+      },
+    );
+
+    it('ignores an older active response after B has terminated', () => {
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+      try {
+        const harness = startBackgroundTurn(false);
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        expect(harness.observedAt).toBe(100);
+        clock.mockReturnValue(200);
+        harness.applyEvent({
+          v: 1,
+          id: 2,
+          type: 'turn_complete',
+          data: { promptId: newTurn.turnId },
+        });
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.getConnection().finishedBackgroundTurnId).toBe(
+          newTurn.turnId,
+        );
+        expect(harness.getConnection().backgroundTurnObservedAt).toBe(200);
+        harness.actions.setDaemonActivePrompt(true, owner, newTurn, 150);
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it.each([true, false])(
+      'ignores an older active=%s response after SSE starts B in a standalone session',
+      (active) => {
+        const harness = startBackgroundTurn(true);
+        harness.replaceConnection({
+          ...harness.getConnection(),
+          sessionContext: { kind: 'standalone' },
+          workspaceCwd: undefined,
+        });
+        expect(harness.sessionRef.current?.workspaceCwd).toBe(
+          owner.workspaceCwd,
+        );
+        const authorityBefore = harness.daemonActivePromptRef.current;
+        harness.actions.setDaemonActivePrompt(
+          active,
+          owner,
+          active ? oldTurn : undefined,
+          harness.observedAt - 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.daemonActivePromptRef.current).toBe(authorityBefore);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+
+        harness.actions.setDaemonActivePrompt(
+          false,
+          owner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toBeUndefined();
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+      },
+    );
+
+    it.each([
+      { ...owner, sessionId: 'another-session' },
+      { ...owner, workspaceCwd: '/another-workspace' },
+    ])(
+      'does not settle a standalone background turn for mismatched owner %j',
+      (otherOwner) => {
+        const harness = startBackgroundTurn(true);
+        harness.replaceConnection({
+          ...harness.getConnection(),
+          sessionContext: { kind: 'standalone' },
+          workspaceCwd: undefined,
+        });
+        harness.actions.setDaemonActivePrompt(
+          false,
+          otherOwner,
+          undefined,
+          harness.observedAt + 1,
+        );
+        expect(harness.getConnection().backgroundTurn).toEqual(newTurn);
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      },
+    );
+
+    it('ignores malformed live-state execution metadata', () => {
+      const harness = createActionsHarness({
+        session: createMockSession(owner.sessionId),
+        connection: { status: 'connected', ...owner },
+      });
+      harness.actions.setDaemonActivePrompt(true, owner, {
+        ...newTurn,
+        startedAt: Number.NaN,
+      });
+      expect(harness.getConnection().backgroundTurn).toBeUndefined();
+    });
+
+    it('preserves settlement for legacy callers without request timing', () => {
+      const harness = startBackgroundTurn(true);
+      harness.actions.setDaemonActivePrompt(false, owner);
+      expect(harness.getConnection().backgroundTurn).toBeUndefined();
+      expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+  });
   describe('setDaemonActivePrompt (#9487)', () => {
     it('settles the prompt state when the daemon reports the turn finished', () => {
       const daemonActivePromptRef: {
@@ -651,6 +914,58 @@ describe('createDaemonSessionActions', () => {
       label: 'exact label',
     });
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
+  });
+
+  it('notifies prompt removal on the stale-session branch with the foreign session id', async () => {
+    const session = createMockSession('session-current');
+    const clientRemovePendingPrompt = vi.fn(async () => ({ removed: true }));
+    (
+      session.client as unknown as {
+        removePendingPrompt: typeof clientRemovePendingPrompt;
+      }
+    ).removePendingPrompt = clientRemovePendingPrompt;
+    const onPromptRemoved = vi.fn();
+    const { actions } = createActionsHarness({ session, onPromptRemoved });
+
+    await expect(
+      actions.removePendingPrompt('prompt-1', { sessionId: 'session-old' }),
+    ).resolves.toEqual({ removed: true });
+
+    expect(clientRemovePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'prompt-1',
+    );
+    expect(onPromptRemoved).toHaveBeenCalledWith(
+      session,
+      'prompt-1',
+      'session-old',
+    );
+  });
+
+  it('does not retire a prompt whose stale-session removal was refused', async () => {
+    // A refused removal (`removed: false`) means the prompt is still running
+    // in the foreign session; the `removed` guard must keep `onPromptRemoved`
+    // from firing, or the settlement admission key is retired while the turn
+    // keeps running.
+    const session = createMockSession('session-current');
+    const clientRemovePendingPrompt = vi.fn(async () => ({ removed: false }));
+    (
+      session.client as unknown as {
+        removePendingPrompt: typeof clientRemovePendingPrompt;
+      }
+    ).removePendingPrompt = clientRemovePendingPrompt;
+    const onPromptRemoved = vi.fn();
+    const { actions } = createActionsHarness({ session, onPromptRemoved });
+
+    await expect(
+      actions.removePendingPrompt('prompt-1', { sessionId: 'session-old' }),
+    ).resolves.toEqual({ removed: false });
+
+    expect(clientRemovePendingPrompt).toHaveBeenCalledWith(
+      'session-old',
+      'prompt-1',
+    );
+    expect(onPromptRemoved).not.toHaveBeenCalled();
   });
 
   it('does not report a stats error while the session is disconnected', async () => {
@@ -1406,7 +1721,7 @@ describe('createDaemonSessionActions', () => {
     expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
   });
 
-  it('does not apply the generic create timeout to standalone create', async () => {
+  it('does not apply the workspace create watchdog to standalone create', async () => {
     vi.useFakeTimers();
     try {
       const deferred = createDeferred<DaemonSessionClient>();
@@ -1430,35 +1745,334 @@ describe('createDaemonSessionActions', () => {
 
       const pending = actions.createSession();
       let settled = false;
-      void pending.finally(() => {
-        settled = true;
-      });
-      await vi.advanceTimersByTimeAsync(30_001);
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(75_001);
       expect(settled).toBe(false);
       deferred.resolve(nextSession as unknown as DaemonSessionClient);
       await expect(pending).resolves.toBe(nextSession);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('applies the generic create timeout to workspace create', async () => {
-    vi.useFakeTimers();
-    try {
-      const deferred = createDeferred<DaemonSessionClient>();
-      const { actions } = createActionsHarness({
-        connection: {
-          status: 'connected',
-          sessionContext: { kind: 'workspace', cwd: '/workspace' },
-        },
-        createDetachedSession: vi.fn(() => deferred.promise),
+  describe.each(['active', 'detached'] as const)(
+    '%s workspace create deadlines',
+    (path) => {
+      it('keeps the create watchdog above two SDK request budgets plus headroom', async () => {
+        vi.useFakeTimers();
+        const deferred = createDeferred<DaemonSessionClient>();
+        try {
+          const { client, fetch } = createTimedCreateClient({
+            sessionDelayMs: 120_000,
+          });
+          const requestStarted = Date.now();
+          const request = client
+            .createOrAttachSession({})
+            .catch((error: unknown) => ({
+              error,
+              elapsedMs: Date.now() - requestStarted,
+            }));
+          await vi.runAllTimersAsync();
+          const requestResult = await request;
+          expect(fetch).toHaveBeenCalledTimes(1);
+          expect(requestResult).toMatchObject({
+            error: { name: 'TimeoutError' },
+          });
+          if (!('elapsedMs' in requestResult))
+            throw new Error('Expected SDK timeout');
+          const singleRequestBudgetMs = requestResult.elapsedMs;
+
+          const { client: preflightClient } = createTimedCreateClient({
+            capabilitiesDelayMs: 120_000,
+          });
+          const preflightStarted = Date.now();
+          const preflight = preflightClient
+            .capabilities()
+            .catch((error: unknown) => ({
+              error,
+              elapsedMs: Date.now() - preflightStarted,
+            }));
+          await vi.runAllTimersAsync();
+          const preflightResult = await preflight;
+          expect(preflightResult).toMatchObject({
+            error: { name: 'TimeoutError' },
+          });
+          if (!('elapsedMs' in preflightResult))
+            throw new Error('Expected capability preflight timeout');
+          expect(preflightResult.elapsedMs).toBe(singleRequestBudgetMs);
+
+          const { actions, existing } = createWorkspaceCreateHarness(
+            path,
+            client,
+            () => deferred.promise,
+          );
+          existing.client.createOrAttachSession.mockReturnValue(
+            deferred.promise,
+          );
+          const createStarted = Date.now();
+          const create = actions.createSession().catch((error: unknown) => ({
+            error,
+            elapsedMs: Date.now() - createStarted,
+          }));
+          await vi.runAllTimersAsync();
+          const createResult = await create;
+          expect(createResult).toMatchObject({
+            error: {
+              message: expect.stringContaining(
+                'Create session timed out after',
+              ),
+            },
+          });
+          if (!('elapsedMs' in createResult))
+            throw new Error('Expected create timeout');
+          expect(createResult.elapsedMs).toBeGreaterThanOrEqual(
+            preflightResult.elapsedMs + singleRequestBudgetMs + 15_000,
+          );
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          deferred.resolve(
+            createMockSession('session-b') as unknown as DaemonSessionClient,
+          );
+          await vi.advanceTimersByTimeAsync(0);
+          vi.useRealTimers();
+        }
       });
 
-      const pending = actions.createSession();
-      await Promise.all([
-        expect(pending).rejects.toThrow('Create session timed out'),
-        vi.advanceTimersByTimeAsync(30_000),
-      ]);
+      it('bounds a hung ACP initialization with the create watchdog', async () => {
+        vi.useFakeTimers();
+        const initialization = createDeferred<Response>();
+        const transport = new AcpHttpTransport(
+          'http://localhost',
+          '',
+          vi.fn(() => initialization.promise),
+        );
+        try {
+          const client = new DaemonClient({
+            baseUrl: 'http://localhost',
+            token: '',
+            transport,
+          });
+          const { actions, sessionRef } = createWorkspaceCreateHarness(
+            path,
+            client,
+          );
+          const rejected = vi.fn();
+          const pending = actions
+            .createSession({ sourceType: 'default' })
+            .catch(rejected);
+          await vi.advanceTimersByTimeAsync(74_999);
+          expect(rejected).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(rejected).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              message: 'Create session timed out after 75000ms',
+            }),
+          );
+          await pending;
+          expect(sessionRef.current?.sessionId).toBe(
+            path === 'active' ? 'session-a' : undefined,
+          );
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          initialization.reject(new Error('Test cleanup'));
+          await vi.advanceTimersByTimeAsync(0);
+          transport.dispose();
+          vi.useRealTimers();
+        }
+      });
+
+      it('detaches a successful result arriving after the create watchdog', async () => {
+        vi.useFakeTimers();
+        try {
+          const created = createMockSession('session-b');
+          const deferred = createDeferred<DaemonSessionClient>();
+          const client = new DaemonClient({
+            baseUrl: 'http://localhost',
+            token: '',
+          });
+          const { actions, sessionRef, existing } =
+            createWorkspaceCreateHarness(path, client, () => deferred.promise);
+          existing.client.createOrAttachSession.mockReturnValue(
+            deferred.promise,
+          );
+          const rejected = vi.fn();
+          const pending = actions.createSession().catch(rejected);
+          await vi.advanceTimersByTimeAsync(75_000);
+          expect(rejected).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              message: 'Create session timed out after 75000ms',
+            }),
+          );
+          await pending;
+          deferred.resolve(created as unknown as DaemonSessionClient);
+          await vi.advanceTimersByTimeAsync(0);
+          if (path === 'active') {
+            expect(
+              existing.client.detachSession,
+            ).toHaveBeenCalledExactlyOnceWith(
+              created.sessionId,
+              created.clientId,
+            );
+            expect(created.detach).not.toHaveBeenCalled();
+          } else {
+            expect(created.detach).toHaveBeenCalledOnce();
+          }
+          expect(sessionRef.current?.sessionId).toBe(
+            path === 'active' ? 'session-a' : undefined,
+          );
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each([
+        { cache: 'cold', capabilitiesDelayMs: 20_000, sessionDelayMs: 15_000 },
+        {
+          cache: 'expired',
+          capabilitiesDelayMs: 20_000,
+          sessionDelayMs: 15_000,
+        },
+        { cache: 'warm', capabilitiesDelayMs: 20_000, sessionDelayMs: 15_000 },
+        { cache: 'cold', capabilitiesDelayMs: 29_000, sessionDelayMs: 29_000 },
+      ] as const)(
+        'waits for $capabilitiesDelayMs/$sessionDelayMs ms SDK requests with a $cache capability cache',
+        async ({ cache, capabilitiesDelayMs, sessionDelayMs }) => {
+          vi.useFakeTimers();
+          try {
+            const { client, fetch, signals } = createTimedCreateClient({
+              capabilitiesDelayMs,
+              sessionDelayMs,
+            });
+            if (cache !== 'cold') {
+              const preflight = client.capabilities();
+              await vi.advanceTimersByTimeAsync(capabilitiesDelayMs);
+              await preflight;
+              if (cache === 'expired') {
+                await vi.advanceTimersByTimeAsync(60_001);
+              }
+              fetch.mockClear();
+            }
+            const detach = vi.spyOn(client, 'detachSession');
+            const { actions, sessionRef, existing } =
+              createWorkspaceCreateHarness(path, client);
+            const completed = vi.fn();
+            const pending = actions
+              .createSession({ sourceType: 'default' })
+              .then(completed);
+            if (cache !== 'warm') {
+              await vi.advanceTimersByTimeAsync(30_001);
+              expect(completed).not.toHaveBeenCalled();
+              expect(signals.every((signal) => !signal.aborted)).toBe(true);
+              await vi.advanceTimersByTimeAsync(
+                capabilitiesDelayMs + sessionDelayMs - 30_001,
+              );
+            } else {
+              await vi.advanceTimersByTimeAsync(sessionDelayMs);
+            }
+            await pending;
+            expect(completed).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({ sessionId: 'session-b' }),
+            );
+            expect(
+              fetch.mock.calls.map(([url]) => new URL(String(url)).pathname),
+            ).toEqual(
+              cache === 'warm' ? ['/session'] : ['/capabilities', '/session'],
+            );
+            expect(detach).not.toHaveBeenCalled();
+            expect(existing.client.detachSession).not.toHaveBeenCalled();
+            if (path === 'detached') {
+              expect(sessionRef.current?.sessionId).toBe('session-b');
+            }
+            expect(vi.getTimerCount()).toBe(0);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it.each(['missing capability', 'request timeout'] as const)(
+        'preserves SDK failure for %s',
+        async (failure) => {
+          vi.useFakeTimers();
+          try {
+            const { client, fetch, signals } = createTimedCreateClient({
+              features: failure === 'missing capability' ? [] : undefined,
+              sessionDelayMs:
+                failure === 'request timeout' ? 35_000 : undefined,
+            });
+            const { actions } = createWorkspaceCreateHarness(path, client);
+            const rejected = vi.fn((error: unknown) => error);
+            const outcome = actions
+              .createSession({ sourceType: 'default' })
+              .catch(rejected);
+            await vi.advanceTimersByTimeAsync(20_000);
+            if (failure === 'request timeout') {
+              await vi.advanceTimersByTimeAsync(29_999);
+              expect(rejected).not.toHaveBeenCalled();
+              expect(signals.at(-1)?.aborted).toBe(false);
+              await vi.advanceTimersByTimeAsync(1);
+              expect(rejected).toHaveBeenCalledExactlyOnceWith(
+                expect.objectContaining({ name: 'TimeoutError' }),
+              );
+            }
+            expect(await outcome).toMatchObject({
+              name:
+                failure === 'request timeout'
+                  ? 'TimeoutError'
+                  : 'DaemonCapabilityMissingError',
+            });
+            expect(fetch).toHaveBeenCalledTimes(
+              failure === 'request timeout' ? 2 : 1,
+            );
+            expect(signals.at(-1)?.aborted).toBe(failure === 'request timeout');
+            expect(vi.getTimerCount()).toBe(0);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+    },
+  );
+
+  it('continues first-prompt preparation once after a slow workspace create', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = createTimedCreateClient();
+      const { actions, getConnection } = createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession: vi.fn((workspaceCwd, overrides) =>
+          DaemonSessionClient.createOrAttach(client, {
+            workspaceCwd,
+            ...overrides,
+          }),
+        ),
+      });
+      const attachSession = vi.fn(async () => {});
+      const onSessionCreated = vi.fn();
+      const submitPrompt = vi.fn();
+      const pending = createAndAttachSessionForPrompt({
+        sessionActions: { ...actions, attachSession },
+        workspaceCwd: '/workspace',
+        onSessionCreated,
+        getCurrentSessionId: () => getConnection().sessionId,
+      }).then(submitPrompt);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(submitPrompt).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(4_999);
+      await pending;
+      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith('session-b');
+      expect(attachSession).toHaveBeenCalledOnce();
+      expect(submitPrompt).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -1566,6 +2180,174 @@ describe('createDaemonSessionActions', () => {
     expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
       expect.objectContaining({ sourceType: 'default' }),
     );
+  });
+
+  it('does not replace navigation after a slow detached create', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextSession = createMockSession('session-b');
+      const deferred = createDeferred<DaemonSessionClient>();
+      const manualSessionClearRef = { current: false };
+      const { actions, sessionRef, getConnection, replaceConnection } =
+        createActionsHarness({
+          connection: { status: 'connected' },
+          createDetachedSession: vi.fn(() => deferred.promise),
+          manualSessionClearRef,
+        });
+      const outcome = actions.createSession().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_001);
+      const navigatedConnection: DaemonConnectionState = {
+        status: 'connecting',
+        sessionId: 'session-c',
+        sessionContext: { kind: 'workspace', cwd: '/other-workspace' },
+      };
+      replaceConnection(navigatedConnection);
+      await vi.advanceTimersByTimeAsync(9_999);
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      expect(await outcome).toMatchObject({
+        name: 'AbortError',
+        message: 'Session creation interrupted',
+      });
+      expect(manualSessionClearRef.current).toBe(false);
+      expect(nextSession.detach).toHaveBeenCalledOnce();
+      expect(getConnection()).toBe(navigatedConnection);
+      expect(sessionRef.current).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not publish a slow detached create after session-less workspace navigation', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextSession = createMockSession('session-b');
+      const deferred = createDeferred<DaemonSessionClient>();
+      let selectedWorkspaceCwd = '/workspace';
+      const connection: DaemonConnectionState = {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      };
+      const publishedSessionIds: Array<string | undefined> = [];
+      const { actions, sessionRef, getConnection } = createActionsHarness({
+        connection,
+        createDetachedSession: vi.fn(() => deferred.promise),
+        onConnectionChange: (next) => publishedSessionIds.push(next.sessionId),
+      });
+      const outcome = actions
+        .createSession({
+          workspaceCwd: '/workspace',
+          getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      selectedWorkspaceCwd = '/other-workspace';
+      expect(getConnection()).toBe(connection);
+      await vi.advanceTimersByTimeAsync(25_000);
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      expect(nextSession.detach).toHaveBeenCalledOnce();
+      expect(sessionRef.current).toBeUndefined();
+      expect(getConnection()).toBe(connection);
+      expect(publishedSessionIds).not.toContain('session-b');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      name: 'equivalent paths',
+      target: '/workspace',
+      current: '/workspace///',
+      attached: false,
+    },
+    {
+      name: 'another checkout',
+      target: '/other-checkout',
+      current: '/workspace',
+      attached: false,
+    },
+    {
+      name: 'the returned session already attached',
+      target: '/other-checkout',
+      current: '/other-checkout',
+      attached: true,
+    },
+  ])(
+    'accepts detached creation with $name',
+    async ({ target, current, attached }) => {
+      const nextSession = createMockSession('session-b');
+      nextSession.workspaceCwd = target;
+      const deferred = createDeferred<DaemonSessionClient>();
+      let selectedWorkspaceCwd = '/workspace';
+      const { actions, sessionRef, getConnection, replaceConnection } =
+        createActionsHarness({
+          connection: {
+            status: 'connected',
+            sessionContext: { kind: 'workspace', cwd: '/workspace' },
+          },
+          createDetachedSession: vi.fn(() => deferred.promise),
+        });
+      const pending = actions.createSession({
+        workspaceCwd: target,
+        getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+      });
+      selectedWorkspaceCwd = current;
+      if (attached) {
+        replaceConnection({
+          status: 'connected',
+          sessionId: nextSession.sessionId,
+          sessionContext: { kind: 'workspace', cwd: target },
+        });
+      }
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      await expect(pending).resolves.toBe(nextSession);
+      expect(nextSession.detach).not.toHaveBeenCalled();
+      expect(sessionRef.current).toBe(nextSession);
+      expect(getConnection().sessionId).toBe('session-b');
+    },
+  );
+
+  it('stops first-prompt preparation before callbacks after workspace navigation', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    let selectedWorkspaceCwd = '/workspace';
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      createDetachedSession: vi.fn(() => deferred.promise),
+    });
+    const attachSession = vi.spyOn(actions, 'attachSession');
+    const clearSession = vi.spyOn(actions, 'clearSession');
+    const onSessionCreated = vi.fn();
+    const onSessionAllocated = vi.fn();
+    const pending = createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      workspaceCwd: '/workspace',
+      getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+      getCurrentSessionId: () => getConnection().sessionId,
+      onSessionCreated,
+      onSessionAllocated,
+    });
+    selectedWorkspaceCwd = '/other-workspace';
+    const navigatedConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-c',
+      sessionContext: { kind: 'workspace', cwd: selectedWorkspaceCwd },
+    };
+    replaceConnection(navigatedConnection);
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(nextSession.detach).toHaveBeenCalledOnce();
+    expect(onSessionCreated).not.toHaveBeenCalled();
+    expect(onSessionAllocated).not.toHaveBeenCalled();
+    expect(attachSession).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(getConnection()).toBe(navigatedConnection);
   });
 
   it('does not restore a detached session after the session was cleared', async () => {
@@ -3247,6 +4029,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         {
@@ -3287,6 +4070,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [{ type: 'text', text: '/help' }],
     });
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
@@ -3320,6 +4104,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [{ type: 'text', text: '/summarize' }],
     });
   });
@@ -3476,6 +4261,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).toHaveBeenCalledOnce();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text },
         {
@@ -3735,6 +4521,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: '/price-sheet update these prices' },
         {
@@ -3785,6 +4572,7 @@ describe('createDaemonSessionActions', () => {
       );
       expect(session.submitPrompt).toHaveBeenCalledWith(
         {
+          eventDetailMode: 'full',
           prompt: shouldUpload
             ? [
                 { type: 'text', text: '/price-sheet update' },
@@ -3832,6 +4620,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -3893,6 +4682,7 @@ describe('createDaemonSessionActions', () => {
       undefined,
     );
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -3949,6 +4739,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -3987,6 +4778,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         {
           type: 'text',
@@ -4027,6 +4819,7 @@ describe('createDaemonSessionActions', () => {
     // matching the legacy shape).
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         { type: 'image', data: 'AQID' },
@@ -4087,6 +4880,7 @@ describe('createDaemonSessionActions', () => {
     });
 
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         { type: 'image', data: 'AQID', mimeType: 'image/png' },
@@ -4483,6 +5277,7 @@ describe('createDaemonSessionActions', () => {
 
     expect(session.uploadAttachment).not.toHaveBeenCalled();
     expect(session.submitPrompt).toHaveBeenCalledWith({
+      eventDetailMode: 'full',
       prompt: [
         { type: 'text', text: 'look' },
         {
@@ -4838,6 +5633,7 @@ describe('createDaemonSessionActions', () => {
     // messageId-keyed idempotency and the reconciliation rings never match
     // if this hop drops the option.
     expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      eventDetailMode: 'full',
       messageId: 'stable-id',
     });
   });
@@ -5318,6 +6114,7 @@ function createActionsHarness(
     addNotice?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
+    onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: {
@@ -5341,6 +6138,7 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
+    getEventDetailMode?: () => 'full' | 'summary';
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -5413,6 +6211,7 @@ function createActionsHarness(
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),
     getConnection: () => connection,
+    getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),
     restartEventStream: opts.restartEventStream ?? vi.fn(),
@@ -5423,6 +6222,7 @@ function createActionsHarness(
     onPromptRemoved: opts.onPromptRemoved,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
+      opts.onConnectionChange?.(connection);
     },
     setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
@@ -5444,6 +6244,32 @@ function createActionsHarness(
     settleRestoredActivePrompt,
     setPromptStatus,
     store,
+  };
+}
+
+function createWorkspaceCreateHarness(
+  path: 'active' | 'detached',
+  client: DaemonClient,
+  createDetachedSession: Parameters<
+    typeof createDaemonSessionActions
+  >[0]['createDetachedSession'] = (workspaceCwd, overrides) =>
+    DaemonSessionClient.createOrAttach(client, { workspaceCwd, ...overrides }),
+) {
+  const existing = createMockSession('session-a');
+  existing.client.createOrAttachSession.mockImplementation((request) =>
+    client.createOrAttachSession(request),
+  );
+  return {
+    existing,
+    ...createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        ...(path === 'active' ? { sessionId: 'session-a' } : {}),
+      },
+      ...(path === 'active' ? { session: existing } : {}),
+      createDetachedSession: vi.fn(createDetachedSession),
+    }),
   };
 }
 
@@ -5804,3 +6630,72 @@ describe('accepted attachment sources', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 });
+
+it('clearing selected stopped session removes stale stop and recovery flags', () => {
+  const next = getConnectionAfterSessionClear(
+    {
+      status: 'disconnected',
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      runtimeStopped: true,
+      runtimeStopPersistenceUnconfirmed: true,
+      capacityRecovery: {
+        sessionId: 'session-1',
+        mode: 'load',
+        error: new Error('full'),
+      },
+    },
+    'session-1',
+  );
+  expect(next.sessionId).toBeUndefined();
+  expect(next.runtimeStopped).not.toBe(true);
+  expect(next.runtimeStopPersistenceUnconfirmed).not.toBe(true);
+  expect(next.capacityRecovery).toBeUndefined();
+});
+
+function createTimedCreateClient({
+  features = ['session_source_metadata'],
+  capabilitiesDelayMs = 20_000,
+  sessionDelayMs = 15_000,
+}: {
+  features?: string[];
+  capabilitiesDelayMs?: number;
+  sessionDelayMs?: number;
+} = {}) {
+  const signals: AbortSignal[] = [];
+  const fetch = vi.fn<typeof globalThis.fetch>((url, init) => {
+    const capabilities = new URL(String(url)).pathname === '/capabilities';
+    const signal = init?.signal;
+    if (!signal) throw new Error('Expected SDK request cancellation signal');
+    signals.push(signal);
+    return new Promise<Response>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(
+        () => {
+          signal.removeEventListener('abort', abort);
+          resolve(
+            Response.json(
+              capabilities
+                ? { features }
+                : {
+                    sessionId: 'session-b',
+                    clientId: 'client-b',
+                    workspaceCwd: '/workspace',
+                  },
+            ),
+          );
+        },
+        capabilities ? capabilitiesDelayMs : sessionDelayMs,
+      );
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  });
+  return {
+    client: new DaemonClient({ baseUrl: 'http://localhost', token: '', fetch }),
+    fetch,
+    signals,
+  };
+}

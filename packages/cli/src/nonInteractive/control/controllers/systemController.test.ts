@@ -8,6 +8,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InputFormat } from '@qwen-code/qwen-code-core';
 import { createMinimalSettings } from '../../../config/settings.js';
+import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
+import { CommandKind } from '../../../ui/commands/types.js';
 import type { StreamJsonOutputAdapter } from '../../io/StreamJsonOutputAdapter.js';
 import type { IControlContext } from '../ControlContext.js';
 import type { IPendingRequestRegistry } from './baseController.js';
@@ -25,6 +27,10 @@ const { mockDebugLogger } = vi.hoisted(() => ({
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createDebugLogger: () => mockDebugLogger,
+}));
+
+vi.mock('../../../nonInteractiveCliCommands.js', () => ({
+  getAvailableCommands: vi.fn(),
 }));
 
 function createContext(
@@ -73,6 +79,38 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('SystemController', () => {
+  it('loads supported commands with the session settings for Skill registration', async () => {
+    const context = createContext();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    vi.mocked(getAvailableCommands).mockResolvedValueOnce([
+      {
+        name: 'demo:analysis',
+        description: 'Analyze a local dataset',
+        kind: CommandKind.FILE,
+      },
+    ]);
+
+    const result = await controller.handleRequest(
+      { subtype: 'supported_commands' },
+      'supported-commands',
+    );
+
+    expect(result).toEqual({
+      subtype: 'supported_commands',
+      commands: ['demo:analysis'],
+    });
+    expect(getAvailableCommands).toHaveBeenCalledWith(
+      context.config,
+      expect.any(AbortSignal),
+      'non_interactive',
+      context.settings,
+    );
+  });
+
   describe('initialize timeout validation', () => {
     it('accepts valid timeout within bounds', async () => {
       const context = createContext();

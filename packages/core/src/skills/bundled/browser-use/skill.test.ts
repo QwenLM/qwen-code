@@ -1,0 +1,119 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
+import { makeFakeConfig } from '../../../test-utils/config.js';
+import { SkillManager } from '../../skill-manager.js';
+
+const skillUrl = new URL('./SKILL.md', import.meta.url);
+const skill = fs.readFileSync(skillUrl, 'utf8');
+const nodeReplPackage = JSON.parse(
+  fs.readFileSync(
+    new URL('../../../../../node-repl/package.json', import.meta.url),
+    'utf8',
+  ),
+) as { version: string };
+
+describe('bundled browser-use skill', () => {
+  it('is discovered without a Qwen extension', async () => {
+    const manager = new SkillManager(makeFakeConfig());
+
+    await expect(
+      manager.loadSkill('browser-use', 'bundled'),
+    ).resolves.toMatchObject({
+      name: 'browser-use',
+      level: 'bundled',
+      filePath: fileURLToPath(skillUrl),
+    });
+  });
+
+  it('loads its bundled runtime through the generic Node REPL', () => {
+    expect(skill).toContain('If `node_repl` is unavailable');
+    expect(skill).toContain('qwen mcp add --scope user node-repl');
+    expect(skill).toContain(
+      `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
+    );
+    expect(skill).not.toContain('@qwen-code/node-repl-mcp@latest');
+    // The SDK loads its own bundled dependencies, so setup must not send the
+    // model through a module-directory registration first.
+    expect(skill).not.toContain('node_repl_add_node_module_dir');
+    expect(skill).not.toContain('node_modules');
+    expect(skill).toContain("import('/absolute/skill/base/runtime/index.js')");
+    expect(skill).not.toContain('<extension-root>');
+    expect(skill).not.toContain('qwen extensions install');
+    expect(skill).not.toContain('npm install --no-save');
+  });
+
+  it('pins the Node REPL version that carries screenshot metadata', () => {
+    const pin = skill.match(
+      /^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@(\S+)$/m,
+    )?.[1];
+    expect(pin).toBe(nodeReplPackage.version);
+    expect(skill.replace(/\s+/g, ' ')).toContain(
+      `Screenshot metadata requires \`@qwen-code/node-repl-mcp\` ${nodeReplPackage.version} or later`,
+    );
+  });
+
+  it('names where the Qwen Chrome extension comes from', () => {
+    expect(skill).toContain(
+      'https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph',
+    );
+    expect(skill).toContain('`packages/chrome-extension`');
+    expect(skill).toContain('`dist/extension`');
+    expect(skill).toContain('Load unpacked');
+  });
+
+  it('uses the current Browser SDK contract', () => {
+    expect(skill).toContain('setupBrowserRuntime()');
+    expect(skill).toContain('nodeRepl.write');
+    expect(skill).toContain('browser.tabs.finalize');
+    expect(skill).toContain('complete set');
+    expect(skill).toContain('handoff in each later turn');
+    expect(skill).toContain('node_id');
+    expect(skill).not.toContain('setupBrowserRuntime(nodeRepl)');
+    expect(skill).not.toContain('dev.network');
+    expect(skill).not.toContain('markDeliverable');
+    expect(skill).not.toContain('markHandoff');
+    expect(skill).not.toContain('domSnapshot({ filter:');
+  });
+
+  it('passes the complete screenshot and metadata to emitImage', async () => {
+    const example = [...skill.matchAll(/```js\n([\s\S]*?)```/g)].find(
+      ([, code]) => code.includes('tab.screenshot()'),
+    )?.[1];
+    expect(example).toBeDefined();
+
+    const shot = {
+      bytes: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/jpeg',
+      metadata: {
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
+      },
+    };
+    const screenshot = vi.fn().mockResolvedValue(shot);
+    const output: unknown[] = [];
+
+    await runInNewContext(`(async () => {\n${example}\n})()`, {
+      tab: { screenshot },
+      nodeRepl: {
+        write: (text: string) => output.push({ text }),
+        emitImage: async (image: unknown) => {
+          output.push({ image });
+        },
+      },
+    });
+
+    expect(screenshot).toHaveBeenCalledTimes(1);
+    expect(output).toEqual([{ image: shot }]);
+  });
+});

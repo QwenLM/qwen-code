@@ -426,6 +426,53 @@ describe('runBuildTest', () => {
     expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
   });
 
+  it("installs a pnpm repo with corepack pnpm, gated on pnpm's own marker", () => {
+    // pnpm-lock.yaml alone — this repo's own shape once package-lock.json is
+    // gone. The npm marker the beforeEach left must not pass for a pnpm tree.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    rmSync(join(root, 'package-lock.json'), { force: true });
+    writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    const calls: string[] = [];
+    const exec = (command: string, cwd: string): CommandResult => {
+      calls.push(command);
+      if (command.startsWith('corepack pnpm install')) {
+        writeFileSync(join(cwd, 'node_modules', '.modules.yaml'), '');
+      }
+      return { command, exitCode: 0, seconds: 1, timedOut: false, output: '' };
+    };
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec,
+    });
+    expect(calls[0]).toBe(
+      'corepack pnpm install --frozen-lockfile --reporter=append-only',
+    );
+    expect(rep.install?.command).toBe(calls[0]);
+    // Scripts still run through npm.
+    expect(rep.toolchain).toBe('npm');
+    expect(calls.some((c) => c.startsWith('npm run build'))).toBe(true);
+
+    // The next run finds the pnpm tree complete and does not reinstall.
+    calls.length = 0;
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec,
+    });
+    expect(calls.some((c) => c.includes('install'))).toBe(false);
+  });
+
   it('builds and tests nothing for a LICENSE-only diff — the license family cannot fail a suite', () => {
     // A LICENSE edit outside every workspace cannot fail any suite, so
     // "nothing to run" is the honest answer, not a skipped step — and no

@@ -49,16 +49,30 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,833,894 bytes of JS with 2,302,905 bytes of CSS moved
-// out, by the Lint & Static lane on this branch. Before the split that lane
-// measured the combined bundle at 4,133,282 bytes on main at c3023b3e6d — the
-// measurement #11372 raised these two constants for, and which this branch
-// supersedes because the CSS it counted is no longer in the JS. Keep the
-// warning close to the measurement and the hard ceiling close above it: a cap
-// left far above the measurement is a ratchet with enough slack for a whole
-// dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_870_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 1_930_000;
+// Last measured at 1,931,934 bytes of JS with 2,332,167 bytes of CSS moved
+// out, by the Lint & Static lane on main at cc9bb98847 — #12199 and #12050
+// grew only transcript-reachable first-party code (the third-party input mix
+// is unchanged) past the old 1,930,000 cap (#12295), so the budget follows
+// the measurement. Before the split that lane measured the combined bundle at
+// 4,133,282 bytes on main at c3023b3e6d — the measurement #11372 raised these
+// two constants for, and which the CSS extraction superseded because the CSS
+// it counted is no longer in the JS.
+//
+// The bundle pulls web-shell's built transcript entry, which carries the
+// whole i18n table, so every string the Web Shell adds anywhere lands here.
+// Measured for #12154 by building this bundle twice against the same tree,
+// once with its dictionary and once with main's: 2,021,942 against
+// 2,013,739, so +8,203 bytes for forty-two keys across two locales,
+// which the cap above has room for. Both figures are local and both are
+// higher than the lane's; it is the difference between them that is
+// comparable, and the lane's absolute number is what these constants
+// track.
+//
+// Keep the warning close to the measurement and the hard ceiling close above
+// it: a cap left far above the measurement is a ratchet with enough slack for
+// a whole dependency family to come back unnoticed.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
