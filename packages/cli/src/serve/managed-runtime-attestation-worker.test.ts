@@ -257,7 +257,7 @@ describe('Managed Runtime attestation worker', () => {
     expect(await answering(probes, port)).toEqual([]);
   });
 
-  it('mounts only the attestation manifest on a loopback listener', async () => {
+  it('serves attestation on a loopback listener and rejects unknown routes', async () => {
     const worker = await startManagedRuntimeAttestationWorker(boot);
     openWorkers.add(worker);
 
