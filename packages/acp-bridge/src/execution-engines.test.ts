@@ -116,6 +116,70 @@ describe('ACP Bridge execution engines', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
+  it.each(['legacy', 'managed'] as const)(
+    'applies startup configuration only to a fresh session on %s',
+    async (engine) => {
+      const p = paired({ sessionScope: 'single' });
+      p.choose(engine === 'legacy' ? 'managed' : 'legacy');
+      const existing = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const startupConfig = {
+        modelServiceId: 'configured-model',
+        reasoningEffort: 'high' as const,
+      };
+      const setters = {
+        legacy: vi.spyOn(p.legacy.agent, 'setSessionConfigOption'),
+        managed: vi.spyOn(p.managed.agent, 'setSessionConfigOption'),
+      };
+      setters[engine].mockResolvedValue({
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            type: 'select',
+            currentValue: startupConfig.modelServiceId,
+            options: [{ value: 'configured-model', name: 'Configured' }],
+          },
+          {
+            id: 'reasoning_effort',
+            name: 'Reasoning',
+            type: 'select',
+            currentValue: 'high',
+            options: [{ value: 'high', name: 'High' }],
+          },
+        ],
+      });
+      p.choose(engine);
+      const session = await p.bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        startupConfig,
+      });
+      expect(session).toMatchObject({
+        sessionId: `${engine}-1`,
+        attached: false,
+        startupConfigApplied: {
+          ...startupConfig,
+          effectiveReasoning: { state: 'enabled', effort: 'high' },
+        },
+      });
+      expect(setters[engine].mock.calls.map(([request]) => request)).toEqual([
+        {
+          sessionId: session.sessionId,
+          configId: 'model',
+          value: startupConfig.modelServiceId,
+        },
+        {
+          sessionId: session.sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+        },
+      ]);
+      expect(
+        setters[engine === 'legacy' ? 'managed' : 'legacy'],
+      ).not.toHaveBeenCalled();
+      expect(p.bridge.getSessionSummary(existing.sessionId)).toBeDefined();
+    },
+  );
+
   it('coalesces each engine independently and routes prompts through the bound channel', async () => {
     const p = paired();
     const managed = await Promise.all([
