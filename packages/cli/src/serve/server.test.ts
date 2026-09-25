@@ -31132,6 +31132,63 @@ describe('createServeApp', () => {
       expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
+    it('reads persisted transcript and turn index for a legacy child of a legacy standalone session', async () => {
+      const parentSid = '55555555-bbbb-cccc-dddd-abababababb0';
+      const childSid = '55555555-bbbb-cccc-dddd-abababababb1';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(parentSid, 'active', internalWs);
+      await writeTranscriptSession(childSid, 'active', internalWs);
+      await appendTranscriptSystemRecord(
+        childSid,
+        internalWs,
+        'parent_session',
+        { parentSessionId: parentSid },
+      );
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${childSid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${childSid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(turnIndex.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: childSid, direction: 'backward' },
+      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([
+        { sessionId: childSid },
+      ]);
+    });
+
     it('skips the internal runtime for a transcript from a non-conversation source', async () => {
       const sid = '55555555-bbbb-cccc-dddd-abababababaf';
       const internalDir = path.join(runtimeDir, 'internal-conversations');
