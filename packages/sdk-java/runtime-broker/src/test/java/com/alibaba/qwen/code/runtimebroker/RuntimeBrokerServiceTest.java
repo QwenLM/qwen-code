@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerServiceTest {
@@ -305,20 +306,17 @@ class RuntimeBrokerServiceTest {
                             "idempotency",
                             reference("runtime", "digest")));
             long initialVersion = created.getVersion();
+            Supplier<ToolExecutionRecord> current =
+                    () -> fixture.executionRepository.findByExecutionCallId(
+                            created.getExecutionCallId());
+            Duration step = Duration.ofMillis(40);
 
-            await(() -> fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getVersion() > initialVersion);
-            clock.advance(Duration.ofMillis(40));
-            // Wait for a renewal made at the advanced time. A version check
-            // can be met by a renewal that landed just before the advance,
-            // which leaves the lease ending before the next advance.
-            Instant renewedAt = clock.instant();
-            await(() -> fixture.executionRepository
-                    .findByExecutionCallId(created.getExecutionCallId())
-                    .getDispatchLeaseUntil().isAfter(
-                            renewedAt.plus(Duration.ofMillis(40))));
-            clock.advance(Duration.ofMillis(40));
+            await(() -> current.get().getVersion() > initialVersion,
+                    () -> "dispatch lease was never renewed");
+            advanceAndAwaitRenewal(clock, step,
+                    () -> current.get().getDispatchLeaseUntil(),
+                    "dispatch lease");
+            clock.advance(step);
             result.complete(Map.of("executionStatus", "success"));
 
             assertEquals(ToolExecutionRecord.State.SETTLED,
@@ -340,15 +338,15 @@ class RuntimeBrokerServiceTest {
                     fixture.service.warm("harness");
             RuntimeProvisionRequest request = new RuntimeProvisionRequest(
                     WORKSPACE_SCOPE, null);
-            await(() -> fixture.bindingRepository.findActive(request)
-                    .getVersion() > 1);
-            clock.advance(Duration.ofMillis(40));
-            // Wait for a renewal made at the advanced time, as above.
-            Instant renewedAt = clock.instant();
-            await(() -> fixture.bindingRepository.findActive(request)
-                    .getOperationLeaseUntil().isAfter(
-                            renewedAt.plus(Duration.ofMillis(40))));
-            clock.advance(Duration.ofMillis(40));
+            Supplier<RuntimeBindingRecord> current =
+                    () -> fixture.bindingRepository.findActive(request);
+            Duration step = Duration.ofMillis(40);
+            await(() -> current.get().getVersion() > 1,
+                    () -> "operation lease was never renewed");
+            advanceAndAwaitRenewal(clock, step,
+                    () -> current.get().getOperationLeaseUntil(),
+                    "operation lease");
+            clock.advance(step);
             lease.complete(lease(1));
 
             assertEquals(RuntimeBindingRecord.State.READY,
@@ -1645,11 +1643,39 @@ class RuntimeBrokerServiceTest {
         return repository.findByExecutionCallId(executionCallId);
     }
 
+    /**
+     * Advances the clock by one step and waits for a renewal made at the
+     * advanced time. A renewal stamps the lease from the current clock, so
+     * while the lease was last stamped at the current reading, every renewal
+     * before the advance repeats the current end and only a renewal made
+     * after the advance moves the end exactly one step later. Call it only
+     * while the lease was last stamped at the current reading, such as before
+     * the clock first moves. Keep the step shorter than the lease, or the
+     * claim lapses at the advance and cannot be renewed. Waiting for a newer
+     * record version instead could be satisfied by a renewal that landed just
+     * before the advance.
+     */
+    private static void advanceAndAwaitRenewal(MutableClock clock,
+            Duration step, Supplier<Instant> leaseEnd, String leaseName) {
+        Instant renewedEnd = leaseEnd.get().plus(step);
+        clock.advance(step);
+        await(() -> leaseEnd.get().equals(renewedEnd),
+                () -> leaseName + " ends at " + leaseEnd.get() + ", not "
+                        + renewedEnd);
+    }
+
     private static void await(BooleanSupplier condition) {
+        await(condition, null);
+    }
+
+    private static void await(BooleanSupplier condition,
+            Supplier<String> detail) {
         long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() >= deadline) {
-                throw new AssertionError("condition was not met in time");
+                throw new AssertionError(detail == null
+                        ? "condition was not met in time"
+                        : "condition was not met in time: " + detail.get());
             }
             try {
                 Thread.sleep(5);
