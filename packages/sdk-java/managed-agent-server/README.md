@@ -14,7 +14,8 @@ it. That ingress must authenticate the tenant before setting the header.
 
 This split is not yet a complete Hosted Harness / Runtime deployment. The
 embedded HTTP transport returns 501 for acquire/control/release. Prepare/start
-also return 501 because the merged Broker has no durable dispatch fence.
+and operator resolution also return 501 because the merged Broker lacks their
+durable service APIs.
 Harness-level drain does not tear down workers. The copied real-process E2E
 script requires TypeScript integrations absent from this PR. See the
 [review corrections](../../../docs/design/2026-09-25-managed-agent-review-corrections.md)
@@ -25,7 +26,10 @@ below are not evidence for this split.
 
 - Java 21
 - MySQL 8
-- a running `qwen serve --profile hosted-harness`
+
+The `qwen serve --profile hosted-harness` option on current main is reserved
+and rejects startup. The configuration below supports control-plane development,
+but a successful Hosted Harness turn is not available in this split.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -242,8 +246,8 @@ When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
-Point `qwen serve --profile hosted-harness` at
-`http://127.0.0.1:4182` with the same Broker bearer. When enabled, the embedded
+The reserved Hosted Harness profile cannot yet connect to the Broker at
+`http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
@@ -284,11 +288,10 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes a local full-chain check that starts an isolated
-MySQL instance, this Spring application, the Hosted Harness, and a local Tool
-Runtime. It uses the selected model from an existing Qwen settings file, then
-verifies that the same Turn completes a real `write_file` call, idempotent
-Session replay, tenant isolation, and durable Event storage.
+The repository includes copied full-chain scripts for a future integration.
+They cannot run against this split: the Hosted Harness profile rejects startup
+and `dist/managed-runtime-worker.js` is not built. The commands below describe
+the intended verification, not passing evidence for this PR.
 
 Build the required artifacts first, then run:
 
@@ -325,9 +328,9 @@ requires the replacement Harness to use the original `executionCallId`, execute
 the physical tool exactly once, continue the original Prompt without replay,
 and commit one public terminal event.
 
-The default zero-delay run is the stable real-model integration gate. To also
-observe resident model output while the Tool Runtime is unavailable, add a
-controlled cold-start delay:
+Once the missing integration lands, a zero-delay run can check the real-model
+path. A controlled cold-start delay can then test output before Runtime
+readiness:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \

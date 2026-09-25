@@ -4,7 +4,7 @@
 
 ## 范围与状态
 
-本次评审针对 PR #12692 的 `2c68513d3d2c91b27ad59f72cc6eb359833580b4`。此前四组设计文档来自更大的集成预览；其中的实现和真实进程验证声明不能证明本次拆分具备相同能力。本文记录修正后的边界；完整 Hosted Harness / Broker / worker 链路仍是合并门禁。
+本次评审针对 PR #12692 当前的拆分。此前四组设计文档来自更大的集成预览；其中的实现和真实进程验证声明不能证明本次拆分具备相同能力。本文记录修正后的边界；完整 Hosted Harness / Broker / worker 链路仍是合并门禁。
 
 ## 修正
 
@@ -15,16 +15,16 @@
 - 公共文本 Part 只聚合相邻且同类的 delta；工具与思考事件切分 Part，保证快照还原后的显示顺序。
 - continuation 回退只清除指定 Harness boot 和 event epoch 的输出。在同一事务中失效派生投影、重置物化进度，提交后发布 `stream.reconciled`，使浏览器重新读取保留的历史。这修复投影一致性，不代表缺失的私有 checkpoint 恢复协议已被证明。
 - 无本地进程所有权且无法连接的 worker 保持 `UNKNOWN`；attestation 失败不能证明旧进程已停止。
-- Broker 实现真正的持久化派发屏障前，`executions:prepare` 与 `executions/{id}:start` 返回不可重试的 501。此前 prepare 会派发执行、start 仅查询，违背设计协议。已有 create-and-dispatch 路由保留原语义。
+- Broker 实现真正的持久化派发屏障前，`executions:prepare` 与 `executions/{id}:start` 返回不可重试的 501。operator resolution 在具备持久化服务 API 前也返回 501。此前 prepare 会派发执行、start 仅查询，违背设计协议。已有 create-and-dispatch 路由保留原语义。
 - Java 21 数据库 CI 任务现已安装本地 SDK/Broker 依赖，并使用独立数据库运行 Spring 模块的单测、Checkstyle 和 MySQL profile 集成测试。共享契约 fixture 变更也会触发工作流。
 - WebShell 正确映射 Java `running`、`cancelling`，禁止在非活动 Session 上操作，并在流事件和 Item 中保留工具失败状态及身份。
 
 ## 剩余集成门禁
 
-1. 内嵌 transport 对 acquire/control/release 返回 501。当前 TypeScript 树缺少所复制 E2E 脚本假设存在的 Broker provider 和远程 durable-store adapter。必须共同集成这些依赖，才能证明真实工具 Turn 与崩溃恢复。
+1. 内嵌 transport 对 acquire/control/release 返回 501。当前 main 已有 Broker client 基础代码，但 `qwen serve --profile hosted-harness` 会明确拒绝启动，因为尚未实现 Broker 支持的 Session 循环；所复制 E2E 脚本需要的远程 durable-store adapter 和 worker bundle 也不可用。必须共同集成这些依赖，才能证明真实工具 Turn 与崩溃恢复。
 2. 私有 Store 的 acquire 接受调用方自行选择的 writer token 和 tenant。writer 租约约束先后写入者，但不认证服务身份。必须为这些路由提供可信服务身份或强制私网入口策略，并与浏览器 Agent 路由区分。
 3. Harness 级 drain 仅在进程内存中标记 Session 退休，不停止 worker、不持久化退休状态，也不撤销全部私有 Broker 访问。不能把 archive/delete 宣称为 Runtime 回收。
-4. HTTP 适配器把 Broker `UNKNOWN` 映射成 `executing`，尚不能表达设计承诺的持久化恢复阻塞。恢复需要明确且兼容的未知结果契约。
+4. HTTP 适配器现在对 Broker `UNKNOWN` 返回 409 并拒绝继续，但尚不能表达设计承诺的持久化恢复阻塞。恢复需要明确且兼容的未知结果契约。
 5. 新增 CI 接线仍需远端运行通过才能合并。既有 SDK CI、本地 H2 测试与监听器的 401 测试不能作为 Spring/Broker/worker 成功集成的证据。
 
 ## 所有权与下游使用方
