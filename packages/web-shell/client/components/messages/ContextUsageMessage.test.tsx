@@ -148,7 +148,9 @@ describe('ContextUsageMessage', () => {
     status.usage.breakdown.messages = 25;
     const text = render(status).textContent;
     expect(text).toContain('Messages 25 (25.0%)');
-    // The captions follow the row, in both locales' source strings.
+    // The captions follow the row. This case renders the EN catalog only:
+    // `render(status)` leaves `language` at its `'en'` default, so the zh-CN
+    // copies of these two captions are not asserted here.
     expect(text).toContain('The estimates below include the conversation.');
     expect(text).toContain('Estimated usage, including the conversation');
     expect(text).not.toContain('excluding conversation messages');
