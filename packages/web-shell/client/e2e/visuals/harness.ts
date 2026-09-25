@@ -21,6 +21,7 @@ import {
   type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import { FIXED_CAPTURE_TIME, VISUAL_VIEWPORT } from './constants';
+import type { WebShellModelManagementOptions } from '../../modelManagement';
 
 export type VisualTheme = 'dark' | 'light';
 
@@ -172,9 +173,9 @@ export async function gotoNewSession(
 }
 
 /**
- * Navigate to the settings harness page, which maps `?exclude=` onto the
- * shell's `settings` prop — the standalone entry never passes one, so the
- * host-exclusion scenarios can only render through that page. Freezes the
+ * Navigate to the settings harness page, which maps query parameters onto
+ * the shell's settings exclusions and model management host props. These
+ * options are not exposed by the standalone entry. Freezes the
  * clock before navigating like every other helper; the theme assertion keys
  * on the shell's own surface because the harness paints the `<html>` theme
  * class from the same `?theme=` param, where it cannot mislabel.
@@ -185,10 +186,14 @@ export async function gotoSettingsHarness(
   daemon: MockDaemonController,
   theme: VisualTheme,
   exclude: readonly string[] = [],
+  modelManagement: WebShellModelManagementOptions = {},
 ): Promise<void> {
   await freezeWallClock(page);
   const params = new URLSearchParams({ theme, sessionId: scenario.sessionId });
   if (exclude.length > 0) params.set('exclude', exclude.join(','));
+  for (const [key, value] of Object.entries(modelManagement)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
   await page.goto(`/e2e/settings-harness.html?${params.toString()}`);
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),

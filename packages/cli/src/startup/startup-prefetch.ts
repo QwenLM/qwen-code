@@ -136,6 +136,8 @@ export function startEarlyStartupPrefetches(config: Config): void {
   }
 }
 
+export const UPDATE_CHECK_DELAY_MS = 3_000;
+
 /**
  * Starts post-render startup prefetches for ordinary interactive TUI sessions.
  *
@@ -158,6 +160,11 @@ export function startPostRenderPrefetches(
     !process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR]
   ) {
     runDeferredTask('update_check', async () => {
+      // The check spawns npm (a second Node process); keep it off the
+      // window where the session is still starting up.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, UPDATE_CHECK_DELAY_MS).unref?.();
+      });
       const [
         { checkForUpdatesDetailed, describeUpdateCheckFailure },
         { handleAutoUpdate },

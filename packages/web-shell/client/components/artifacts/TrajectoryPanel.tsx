@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { CornerDownRightIcon, RefreshCwIcon } from 'lucide-react';
+import { CornerDownRightIcon, RefreshCwIcon, XIcon } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonTranscriptBlock,
@@ -34,8 +34,13 @@ import type {
 } from '../../trajectory/types';
 import {
   buildTimeline,
+  type TimelineMode,
   type TimelineSpan,
 } from '../../trajectory/buildTimeline';
+import {
+  rowKeysInRange,
+  type TimelineRange,
+} from '../../trajectory/timelineRange';
 import { TrajectoryOverview } from './TrajectoryOverview';
 import styles from './TrajectoryPanel.module.css';
 
@@ -298,11 +303,55 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     scrollTopRef.current = element.scrollTop;
   }, []);
 
+  const [mode, setMode] = useState<TimelineMode>('active');
+  const timeline = useMemo(
+    () => (trajectory ? buildTimeline(trajectory, { mode }) : undefined),
+    [trajectory, mode],
+  );
+
+  // The selection belongs to the axis it was drawn on. A refresh, another
+  // session, or a switch between active and real time lays the axis out
+  // afresh, so the same numbers would name a different stretch of the run;
+  // holding what the axis was built from alongside the range lets the range
+  // lapse in the same render the axis changes, with no frame in which the new
+  // table is filtered by the old one. Keyed on the window and the mode — the
+  // axis's inputs — rather than on the memoized axis itself, whose identity
+  // React keeps as an optimisation, not a promise.
+  const [rangeState, setRangeState] = useState<
+    { range: TimelineRange; of: Trajectory; mode: TimelineMode } | undefined
+  >(undefined);
+  const range =
+    rangeState !== undefined &&
+    rangeState.of === trajectory &&
+    rangeState.mode === mode
+      ? rangeState.range
+      : undefined;
+  const setRange = useCallback(
+    (next: TimelineRange | undefined) => {
+      setRangeState(
+        next !== undefined && trajectory !== undefined
+          ? { range: next, of: trajectory, mode }
+          : undefined,
+      );
+    },
+    [trajectory, mode],
+  );
+
+  /** Rows running in the selected time, or undefined when nothing is selected. */
+  const inRange = useMemo(
+    () => (range && timeline ? rowKeysInRange(timeline, range) : undefined),
+    [range, timeline],
+  );
+
   const visualRows = useMemo<VisualRow[]>(() => {
     if (!trajectory) return [];
     const byKey = new Map(trajectory.rows.map((row) => [row.key, row]));
     const out: VisualRow[] = [];
     for (const turn of trajectory.turns) {
+      // Under a time selection a turn stays only if something in it ran in
+      // that time, and then keeps its header and prompt so the rows that
+      // survive still say which turn and which ask they answered.
+      if (inRange && !turn.rowKeys.some((key) => inRange.has(key))) continue;
       // Named after the prompt that opened the turn, so a refresh that adds
       // newer turns leaves the selection on the turn it was on. Turn numbers
       // are window-relative and shift under exactly that. A turn the window
@@ -311,12 +360,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       const turnKey = turn.userRowKey ?? `ordinal:${turn.index}`;
       out.push({ kind: 'turn', key: `turn:${turnKey}`, turn });
       for (const rowKey of turn.rowKeys) {
+        if (inRange && !inRange.has(rowKey) && rowKey !== turn.userRowKey) {
+          continue;
+        }
         const row = byKey.get(rowKey);
         if (row) out.push({ kind: 'row', key: rowKey, row });
       }
     }
     return out;
-  }, [trajectory]);
+  }, [trajectory, inRange]);
 
   const virtualizer = useVirtualizer({
     count: visualRows.length,
@@ -396,6 +448,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === 'Escape') {
+        // Only claimed when there is a selection to drop; otherwise Escape is
+        // left to whatever encloses the panel.
+        if (range !== undefined) {
+          event.preventDefault();
+          setRange(undefined);
+        }
+        return;
+      }
       if (visualRows.length === 0) return;
       const current = selectedIndex < 0 ? -1 : selectedIndex;
       if (event.key === 'ArrowDown') {
@@ -412,7 +473,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         moveSelection(visualRows.length - 1);
       }
     },
-    [moveSelection, selectedIndex, visualRows],
+    [moveSelection, range, selectedIndex, setRange, visualRows],
   );
 
   const totals = useMemo(() => {
@@ -431,8 +492,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
-    visualRows.length > 0 &&
+    trajectory.rows.length > 0 &&
     !hasAnyTiming(trajectory);
+  const rangeCounts = useMemo(() => {
+    if (!range || !trajectory) return undefined;
+    return {
+      shown: visualRows.filter((row) => row.kind === 'row').length,
+      total: trajectory.rows.length,
+    };
+  }, [range, trajectory, visualRows]);
 
   const olderFailureText =
     olderFailure === undefined
@@ -441,21 +509,39 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         ? t('trajectory.olderPartial')
         : t('trajectory.olderFailed', { message: olderFailure.message });
 
-  const timeline = useMemo(
-    () => (trajectory ? buildTimeline(trajectory) : undefined),
-    [trajectory],
-  );
+  /**
+   * A span pressed outside the selected time: the selection is dropped so its
+   * row can be shown, and the reveal waits for the unfiltered table to render.
+   */
+  const pendingRevealRef = useRef<string | undefined>(undefined);
 
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
     (rowKey: string) => {
       const index = visualRows.findIndex((row) => row.key === rowKey);
-      if (index < 0) return;
+      if (index < 0) {
+        if (range === undefined) return;
+        pendingRevealRef.current = rowKey;
+        setRange(undefined);
+        selectRow(rowKey);
+        return;
+      }
       selectRow(rowKey);
       virtualizer.scrollToIndex(index, { align: 'auto' });
     },
-    [selectRow, virtualizer, visualRows],
+    [range, selectRow, setRange, virtualizer, visualRows],
   );
+
+  useLayoutEffect(() => {
+    const key = pendingRevealRef.current;
+    if (key === undefined) return;
+    // One attempt, on the first render after the selection was dropped. A key
+    // left waiting would scroll the table to it at some unrelated later
+    // change, long after the press that asked for it.
+    pendingRevealRef.current = undefined;
+    const index = visualRows.findIndex((row) => row.key === key);
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
+  }, [virtualizer, visualRows]);
 
   // Named the way the row reads, which already says a failed request failed
   // in words — the red of the span is never the only signal.
@@ -479,7 +565,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
         <div className={styles.summary}>
-          {totals ? (
+          {rangeCounts ? (
+            <span data-testid="trajectory-range-status" role="status">
+              {t('trajectory.range.status', rangeCounts)}
+            </span>
+          ) : totals ? (
             <span data-testid="trajectory-totals">
               {t('trajectory.totals', {
                 turns: totals.turns,
@@ -496,6 +586,18 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           )}
         </div>
         <div className={styles.headerActions}>
+          {range !== undefined && (
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={() => setRange(undefined)}
+              title={t('trajectory.range.clear')}
+              aria-label={t('trajectory.range.clear')}
+              data-testid="trajectory-range-clear"
+            >
+              <XIcon size={14} strokeWidth={1.6} />
+            </button>
+          )}
           <button
             type="button"
             className={styles.iconButton}
@@ -519,6 +621,9 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         selectedKey={selectedKey}
         onSelect={selectSpan}
         describe={describeSpan}
+        {...(range !== undefined ? { range } : {})}
+        onRangeChange={setRange}
+        onModeChange={setMode}
       />
 
       {error !== undefined && (
@@ -543,7 +648,26 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
-          status === 'error' ? null : (
+          status === 'error' ? null : range !== undefined ? (
+            // Real time keeps the gaps between turns on the axis, and a
+            // stretch dragged inside one has nothing in it. Said here, with
+            // the way back beside it, rather than left as a blank table. Not
+            // a live region: the header's row count, which changes in the
+            // same render, already says it, and two would say it twice.
+            <div
+              className={styles.placeholder}
+              data-testid="trajectory-range-empty"
+            >
+              <span>{t('trajectory.range.empty')}</span>{' '}
+              <button
+                type="button"
+                className={styles.headerButton}
+                onClick={() => setRange(undefined)}
+              >
+                {t('trajectory.range.clear')}
+              </button>
+            </div>
+          ) : (
             <div className={styles.placeholder} role="status">
               {empty
                 ? t('trajectory.empty')
