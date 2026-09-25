@@ -4067,7 +4067,7 @@ export class LlmClient {
         if (this.config.getAdvisorModel?.()) {
           const registry = this.config.getToolRegistry();
           const advisorReminder = buildAdvisorReminder(
-            !!registry.getTool('advisor'),
+            !!registry.getTool(ToolNames.ADVISOR),
             registry.getFunctionDeclarations().map((tool) => tool.name),
           );
           if (advisorReminder) systemReminders.push(advisorReminder);
