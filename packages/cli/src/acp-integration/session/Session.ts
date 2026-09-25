@@ -4223,6 +4223,10 @@ export class Session implements SessionContext {
     );
   }
 
+  hasActiveTurn(): boolean {
+    return this.#hasActiveTurn();
+  }
+
   isIdle(): boolean {
     return this.isTurnIdle() && this.collectActiveWorkHolds().length === 0;
   }
