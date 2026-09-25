@@ -162,6 +162,26 @@ describe('FileManagedActivationStore', () => {
     });
   });
 
+  it('keeps non-extending renewals replayable without halting the store', async () => {
+    const store = await openStore();
+    const input = activation('a1');
+    await store.enqueue(input, limits);
+    const lease = (await store.claim(input, 'worker-a', 1000))!;
+    const contents = await readFile(filePath, 'utf8');
+
+    await expect(store.renew(lease, 1000)).resolves.toEqual(lease);
+    now -= 1;
+    await expect(store.renew(lease, 500)).resolves.toEqual(lease);
+    expect(await readFile(filePath, 'utf8')).toBe(contents);
+    expect(store.haltedError).toBeUndefined();
+    const reopened = await openStore();
+    expect(reopened.get(input)?.lease).toEqual(lease);
+    now = 200;
+    await expect(reopened.renew(lease, 1000)).resolves.toMatchObject({
+      expiresAt: 1200,
+    });
+  });
+
   it('preserves Session FIFO and fences expired lease epochs', async () => {
     const store = await openStore();
     const first = activation('a1');

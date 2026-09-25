@@ -16,6 +16,10 @@ import {
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
+import {
+  createInitialHarnessCheckpoint,
+  encodeHarnessCheckpointV1,
+} from './managed-harness-checkpoint.js';
 
 const SESSION_KEY: ManagedSessionKey = {
   tenantId: 'tenant-a',
@@ -234,6 +238,129 @@ describe('HTTP Managed Session store', () => {
     await restored.close();
   });
 
+  it('commits only checkpoint resources and their dependencies for a cold owner', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const firstStores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await firstStores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await firstStores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+
+    const first = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: firstStores.journalStore,
+      resourceStore: firstStores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+
+    const historyBytes = Buffer.from(
+      '[{"role":"user","parts":[{"text":"earlier context"}]}]',
+    );
+    const historyRef = await first.resources.publish(
+      'managed-api-history',
+      historyBytes,
+    );
+    const unusedRef = await first.resources.publish(
+      'managed-api-history',
+      Buffer.from('[]'),
+    );
+    const checkpoint = createInitialHarnessCheckpoint({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'ckpt-2',
+      coveredSequence: 1,
+      activationId: first.activation.activationId,
+      turnId: null,
+      promptId: null,
+      definitionRevision: definitionRef.resourceId,
+      configRevision: rootSnapshotRef.resourceId,
+      inputDigest: definitionRef.digest,
+      previousCheckpointId: null,
+    });
+    const state = encodeHarnessCheckpointV1({
+      ...checkpoint,
+      resume: { ...checkpoint.resume, apiHistoryRef: historyRef },
+    });
+    await first.authority.commitCheckpoint(
+      {
+        operation: 'commitCheckpoint',
+        commandId: 'test-checkpoint',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'c'.repeat(64),
+      },
+      { state, boundary: null },
+      { class: 'harness', activation: first.activation },
+    );
+    const checkpointRef = first.authority.latestCheckpoint!.stateRef;
+    const committedResources = server.commits.at(-1)!['resources'] as Array<{
+      resourceId: string;
+    }>;
+    expect(
+      committedResources.map(({ resourceId }) => resourceId).sort(),
+    ).toEqual([checkpointRef.resourceId, historyRef.resourceId].sort());
+    await first.close();
+
+    const secondStores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-b',
+      writerToken: TOKEN_B,
+      fetchFn: server.fetch,
+    });
+    const restored = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-b',
+      activationLeaseDurationMs: 60_000,
+      journalStore: secondStores.journalStore,
+      resourceStore: secondStores.resourceStore,
+    });
+    try {
+      await expect(restored.authority.readCheckpointState()).resolves.toEqual(
+        state,
+      );
+      await expect(restored.resources.read(historyRef)).resolves.toEqual(
+        historyBytes,
+      );
+      await expect(restored.resources.read(unusedRef)).rejects.toMatchObject({
+        status: 404,
+        remoteCode: 'managed_session_resource_not_found',
+      });
+    } finally {
+      await restored.close();
+    }
+  });
+
   it('surfaces structured Java errors without exposing the token', async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse(
@@ -341,6 +468,59 @@ describe('HTTP Managed Session store', () => {
 
     expect(server.commits).toHaveLength(committedBeforeClose);
     expect(server.sealCount).toBe(1);
+  });
+
+  it('does not restart renewal while an in-flight renewal races sealing', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    let finishRenewal!: () => void;
+    let finishSeal!: () => void;
+    const renewalGate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const sealGate = new Promise<void>((resolve) => {
+      finishSeal = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (requestUrl(input).endsWith('/writers:renew')) await renewalGate;
+      if (requestUrl(input).endsWith('/writers:seal')) await sealGate;
+      return response;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      leaseDurationMs: 1000,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(
+        fetchFn.mock.calls.some(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toBe(true);
+      const closing = stores.close();
+      finishRenewal();
+      await vi.advanceTimersByTimeAsync(0);
+      finishSeal();
+      await closing;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      finishRenewal();
+      finishSeal();
+      await stores.close();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('rejects resources that require the unimplemented OSS path', async () => {

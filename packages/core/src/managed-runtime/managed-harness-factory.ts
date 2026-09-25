@@ -232,6 +232,7 @@ export function createManagedHarnessHandle(
 
 class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   private ran = false;
+  private runStartCheckpointId: string | undefined;
   private detached = false;
   private checkpointMutation = Promise.resolve();
 
@@ -243,7 +244,11 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     },
   ) {}
 
-  async ensureRunnable(): Promise<HarnessCheckpointV1> {
+  ensureRunnable(): Promise<HarnessCheckpointV1> {
+    return this.mutateCheckpoint(() => this.ensureRunnableUnlocked());
+  }
+
+  private async ensureRunnableUnlocked(): Promise<HarnessCheckpointV1> {
     this.assertNotDetached();
     this.assertCurrentActivation();
     assertManagedSessionRestoreBundle(await this.authority.restoreBundle());
@@ -256,46 +261,58 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   }
 
   async run<T>(agent: () => Promise<T>): Promise<T> {
-    await this.ensureRunnable();
-    if (this.ran) {
-      throw new ManagedSessionConflictError(
-        'a harness handle runs the Agent at most once.',
-      );
-    }
-    this.ran = true;
-    return agent();
+    const { running } = await this.mutateCheckpoint(async () => {
+      const checkpoint = await this.ensureRunnableUnlocked();
+      if (this.ran) {
+        throw new ManagedSessionConflictError(
+          'a harness handle runs the Agent at most once.',
+        );
+      }
+      this.ran = true;
+      this.runStartCheckpointId = checkpoint.identity.checkpointId;
+      // The Agent may commit checkpoints itself, so release the queue before
+      // awaiting its completion.
+      return { running: agent() };
+    });
+    return running;
   }
 
   async requestBoundary(): Promise<HarnessSafetyBoundary> {
-    this.assertNotDetached();
-    this.assertCurrentActivation();
-    const latest = this.authority.latestCheckpoint;
-    if (latest === undefined || !isHarnessSafetyBoundary(latest.boundary)) {
-      throw new ManagedSessionConflictError(
-        'harness is not at a turn-complete or durable-wait safety point.',
-      );
-    }
-    const authorization = await this.requireRunnableAuthorization();
-    const phase = authorization.checkpoint.continuation.phase;
-    if (
-      latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
-      phase !== 'await_action' &&
-      phase !== 'await_runtime'
-    ) {
-      throw new ManagedSessionConflictError(
-        'durable-wait checkpoint is not an await_action or await_runtime phase.',
-      );
-    }
-    return {
-      kind:
-        latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY
-          ? 'durable_wait'
-          : 'turn_complete',
-      checkpointId: latest.checkpointId,
-      coveredSequence: latest.coveredSequence,
-      activationId: this.activation.activationId,
-      epoch: this.activation.epoch,
-    };
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (
+        latest === undefined ||
+        latest.checkpointId === this.runStartCheckpointId ||
+        !isHarnessSafetyBoundary(latest.boundary)
+      ) {
+        throw new ManagedSessionConflictError(
+          'harness is not at a turn-complete or durable-wait safety point.',
+        );
+      }
+      const authorization = await this.requireRunnableAuthorization();
+      const phase = authorization.checkpoint.continuation.phase;
+      if (
+        latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
+        phase !== 'await_action' &&
+        phase !== 'await_runtime'
+      ) {
+        throw new ManagedSessionConflictError(
+          'durable-wait checkpoint is not an await_action or await_runtime phase.',
+        );
+      }
+      return {
+        kind:
+          latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY
+            ? 'durable_wait'
+            : 'turn_complete',
+        checkpointId: latest.checkpointId,
+        coveredSequence: latest.coveredSequence,
+        activationId: this.activation.activationId,
+        epoch: this.activation.epoch,
+      };
+    });
   }
 
   isDetached(): boolean {
@@ -303,151 +320,163 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   }
 
   async detach(): Promise<void> {
-    if (this.detached) return;
-    this.assertCurrentActivation();
-    if (!isHarnessSafetyBoundary(this.authority.latestCheckpoint?.boundary)) {
-      throw new ManagedSessionConflictError(
-        'harness cannot detach before a turn-complete or durable-wait checkpoint.',
-      );
-    }
-    const authorization = await this.authority.harnessRunAuthorization();
-    if (
-      authorization.status === 'runnable' &&
-      authorization.checkpoint.continuation.phase === 'await_runtime'
-    ) {
-      const gate = managedRuntimeDispatchGate(
-        this.authority.sessionHeader.sessionKey,
-      );
-      for (const binding of authorization.checkpoint.runtime?.bindings ?? []) {
-        gate.handoff(binding.executionCallId);
+    return this.mutateCheckpoint(async () => {
+      if (this.detached) return;
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (
+        latest === undefined ||
+        latest.checkpointId === this.runStartCheckpointId ||
+        !isHarnessSafetyBoundary(latest.boundary)
+      ) {
+        throw new ManagedSessionConflictError(
+          'harness cannot detach before a turn-complete or durable-wait checkpoint.',
+        );
       }
-    }
-    this.detached = true;
+      const authorization = await this.authority.harnessRunAuthorization();
+      if (
+        authorization.status === 'runnable' &&
+        authorization.checkpoint.continuation.phase === 'await_runtime'
+      ) {
+        const gate = managedRuntimeDispatchGate(
+          this.authority.sessionHeader.sessionKey,
+        );
+        for (const binding of authorization.checkpoint.runtime?.bindings ??
+          []) {
+          gate.handoff(binding.executionCallId);
+        }
+      }
+      this.detached = true;
+    });
   }
 
   async commitDurableWait(
     request: ManagedDurableWaitCommit,
   ): Promise<HarnessDurableWaitBoundary> {
-    this.assertNotDetached();
-    this.assertCurrentActivation();
-    const latest = this.authority.latestCheckpoint;
-    if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
-      const authorization = await this.requireRunnableAuthorization();
-      const approval = authorization.checkpoint.approval;
-      if (
-        authorization.checkpoint.continuation.phase === 'await_action' &&
-        approval?.requestId === request.requestId
-      ) {
-        return {
-          kind: 'durable_wait',
-          checkpointId: latest.checkpointId,
-          coveredSequence: latest.coveredSequence,
-          activationId: this.activation.activationId,
-          epoch: this.activation.epoch,
-        };
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
+        const authorization = await this.requireRunnableAuthorization();
+        const approval = authorization.checkpoint.approval;
+        if (
+          authorization.checkpoint.continuation.phase === 'await_action' &&
+          approval?.requestId === request.requestId
+        ) {
+          return {
+            kind: 'durable_wait',
+            checkpointId: latest.checkpointId,
+            coveredSequence: latest.coveredSequence,
+            activationId: this.activation.activationId,
+            epoch: this.activation.epoch,
+          };
+        }
+        throw new ManagedSessionConflictError(
+          'harness is already waiting on a different approval.',
+        );
       }
-      throw new ManagedSessionConflictError(
-        'harness is already waiting on a different approval.',
-      );
-    }
 
-    const previous = await this.ensureRunnable();
-    if (request.source === 'tool_call') {
-      await this.authority.requestToolAction(
-        {
-          operation: 'requestToolAction',
-          commandId: `requestToolAction:${request.requestId}`,
-          sessionKey: this.authority.sessionHeader.sessionKey,
-          contentDigest: createHash('sha256')
-            .update(request.optionsRef.digest)
-            .digest('hex'),
+      const previous = await this.ensureRunnableUnlocked();
+      if (request.source === 'tool_call') {
+        await this.authority.requestToolAction(
+          {
+            operation: 'requestToolAction',
+            commandId: `requestToolAction:${request.requestId}`,
+            sessionKey: this.authority.sessionHeader.sessionKey,
+            contentDigest: createHash('sha256')
+              .update(request.optionsRef.digest)
+              .digest('hex'),
+          },
+          {
+            requestId: request.requestId,
+            kind: request.kind,
+            inputRevision: 1,
+            optionsRef: request.optionsRef,
+          },
+          { class: 'harness', activation: this.activation },
+        );
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createAwaitActionHarnessCheckpoint({
+        previous,
+        ...identity,
+        attempt: previous.attempt ?? {
+          attemptId: request.attemptId,
+          routeRef: request.routeRef,
+          capabilityRef: null,
+          samplingRef: null,
+          outputState: 'output_committed',
+          usageRef: null,
+          budgetConsumed: 0,
         },
-        {
+        approval: {
           requestId: request.requestId,
           kind: request.kind,
-          inputRevision: 1,
+          source: request.source,
           optionsRef: request.optionsRef,
+          inputRevision: request.inputRevision,
+          confirmationVersion: null,
+          state: 'requested',
+          decisionRef: null,
+          invocationRef: request.invocationRef,
         },
-        { class: 'harness', activation: this.activation },
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:await_action:${this.activation.activationId}:${request.requestId}:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
       );
-    }
-    const identity = this.nextCheckpointIdentity();
-    const checkpoint = createAwaitActionHarnessCheckpoint({
-      previous,
-      ...identity,
-      attempt: previous.attempt ?? {
-        attemptId: request.attemptId,
-        routeRef: request.routeRef,
-        capabilityRef: null,
-        samplingRef: null,
-        outputState: 'output_committed',
-        usageRef: null,
-        budgetConsumed: 0,
-      },
-      approval: {
-        requestId: request.requestId,
-        kind: request.kind,
-        source: request.source,
-        optionsRef: request.optionsRef,
-        inputRevision: request.inputRevision,
-        confirmationVersion: null,
-        state: 'requested',
-        decisionRef: null,
-        invocationRef: request.invocationRef,
-      },
+      const committed = this.authority.latestCheckpoint;
+      if (committed === undefined) {
+        throw new ManagedSessionConflictError(
+          'durable wait was committed but no checkpoint was recorded.',
+        );
+      }
+      return {
+        kind: 'durable_wait',
+        checkpointId: committed.checkpointId,
+        coveredSequence: committed.coveredSequence,
+        activationId: this.activation.activationId,
+        epoch: this.activation.epoch,
+      };
     });
-    await this.commitHarnessCheckpoint(
-      `harness:await_action:${this.activation.activationId}:${request.requestId}:${identity.coveredSequence}`,
-      checkpoint,
-      HARNESS_DURABLE_WAIT_BOUNDARY,
-    );
-    const committed = this.authority.latestCheckpoint;
-    if (committed === undefined) {
-      throw new ManagedSessionConflictError(
-        'durable wait was committed but no checkpoint was recorded.',
-      );
-    }
-    return {
-      kind: 'durable_wait',
-      checkpointId: committed.checkpointId,
-      coveredSequence: committed.coveredSequence,
-      activationId: this.activation.activationId,
-      epoch: this.activation.epoch,
-    };
   }
 
   async resolveDurableWait(): Promise<HarnessCheckpointV1 | null> {
-    this.assertNotDetached();
-    this.assertCurrentActivation();
-    const latest = this.authority.latestCheckpoint;
-    if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
-      return null;
-    }
-    const previous = (await this.requireRunnableAuthorization()).checkpoint;
-    if (previous.continuation.phase !== 'await_action') {
-      throw new ManagedSessionConflictError(
-        'durable-wait checkpoint is not an await_action phase.',
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+        return null;
+      }
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (previous.continuation.phase !== 'await_action') {
+        throw new ManagedSessionConflictError(
+          'durable-wait checkpoint is not an await_action phase.',
+        );
+      }
+      const requestId = previous.approval?.requestId;
+      const action =
+        requestId === undefined ? undefined : this.authority.action(requestId);
+      if (action === undefined || action.state === 'requested') {
+        throw new ManagedSessionConflictError(
+          'durable wait cannot resolve before a final action decision.',
+        );
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createModelOutputCommittedHarnessCheckpoint({
+        previous,
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
       );
-    }
-    const requestId = previous.approval?.requestId;
-    const action =
-      requestId === undefined ? undefined : this.authority.action(requestId);
-    if (action === undefined || action.state === 'requested') {
-      throw new ManagedSessionConflictError(
-        'durable wait cannot resolve before a final action decision.',
-      );
-    }
-    const identity = this.nextCheckpointIdentity();
-    const checkpoint = createModelOutputCommittedHarnessCheckpoint({
-      previous,
-      ...identity,
+      return checkpoint;
     });
-    await this.commitHarnessCheckpoint(
-      `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
-      checkpoint,
-      null,
-    );
-    return checkpoint;
   }
 
   async commitAwaitRuntime(
@@ -471,7 +500,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       const previous =
         latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY
           ? (await this.requireRunnableAuthorization()).checkpoint
-          : await this.ensureRunnable();
+          : await this.ensureRunnableUnlocked();
       if (
         latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
         previous.continuation.phase !== 'await_runtime'
@@ -616,55 +645,59 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   }
 
   async consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null> {
-    this.assertNotDetached();
-    this.assertCurrentActivation();
-    const previous = (await this.requireRunnableAuthorization()).checkpoint;
-    if (previous.continuation.phase !== 'results_ready') {
-      return null;
-    }
-    const items = previous.tools?.items ?? [];
-    if (
-      items.length === 0 ||
-      items.every((item) => item.state !== 'settled' || item.consumed)
-    ) {
-      return previous;
-    }
-    const identity = this.nextCheckpointIdentity();
-    const checkpoint = createConsumedRuntimeResultsHarnessCheckpoint({
-      previous,
-      ...identity,
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (previous.continuation.phase !== 'results_ready') {
+        return null;
+      }
+      const items = previous.tools?.items ?? [];
+      if (
+        items.length === 0 ||
+        items.every((item) => item.state !== 'settled' || item.consumed)
+      ) {
+        return previous;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createConsumedRuntimeResultsHarnessCheckpoint({
+        previous,
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:results_consumed:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
+      return checkpoint;
     });
-    await this.commitHarnessCheckpoint(
-      `harness:results_consumed:${this.activation.activationId}:${identity.coveredSequence}`,
-      checkpoint,
-      null,
-    );
-    return checkpoint;
   }
 
   async settleConsumedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null> {
-    this.assertNotDetached();
-    this.assertCurrentActivation();
-    const previous = (await this.requireRunnableAuthorization()).checkpoint;
-    const items = previous.tools?.items ?? [];
-    if (
-      previous.continuation.phase !== 'results_ready' ||
-      items.length === 0 ||
-      items.some((item) => item.state !== 'settled' || !item.consumed)
-    ) {
-      return null;
-    }
-    const identity = this.nextCheckpointIdentity();
-    const checkpoint = createTurnSettledHarnessCheckpoint({
-      previous,
-      ...identity,
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      const items = previous.tools?.items ?? [];
+      if (
+        previous.continuation.phase !== 'results_ready' ||
+        items.length === 0 ||
+        items.some((item) => item.state !== 'settled' || !item.consumed)
+      ) {
+        return null;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createTurnSettledHarnessCheckpoint({
+        previous,
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
+      return checkpoint;
     });
-    await this.commitHarnessCheckpoint(
-      `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
-      checkpoint,
-      null,
-    );
-    return checkpoint;
   }
 
   private runtimeBoundary(): HarnessDurableWaitBoundary {

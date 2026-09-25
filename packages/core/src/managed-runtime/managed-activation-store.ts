@@ -437,6 +437,9 @@ export class FileManagedActivationStore {
       if (!Number.isSafeInteger(expiresAt)) {
         throw new Error('lease expiry exceeds safe integer range.');
       }
+      if (expiresAt <= state.lease!.expiresAt) {
+        return structuredClone(state.lease!);
+      }
       const renewed = { ...state.lease!, expiresAt };
       await this.persist({
         v: 1,

@@ -510,6 +510,9 @@ export class FileManagedSessionInbox {
       const messageIdentity = identity(capturedInput);
       const state = this.required(messageIdentity);
       if (state.activationReady) return snapshot(state);
+      if (state.state !== 'admitted') {
+        throw new Error('Managed Session message is already finished.');
+      }
       await this.persist({
         v: 1,
         sequence: this.nextSequence,

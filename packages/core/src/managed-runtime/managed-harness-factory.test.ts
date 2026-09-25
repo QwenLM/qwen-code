@@ -360,6 +360,75 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('requires a new boundary after starting the next Agent', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    await settleTurnComplete(session);
+    await previous.detach();
+    const handle = createManagedHarnessHandle(session);
+    const runtime = await runtimeCommit(session);
+    let allowWait!: () => void;
+    const enterWait = new Promise<void>((resolve) => {
+      allowWait = resolve;
+    });
+    let reachedWait!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reachedWait = resolve;
+    });
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const running = handle.run(async () => {
+      await enterWait;
+      await handle.commitAwaitRuntime(runtime);
+      reachedWait();
+      await finished;
+    });
+    try {
+      await expect(handle.detach()).rejects.toThrow(
+        /cannot detach before a turn-complete or durable-wait checkpoint/,
+      );
+      await expect(handle.requestBoundary()).rejects.toThrow(
+        /not at a turn-complete or durable-wait safety point/,
+      );
+      expect(handle.isDetached()).toBe(false);
+
+      allowWait();
+      await waiting;
+      await expect(handle.requestBoundary()).resolves.toMatchObject({
+        kind: 'durable_wait',
+      });
+      await handle.detach();
+      expect(managedRuntimeDispatchGate(sessionKey).isHandedOff('ex-1')).toBe(
+        true,
+      );
+    } finally {
+      allowWait();
+      finish();
+      await running;
+      await session.close();
+    }
+  });
+
+  it('releases the checkpoint queue when the Agent throws synchronously', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await expect(
+      handle.run(() => {
+        throw new Error('Agent failed to start');
+      }),
+    ).rejects.toThrow('Agent failed to start');
+    await expect(handle.ensureRunnable()).resolves.toMatchObject({
+      continuation: { phase: 'before_model' },
+    });
+    await expect(handle.run(async () => undefined)).rejects.toThrow(
+      /runs the Agent at most once/,
+    );
+    await session.close();
+  });
+
   it('commits an approval wait before the next model start is allowed', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
@@ -781,6 +850,83 @@ describe('managed harness factory', () => {
     const runnable = await next.ensureRunnable();
     expect(runnable.continuation.phase).toBe('results_ready');
     await reopened.close();
+  });
+
+  it.each([false, true])(
+    'serializes approval and Runtime admission (Runtime first: %s)',
+    async (runtimeFirst) => {
+      const session = await open(await createWorkspace());
+      const handle = createManagedHarnessHandle(session);
+      await handle.ensureRunnable();
+      const approval = waitCommit(await waitRefs(session));
+      const runtime = await runtimeCommit(session);
+      const operations = runtimeFirst
+        ? [
+            () => handle.commitAwaitRuntime(runtime),
+            () => handle.commitDurableWait(approval),
+          ]
+        : [
+            () => handle.commitDurableWait(approval),
+            () => handle.commitAwaitRuntime(runtime),
+          ];
+
+      const [first, second] = await Promise.allSettled(
+        operations.map((operation) => operation()),
+      );
+
+      expect(first.status).toBe('fulfilled');
+      expect(second.status).toBe('rejected');
+      if (second.status === 'rejected') {
+        expect(second.reason).toBeInstanceOf(ManagedSessionConflictError);
+      }
+      const checkpoint = parseHarnessCheckpointV1(
+        (await session.authority.readCheckpointState())!,
+      );
+      expect(checkpoint.continuation.phase).toBe(
+        runtimeFirst ? 'await_runtime' : 'await_action',
+      );
+      if (runtimeFirst) {
+        expect(checkpoint.tools?.items).toHaveLength(1);
+        expect(checkpoint.tools?.items[0]?.executionCallId).toBe('ex-1');
+        expect(session.authority.action(approval.requestId)).toBeUndefined();
+        const outcome = await session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from('{}', 'utf8'),
+        );
+        await expect(
+          handle.resolveAwaitRuntime(runtime.executionCallId, outcome),
+        ).resolves.toMatchObject({ continuation: { phase: 'results_ready' } });
+      } else {
+        expect(checkpoint.approval?.requestId).toBe(approval.requestId);
+        expect(
+          managedRuntimeDispatchGate(sessionKey).state('ex-1'),
+        ).toBeUndefined();
+        await decideAction(session);
+        await expect(handle.resolveDurableWait()).resolves.toMatchObject({
+          continuation: { phase: 'model_output_committed' },
+        });
+      }
+      await session.close();
+    },
+  );
+
+  it('finishes an admitted checkpoint before handing off the handle', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const runtime = await runtimeCommit(session);
+
+    await Promise.all([handle.commitAwaitRuntime(runtime), handle.detach()]);
+
+    expect(handle.isDetached()).toBe(true);
+    expect(managedRuntimeDispatchGate(sessionKey).isHandedOff('ex-1')).toBe(
+      true,
+    );
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('await_runtime');
+    await session.close();
   });
 
   it('rejects Runtime dispatch while an approval wait is still open', async () => {

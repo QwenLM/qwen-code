@@ -12,7 +12,10 @@ import { SessionService } from '../services/sessionService.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { Storage } from '../config/storage.js';
 import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
-import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
+import {
+  readManagedSessionTitleInfoSync,
+  readManagedSessionSourceSync,
+} from '../utils/sessionStorageUtils.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
@@ -170,6 +173,132 @@ describe('managed session metadata', () => {
     expect(body.previousRecordRef?.resourceId).toBe(refs[0].resourceId);
   });
 
+  it.each([
+    ['session_metadata', 'missing'],
+    ['session_metadata', 'incomplete'],
+    ['session_source', 'missing'],
+    ['session_source', 'incomplete'],
+  ] as const)(
+    'hides %s until its marker is complete (%s)',
+    async (domain, tail) => {
+      const harness = await createHarness();
+      await withAuthority(harness, async (authority) => {
+        for (const value of ['committed', 'uncommitted']) {
+          await authority.commitDomainRecord(
+            renameCommand(`cmd-${value}`),
+            {
+              domain,
+              content:
+                domain === 'session_metadata'
+                  ? { title: value, titleSource: 'manual' }
+                  : {
+                      record: {
+                        systemPayload: { sourceType: 'fork', sourceId: value },
+                      },
+                    },
+            },
+            { class: 'trusted_entry' },
+          );
+        }
+      });
+      const text = await fs.readFile(harness.transcriptPath, 'utf8');
+      const lines = text.trimEnd().split('\n');
+      if (tail === 'missing') lines.pop();
+      await fs.writeFile(
+        harness.transcriptPath,
+        lines.join('\n') + (tail === 'missing' ? '\n' : ''),
+      );
+
+      expect(
+        domain === 'session_metadata'
+          ? readManagedSessionTitleInfoSync(
+              harness.transcriptPath,
+              harness.runtimeBaseDir,
+            )
+          : readManagedSessionSourceSync(
+              harness.transcriptPath,
+              harness.runtimeBaseDir,
+            ),
+      ).toEqual(
+        domain === 'session_metadata'
+          ? { title: 'committed', source: 'manual' }
+          : { sourceType: 'fork', sourceId: 'committed' },
+      );
+    },
+  );
+
+  it('finds the committed title in the bounded tail window of a long log', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (let index = 0; index < 64; index++) {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-${index}`),
+          {
+            domain: 'session_metadata',
+            content: { title: `Title ${index}`, titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+    });
+    const text = await fs.readFile(harness.transcriptPath, 'utf8');
+    expect(Buffer.byteLength(text)).toBeGreaterThan(64 * 1024);
+    const lines = text.trimEnd().split('\n');
+    lines.pop();
+    await fs.writeFile(harness.transcriptPath, `${lines.join('\n')}\n`);
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({
+      title: 'Title 62',
+      source: 'manual',
+    });
+  });
+
+  it.each(['length', 'digest'] as const)(
+    'hides a title resource with a mismatched %s',
+    async (mismatch) => {
+      const harness = await createHarness();
+      const ref = await withAuthority(
+        harness,
+        async (authority) =>
+          (
+            await authority.commitDomainRecord(
+              renameCommand('cmd-rename'),
+              {
+                domain: 'session_metadata',
+                content: { title: 'original', titleSource: 'manual' },
+              },
+              { class: 'trusted_entry' },
+            )
+          ).recordRef,
+      );
+      const resourcePath = path.join(
+        harness.store.sessionRoot,
+        ref.kind,
+        ref.resourceId,
+      );
+      const original = await fs.readFile(resourcePath, 'utf8');
+      await fs.writeFile(
+        resourcePath,
+        original.replace(
+          'original',
+          mismatch === 'length' ? 'longer title' : 'tampered',
+        ),
+      );
+
+      expect(
+        readManagedSessionTitleInfoSync(
+          harness.transcriptPath,
+          harness.runtimeBaseDir,
+        ),
+      ).toEqual({});
+    },
+  );
+
   it('recovers the revision chain across a cold reopen', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -326,7 +455,7 @@ describe('legacy maintenance on a managed session', () => {
     };
   }
 
-  it('refuses to rename a managed session and leaves it untouched', async () => {
+  it('refuses legacy rename and fork of a managed session without changing files', async () => {
     const harness = await createProject();
     const store = LocalManagedSessionResourceStore.create({
       runtimeBaseDir: harness.runtimeBaseDir,
@@ -369,6 +498,16 @@ describe('legacy maintenance on a managed session', () => {
     const after = await fs.readFile(harness.transcriptPath, 'utf8');
     expect(after).toBe(before);
     expect(after).not.toContain('custom_title');
+    const targetId = '650e8400-e29b-41d4-a716-446655440000';
+    await expect(
+      harness.service.forkSession(sessionId, targetId),
+    ).rejects.toThrow(/belongs to managed/);
+    await expect(
+      fs.stat(
+        path.join(path.dirname(harness.transcriptPath), `${targetId}.jsonl`),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(harness.transcriptPath, 'utf8')).toBe(before);
   });
 
   it('removes the private resources when the session is deleted', async () => {
