@@ -2,7 +2,7 @@
 
 [English](2026-09-24-fresh-startup-performance.md) | [简体中文](2026-09-24-fresh-startup-performance.zh-CN.md)
 
-Status: implemented as a draft PR. Section 9 lists the decisions still open.
+Status: implemented. Section 9 records the design decisions.
 
 ## 1. Problem
 
@@ -108,7 +108,9 @@ We followed the approach in
 - stream-json, `--json-fd`, file input and dual output;
 - sandbox;
 - Windows process handling;
-- `advanced.autoConfigureMemory=true`.
+- `advanced.autoConfigureMemory=true`;
+- sessions where `.env` files or `settings.env` injected values;
+- the Bun standalone flavor's launcher.
 
 **Out of scope for this PR:**
 
@@ -121,19 +123,19 @@ We followed the approach in
 Every Δ is a paired median against the previous build; "pairs" is how many
 pairs the change won.
 
-| #   | Change                                                                                                                                             | Result                                                                                       | Decision                 |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------ |
-| E1  | Skip the relaunch when it adds no Node flags. Trust restarts re-exec in place (`execve`); `/update` runs in-process.                               | TTI −767 ms (20/20); first content −707 ms; RSS −190 MB; `-p` −748 ms                        | Kept                     |
-| E2  | `module.enableCompileCache()` before loading the main module graph                                                                                 | Warm: TTI −358 ms (20/20), `-p` −296 ms, RSS +10 MB. Cold first launch: TTI +104 ms          | Kept                     |
-| E3  | Probe for editors when the editor dialog asks, not at import time                                                                                  | First content −47 ms (19/24); TTI −32 ms (14/24)                                             | Kept                     |
-| E4  | Walk the IDE process ancestry only when `TERM_PROGRAM=vscode`                                                                                      | TTI −50 ms (20/24); CPU −120 ms; **S1 regressed**, 8/24 → 22/24                              | Kept together with E5    |
-| E5  | Resolve the git branch before the first frame                                                                                                      | S1 17/24 → 0/24; time neutral                                                                | Kept                     |
-| E6  | esbuild `minifyWhitespace`, with `keepNames` still on                                                                                              | RSS −23 MB (24/24); first content −48 ms (21/24); TTI −36 ms (17/24); `-p` −43 ms and −21 MB | Kept, pending decision 3 |
-| E7  | Start the update check 3 s after render                                                                                                            | TTI −56 ms (20/24); RSS at TTI −81 MB (24/24); CPU −335 ms                                   | Kept                     |
-| E8  | The bin launcher imports the CLI in-process on POSIX. `gc` is exposed with `v8.setFlagsFromString`, and exit code 44 relaunches from an exit hook. | TTI −48 ms (20/24); first content −73 ms (23/24); RSS −49 MB (24/24); `-p` −48 ms and −50 MB | Kept                     |
-| E9  | Register the `review` command only when `review` is in argv                                                                                        | RSS −8 MB (24/24); `-p` −14 MB; time neutral                                                 | Kept                     |
-| E10 | Load only lowlight's `common` grammars (chunk 1.5 MB → 216 KB)                                                                                     | RSS −1.5 MB; time neutral                                                                    | Kept (improves D2)       |
-| —   | Extension-store lock, suspected of costing 200 ms in `config.initialize`                                                                           | Uncontended: the gaps are a busy main thread, not the lock                                   | No change                |
+| #   | Change                                                                                                                                                         | Result                                                                                       | Decision              |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| E1  | Skip the relaunch when it adds no Node flags. Trust restarts re-exec in place (`execve`); `/update` runs in-process.                                           | TTI −767 ms (20/20); first content −707 ms; RSS −190 MB; `-p` −748 ms                        | Kept                  |
+| E2  | `module.enableCompileCache()` before loading the main module graph                                                                                             | Warm: TTI −358 ms (20/20), `-p` −296 ms, RSS +10 MB. Cold first launch: TTI +104 ms          | Kept                  |
+| E3  | Probe for editors when the editor dialog asks, not at import time                                                                                              | First content −47 ms (19/24); TTI −32 ms (14/24)                                             | Kept                  |
+| E4  | Walk the IDE process ancestry only when `TERM_PROGRAM=vscode`                                                                                                  | TTI −50 ms (20/24); CPU −120 ms; **S1 regressed**, 8/24 → 22/24                              | Kept together with E5 |
+| E5  | Resolve the git branch before the first frame                                                                                                                  | S1 17/24 → 0/24; time neutral                                                                | Kept                  |
+| E6  | esbuild `minifyWhitespace`, with `keepNames` still on                                                                                                          | RSS −23 MB (24/24); first content −48 ms (21/24); TTI −36 ms (17/24); `-p` −43 ms and −21 MB | Kept (decision 3)     |
+| E7  | Start the update check 3 s after render                                                                                                                        | TTI −56 ms (20/24); RSS at TTI −81 MB (24/24); CPU −335 ms                                   | Kept                  |
+| E8  | Under Node on POSIX, the bin launcher imports the CLI in-process. `gc` is exposed with `v8.setFlagsFromString`, and exit code 44 relaunches from an exit hook. | TTI −48 ms (20/24); first content −73 ms (23/24); RSS −49 MB (24/24); `-p` −48 ms and −50 MB | Kept                  |
+| E9  | Register the `review` command only when `review` is in argv                                                                                                    | RSS −8 MB (24/24); `-p` −14 MB; time neutral                                                 | Kept                  |
+| E10 | Load only lowlight's `common` grammars (chunk 1.5 MB → 216 KB)                                                                                                 | RSS −1.5 MB; time neutral                                                                    | Kept (improves D2)    |
+| —   | Extension-store lock, suspected of costing 200 ms in `config.initialize`                                                                                       | Uncontended: the gaps are a busy main thread, not the lock                                   | No change             |
 
 ### 5.1 The relaunch
 
@@ -152,16 +154,29 @@ for.
 - **Environment hand-off.** It passed along which variables came from `.env`
   or settings. This matters only across a process boundary.
 
-**What changed.** On POSIX, when there are no memory flags and the mode needs
-no separate supervisor, the CLI marks itself as supervising in-process:
+**What changed.** On POSIX, when there are no memory flags, no `.env` file or
+`settings.env` injected a value, and the mode needs no separate supervisor, the
+CLI marks itself as supervising in-process:
 
 - `relaunchApp()` runs exit cleanup and then `execve`s the same command line.
   It adds `--expose-gc` if gc had been exposed at runtime.
 - `relaunchForUpdate()` runs the update handler in-process and exits with its
   code. When that code is 44, the launcher's exit hook relaunches.
+- An update requested for exit is installed after the session ends cleanly
+  (exit code 0), once, even if the user quits again meanwhile. On success the
+  exit code is 44 and the launcher's exit hook reopens the new version, as the
+  supervising parent did.
 - Every other mode keeps the supervised relaunch. Its child gets
   `--expose-gc` by the same rule, because the launcher no longer passes that
   flag in argv.
+
+**Env files.** Modules that read the environment at load time, and Node itself
+for `NODE_EXTRA_CA_CERTS`, only see values from `.env` or `settings.env` in a
+fresh image. Such sessions therefore relaunch as on `main`, which applies the
+same rule to one-shot runs (#12602).
+
+**Bun.** The Bun standalone flavor has no `v8.setFlagsFromString`, so its
+launcher keeps the child spawned with `--expose-gc`, as on Windows.
 
 ## 6. Results
 
@@ -185,6 +200,13 @@ HOME, 4 vCPU:
 - First launch with an empty compile cache: TTI −40% (15/15 pairs).
 - A terminal that ignores OSC 11: TTI −49% (15/15 pairs).
 
+**Independent reproductions** (reported on the PR):
+
+- Linux arm64, 10 vCPU, 30 pairs: J1 −49%, J3 −57%, J2 −53%, M1 −60%, S1
+  26/30 → 0/30; every pair won.
+- macOS on Apple Silicon, 8–12 pairs: J1 −42%, J3 −48%, J2 −45%, RSS −54%;
+  every pair won.
+
 **Deterministic proxies:**
 
 | Proxy              | Interactive    | Headless       |
@@ -199,27 +221,41 @@ that `execve` replaces.
 
 ## 7. Risks and behaviour changes
 
-1. **Update-on-exit** (standalone and `updateCommand` installs). With no
-   parent process, the startup check shows "Run /update to install the
-   update." instead of installing after exit.
+1. **Update-on-exit** (standalone and `updateCommand` installs). Kept: the
+   session installs the update after it ends cleanly and the launcher reopens
+   the new version, as on `main`. The Settings dialog's restart-required exit
+   does not install it.
 2. **Trust restart, then `/update`.** After an in-place trust restart, a later
-   `/update` exits with code 44 instead of relaunching, because the new image
-   has no launcher exit hook. The update itself is still installed.
-3. **Stack traces.** With `minifyWhitespace`, stack traces from the bundle keep
-   function names but lose useful line numbers.
+   `/update`, or an update requested for exit, installs the update but exits
+   with code 44 instead of reopening, because the new image has no launcher
+   exit hook. It needs folder trust, a trust change and an update in one
+   session; the next `qwen` runs the new version.
+3. **Stack traces.** With `minifyWhitespace`, frames keep function names and
+   exact line and column, but lines average about 2 KB, so a line number alone
+   no longer points at readable code. Neither build ships source maps.
 4. **Short sessions.** The update check waits 3 s, so sessions shorter than
-   that skip it.
-5. **Legacy IDE discovery.** The IDE process walk now runs only in VS Code
-   terminals. Legacy VS Code companions older than 0.5.1, reached through a
-   terminal that rewrites `TERM_PROGRAM` (for example tmux), lose pid-file
-   discovery.
+   that skip it; the next launch checks.
+5. **IDE process walk.** It now runs only in VS Code terminals. This loses
+   nothing: companions older than 0.5.1 do not write the IDE's identity into
+   their connection file, so in a terminal that rewrites `TERM_PROGRAM` (for
+   example tmux) `main` could not detect the IDE for them either.
 6. **Compile cache.** It lives in the OS temp directory (about 9 MB), and the
-   first launch after an install or upgrade is about 100 ms slower.
+   first launch after an install or upgrade is about 100 ms slower. The
+   launcher exports `NODE_COMPILE_CACHE`, so relaunched children and tool
+   subprocesses share it, as on `main`.
 7. **Process chain.** On POSIX, `QWEN_CODE_LAUNCHER_PID` is no longer set.
    Only the Windows standalone updater reads it, and Windows keeps the spawned
    child.
 8. **Core-gated areas.** The change touches `packages/core/src/**` and
    `packages/cli/src/config/**`, which need maintainer review.
+9. **Env-file sessions.** When `.env` files or `settings.env` inject values,
+   interactive and `-p` sessions relaunch as on `main` and keep its startup
+   cost.
+10. **Bun flavor.** Its launcher keeps the spawned child, so it does not get
+    E8's gains.
+11. **Signal exit status.** On SIGTERM or SIGHUP the process exits with code
+    143 or 129 instead of being killed by the signal. A shell's `$?` is the
+    same; a parent that inspects the signal sees a normal exit.
 
 ## 8. Rejected metrics
 
@@ -230,30 +266,26 @@ that `execve` replaces.
 | Interactive instruction counts under Valgrind | Spread of about 10%, because timer-driven work scales with the slowdown; needs a benchmark hook that exits at `input_enabled` |
 | Internal `to_input_enabled` as the headline   | Misses about 1 s (35%) of what the user waits for; kept as a phase breakdown only                                             |
 
-## 9. Open decisions
+## 9. Decisions
 
-Each needs a maintainer and author decision before this leaves draft.
+These were open while the PR was a draft.
 
-1. **Update-on-exit.** Keep the "Run /update" fallback, or restore
-   install-after-exit with an exit hook?
-2. **Trust restart, then `/update`.** Accept the edge case, or have in-place
-   restarts re-exec the launcher so its exit hook survives?
-3. **E6 stack traces.** Accept, ship sourcemaps (and decide how to load them),
-   or drop E6, giving back 23 MB and about 40 ms?
-4. **Update-check delay.** Is 3 s right, or should the check run when the
-   session is idle instead?
-5. **IDE walk.** Is gating it on `TERM_PROGRAM=vscode` acceptable for legacy
-   companions?
-6. **Split.** Land this as one PR, or split it into independent PRs? A
-   natural split is:
-   - E1+E8 (process chain);
-   - E2 (compile cache);
-   - E3/E4/E5/E7 (startup side effects);
-   - E6/E9/E10 (bundle).
-7. **Harness and CI.** Check in the benchmark harness and add D1–D3 CI
-   ratchets? These would fail on any increase in D1/D2 or a >0.2% increase in
-   D3; a nightly job would lower the ceilings and track J1–J3/S1. The harness
-   is not part of this PR.
+1. **Update-on-exit.** Restored in-process instead of the "Run /update"
+   fallback (section 5.1).
+2. **Trust restart, then `/update`.** Accepted as a documented edge case
+   (section 7, item 2). Re-executing the launcher on restart would have to
+   handle the standalone shell launcher and the managed-version pin, which is
+   more than the edge case warrants.
+3. **E6 stack traces.** Kept. Frames keep names and exact positions, and
+   neither build ships source maps; source maps can follow separately.
+4. **Update-check delay.** Kept at 3 s after render. It no longer competes
+   with startup, and a shorter session checks on its next launch.
+5. **IDE walk.** Kept; it loses nothing (section 7, item 5).
+6. **Split.** One PR. If maintainers prefer, the process-chain change (E1+E8)
+   is the part to split out; the bugs found in review were all there.
+7. **Harness and CI.** A follow-up PR checks in the harness and adds D1/D2
+   ratchets, which are deterministic on Linux. Wall-clock and D3 stay nightly
+   or manual.
 
 ## 10. Validation
 
@@ -277,7 +309,10 @@ New tests cover:
 - branch priming;
 - the update-check delay;
 - the in-process launcher and its exit-44 relaunch;
-- `--expose-gc` on both relaunch paths when gc was exposed at runtime.
+- `--expose-gc` on both relaunch paths when gc was exposed at runtime;
+- the env-file relaunch rule;
+- the Bun launcher path;
+- update-on-exit after a clean exit, once, when the user quits twice.
 
 **Integration:**
 
@@ -298,6 +333,13 @@ New tests cover:
   holds on Node 22.23, on Node 22.3 (which has no `process.execve`), and after
   a folder-trust restart.
 - `qwen review --help` works.
+- Update-on-exit on a pnpm global install, with a local registry serving a
+  newer version: after `/quit`, a double Ctrl+C, or a third Ctrl+D during
+  shutdown, the update was installed and the new version reopened, as on
+  `main`.
+- With a value in `~/.qwen/.env`, interactive and `-p` sessions relaunch and
+  see the value at boot.
+- Under Bun 1.3.14 and 1.4.2, the launcher reaches the CLI.
 
 ## 11. Acceptance criteria
 
@@ -324,3 +366,5 @@ These are not part of this PR:
   become a gate.
 - **Field telemetry.** Enable the reserved `qwen-code.startup.duration`
   metric.
+- **Benchmark harness and CI ratchets** (decision 7).
+- **Source maps** for bundle stack traces, if needed (decision 3).
