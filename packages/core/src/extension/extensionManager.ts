@@ -78,6 +78,7 @@ import {
   type LocalizableString,
 } from './i18n.js';
 import {
+  clearStoredExtensionSecrets,
   getEnvContents,
   maybePromptForSettings,
   promptForSetting,
@@ -1710,7 +1711,11 @@ export class ExtensionManager {
       createDataDir?: boolean;
       onListFailure?: (extensionsDir: string, error: unknown) => void;
     } = {},
-    onLoadFailure?: (extensionDir: string, error: unknown) => void,
+    onLoadFailure?: (
+      extensionDir: string,
+      error: unknown,
+      extensionName?: string,
+    ) => void,
   ): Promise<Extension[]> {
     if (!this.managedExtensionsDir) return [];
     const extensions = await this.loadExtensionsFromExtensionsDir(
@@ -1736,7 +1741,11 @@ export class ExtensionManager {
     workspaceDir: string,
     options: { manifestOnly?: boolean } = {},
   ): Promise<Extension[]> {
-    const failedManaged: Array<{ directory: string; error: unknown }> = [];
+    const failedManaged: Array<{
+      directory: string;
+      error: unknown;
+      name?: string;
+    }> = [];
     const manageds = await this.loadManagedExtensions(
       workspaceDir,
       {
@@ -1751,22 +1760,24 @@ export class ExtensionManager {
           );
         },
       },
-      (directory, error) => {
-        failedManaged.push({ directory, error });
+      (directory, error, name) => {
+        failedManaged.push({ directory, error, name });
       },
     );
     const managedNames = new Set(
       manageds.map((extension) => extension.name.toLowerCase()),
     );
-    for (const { directory, error } of failedManaged) {
+    for (const { directory, error, name } of failedManaged) {
       // A managed entry that fails to load still claims its name: silently
       // letting a same-name user copy take over would substitute user code
-      // for the deployment's package with no signal. The manifest is
-      // unreadable, so the directory name is the only reservation left.
+      // for the deployment's package with no signal. Reserve the declared
+      // manifest name when the failure carried it; the directory basename is
+      // the only reservation left when the manifest itself is unreadable.
       process.stderr.write(
         `Warning: Managed extension at "${directory}" failed to load; its name stays reserved and a same-name user extension stays shadowed. ${getErrorMessage(error)}\n`,
       );
       managedNames.add(path.basename(directory).toLowerCase());
+      if (name) managedNames.add(name.toLowerCase());
     }
     const users = await this.loadExtensionsFromExtensionsDir(
       this.configDir,
@@ -1789,22 +1800,28 @@ export class ExtensionManager {
     if (extension.source === 'managed') {
       throw new ManagedExtensionReadOnlyError(extension.name);
     }
-    const failedManaged: Array<{ directory: string; error: unknown }> = [];
+    const failedManaged: Array<{
+      directory: string;
+      error: unknown;
+      name?: string;
+    }> = [];
     const manageds = await this.loadManagedExtensions(
       this.workspaceDir,
       {},
-      (directory, error) => {
-        failedManaged.push({ directory, error });
+      (directory, error, name) => {
+        failedManaged.push({ directory, error, name });
       },
     );
     const managedNames = new Set(
       manageds.map((managed) => managed.name.toLowerCase()),
     );
-    // Discovery reserves the directory name of a managed entry that failed
-    // to load; the gate must honor the same reservation, or an install or
-    // update would seize a name the load path refuses to release.
-    for (const { directory } of failedManaged) {
+    // Discovery reserves the names of a managed entry that failed to load —
+    // the directory basename, plus the declared manifest name when the
+    // failure carried it; the gate must honor the same reservation, or an
+    // install or update would seize a name the load path refuses to release.
+    for (const { directory, name } of failedManaged) {
       managedNames.add(path.basename(directory).toLowerCase());
+      if (name) managedNames.add(name.toLowerCase());
     }
     if (managedNames.has(extension.name.toLowerCase())) {
       throw new ManagedExtensionReadOnlyError(extension.name);
@@ -1826,7 +1843,11 @@ export class ExtensionManager {
       manifestOnly?: boolean;
       createDataDir?: boolean;
       source?: 'managed' | 'user';
-      onLoadFailure?: (extensionDir: string, error: unknown) => void;
+      onLoadFailure?: (
+        extensionDir: string,
+        error: unknown,
+        extensionName?: string,
+      ) => void;
       onListFailure?: (extensionsDir: string, error: unknown) => void;
     } = {},
   ): Promise<Extension[]> {
@@ -1996,7 +2017,11 @@ export class ExtensionManager {
       manifestOnly?: boolean;
       createDataDir?: boolean;
       source?: 'managed' | 'user';
-      onLoadFailure?: (extensionDir: string, error: unknown) => void;
+      onLoadFailure?: (
+        extensionDir: string,
+        error: unknown,
+        extensionName?: string,
+      ) => void;
     } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
@@ -2022,16 +2047,28 @@ export class ExtensionManager {
       // basename as a FAILED package and shadow a valid same-name user
       // extension. lstat, not existsSync: a manifest that exists but cannot
       // be read still fails below and keeps its reservation.
-      const hasManifest = [
-        EXTENSIONS_CONFIG_FILENAME,
-        AGENT_PLUGIN_MANIFEST,
-      ].some((file) => {
-        try {
-          return !!fs.lstatSync(path.join(extensionDir, file));
-        } catch {
-          return false;
-        }
-      });
+      let hasManifest: boolean;
+      try {
+        hasManifest = [EXTENSIONS_CONFIG_FILENAME, AGENT_PLUGIN_MANIFEST].some(
+          (file) => {
+            try {
+              return !!fs.lstatSync(path.join(extensionDir, file));
+            } catch (error) {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+              throw error;
+            }
+          },
+        );
+      } catch (error) {
+        // A non-absence error (e.g. EACCES on a listable but unsearchable
+        // package directory) is a failing package, not a missing one: route
+        // it to the failing-load path so the basename reservation and its
+        // warning still fire. Throwing out of here would reject the whole
+        // refresh and lose every other extension.
+        options.onLoadFailure?.(extensionDir, error);
+        return null;
+      }
       if (!hasManifest) return null;
     }
 
@@ -2209,7 +2246,14 @@ export class ExtensionManager {
       return extension;
     } catch (e) {
       if (options.throwOnError) throw e;
-      if (source === 'managed') options.onLoadFailure?.(extensionDir, e);
+      if (source === 'managed') {
+        options.onLoadFailure?.(
+          extensionDir,
+          e,
+          extension?.name ??
+            (e as Error & { extensionName?: string }).extensionName,
+        );
+      }
       debugLogger.warn(
         `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
@@ -2258,8 +2302,11 @@ export class ExtensionManager {
           config: loadAgentPluginManifest(extensionDir),
         };
       } catch (error) {
-        throw new Error(
-          `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
+        throw withDeclaredExtensionName(
+          new Error(
+            `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
+          ),
+          path.join(extensionDir, AGENT_PLUGIN_MANIFEST),
         );
       }
     }
@@ -2268,11 +2315,14 @@ export class ExtensionManager {
     if (!fs.existsSync(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
+    let parsedConfig: unknown;
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const parsedConfig = JSON.parse(configContent);
-      const skillStates = parseSkillStates(parsedConfig?.skillStates);
-      const rawConfig = recursivelyHydrateStrings(parsedConfig, {
+      parsedConfig = JSON.parse(configContent);
+      const skillStates = parseSkillStates(
+        (parsedConfig as { skillStates?: unknown })?.skillStates,
+      );
+      const rawConfig = recursivelyHydrateStrings(parsedConfig as JsonValue, {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,
@@ -2292,10 +2342,14 @@ export class ExtensionManager {
       validateExtensionSettingEnvVars(config.settings);
       return { format: 'qwen', config };
     } catch (e) {
-      throw new Error(
-        `Failed to load extension config from ${configFilePath}: ${getErrorMessage(
-          e,
-        )}`,
+      throw withDeclaredExtensionName(
+        new Error(
+          `Failed to load extension config from ${configFilePath}: ${getErrorMessage(
+            e,
+          )}`,
+        ),
+        undefined,
+        (parsedConfig as { name?: unknown })?.name,
       );
     }
   }
@@ -3470,10 +3524,42 @@ export class ExtensionManager {
         );
       if (policy && extensionId === getManagedExtensionId(policy.name)) {
         if (extension) throw new ManagedExtensionReadOnlyError(policy.name);
-        // The policy is retained for a managed package that is no longer
-        // there: the extension is absent, so uninstall is an idempotent
-        // no-op (and can never reach a shadowed user artifact).
-        return snapshot;
+        // A still-deployed package that fails to load keeps its name
+        // reserved (discovery reserves the failing entry), so it rejects
+        // here exactly like a loaded one.
+        await this.assertUserManagedExtension({ name: policy.name });
+        // The package has genuinely left the deployment root. An explicit
+        // uninstall releases the retained policy rather than reporting an
+        // idempotent no-op that leaves the name blocked forever — and no
+        // other product surface can exit that state. Settings written for
+        // the managed package leave with it: its stored secrets, and the
+        // user-scope settings directory when it holds nothing but settings
+        // (a real artifact directory — e.g. a shadowed user copy — is never
+        // touched here).
+        await clearStoredExtensionSecrets(policy.name, extensionId);
+        const settingsDirectory = path.join(this.configDir, policy.name);
+        const entries = await fs.promises
+          .readdir(settingsDirectory, { withFileTypes: true })
+          .catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+              return undefined;
+            throw error;
+          });
+        if (
+          entries?.every(
+            (entry) =>
+              entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
+          )
+        ) {
+          await fs.promises.rm(settingsDirectory, {
+            recursive: true,
+            force: true,
+          });
+        }
+        return await this.extensionStore.removePolicy({
+          id: extensionId,
+          name: policy.name,
+        });
       }
       if (extension) await this.assertUserManagedExtension(extension);
       if (!policy || policy.declarationOnly) return snapshot;
@@ -3789,6 +3875,31 @@ export async function copyExtension(
       }
     },
   });
+}
+
+// A manifest that fails schema validation after its name parsed still has a
+// declared name, and the failing-load reservation must hold that name rather
+// than only the directory basename: a deployment package's directory may
+// differ from its manifest name. Best effort — when the name is genuinely
+// unreadable the basename reservation is the only one left.
+function withDeclaredExtensionName(
+  error: Error,
+  manifestPath?: string,
+  parsedName?: unknown,
+): Error {
+  let name = typeof parsedName === 'string' && parsedName ? parsedName : '';
+  if (!name && manifestPath) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+        name?: unknown;
+      };
+      if (typeof raw.name === 'string') name = raw.name;
+    } catch {
+      // The manifest is unreadable; the basename reservation remains.
+    }
+  }
+  if (name) (error as Error & { extensionName?: string }).extensionName = name;
+  return error;
 }
 
 function getManagedExtensionId(name: string): string {

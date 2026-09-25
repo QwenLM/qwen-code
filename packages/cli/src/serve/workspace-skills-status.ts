@@ -217,20 +217,20 @@ async function buildWorkspaceSkillsStatus(
               }
               storeRead = true;
             } catch (error) {
-              // A store that exists but cannot be read (a home remounted
-              // read-only) must not fail the whole catalog on the path this
-              // fallback owns; a real user extensions dir keeps the
-              // pre-existing fail-and-report behavior.
-              if (entry) throw error;
+              // Fail-and-report whenever state exists: the store-free
+              // fallback below answers with manifest defaults, which would
+              // report a managed package the user disabled as active. Only a
+              // home with neither an extensions dir nor a store can use it.
+              if (entry || storeEntry) throw error;
             }
           }
           if (!storeRead) {
-            // Fresh home (or an unreadable store with no user extensions
-            // dir): no activation preferences can exist, so a store-free
-            // managed discovery with manifest defaults gives the same
-            // answer — and performs no write. createDataDir: false keeps
-            // the probe read-only even for agent-plugins-format managed
-            // packages.
+            // Fresh home: neither the user extensions dir nor the store
+            // exists, so no activation preferences can exist, and a
+            // store-free managed discovery with manifest defaults gives the
+            // same answer — and performs no write. createDataDir: false
+            // keeps the probe read-only even for agent-plugins-format
+            // managed packages.
             if (managedExtensionsDir) {
               extensions = await extensionManager.loadManagedExtensions(
                 workspaceCwd,

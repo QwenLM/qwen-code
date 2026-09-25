@@ -38,6 +38,39 @@ function stashLegacyPathRulesForManaged(policy: ExtensionPolicy): void {
   }
 }
 
+// The pre-managed stash is authoritative for the whole activation surface at
+// the refresh-time hand-back: activation changes made during the managed
+// episode belong to the managed package, so a stash never yields to an
+// episode-era write. (The install-time adoption deliberately keeps the
+// retained managed-era activation instead — the package is an explicit
+// takeover, not the user's own package returning.)
+function restorePreservedActivationSurface(policy: ExtensionPolicy): void {
+  if (policy.preservedLegacyPathRules) {
+    policy.legacyPathRules = [...policy.preservedLegacyPathRules];
+    delete policy.preservedLegacyPathRules;
+  }
+  if (policy.preservedDefaultActivation !== undefined) {
+    policy.defaultActivation = policy.preservedDefaultActivation;
+    delete policy.preservedDefaultActivation;
+  }
+  if (policy.preservedWorkspaceOverrides) {
+    policy.workspaceOverrides = { ...policy.preservedWorkspaceOverrides };
+    delete policy.preservedWorkspaceOverrides;
+    // Skill states ride the same surface: when the claim-time baseline holds
+    // none, episode-era skill toggles leave with the episode.
+    if (policy.preservedSkillWorkspaceOverrides) {
+      policy.skillWorkspaceOverrides = Object.fromEntries(
+        Object.entries(policy.preservedSkillWorkspaceOverrides).map(
+          ([workspace, states]) => [workspace, { ...states }],
+        ),
+      );
+      delete policy.preservedSkillWorkspaceOverrides;
+    } else {
+      delete policy.skillWorkspaceOverrides;
+    }
+  }
+}
+
 export type ExtensionActivation = 'enabled' | 'disabled';
 export type WorkspaceActivation = ExtensionActivation | 'inherit';
 
@@ -63,6 +96,12 @@ export interface ExtensionPolicy {
   // and later withdrawing a managed package would permanently re-enable a
   // package the user explicitly disabled.
   preservedDefaultActivation?: ExtensionActivation;
+  // The workspace-scoped half of the same hold: getActivation consults
+  // workspaceOverrides before the default, and the skill states ride with
+  // them, so restoring only the default would let an episode-era toggle
+  // survive onto the user's own package.
+  preservedWorkspaceOverrides?: Record<string, WorkspaceActivation>;
+  preservedSkillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
 }
 
 export interface ExtensionStoreSnapshot {
@@ -364,7 +403,30 @@ function parseState(
           ))) &&
       (parsed.preservedDefaultActivation === undefined ||
         parsed.preservedDefaultActivation === 'enabled' ||
-        parsed.preservedDefaultActivation === 'disabled')
+        parsed.preservedDefaultActivation === 'disabled') &&
+      (parsed.preservedWorkspaceOverrides === undefined ||
+        (!!parsed.preservedWorkspaceOverrides &&
+          typeof parsed.preservedWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.preservedWorkspaceOverrides) &&
+          Object.values(parsed.preservedWorkspaceOverrides).every(
+            (activation) =>
+              activation === 'enabled' ||
+              activation === 'disabled' ||
+              activation === 'inherit',
+          ))) &&
+      (parsed.preservedSkillWorkspaceOverrides === undefined ||
+        (!!parsed.preservedSkillWorkspaceOverrides &&
+          typeof parsed.preservedSkillWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.preservedSkillWorkspaceOverrides) &&
+          Object.values(parsed.preservedSkillWorkspaceOverrides).every(
+            (states) =>
+              states !== null &&
+              typeof states === 'object' &&
+              !Array.isArray(states) &&
+              Object.values(states).every(
+                (enabled) => typeof enabled === 'boolean',
+              ),
+          )))
     );
   };
   if (
@@ -665,16 +727,22 @@ export class ExtensionStore {
           // during the managed episode belong to the managed package, not to
           // the user package this policy returns to.
           policy.preservedDefaultActivation ??= policy.defaultActivation;
+          policy.preservedWorkspaceOverrides ??= {
+            ...policy.workspaceOverrides,
+          };
+          if (
+            policy.skillWorkspaceOverrides &&
+            !policy.preservedSkillWorkspaceOverrides
+          ) {
+            policy.preservedSkillWorkspaceOverrides = Object.fromEntries(
+              Object.entries(policy.skillWorkspaceOverrides).map(
+                ([workspace, states]) => [workspace, { ...states }],
+              ),
+            );
+          }
         } else {
           delete policy.managed;
-          if (policy.preservedLegacyPathRules) {
-            policy.legacyPathRules ??= [...policy.preservedLegacyPathRules];
-            delete policy.preservedLegacyPathRules;
-          }
-          if (policy.preservedDefaultActivation !== undefined) {
-            policy.defaultActivation = policy.preservedDefaultActivation;
-            delete policy.preservedDefaultActivation;
-          }
+          restorePreservedActivationSurface(policy);
         }
         changed = true;
       }
@@ -703,13 +771,25 @@ export class ExtensionStore {
     for (const identity of extensions) {
       assertIdentity(identity);
       const rules = findLegacyRules(legacy, identity.name);
-      policies[identity.id] = {
+      const policy: ExtensionPolicy = {
         name: identity.name,
-        ...(identity.source === 'managed' ? { managed: true as const } : {}),
         defaultActivation: 'enabled',
         workspaceOverrides: {},
         ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
       };
+      if (identity.source === 'managed') {
+        policy.managed = true;
+        // A policy born managed never passes the claim-time stash, so stamp
+        // the pre-managed baseline here: the birth default with no workspace
+        // state. Without it a managed-era disable would become the user
+        // package's own default at hand-back — and stick through a re-claim.
+        policy.preservedDefaultActivation = policy.defaultActivation;
+        policy.preservedWorkspaceOverrides = {};
+        if (policy.legacyPathRules) {
+          policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+        }
+      }
+      policies[identity.id] = policy;
     }
     const snapshot: ExtensionStoreSnapshot = {
       version: 2,
@@ -956,19 +1036,16 @@ export class ExtensionStore {
       }
       if (input.operation !== 'uninstall') {
         // Adopting a managed policy (or completing an install/update) hands
-        // it to the user identity: restore any rules stashed while the
-        // managed identity held the record, the same hand-back the
-        // refresh-time managed-flag sync performs.
+        // it to the user identity. Unlike the refresh-time hand-back — which
+        // returns the user's own still-installed package — an explicit
+        // install adopts the retained managed activation as-is, so the
+        // pre-managed stash is spent: drop it rather than restore it.
         const committed = targetSnapshot.extensions[input.identity.id];
         delete committed.managed;
-        if (committed.preservedLegacyPathRules) {
-          committed.legacyPathRules ??= [...committed.preservedLegacyPathRules];
-          delete committed.preservedLegacyPathRules;
-        }
-        if (committed.preservedDefaultActivation !== undefined) {
-          committed.defaultActivation = committed.preservedDefaultActivation;
-          delete committed.preservedDefaultActivation;
-        }
+        delete committed.preservedLegacyPathRules;
+        delete committed.preservedDefaultActivation;
+        delete committed.preservedWorkspaceOverrides;
+        delete committed.preservedSkillWorkspaceOverrides;
       }
       targetSnapshot.generation = snapshot.generation + 1;
       targetSnapshot.legacyProjectionHash = projectionHash(
@@ -1192,6 +1269,8 @@ export class ExtensionStore {
       delete policy.legacyPathRules;
       delete policy.preservedLegacyPathRules;
       delete policy.preservedDefaultActivation;
+      delete policy.preservedWorkspaceOverrides;
+      delete policy.preservedSkillWorkspaceOverrides;
     });
   }
 
@@ -1278,6 +1357,29 @@ export class ExtensionStore {
       },
       false,
     );
+  }
+
+  /**
+   * Removes a policy outright. The managed hand-back keeps a withdrawn
+   * package's policy so activation survives a re-claim; an explicit uninstall
+   * of that absent package releases it here instead. Idempotent for a missing
+   * or name-mismatched record, and never called by ensureInitialized — the
+   * hand-back would lose its state otherwise.
+   */
+  async removePolicy(
+    identity: ExtensionIdentity,
+  ): Promise<ExtensionStoreSnapshot> {
+    assertIdentity(identity);
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const policy = snapshot.extensions[identity.id];
+      if (!policy || policy.name !== identity.name) return snapshot;
+      delete snapshot.extensions[identity.id];
+      snapshot.generation += 1;
+      await this.writeSnapshotUnlocked(snapshot);
+      return snapshot;
+    });
   }
 
   async setLegacyPathActivation(

@@ -37,6 +37,12 @@ const debugLogger = createDebugLogger('ACP_FILE_SYSTEM');
 
 interface AcpFileSystemServiceOptions {
   localReadRoots?: readonly string[];
+  // Roots matched against the requested path's lexical form instead of its
+  // realpath. Used for the deployment-managed extensions root: that root is
+  // validated to not be a link and pinned at the process boundary, so
+  // re-resolving it here would let a mid-session relink of the root (by an
+  // actor who can write its parent) silently relocate the read boundary.
+  lexicalLocalReadRoots?: readonly string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,6 +266,19 @@ export class AcpFileSystemService implements FileSystemService {
     const realFilePath = await resolveRealPath(normalizedFilePath);
     if (!realFilePath) return undefined;
 
+    // A lexical root is never re-resolved. The candidate's real path must
+    // still land under the same lexical root, so swapping the root directory
+    // for a symlink after the boundary was pinned breaks containment here and
+    // the read is refused rather than served from the link target.
+    for (const root of this.options.lexicalLocalReadRoots ?? []) {
+      const lexicalRoot = path.resolve(root);
+      if (
+        isSubpath(lexicalRoot, normalizedFilePath) &&
+        isSubpath(lexicalRoot, realFilePath)
+      ) {
+        return realFilePath;
+      }
+    }
     for (const realRoot of await this.getResolvedLocalReadRoots()) {
       if (isSubpath(realRoot, realFilePath)) {
         return realFilePath;

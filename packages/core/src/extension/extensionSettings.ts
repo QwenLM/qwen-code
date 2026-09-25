@@ -533,23 +533,52 @@ export async function updateSetting(
 }
 
 /**
- * Whether the user-scope secret backend holds any values for the given
- * extension identity. The adoption gate in the extension store uses this
- * because `updateSetting` stores sensitive values without writing selector
- * metadata, so a settings-only directory can still be secret-bearing.
+ * Whether the secret backend holds any values for the given extension
+ * identity, in either scope. The adoption gate in the extension store uses
+ * this because `updateSetting` stores sensitive values without writing
+ * selector metadata, so a settings-only directory can still be
+ * secret-bearing. The workspace-scope service name folds `process.cwd()`, so
+ * only entries written from this working directory are visible; a probe that
+ * finds nothing can never prove another workspace holds none, so the gate
+ * stays fail-closed on any hit it can see (and a probe error aborts the
+ * commit rather than being swallowed).
  */
 export async function hasStoredExtensionSecrets(
   extensionName: string,
   extensionId: string,
 ): Promise<boolean> {
-  const storage = new HybridTokenStorage(
-    getKeychainStorageName(
-      extensionName,
-      extensionId,
-      ExtensionSettingScope.USER,
-    ),
-  );
-  return (await storage.listSecrets()).length > 0;
+  for (const scope of [
+    ExtensionSettingScope.USER,
+    ExtensionSettingScope.WORKSPACE,
+  ]) {
+    const storage = new HybridTokenStorage(
+      getKeychainStorageName(extensionName, extensionId, scope),
+    );
+    if ((await storage.listSecrets()).length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Deletes every stored secret for the given extension identity in both
+ * scopes. Used when a retained managed policy is explicitly uninstalled after
+ * its package left the deployment root, so the managed identity's values do
+ * not sit orphaned in the backend forever.
+ */
+export async function clearStoredExtensionSecrets(
+  extensionName: string,
+  extensionId: string,
+): Promise<void> {
+  for (const scope of [
+    ExtensionSettingScope.USER,
+    ExtensionSettingScope.WORKSPACE,
+  ]) {
+    await clearKeychainSettings(
+      new HybridTokenStorage(
+        getKeychainStorageName(extensionName, extensionId, scope),
+      ),
+    );
+  }
 }
 
 interface settingsChanges {

@@ -261,11 +261,15 @@ describe('ExtensionStore', () => {
       });
       if (succeeds) {
         const after = await commit;
+        // An explicit install adopts the retained managed-era activation
+        // as-is; the pre-managed stash is spent and leaves with the episode.
         const expectedPolicy = {
           ...before.extensions[identity.id],
           artifactGeneration: after.generation,
         };
         delete expectedPolicy.managed;
+        delete expectedPolicy.preservedDefaultActivation;
+        delete expectedPolicy.preservedWorkspaceOverrides;
         expect(after.extensions).toEqual({ [userIdentity.id]: expectedPolicy });
       } else {
         await expect(commit).rejects.toBeInstanceOf(ExtensionConflictError);
@@ -3321,6 +3325,138 @@ describe('ExtensionStore', () => {
     ).toBeUndefined();
   });
 
+  it('restores the whole pre-managed activation surface when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c2'.repeat(32), name: 'surfaced' };
+    // The user's own disable predates the managed episode.
+    await store.setDefaultActivations([identity], 'disabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+    });
+
+    // Episode-era toggles belong to the managed package: getActivation
+    // consults workspaceOverrides before the default, so restoring only the
+    // default would leave the user's own package enabled in this workspace.
+    await store.setWorkspaceActivation(identity, workspacePath('a'), 'enabled');
+    await store.setSkillWorkspaceOverrides(
+      identity,
+      workspacePath('a'),
+      { helper: false },
+      0,
+    );
+
+    const handedBack = await store.ensureInitialized([identity]);
+    const policy = handedBack.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.workspaceOverrides).toEqual({});
+    expect(policy.skillWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedSkillWorkspaceOverrides).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'surfaced',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'default' });
+  });
+
+  it('restores a pre-managed workspace override cleared during the managed episode', async () => {
+    const store = makeStore();
+    const identity = { id: 'c3'.repeat(32), name: 'mirror' };
+    await store.ensureInitialized([identity]);
+    await store.setWorkspaceActivation(identity, workspacePath('a'), 'enabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(
+      claimed.extensions[identity.id]?.preservedWorkspaceOverrides,
+    ).toEqual({ [workspacePath('a')]: 'enabled' });
+
+    await store.clearWorkspaceActivation(identity, workspacePath('a'));
+    const handedBack = await store.ensureInitialized([identity]);
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'mirror',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
+  });
+
+  it('applies the stashed legacy rules over episode-era writes at hand-back', async () => {
+    const store = makeStore();
+    const identity = { id: 'c4'.repeat(32), name: 'rules' };
+    const preManaged = `!${legacyWorkspaceRule(workspacePath('pre'))}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ rules: { overrides: [preManaged] } }),
+    );
+    await store.ensureInitialized([identity]);
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      preManaged,
+    ]);
+
+    // A legacy-rule write during the episode belongs to the managed package:
+    // the hand-back applies the stash rather than silently discarding it.
+    await store.setLegacyPathActivation(
+      identity,
+      workspacePath('episode'),
+      'disabled',
+    );
+    // Retire the projection so the hand-back can only draw on the stash.
+    await fsp.rm(enablementPath);
+    const handedBack = await store.ensureInitialized([identity]);
+    expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([
+      preManaged,
+    ]);
+    expect(
+      handedBack.extensions[identity.id]?.preservedLegacyPathRules,
+    ).toBeUndefined();
+  });
+
+  it('hands a policy born managed back to its birth default when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c5'.repeat(32), name: 'born' };
+    // Born managed: the fresh-snapshot path never passes the claim-time
+    // stash, so the pre-managed baseline must be stamped at birth.
+    const born = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(born.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'enabled',
+    });
+
+    await store.setDefaultActivation(identity, 'disabled', {
+      clearLegacyPathRules: true,
+    });
+    const handedBack = await store.ensureInitialized([identity]);
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+
+    // A re-claim after the hand-back stashes the restored baseline, not a
+    // managed-era value that leaked into the policy.
+    const reclaimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(reclaimed.extensions[identity.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+  });
+
   it('stashes legacy rules that reach a managed policy inside a batch mutation', async () => {
     const store = makeStore();
     const identity = { id: 'e1'.repeat(32), name: 'batched' };
@@ -3370,12 +3506,21 @@ describe('ExtensionStore', () => {
       JSON.stringify({ scoped: { overrides: [rule] } }),
     );
     await store.ensureInitialized([identity]);
+    // A pre-claim workspace override joins the stash the same way.
+    await store.setWorkspaceActivation(
+      identity,
+      workspacePath('a'),
+      'disabled',
+    );
     const claimed = await store.ensureInitialized([
       { ...identity, source: 'managed' },
     ]);
     expect(claimed.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
       rule,
     ]);
+    expect(
+      claimed.extensions[identity.id]?.preservedWorkspaceOverrides,
+    ).toEqual({ [workspacePath('a')]: 'disabled' });
 
     await store.setDefaultActivations([identity], 'enabled', {
       clearLegacyPathRulesForManaged: true,
@@ -3389,6 +3534,8 @@ describe('ExtensionStore', () => {
     expect(policy.managed).toBeUndefined();
     expect(policy.legacyPathRules).toBeUndefined();
     expect(policy.preservedLegacyPathRules).toBeUndefined();
+    expect(policy.preservedWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedSkillWorkspaceOverrides).toBeUndefined();
     expect(
       store.getActivation(
         handedBack,
@@ -3430,6 +3577,58 @@ describe('ExtensionStore', () => {
       'API_TOKEN',
       async () => 'super-secret-value',
       ExtensionSettingScope.USER,
+    );
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
+
+  it('refuses to adopt a managed settings directory while the backend holds workspace-scope secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e7'.repeat(32),
+      name: 'ws-configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'e8'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // A workspace-scope sensitive setting lands under a different service
+    // name (the base name plus the working directory) and writes no selector
+    // file, so a user-scope-only probe would miss it: the adoption would
+    // re-key the policy and strand the value in the backend.
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'workspace-secret-value',
+      ExtensionSettingScope.WORKSPACE,
     );
 
     const staging = await store.createStagingDirectory();

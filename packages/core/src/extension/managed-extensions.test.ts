@@ -8,6 +8,27 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// ESM namespaces cannot be spied on, and chmod 000 neither works on win32 nor
+// binds root: register absolute paths that must fail lstatSync with EACCES.
+// Every other call passes through to the real implementation.
+const lstatEaccesPaths = vi.hoisted(() => new Set<string>());
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    lstatSync(target: fs.PathLike, options?: fs.StatOptions) {
+      if (typeof target === 'string' && lstatEaccesPaths.has(target)) {
+        const error = new Error(
+          `EACCES: permission denied, lstat '${target}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = 'EACCES';
+        throw error;
+      }
+      return actual.lstatSync(target, options as never);
+    },
+  };
+});
 import {
   ManagedExtensionReadOnlyError,
   ExtensionManager,
@@ -27,6 +48,10 @@ import {
   recursivelyHydrateStrings,
   type JsonValue,
 } from './variables.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+} from './agent-plugins-v1/index.js';
 
 function inventory(root: string): Record<string, string> {
   return Object.fromEntries(
@@ -98,6 +123,7 @@ describe('managed extensions', () => {
   });
 
   afterEach(() => {
+    lstatEaccesPaths.clear();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -378,6 +404,105 @@ describe('managed extensions', () => {
     ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
   });
 
+  it('reserves the declared manifest name of a managed package that fails after parsing', async () => {
+    writeExtension(user, 'user-portable', {
+      name: 'portable',
+      version: 'user',
+    });
+    // The directory name differs from the declared name, and the load fails
+    // after the manifest parsed: the declared name is what the user copy
+    // collides with, so reserving only the basename would admit it.
+    const broken = path.join(managed, 'package-folder');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(
+      path.join(broken, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable',
+        version: 42,
+      }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    // The management gate honors the same declared-name reservation.
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('reserves the declared manifest name of a qwen-format managed package that fails validation', async () => {
+    writeExtension(user, 'user-portable', {
+      name: 'portable',
+      version: 'user',
+    });
+    // Same declared-name reservation on the qwen manifest path: the manifest
+    // parses (the name is known) but fails validation afterwards.
+    const broken = path.join(managed, 'package-folder');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(
+      path.join(broken, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify({
+        name: 'portable',
+        version: '2.0.0',
+        settings: [
+          { name: 'Token', description: 'token', envVar: 'not an env var!' },
+        ],
+      }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('reserves the name of a managed package whose manifest probe fails with a non-absence error', async () => {
+    writeExtension(user, 'user-deployed', {
+      name: 'deployed',
+      version: 'user',
+    });
+    const broken = writeExtension(managed, 'deployed', {
+      name: 'deployed',
+      version: 'managed',
+    });
+    // A listable but unsearchable package directory (mode 0700 owned by the
+    // installer, a root-squash NFS mount) fails the manifest probe with
+    // EACCES — a failing package, not a missing manifest.
+    lstatEaccesPaths.add(path.join(broken, EXTENSIONS_CONFIG_FILENAME));
+    lstatEaccesPaths.add(path.join(broken, AGENT_PLUGIN_MANIFEST));
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    // The package keeps its basename reservation and warning instead of
+    // silently releasing the name to the same-name user copy.
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'deployed',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
   // Windows cannot create directory symlinks without extra privileges.
   it.skipIf(process.platform === 'win32')(
     'reserves the name of a dangling managed symlink entry and warns',
@@ -652,22 +777,39 @@ describe('managed extensions', () => {
     await subject.refreshCache();
     const managedId = subject.getLoadedExtensions()[0].id;
     const before = await subject.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]?.managed).toBe(true);
     fs.rmSync(extensionPath, { recursive: true });
-    // The managed package is absent: uninstalling its retained identity is an
-    // idempotent no-op that leaves the store and the shadowed user artifact
-    // untouched.
-    await expect(
-      manager().uninstallExtensionById(managedId, false),
-    ).resolves.toEqual(before);
-    await expect(
-      manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
-        managedId,
-        false,
-      ),
-    ).resolves.toEqual(before);
+    // The managed package is gone: an explicit uninstall releases the
+    // retained policy so the name stops blocking a user install, and it can
+    // never reach the shadowed user artifact on disk.
+    const after = await manager().uninstallExtensionById(managedId, false);
+    expect(after.extensions[managedId]).toBeUndefined();
+    expect(after.generation).toBeGreaterThan(before.generation);
+    // Releasing is idempotent: a second uninstall changes nothing further.
+    const repeated = await manager({
+      managedExtensionsDir: undefined,
+    }).uninstallExtensionById(managedId, false);
+    expect(repeated).toEqual(after);
     expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
       true,
     );
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(after);
+  });
+
+  it('refuses to release a retained managed policy whose package is still deployed but fails to load', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    // The package is still deployed, just broken: discovery reserves the
+    // failing entry's name, so uninstalling the stale managed id rejects
+    // exactly like uninstalling a loaded managed package.
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await expect(
+      manager().uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
     expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
   });
 

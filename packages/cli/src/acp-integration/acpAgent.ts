@@ -940,11 +940,12 @@ function defaultAcpOnlyLocalReadRoots(): string[] {
 }
 
 function buildAcpLocalReadRoots(config: Config): string[] {
-  const managedExtensionsDir = config.getManagedExtensionsDir();
   return [
     // SYNC: The first group mirrors ReadFileTool's default allowed local roots,
     // including auto-memory roots. The ACP-only additions below expand only
-    // local read fallback, not read_file's default permission.
+    // local read fallback, not read_file's default permission. The managed
+    // extensions root is NOT here: it is passed as a lexical root so the ACP
+    // read fallback never re-resolves it (see AcpFileSystemService).
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
     path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
@@ -952,7 +953,6 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
-    ...(managedExtensionsDir ? [managedExtensionsDir] : []),
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
@@ -963,6 +963,11 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
+}
+
+function buildAcpLexicalLocalReadRoots(config: Config): string[] {
+  const managedExtensionsDir = config.getManagedExtensionsDir();
+  return managedExtensionsDir ? [managedExtensionsDir] : [];
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -15309,6 +15314,7 @@ class QwenAgent implements Agent {
       config.getFileSystemService(),
       {
         localReadRoots: buildAcpLocalReadRoots(config),
+        lexicalLocalReadRoots: buildAcpLexicalLocalReadRoots(config),
       },
     );
     config.setFileSystemService(acpFileSystemService);

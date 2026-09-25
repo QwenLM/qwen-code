@@ -3994,12 +3994,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     try {
       const managedRoot = path.resolve('/deployment/prepared-extensions');
+      // The managed root is not a canonicalized localReadRoots entry; the
+      // helper asserts it arrives as the sole lexicalLocalReadRoots entry.
       const expected = expectedDefaultAcpLocalReadRoots();
-      expected.splice(
-        expected.indexOf('/tmp/qwen-extensions') + 1,
-        0,
-        managedRoot,
-      );
       await expectAcpLocalReadRoots(
         'session-with-fs-managed',
         expected,
@@ -5112,6 +5109,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         fallbackFileSystem,
         {
           localReadRoots: expectedLocalReadRoots,
+          // The managed root is pinned lexically so the read fallback never
+          // re-resolves it (a mid-session relink must not relocate reads).
+          lexicalLocalReadRoots: managedExtensionsDir
+            ? [managedExtensionsDir]
+            : [],
         },
       );
       expect(innerConfig.setFileSystemService).toHaveBeenCalled();

@@ -17,6 +17,7 @@ import { ExtensionStore } from './extension-store.js';
 import {
   updateSetting,
   getScopedEnvContents,
+  hasStoredExtensionSecrets,
   ExtensionSettingScope,
 } from './extensionSettings.js';
 
@@ -382,6 +383,81 @@ describe('managed extension activation migration', () => {
     const installedFiles = inventory(userDirectory);
     await deployed.uninstallExtensionById(managed.id, false);
     expect(inventory(userDirectory)).toEqual(installedFiles);
+  });
+
+  it('releases a withdrawn managed policy and its settings on explicit uninstall', async () => {
+    const settings = [
+      {
+        name: 'Endpoint',
+        description: 'Public endpoint',
+        envVar: 'PUBLIC_ENDPOINT',
+      },
+      {
+        name: 'Token',
+        description: 'Secret token',
+        envVar: 'API_TOKEN',
+        sensitive: true,
+      },
+    ];
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    fs.writeFileSync(
+      path.join(managedPackage, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '2.0.0', settings }),
+    );
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    // A settings write for the managed package creates the user-scope
+    // settings directory (non-sensitive values) and a backend entry
+    // (sensitive values) under the managed identity.
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Endpoint',
+      async () => 'https://example.invalid/saved',
+      ExtensionSettingScope.USER,
+    );
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Token',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    const userDirectory = path.join(
+      process.env['QWEN_HOME']!,
+      'extensions',
+      name,
+    );
+    expect(fs.readdirSync(userDirectory)).toEqual(['.env']);
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+
+    fs.rmSync(managedPackage, { recursive: true });
+    await deployed.refreshCache();
+    // The explicit uninstall is the exit from the retained-policy state: it
+    // drops the policy, clears the stored secrets, and removes the
+    // settings-only directory the managed package's settings writes made.
+    await deployed.uninstallExtensionById(managed.id, false);
+    const released = await deployed.getExtensionStoreSnapshot();
+    expect(released.extensions[managed.id]).toBeUndefined();
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(false);
+    expect(fs.existsSync(userDirectory)).toBe(false);
+
+    // The name is free again: a user install of it no longer dead-ends in a
+    // conflict with the retained managed policy or its settings directory.
+    const installed = await deployed.installExtension({
+      type: 'local',
+      source,
+    });
+    expect(installed).toMatchObject({ source: 'user', name });
+    expect(
+      await getScopedEnvContents(
+        installed.config,
+        installed.id,
+        ExtensionSettingScope.USER,
+      ),
+    ).toEqual({});
   });
 
   it('rejects installing over a managed source hidden by a name-filtered cache', async () => {

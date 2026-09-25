@@ -492,6 +492,42 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     );
   });
 
+  it('fails closed when the store exists but cannot be read instead of reporting managed defaults', async () => {
+    const managedExtensionsDir = path.join(qwenHome, 'prepared');
+    const skillDir = path.join(
+      managedExtensionsDir,
+      'bundle',
+      'skills',
+      'example',
+    );
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+      JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+    );
+    // The store EXISTS, so activation preferences may exist — but it cannot
+    // be read. The store-free fallback answers with manifest defaults, which
+    // would report a managed package the user disabled as active.
+    const storeDir = path.join(qwenHome, 'extension-store');
+    await fsp.mkdir(storeDir, { recursive: true });
+    await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+    const provider = createWorkspaceSkillsStatusProvider({
+      managedExtensionsDir,
+    });
+
+    const status = await provider(qwenHome);
+
+    expect(status.initialized).toBe(false);
+    expect(status.errors).toBeDefined();
+    expect(
+      status.skills.find((skill) => skill.name === 'bundle:example'),
+    ).toBeUndefined();
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'answers a read-only home with managed skills and creates no state directories',
     async () => {

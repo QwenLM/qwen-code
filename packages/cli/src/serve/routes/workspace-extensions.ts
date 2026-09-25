@@ -2321,20 +2321,13 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.getExtensionStoreSnapshot();
         const policy = snapshot.extensions[extensionId];
-        // A retained managed policy whose package has left the deployment
-        // root is an absent extension: DELETE stays idempotent for it. The
-        // per-request manager starts with an empty cache, so the presence
-        // check refreshes first — managed policies are the rare case.
+        // The per-request manager starts with an empty cache, so refresh
+        // before the uninstall can tell a still-deployed package (read-only,
+        // rejected by the manager) from a withdrawn one (whose retained
+        // policy the uninstall releases). Managed policies are the rare
+        // case.
         if (policy?.managed === true && !policy.declarationOnly) {
           await manager.refreshCacheWithSnapshot();
-          if (
-            !manager
-              .getLoadedExtensions()
-              .some((loaded) => loaded.id === extensionId)
-          ) {
-            res.status(204).end();
-            return;
-          }
         }
         if (!policy || policy.declarationOnly) {
           res.status(204).end();
