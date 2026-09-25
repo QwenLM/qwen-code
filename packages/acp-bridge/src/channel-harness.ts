@@ -28,6 +28,7 @@ import { BridgeTimeoutError, SERVE_CONTROL_EXT_METHODS } from './status.js';
 import { terminateChannel } from './channel-transport.js';
 import { WorkspaceDrainingError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+import type { BridgeExecutionEngine } from './bridgeOptions.js';
 
 export interface ChannelWorkExclusions {
   ignoreCurrentSessionSpawn?: boolean;
@@ -68,14 +69,17 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     channelShouldReapWhenIdle,
     sessionCount,
   } = options;
-  const channelLifecycle = createChannelLifecycle();
+  const defaultEngine = options.executionEngines ? 'legacy' : undefined;
+  const channelLifecycle = createChannelLifecycle(defaultEngine);
   let keepAliveUntil = 0;
   let runtimeOperationReservations = 0;
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const idleTimers = new Map<HarnessChannel, ReturnType<typeof setTimeout>>();
 
-  function liveHarnessChannel(): HarnessChannel | undefined {
-    const channel = channelLifecycle.current;
+  function liveHarnessChannel(
+    engine: BridgeExecutionEngine | undefined = defaultEngine,
+  ): HarnessChannel | undefined {
+    const channel = channelLifecycle.currentFor(engine);
     return channel && !channel.isDying ? channel : undefined;
   }
 
@@ -92,10 +96,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     );
   }
 
-  function cancelIdleTimer(): void {
-    if (idleTimer !== undefined) {
-      clearTimeout(idleTimer);
-      idleTimer = undefined;
+  function cancelIdleTimer(channel?: HarnessChannel): void {
+    for (const [owner, timer] of idleTimers) {
+      if (channel !== undefined && owner !== channel) continue;
+      clearTimeout(timer);
+      idleTimers.delete(owner);
     }
   }
 
@@ -104,6 +109,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     context?: string,
   ): Promise<void> {
     ci.isDying = true;
+    cancelIdleTimer(ci);
     ci.channelLiveness?.stop();
     await terminateChannel(
       ci.channel,
@@ -148,8 +154,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       : 0;
   }
 
-  function resolvedChannelIdleTimeoutMs(): number {
+  function resolvedChannelIdleTimeoutMs(engine = defaultEngine): number {
     const configured = configuredChannelIdleTimeoutMs();
+    if (engine !== defaultEngine) return configured;
     const now = Date.now();
     let pendingKeepAliveMs = 0;
     for (const deadline of pendingKeepAliveDeadlines.values()) {
@@ -165,17 +172,17 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (
       options.isRuntimeStopping() ||
       ci.isDying ||
-      liveHarnessChannel() !== ci
+      liveHarnessChannel(ci.executionEngine) !== ci
     )
       return;
-    const timeoutMs = resolvedChannelIdleTimeoutMs();
+    const timeoutMs = resolvedChannelIdleTimeoutMs(ci.executionEngine);
     if (timeoutMs <= 0) {
       await killChannelWithLog(ci, context);
       return;
     }
-    cancelIdleTimer();
-    idleTimer = setTimeout(() => {
-      idleTimer = undefined;
+    cancelIdleTimer(ci);
+    const idleTimer = setTimeout(() => {
+      idleTimers.delete(ci);
       if (hasNoChannelWork(ci)) {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
@@ -183,13 +190,14 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         void killChannelWithLog(ci, 'idle timeout');
       }
     }, timeoutMs);
+    idleTimers.set(ci, idleTimer);
     idleTimer.unref();
   }
 
   function retireChannel(info: HarnessChannel, context: string) {
     info.isDying = true;
-    cancelIdleTimer();
-    keepAliveUntil = 0;
+    cancelIdleTimer(info);
+    if (info.executionEngine === defaultEngine) keepAliveUntil = 0;
     info.channelLiveness?.stop();
     return terminateChannel(info.channel, initTimeoutMs, context);
   }
@@ -218,7 +226,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   ): Promise<T> {
     if (options.isRuntimeStopping())
       throw new WorkspaceDrainingError(options.boundWorkspace ?? '');
-    if (liveHarnessChannel() === ci) cancelIdleTimer();
+    if (liveHarnessChannel(ci.executionEngine) === ci) cancelIdleTimer(ci);
     if (recordUse) ci.lastUsedAt = Date.now();
     ci.workspaceControlInFlight++;
     try {
@@ -233,7 +241,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         ci.workspaceControlInFlight - 1,
       );
       await reapPendingEmptyChannel(ci);
-      if (!ci.isDying && liveHarnessChannel() === ci && hasNoChannelWork(ci)) {
+      if (
+        !ci.isDying &&
+        liveHarnessChannel(ci.executionEngine) === ci &&
+        hasNoChannelWork(ci)
+      ) {
         await startIdleTimer(ci, 'workspace control');
       }
     }
@@ -247,9 +259,10 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       await reapPendingEmptyChannel(ci);
     }
     if (!armIdleTimer) return;
-    const ci = liveHarnessChannel();
-    if (ci && hasNoChannelWork(ci)) {
-      await startIdleTimer(ci, context);
+    for (const ci of channelLifecycle.values()) {
+      if (!ci.isDying && hasNoChannelWork(ci)) {
+        await startIdleTimer(ci, context);
+      }
     }
   }
 
@@ -264,14 +277,16 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   }
 
   /**
-   * Get-or-create the daemon's single `qwen --acp` channel. N sessions
+   * Get-or-create the selected engine's ACP channel. N sessions
    * multiplex onto it via `connection.newSession()`. Concurrent callers
    * coalesce through `inFlightChannelSpawn` so we never spawn two
    * children. Wires up the one-and-only `channel.exited` cleanup on
    * first creation so the late-arriving event tears down ALL
    * multiplexed sessions.
    */
-  async function ensureChannel(): Promise<HarnessChannel> {
+  async function ensureChannel(
+    engine: BridgeExecutionEngine | undefined = defaultEngine,
+  ): Promise<HarnessChannel> {
     if (options.isRuntimeStopping())
       throw new WorkspaceDrainingError(options.boundWorkspace ?? '');
     if (isShuttingDown()) {
@@ -281,16 +296,20 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
     // immediately 404s on every follow-up.
-    cancelIdleTimer();
-    if (channelLifecycle.current && !channelLifecycle.current.isDying)
-      return channelLifecycle.current;
-    if (channelLifecycle.starting) return await channelLifecycle.starting;
+    const current = channelLifecycle.currentFor(engine);
+    if (current) cancelIdleTimer(current);
+    if (current && !current.isDying) return current;
+    const starting = channelLifecycle.startingFor(engine);
+    if (starting) return await starting;
 
-    const promise = channelLifecycle.startSpawn(channelStartup.start);
+    const promise = channelLifecycle.startSpawn(
+      () => channelStartup.start(engine),
+      engine,
+    );
     try {
       return await promise;
     } finally {
-      channelLifecycle.finishSpawn();
+      channelLifecycle.finishSpawn(engine);
     }
   }
 
@@ -348,7 +367,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     handleChannelExit(info, exitInfo) {
       info.channelLiveness?.stop();
       options.handleChannelTransportUnavailable(info);
-      if (channelLifecycle.current === info) cancelIdleTimer();
+      cancelIdleTimer(info);
       options.beforeChannelExit(info);
       channelLifecycle.remove(info);
       options.handleChannelExit(info, exitInfo);
@@ -362,6 +381,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     get starting() {
       return channelLifecycle.starting;
     },
+    currentFor: channelLifecycle.currentFor,
+    startingFor: channelLifecycle.startingFor,
+    startups: channelLifecycle.startups,
     get epoch() {
       return channelStartup.epoch;
     },
