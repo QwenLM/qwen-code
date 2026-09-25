@@ -976,6 +976,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'echo $(cat secret.txt)',
       safetyCommand: `FOO="bar baz" echo $(cat secret.txt)`,
+      safetyCommands: [`FOO="bar baz" echo $(cat secret.txt)`],
       spawnCommand: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
       strippedTrailingAmp: false,
     });
@@ -989,6 +990,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'tail -f /tmp/app.log',
       safetyCommand: 'tail -f /tmp/app.log',
+      safetyCommands: ['tail -f /tmp/app.log'],
       spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
       strippedTrailingAmp: true,
     });
@@ -1002,6 +1004,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'echo $(cat secret.txt)',
       safetyCommand: 'echo $(cat secret.txt)',
+      safetyCommands: ['echo $(cat secret.txt)'],
       spawnCommand: `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
       strippedTrailingAmp: false,
     });
@@ -1013,6 +1016,10 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'echo $(cat secret.txt)',
       safetyCommand: 'echo $(cat secret.txt) ignored',
+      safetyCommands: [
+        'echo $(cat secret.txt) ignored',
+        'echo $(cat secret.txt)',
+      ],
       spawnCommand: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
       strippedTrailingAmp: false,
     });
@@ -1024,6 +1031,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'tail -f /tmp/app.log',
       safetyCommand: 'tail -f /tmp/app.log ignored',
+      safetyCommands: ['tail -f /tmp/app.log ignored', 'tail -f /tmp/app.log'],
       spawnCommand: `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
       strippedTrailingAmp: true,
     });
@@ -1035,6 +1043,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'echo ok',
       safetyCommand: 'echo ok $(cat secret.txt)',
+      safetyCommands: ['echo ok $(cat secret.txt)', 'echo ok'],
       spawnCommand: `/bin/bash -c 'echo ok' $(cat secret.txt)`,
       strippedTrailingAmp: false,
     });
@@ -1048,6 +1057,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'tail -f /tmp/app.log',
       safetyCommand: String.raw`FOO=bar\ baz tail -f /tmp/app.log`,
+      safetyCommands: [String.raw`FOO=bar\ baz tail -f /tmp/app.log`],
       spawnCommand: String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
       strippedTrailingAmp: true,
     });
@@ -1059,6 +1069,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: `FOO="bar baz" tail -f /tmp/app.log`,
       safetyCommand: `FOO="bar baz" tail -f /tmp/app.log`,
+      safetyCommands: [`FOO="bar baz" tail -f /tmp/app.log`],
       spawnCommand: `FOO="bar baz" tail -f /tmp/app.log`,
       strippedTrailingAmp: false,
     });
@@ -1070,6 +1081,7 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual({
       analysisCommand: 'echo ok',
       safetyCommand: 'FOO=$(cat secret.txt) echo ok',
+      safetyCommands: ['FOO=$(cat secret.txt) echo ok'],
       spawnCommand: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
       strippedTrailingAmp: false,
     });
@@ -1629,6 +1641,85 @@ describe('bash word separators (#12089)', () => {
       expect(stripShellWrapper(`bash -c 'echo hi'x`)).toBe('echo hix');
     });
 
+    it('preserves escaped double quotes in spawn while dequoting the script for analysis', () => {
+      const command = String.raw`bash -c "grep \"a;touch /tmp/x\" f"`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe('grep "a;touch /tmp/x" f');
+      expect(normalized.spawnCommand).toBe(command);
+      expect(getCommandRoots(normalized.safetyCommand)).toEqual(['grep']);
+    });
+
+    it('preserves escaped double quotes when removing a final background operator', () => {
+      const command = String.raw`bash -c "echo \"x\" &"`;
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(
+        String.raw`bash -c "echo \"x\""`,
+      );
+    });
+
+    it('keeps a command after a glued quoted script visible without losing the wrapper suffix', () => {
+      const command = `bash -c 'echo $(cat secret)'\u00a0; rm -rf /tmp/x`;
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+      expect(hasShellSubstitution(command)).toBe(true);
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+    });
+
+    it('separates unquoted shell operators from the -c script word', () => {
+      const command = `bash -c 'echo hi'; rm -rf /tmp/x`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe('echo hi');
+      expect(normalized.safetyCommands).toContain('rm -rf /tmp/x');
+      expect(normalized.spawnCommand).toBe(command);
+    });
+
+    it.each([';', '&', '|', '<', '>', '(', ')'])(
+      'ends the -c script word before unquoted %s',
+      (operator) => {
+        const command = `bash -c 'echo hi'${operator}echo`;
+        expect(normalizeMonitorCommand(command).analysisCommand).toBe(
+          'echo hi',
+        );
+        expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+      },
+    );
+
+    it('keeps an outer command after -c positional argv visible', () => {
+      const command = `bash -c 'echo hi' ignored; rm -rf /tmp/x`;
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+      expect(normalizeMonitorCommand(command).safetyCommands).toContain(
+        'rm -rf /tmp/x',
+      );
+      expect(normalizeMonitorCommand(command).safetyCommands).not.toContain(
+        'ignored',
+      );
+    });
+
+    it.each(NON_SEPARATORS)(
+      'preserves a positional argv suffix beginning with %s',
+      (_name, char) => {
+        const command = `bash -c 'echo ok' ${char}--color`;
+        const normalized = normalizeMonitorCommand(command);
+        expect(normalized.spawnCommand).toBe(command);
+        expect(normalized.safetyCommand).toContain(`${char}--color`);
+      },
+    );
+
+    it.each(NON_SEPARATORS)(
+      'retains %s before a stripped final background operator',
+      (_name, char) => {
+        expect(stripTrailingBackgroundAmp(`echo hi${char}&`)).toBe(
+          `echo hi${char}`,
+        );
+      },
+    );
+
+    it('does not combine an inner quoted & with a distinct outer &', () => {
+      const command = `bash -c 'echo &'&`;
+      expect(normalizeMonitorCommand(command).analysisCommand).toBe('echo');
+      expect(stripShellWrapper(command)).toBe('echo & &');
+    });
+
     it.each([
       `bash -c 'tail -f app.log''; rm -rf /tmp/x'`,
       `bash -c 'echo'\r'; rm -rf /tmp/x ;'`,
@@ -1642,8 +1733,13 @@ describe('bash word separators (#12089)', () => {
       const normalized = normalizeMonitorCommand(command);
 
       expect(normalized).toEqual({
-        analysisCommand: `echo hi; rm -f poc.flag \u00a0;`,
-        safetyCommand: `echo hi; rm -f poc.flag \u00a0; echo y`,
+        analysisCommand: `echo hi; rm -f poc.flag \u00a0`,
+        safetyCommand: `echo hi; rm -f poc.flag \u00a0 ; echo y`,
+        safetyCommands: [
+          `echo hi; rm -f poc.flag \u00a0 ; echo y`,
+          `echo hi; rm -f poc.flag \u00a0`,
+          'echo y',
+        ],
         spawnCommand: command,
         strippedTrailingAmp: false,
       });
@@ -1680,7 +1776,7 @@ describe('bash word separators (#12089)', () => {
       const command = `bash -c 'echo hi'${char}; rm -rf /tmp/x`;
       const normalized = normalizeMonitorCommand(command);
 
-      expect(normalized.analysisCommand).toBe(`echo hi${char};`);
+      expect(normalized.analysisCommand).toBe(`echo hi${char}`);
       expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
       expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
       expect(normalized.spawnCommand).toBe(command);
@@ -1691,15 +1787,18 @@ describe('bash word separators (#12089)', () => {
         `bash -c 'echo a'\u00a0'; rm -rf /tmp/x #'y`,
         `echo a\u00a0; rm -rf /tmp/x #y`,
       ],
-      [`bash -c 'echo "hi'\u00e9; rm -rf /tmp/x`, `echo "hi\u00e9;`],
+      [`bash -c 'echo "hi'\u00e9; rm -rf /tmp/x`, `echo "hi\u00e9`],
     ])(
       'keeps commands after interior quotes in %j visible',
       (command, analysisCommand) => {
         const normalized = normalizeMonitorCommand(command);
 
         expect(normalized.analysisCommand).toBe(analysisCommand);
-        expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
-        expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+        expect(
+          normalized.safetyCommands.some((view) =>
+            getCommandRoots(view).includes('rm'),
+          ),
+        ).toBe(true);
         expect(normalized.spawnCommand).toBe(command);
       },
     );
@@ -1730,6 +1829,15 @@ describe('bash word separators (#12089)', () => {
         'rm -rf /tmp/x',
       );
     });
+  });
+
+  it('keeps non-separators in getCommandRoot fallback when parsing fails', () => {
+    expect(getCommandRoot('\u00a0echo ${FOO')).toBe('\u00a0echo');
+    expect(getCommandRoots('\u00a0echo ${FOO')).toEqual(['\u00a0echo']);
+  });
+
+  it('retains an analyzable safety view for an empty monitor command', () => {
+    expect(normalizeMonitorCommand('').safetyCommands).toEqual(['']);
   });
 
   describe('checkCommandPermissions', () => {

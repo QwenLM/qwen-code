@@ -86,9 +86,8 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * ends the comment and revives the tail.
  *
  * `monitor` is excluded because its scanned string is not an invocation at
- * all: `normalizePermissionContext()` substitutes the quote-stripped
- * `normalizeMonitorCommand().safetyCommand` reconstruction while monitor
- * spawns `spawnCommand`, so a `#` that the spawned shell sees inside the
+ * all: monitor permission checks use independent dequoted script and outer
+ * suffix views while monitor spawns `spawnCommand`, so a `#` inside the
  * wrapper's inner quotes would be scanned here as an unquoted comment start
  * and swallow a separator the spawned command really executes. Monitor
  * therefore keeps the conservative splitter, and stays covered by `Bash(...)`
@@ -368,7 +367,20 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-    ctx = this.normalizePermissionContext(ctx);
+    let decision: PermissionDecision = 'allow';
+    for (const view of this.normalizePermissionContexts(ctx)) {
+      const result = await this.evaluateContext(view);
+      if (DECISION_PRIORITY[result] > DECISION_PRIORITY[decision]) {
+        decision = result;
+      }
+      if (decision === 'deny') break;
+    }
+    return decision;
+  }
+
+  private async evaluateContext(
+    ctx: PermissionCheckContext,
+  ): Promise<PermissionDecision> {
     const { command, toolName } = ctx;
 
     // ── Cross-command virtual-op pass (shell tools only) ─────────────────
@@ -708,11 +720,11 @@ export class PermissionManager {
     return 'ask';
   }
 
-  private normalizePermissionContext(
+  private normalizePermissionContexts(
     ctx: PermissionCheckContext,
-  ): PermissionCheckContext {
+  ): PermissionCheckContext[] {
     if (ctx.toolName !== 'monitor' || ctx.command === undefined) {
-      return ctx;
+      return [ctx];
     }
 
     // Note on cwd: callers wired through `buildPermissionCheckContext`
@@ -722,10 +734,12 @@ export class PermissionManager {
     // virtual shell ops in evaluateSingle() — resolve against the monitor's
     // working directory rather than the global config cwd. Direct callers
     // of `evaluate()` that bypass that helper must pass `cwd` themselves.
-    return {
-      ...ctx,
-      command: normalizeMonitorCommand(ctx.command).safetyCommand,
-    };
+    return normalizeMonitorCommand(ctx.command).safetyCommands.map(
+      (command) => ({
+        ...ctx,
+        command,
+      }),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -971,7 +985,16 @@ export class PermissionManager {
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-    ctx = this.normalizePermissionContext(ctx);
+    for (const view of this.normalizePermissionContexts(ctx)) {
+      const rule = this.findMatchingDenyRuleForContext(view);
+      if (rule) return rule;
+    }
+    return undefined;
+  }
+
+  private findMatchingDenyRuleForContext(
+    ctx: PermissionCheckContext,
+  ): string | undefined {
     const {
       toolName,
       toolAliases,
@@ -1128,7 +1151,12 @@ export class PermissionManager {
    * @returns true if at least one rule matches.
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
-    ctx = this.normalizePermissionContext(ctx);
+    return this.normalizePermissionContexts(ctx).some((view) =>
+      this.hasRelevantRulesForContext(view),
+    );
+  }
+
+  private hasRelevantRulesForContext(ctx: PermissionCheckContext): boolean {
     const {
       toolName,
       toolAliases,
@@ -1242,7 +1270,12 @@ export class PermissionManager {
    * real ask rule matched.
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-    ctx = this.normalizePermissionContext(ctx);
+    return this.normalizePermissionContexts(ctx).some((view) =>
+      this.hasMatchingAskRuleForContext(view),
+    );
+  }
+
+  private hasMatchingAskRuleForContext(ctx: PermissionCheckContext): boolean {
     const {
       toolName,
       toolAliases,

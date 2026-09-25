@@ -2568,9 +2568,8 @@ describe('PermissionManager', () => {
 
     // The comment fast path is only sound when the scanned string is literally
     // what the shell executes. That holds for run_shell_command, but not for
-    // monitor: normalizePermissionContext() analyses the quote-stripped
-    // `safetyCommand` reconstruction while monitor spawns `spawnCommand`, so a
-    // `#` that only exists inside the wrapper's inner quotes would swallow a
+    // monitor: independent dequoted safety views differ from the raw
+    // `spawnCommand`, so a `#` inside the wrapper's inner quotes would swallow a
     // separator the spawned command really runs.
     it.each([
       [
@@ -2623,6 +2622,91 @@ describe('PermissionManager', () => {
       pm.initialize();
 
       expect(await pm.evaluate({ toolName: 'monitor', command })).toBe('deny');
+    });
+
+    it.each([
+      `bash -c 'echo a"x' ; rm -rf /tmp/x`,
+      `bash -c 'echo a # "' ; rm -rf /tmp/x`,
+      `bash -c 'echo "hi' ; rm -rf /tmp/x`,
+      `bash -c "echo a'b" ; rm -rf /tmp/x`,
+      `bash -c "echo 'a'; rm -rf /tmp/x"x #'`,
+      String.raw`bash -c "echo \"a\"; rm -rf /tmp/x"`,
+    ])('denies a monitor suffix despite quotes in %j', async (command) => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+
+      expect(await pm.evaluate({ toolName: 'monitor', command })).toBe('deny');
+      expect(pm.findMatchingDenyRule({ toolName: 'monitor', command })).toBe(
+        'Bash(rm *)',
+      );
+    });
+
+    it('denies a protected write inside a glued quoted wrapper script', async () => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Write(.qwen/settings.json)'] }),
+      );
+      pm.initialize();
+
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `bash -c 'echo pwned > .qwen/settings.json; echo done'\u00a0x y`,
+        }),
+      ).toBe('deny');
+    });
+
+    it.each([
+      [`bash -c 'echo a"' ; pkill -f qwen-code`, 'Bash(pkill *)'],
+      [
+        `cmd.exe /c "taskkill /F /IM node.exe & echo hi"\u00a0`,
+        'Bash(taskkill *)',
+      ],
+    ])('keeps self-kill command rules visible in %j', async (command, rule) => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(makeConfig({ permissionsDeny: [rule] }));
+      pm.initialize();
+
+      expect(await pm.evaluate({ toolName: 'monitor', command })).toBe('deny');
+    });
+
+    it('does not treat a plain -c positional argument as another command', async () => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+
+      expect(
+        await pm.evaluate({
+          toolName: 'monitor',
+          command: `bash -c 'echo ok' rm -rf /tmp/x`,
+        }),
+      ).not.toBe('deny');
+      expect(
+        await pm.evaluate({
+          toolName: 'monitor',
+          command: `bash -c 'echo ok' rm -rf /tmp/x; echo done`,
+        }),
+      ).not.toBe('deny');
+    });
+
+    it('keeps ask-rule and relevant-rule checks aligned across outer safety views', () => {
+      shellTypeMock.value = 'bash';
+      pm = new PermissionManager(
+        makeConfig({ permissionsAsk: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+      const ctx = {
+        toolName: 'monitor',
+        command: `bash -c 'echo "hi' ; rm -rf /tmp/x`,
+      };
+
+      expect(pm.hasRelevantRules(ctx)).toBe(true);
+      expect(pm.hasMatchingAskRule(ctx)).toBe(true);
     });
 
     // `splitCommandForRules` has to drive every Bash-rule consumer, not just

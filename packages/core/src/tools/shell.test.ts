@@ -2392,6 +2392,17 @@ describe('ShellTool', () => {
       expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
+    it('rejects an outer & glued to a quoted wrapper script in managed background mode', () => {
+      expect(() =>
+        shellTool.build({
+          command: "bash -c 'echo &'&",
+          is_background: true,
+        }),
+      ).toThrow(
+        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
+      );
+    });
+
     it('rejects wrapped sh commands whose stripped payload ends with bare &', async () => {
       expect(() =>
         shellTool.build({

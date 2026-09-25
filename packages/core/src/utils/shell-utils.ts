@@ -515,7 +515,7 @@ export function getCommandRoot(command: string): string | undefined {
     const firstToken = tokens[idx];
     return firstToken ? firstToken.split(/[\\/]/).pop() : undefined;
   } catch {
-    const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+    const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^([^ \t\n]+)/);
     if (match) {
       const commandRoot = match[1] || match[2] || match[3];
       if (commandRoot) {
@@ -613,12 +613,17 @@ export function stripShellWrapper(command: string): string {
         tail,
       } = stripSymmetricQuotes(commandToken.token);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
-        return token.rest.trimStart() || trimmed;
+        return trimBashEdgeSeparators(token.rest) || trimmed;
       }
-      if (tail && trimBashEdgeSeparators(commandToken.rest)) {
-        return trimmed;
+      const suffix = trimBashEdgeSeparators(commandToken.rest);
+      const outerShellSyntax =
+        suffix &&
+        (';&|()<>'.includes(suffix[0]!) ||
+          getOuterShellCommands(suffix).length > 0);
+      if (!suffix || (!tail && !outerShellSyntax)) {
+        return innerCommand || trimmed;
       }
-      return innerCommand || trimmed;
+      return innerCommand + (outerShellSyntax ? ' ' : '') + commandToken.rest;
     }
 
     // Non-wrapper-option token — not a wrapper.
@@ -1166,11 +1171,11 @@ export function detectSelfKillCommand(command: string): boolean {
  * at the end at all.
  */
 export function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
+  const trimmed = command.replace(/(?:[ \t]|\r?\n)+$/, '');
   if (!trimmed.endsWith('&')) return command;
   if (trimmed.endsWith('&&')) return command;
   if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
+  return trimmed.slice(0, -1).replace(/(?:[ \t]|\r?\n)+$/, '');
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -1285,8 +1290,13 @@ interface ParsedMonitorShellWrapper {
 }
 
 export interface NormalizedMonitorCommand {
+  /** Dequoted -c script word, excluding outer-shell syntax. */
   analysisCommand: string;
+  /** Combined display view; safety decisions must use safetyCommands. */
   safetyCommand: string;
+  /** Independently parsed views, evaluated with the most restrictive result. */
+  safetyCommands: string[];
+  /** Raw input, except the existing final-background-operator removal. */
   spawnCommand: string;
   strippedTrailingAmp: boolean;
 }
@@ -1382,7 +1392,10 @@ function takeLeadingToken(
       continue;
     }
 
-    if (isBashWordSeparator(char) && commandSubstitutionDepth === 0) {
+    if (
+      commandSubstitutionDepth === 0 &&
+      (isBashWordSeparator(char) || ';&|()<>'.includes(char))
+    ) {
       break;
     }
 
@@ -1465,6 +1478,21 @@ function removeQuoting(command: string): string {
     }
   }
   return value;
+}
+
+function getOuterShellCommands(suffix: string): string[] {
+  if (!suffix) return [];
+  const commands = splitCommands(suffix);
+  if (';&|()<>'.includes(suffix[0]!)) return commands;
+  return suffix.startsWith(commands[0] ?? '') ? commands.slice(1) : commands;
+}
+
+function removeFinalBackgroundAmpFromRawToken(token: string): string {
+  const ampIndex = token.lastIndexOf('&');
+  return (
+    token.slice(0, ampIndex).replace(/(?:[ \t]|\r?\n)+$/, '') +
+    token.slice(ampIndex + 1).replace(/^(?:[ \t]|\r?\n)+/, '')
+  );
 }
 
 function stripSymmetricQuotes(command: string): {
@@ -1624,17 +1652,15 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
         };
       }
-      const {
-        value: innerCommand,
-        quote: innerQuote,
-        tail,
-      } = stripSymmetricQuotes(commandToken.token);
+      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
       return {
         wrapperTokens,
         innerCommand,
         innerQuote,
-        rawInnerCommandToken: tail ? commandToken.token : undefined,
-        innerArgsSuffix: commandToken.rest.trimStart(),
+        rawInnerCommandToken: innerQuote ? commandToken.token : undefined,
+        innerArgsSuffix: trimBashEdgeSeparators(commandToken.rest),
       };
     }
 
@@ -1676,7 +1702,9 @@ export function normalizeMonitorCommand(
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
   const normalizedRawInnerCommandToken = rawInnerCommandToken
-    ? stripTrailingBackgroundAmp(rawInnerCommandToken)
+    ? analysisCommand === innerCommand
+      ? rawInnerCommandToken
+      : removeFinalBackgroundAmpFromRawToken(rawInnerCommandToken)
     : undefined;
   const rawInnerArgsSuffix = trimBashEdgeSeparators(innerArgsSuffix ?? '');
   const normalizedInnerArgsSuffix =
@@ -1694,47 +1722,44 @@ export function normalizeMonitorCommand(
     wrapperTokens && safetyParts.length > 0
       ? trimBashEdgeSeparators(safetyParts.join(' '))
       : analysisCommand;
-  const rawSafetyCommand = [
-    ...(wrapperTokens ? leadingEnvTokens : []),
-    normalizedRawInnerCommandToken,
-    normalizedInnerArgsSuffix,
-  ]
-    .filter(Boolean)
-    .join(' ');
   const innerSafetyCommand = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
   ]
     .filter(Boolean)
     .join(' ');
-  // A literal quote in the dequoted -c value can swallow an outer-shell
-  // suffix during safety parsing. Preserve both views at that boundary.
-  const safetyCommand =
-    normalizedRawInnerCommandToken &&
-    normalizedInnerArgsSuffix &&
-    /['"]/.test(analysisCommand)
-      ? `${rawSafetyCommand}\n${innerSafetyCommand}`
-      : dequotedSafetyCommand;
+  const outerCommands = getOuterShellCommands(normalizedInnerArgsSuffix);
+  // Parse each view independently: a literal quote in the -c script must
+  // never swallow commands in the outer shell's suffix (or vice versa).
+  const safetyCommands = [
+    dequotedSafetyCommand,
+    innerSafetyCommand,
+    ...outerCommands,
+  ].filter((view, index, views) => view && views.indexOf(view) === index);
+  if (safetyCommands.length === 0) safetyCommands.push(analysisCommand);
+  const safetyCommand = dequotedSafetyCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
-    normalizedInnerArgsSuffix !== rawInnerArgsSuffix ||
-    normalizedRawInnerCommandToken !== rawInnerCommandToken;
-  const spawnCommand = wrapperTokens
-    ? [
-        wrapperTokens.join(' '),
-        normalizedRawInnerCommandToken ??
-          (innerQuote
-            ? `${innerQuote}${analysisCommand}${innerQuote}`
-            : analysisCommand),
-        normalizedInnerArgsSuffix,
-      ]
-        .filter(Boolean)
-        .join(' ')
-    : analysisCommand;
+    normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
+  const spawnCommand = !strippedTrailingAmp
+    ? command
+    : wrapperTokens
+      ? [
+          wrapperTokens.join(' '),
+          normalizedRawInnerCommandToken ??
+            (innerQuote
+              ? `${innerQuote}${analysisCommand}${innerQuote}`
+              : analysisCommand),
+          normalizedInnerArgsSuffix,
+        ]
+          .filter(Boolean)
+          .join(' ')
+      : analysisCommand;
 
   return {
     analysisCommand,
     safetyCommand,
+    safetyCommands,
     spawnCommand,
     strippedTrailingAmp,
   };

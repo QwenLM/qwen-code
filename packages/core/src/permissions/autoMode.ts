@@ -313,26 +313,27 @@ export function shouldForceAutoModeReviewForAllow(
 
   // Monitor wraps the user command; analyze the same payload used by
   // PermissionManager.
-  const command =
+  const commands =
     ctx.toolName === ToolNames.MONITOR
-      ? normalizeMonitorCommand(ctx.command).safetyCommand
-      : ctx.command;
+      ? normalizeMonitorCommand(ctx.command).safetyCommands
+      : [ctx.command];
   const cwd = ctx.cwd ?? cwdFallback;
 
-  if (hasRawProtectedRedirect(command, cwd)) return true;
-  if (hasRawProtectedWriteCommand(command, cwd)) return true;
-
-  return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
-    if (
-      op.virtualTool !== ToolNames.EDIT &&
-      op.virtualTool !== ToolNames.WRITE_FILE
-    ) {
-      return false;
-    }
-    if (op.cwdUnknown && op.pathMayDependOnCwd) {
-      return true;
-    }
-    return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
+  return commands.some((command) => {
+    if (hasRawProtectedRedirect(command, cwd)) return true;
+    if (hasRawProtectedWriteCommand(command, cwd)) return true;
+    return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
+      if (
+        op.virtualTool !== ToolNames.EDIT &&
+        op.virtualTool !== ToolNames.WRITE_FILE
+      ) {
+        return false;
+      }
+      if (op.cwdUnknown && op.pathMayDependOnCwd) {
+        return true;
+      }
+      return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
+    });
   });
 }
 
@@ -819,16 +820,16 @@ export async function evaluateAutoMode(
   // failures or classifier misjudgment cannot allow destructive git/IaC
   // commands through. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
-    const command =
+    const commands =
       input.ctx.toolName === ToolNames.MONITOR
-        ? normalizeMonitorCommand(input.ctx.command).safetyCommand
-        : input.ctx.command;
+        ? normalizeMonitorCommand(input.ctx.command).safetyCommands
+        : [input.ctx.command];
     const userPrompt = extractLastUserPrompt(input.messages) ?? '';
-    const destructiveResult = isDestructiveCommand(
-      command,
-      userPrompt,
-      input.ctx.cwd,
-    );
+    const destructiveResult = commands
+      .map((command) =>
+        isDestructiveCommand(command, userPrompt, input.ctx.cwd),
+      )
+      .find((result) => result?.blocked);
     if (destructiveResult?.blocked) {
       return {
         via: 'blocked:destructive-command',

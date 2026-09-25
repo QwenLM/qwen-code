@@ -138,10 +138,10 @@ export async function evaluatePlanModeShellPolicy(input: {
     typeof input.invocationParams['command'] === 'string'
       ? input.invocationParams['command']
       : '';
-  const safetyCommand =
+  const safetyCommands =
     input.toolName === ToolNames.MONITOR
-      ? normalizeMonitorCommand(rawCommand).safetyCommand
-      : rawCommand;
+      ? normalizeMonitorCommand(rawCommand).safetyCommands
+      : [rawCommand];
   const permissionContext = clone(input.permissionContext);
   permissionContext.cwd = effectiveWorkingDirectory(
     input.config,
@@ -164,16 +164,25 @@ export async function evaluatePlanModeShellPolicy(input: {
 
   let classification: ShellCommandSafety;
   try {
-    classification = await raceWithAbort(
+    const classifications = await raceWithAbort(
       () =>
-        permissionContext.cwd
-          ? classifyShellCommandSafetyInDirectory(
-              safetyCommand,
-              permissionContext.cwd,
-            )
-          : classifyShellCommandSafety(safetyCommand),
+        Promise.all(
+          safetyCommands.map((command) =>
+            permissionContext.cwd
+              ? classifyShellCommandSafetyInDirectory(
+                  command,
+                  permissionContext.cwd,
+                )
+              : classifyShellCommandSafety(command),
+          ),
+        ),
       input.signal,
     );
+    classification = classifications.includes('write')
+      ? 'write'
+      : classifications.includes('unknown')
+        ? 'unknown'
+        : 'read-only';
   } catch (error) {
     if (input.signal.aborted) throw error;
     classification = 'unknown';

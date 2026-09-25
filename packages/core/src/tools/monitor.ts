@@ -174,7 +174,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
-    const command = normalized.safetyCommand;
     const cwd =
       this.params.directory || this.config.getTargetDir?.() || process.cwd();
 
@@ -191,10 +190,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Bash(...) — see comment in getConfirmationDetails); only the
     // substitution-deny half is removed.
     try {
-      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
-        command,
-        cwd,
-      );
+      const isReadOnly = (
+        await Promise.all(
+          normalized.safetyCommands.map((command) =>
+            isShellCommandReadOnlyASTInDirectory(command, cwd),
+          ),
+        )
+      ).every(Boolean);
       if (isReadOnly) {
         return 'allow';
       }
@@ -211,7 +213,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const cwd =
       this.params.directory || this.config.getTargetDir?.() || process.cwd();
-    const subCommands = splitCommands(normalized.safetyCommand);
+    const subCommands = [
+      ...new Set(
+        normalized.safetyCommands.flatMap((view) => splitCommands(view)),
+      ),
+    ];
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
@@ -264,7 +270,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       );
     } catch (e) {
       debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${normalized.safetyCommand})`];
+      permissionRules = normalized.safetyCommands.map(
+        (view) => `Monitor(${view})`,
+      );
     }
 
     // Flag command substitution ($(), backticks, <(), >()) so the user
@@ -274,10 +282,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Checked against both the normalized safety command and the
     // original params.command so wrappers like `bash -c "..."` still
     // trigger the warning.
-    const warnings = buildShellExecWarnings(
-      normalized.safetyCommand,
-      this.params.command,
-    );
+    const warnings = normalized.safetyCommands
+      .map((view) => buildShellExecWarnings(view, this.params.command))
+      .find(Boolean);
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',

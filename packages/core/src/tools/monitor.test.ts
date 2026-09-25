@@ -649,6 +649,21 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     });
 
+    it('checks an outer command separately from a script with an unmatched quote', async () => {
+      mockIsShellCommandReadOnlyAST.mockImplementation(
+        async (command: string) => !command.startsWith('rm -rf'),
+      );
+      const invocation = createInvocation({
+        command: `bash -c 'echo "hi' ; rm -rf /tmp/x`,
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        'rm -rf /tmp/x',
+        '/test/dir',
+      );
+    });
+
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
       const invocation = createInvocation({
         command: 'echo $(cat secret.txt)',
@@ -977,6 +992,17 @@ describe('MonitorTool', () => {
       );
       expect(monitorRegistry.getRunning()[0]?.command).toBe(
         `/bin/bash -c 'tail -f /var/log/app.log'`,
+      );
+    });
+
+    it('spawns escaped double quotes exactly as written', async () => {
+      const command = String.raw`bash -c "grep \"a;touch /tmp/x\" f"`;
+      await createInvocation({ command }).execute(new AbortController().signal);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        '/bin/bash',
+        ['-c', command],
+        expect.objectContaining({ cwd: '/test/dir' }),
       );
     });
 
