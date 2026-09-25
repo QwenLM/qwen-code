@@ -300,6 +300,23 @@ export class SessionHooksManager {
   }
 
   /**
+   * Get hooks whose matcher matches ANY of the given subjects — e.g. the
+   * relative paths of a batched MemoryChanged notice, mirroring the
+   * registry-side HookPlanner. No tool-alias expansion: the subjects here
+   * are paths, not tool names.
+   */
+  getMatchingHooksForSubjects(
+    sessionId: string,
+    event: HookEventName,
+    subjects: readonly string[],
+  ): SessionHookEntry[] {
+    const hooks = this.getHooksForEvent(sessionId, event);
+    return hooks.filter((entry) =>
+      subjects.some((subject) => matchesHookPattern(entry.matcher, subject)),
+    );
+  }
+
+  /**
    * Check if a session has any hooks registered
    * @param sessionId Session ID
    * @returns True if session has hooks

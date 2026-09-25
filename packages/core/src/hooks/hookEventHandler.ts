@@ -10,7 +10,10 @@ import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import { getHookMatcherTarget } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
-import type { SessionHooksManager } from './sessionHooksManager.js';
+import type {
+  SessionHookEntry,
+  SessionHooksManager,
+} from './sessionHooksManager.js';
 import { HookEventName } from './types.js';
 import type {
   HookConfig,
@@ -986,19 +989,37 @@ export class HookEventHandler {
       // Create execution plan from registry hooks
       const plan = this.hookPlanner.createExecutionPlan(eventName, context);
 
-      // Get session hooks and merge with registry hooks
+      // Get session hooks and merge with registry hooks. Mirrors
+      // HookPlanner.matchesContext: an event without a target — e.g. the
+      // MemoryChanged on/off toggle — matches every session hook, and a
+      // batched filePath event matches on ANY of its paths.
       const sessionId = input.session_id;
-      const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
-      const registeredSessionHooks =
-        sessionId !== undefined
-          ? matcherTarget === undefined
-            ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
-            : this.sessionHooksManager.getMatchingHooks(
-                sessionId,
-                eventName,
-                matcherTarget,
-              )
-          : [];
+      const matcherTarget = getHookMatcherTarget(eventName, context);
+      let registeredSessionHooks: SessionHookEntry[] = [];
+      if (sessionId !== undefined) {
+        if (!matcherTarget || !matcherTarget.target) {
+          registeredSessionHooks = this.sessionHooksManager.getHooksForEvent(
+            sessionId,
+            eventName,
+          );
+        } else if (
+          matcherTarget.kind === 'filePath' &&
+          context?.filePaths?.length
+        ) {
+          registeredSessionHooks =
+            this.sessionHooksManager.getMatchingHooksForSubjects(
+              sessionId,
+              eventName,
+              context.filePaths,
+            );
+        } else {
+          registeredSessionHooks = this.sessionHooksManager.getMatchingHooks(
+            sessionId,
+            eventName,
+            matcherTarget.target,
+          );
+        }
+      }
       // The second side of the project-skill trust gate: a hook registered
       // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
       // only while the folder is STILL trusted. `Config.isTrustedFolder()`

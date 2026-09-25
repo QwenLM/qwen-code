@@ -241,13 +241,20 @@ export async function runAutoMemoryExtract(params: {
             )
           : Promise.resolve();
         await Promise.all([projectRebuild, userRebuild]);
-        await refreshMemoryInstruction(config, {
-          logContext: 'managed auto-memory extraction',
-        });
       }
       return result;
     },
   );
+
+  // The instruction refresh runs OUTSIDE the coalesced window: it can reach
+  // Config.refreshHierarchicalMemory -> syncTeamMemory's git pull, and
+  // collaborator documents landing between the window's snapshots would be
+  // reported as this session's own changes.
+  if (agentResult.touchedTopics.length > 0) {
+    await refreshMemoryInstruction(config, {
+      logContext: 'managed auto-memory extraction',
+    });
+  }
 
   const madeGenuineProgress =
     agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;

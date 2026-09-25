@@ -59,7 +59,13 @@ interface MemoryChangedRegistration {
 }
 
 const listeners = new Set<MemoryChangedRegistration>();
-const suppressDelivery = new AsyncLocalStorage<true>();
+/**
+ * The store is the current window's outside-baseline bucket. A notify made
+ * inside a window is not delivered; it is still recorded for every OTHER open
+ * window so a sibling window's closing diff does not re-report the write
+ * under its own attribution.
+ */
+const suppressDelivery = new AsyncLocalStorage<Map<string, string | null>>();
 
 /**
  * Register a listener for one workspace. A write is delivered to the
@@ -146,11 +152,25 @@ const outsideWindowEmits = new Set<Map<string, string | null>>();
 async function rememberOutsideEmit(
   filePaths: readonly string[],
 ): Promise<void> {
-  if (outsideWindowEmits.size === 0 || suppressDelivery.getStore()) return;
+  if (outsideWindowEmits.size === 0) return;
+  const ownBucket = suppressDelivery.getStore();
   for (const filePath of filePaths) {
-    const content = await fs.readFile(filePath, 'utf-8').catch(() => null);
+    // A symlinked document reads fine here but is invisible to the tree walk
+    // (Dirent.isFile() is false for links): recording it would let a closing
+    // window report a `delete` for a file that is still on disk.
+    const stat = await fs.lstat(filePath).catch(() => undefined);
+    if (stat?.isSymbolicLink()) continue;
+    // `null` encodes 'reported while absent' (a delete). A present but
+    // unreadable file is unknown, not absent: keep the snapshot baseline.
+    const content =
+      stat === undefined
+        ? null
+        : await fs.readFile(filePath, 'utf-8').catch(() => undefined);
+    if (content === undefined) continue;
     for (const bucket of outsideWindowEmits) {
-      bucket.set(filePath, content);
+      if (bucket !== ownBucket) {
+        bucket.set(filePath, content);
+      }
     }
   }
 }
@@ -159,15 +179,20 @@ function recipientsFor(
   workspace: string,
   deliveryId: symbol | undefined,
 ): MemoryChangedRegistration[] {
+  if (deliveryId !== undefined) {
+    // A delivery id names one registration globally (the ids are unique
+    // symbols): a Config relocated by /cd or a derived worktree Config
+    // notifies with its live root, which no longer equals the key the
+    // registration was made under. An id whose registration is gone matches
+    // nothing — never another session's registration.
+    const named = [...listeners].filter(
+      (registration) => registration.id === deliveryId,
+    );
+    return named.length > 0 ? named : [];
+  }
   const matched = [...listeners].filter(
     (registration) => registration.workspace === workspace,
   );
-  if (deliveryId) {
-    const named = matched.filter(
-      (registration) => registration.id === deliveryId,
-    );
-    if (named.length > 0) return named;
-  }
   const newest = matched.at(-1);
   return newest ? [newest] : [];
 }
@@ -204,7 +229,6 @@ export async function notifyMemoryFileChange(
   operation: MemoryChangedOperation,
   deliveryId?: symbol,
 ): Promise<void> {
-  if (suppressDelivery.getStore()) return;
   if (listeners.size === 0) return;
   const filePaths = typeof filePath === 'string' ? [filePath] : filePath;
   const workspace = path.resolve(projectRoot);
@@ -239,7 +263,10 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
+  // Record even when delivery is suppressed inside a coalesced window, so a
+  // sibling window does not re-report the write under its own attribution.
   await rememberOutsideEmit(emittedPaths);
+  if (suppressDelivery.getStore()) return;
   await emit(projectRoot, changes, deliveryId);
 }
 
@@ -324,38 +351,63 @@ export async function notifyMemoryEnabledChange(
   await emit(workspace, [change], deliveryId);
 }
 
+interface MemoryTreeSnapshot {
+  documents: Map<string, string>;
+  /** Paths the walk saw but could not read: 'unknown', never a difference. */
+  unreadable: Set<string>;
+  /**
+   * False when a directory could not be enumerated. 'Could not enumerate' is
+   * not 'empty' — a partial snapshot must never be one side of a difference.
+   */
+  complete: boolean;
+}
+
 async function readMemoryTree(
   root: string,
-  into: Map<string, string>,
+  snapshot: MemoryTreeSnapshot,
 ): Promise<void> {
   let entries;
   try {
     entries = await fs.readdir(root, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      snapshot.complete = false;
+    }
     return;
   }
   for (const entry of entries) {
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      await readMemoryTree(full, into);
+      await readMemoryTree(full, snapshot);
     } else if (entry.isFile()) {
-      into.set(path.resolve(full), await fs.readFile(full, 'utf-8'));
+      // One unreadable or vanished file must not reject the whole snapshot
+      // (the same tolerance scan.ts applies): record it as unknown instead.
+      const content = await fs.readFile(full, 'utf-8').catch(() => undefined);
+      if (content === undefined) {
+        snapshot.unreadable.add(path.resolve(full));
+      } else {
+        snapshot.documents.set(path.resolve(full), content);
+      }
     }
   }
 }
 
 async function readMemoryDocuments(
   projectRoot: string,
-): Promise<Map<string, string>> {
-  const documents = new Map<string, string>();
+): Promise<MemoryTreeSnapshot> {
+  const snapshot: MemoryTreeSnapshot = {
+    documents: new Map(),
+    unreadable: new Set(),
+    complete: true,
+  };
   await Promise.all(
     [
       getUserAutoMemoryRoot(),
       getAutoMemoryRoot(projectRoot),
       getTeamAutoMemoryRoot(projectRoot),
-    ].map((root) => readMemoryTree(root, documents)),
+    ].map((root) => readMemoryTree(root, snapshot)),
   );
-  return documents;
+  return snapshot;
 }
 
 /**
@@ -372,35 +424,66 @@ export async function withCoalescedMemoryChanges<T>(
   const outside = new Map<string, string | null>();
   outsideWindowEmits.add(outside);
   try {
-    const before = await readMemoryDocuments(projectRoot);
+    const before = await readMemoryDocuments(projectRoot).catch(
+      () => undefined,
+    );
     try {
-      return await suppressDelivery.run(true, fn);
+      return await suppressDelivery.run(outside, fn);
     } finally {
-      const after = await readMemoryDocuments(projectRoot);
-      const created: string[] = [];
-      const updated: string[] = [];
-      const deleted: string[] = [];
-      // An outside emit moves the baseline. It does not hide the path.
-      const baseline = (filePath: string) =>
-        outside.has(filePath)
-          ? (outside.get(filePath) ?? undefined)
-          : before.get(filePath);
-      for (const [filePath, content] of after) {
-        const reported = baseline(filePath);
-        if (reported === undefined) {
-          created.push(filePath);
-        } else if (reported !== content) {
-          updated.push(filePath);
+      // The snapshot is best-effort: a failure here must never replace fn's
+      // outcome (the extract cursor depends on it).
+      const after = await readMemoryDocuments(projectRoot).catch(
+        () => undefined,
+      );
+      if (before?.complete && after?.complete) {
+        const created: string[] = [];
+        const updated: string[] = [];
+        const deleted: string[] = [];
+        // An outside emit moves the baseline. It does not hide the path.
+        const baseline = (filePath: string) =>
+          outside.has(filePath)
+            ? (outside.get(filePath) ?? undefined)
+            : before.documents.get(filePath);
+        for (const [filePath, content] of after.documents) {
+          const reported = baseline(filePath);
+          if (reported === undefined) {
+            created.push(filePath);
+          } else if (reported !== content) {
+            updated.push(filePath);
+          }
         }
-      }
-      for (const filePath of new Set([...before.keys(), ...outside.keys()])) {
-        if (!after.has(filePath) && baseline(filePath) !== undefined) {
-          deleted.push(filePath);
+        for (const filePath of new Set([
+          ...before.documents.keys(),
+          ...outside.keys(),
+        ])) {
+          // Present-or-unknown is not a delete: a path that was only
+          // unreadable in the after snapshot must not be reported gone.
+          if (after.documents.has(filePath) || after.unreadable.has(filePath)) {
+            continue;
+          }
+          if (baseline(filePath) !== undefined) {
+            deleted.push(filePath);
+          }
         }
+        await notifyMemoryFileChange(
+          deleted,
+          projectRoot,
+          'delete',
+          deliveryId,
+        );
+        await notifyMemoryFileChange(
+          updated,
+          projectRoot,
+          'update',
+          deliveryId,
+        );
+        await notifyMemoryFileChange(
+          created,
+          projectRoot,
+          'create',
+          deliveryId,
+        );
       }
-      await notifyMemoryFileChange(deleted, projectRoot, 'delete', deliveryId);
-      await notifyMemoryFileChange(updated, projectRoot, 'update', deliveryId);
-      await notifyMemoryFileChange(created, projectRoot, 'create', deliveryId);
     }
   } finally {
     outsideWindowEmits.delete(outside);

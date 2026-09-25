@@ -112,6 +112,11 @@ import {
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import {
+  notifyMemoryEnabledChange,
+  registerMemoryChangedListener,
+  type MemoryChangedNotice,
+} from '../memory/memory-file-change.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
@@ -1277,6 +1282,36 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getMessageBus()).toBeUndefined();
       expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('memory change listener registration', () => {
+    it('assigns a hooks-disabled Config a delivery id that matches no registration', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      await config.initialize();
+
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(
+        config.getProjectRoot(),
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        // Hooks are disabled for this Config, so its id is registered
+        // nowhere and must not fall through to another session's listener.
+        expect(seen).toEqual([]);
+        // Control: an id-less toggle still reaches the newest registration.
+        await notifyMemoryEnabledChange(config.getProjectRoot(), true);
+        expect(seen).toHaveLength(1);
+      } finally {
+        unregister();
+      }
     });
   });
 

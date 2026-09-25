@@ -3890,6 +3890,11 @@ export class Config {
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
     recordStartupEvent('config_initialize_hooks_start');
+    // A Config whose hooks stay disabled registers no listener below. Its
+    // delivery id must still be defined — and match no registration — so a
+    // memory write from it can never fall through to another session's
+    // listener via the workspace fallback.
+    this.memoryHookDeliveryId = Symbol('memory-hooks-inactive');
     if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
@@ -4921,8 +4926,10 @@ export class Config {
         //     it self-corrects on the next successful rebuild. Log and sync on.
         let teamRootSecurityBlocked = false;
         try {
-          teamAutoMemoryIndex =
-            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+          teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+            teamProjectRoot,
+            { deliveryId: this.getMemoryHookDeliveryId() },
+          );
         } catch (err) {
           if (err instanceof TeamMemoryRootSecurityError) {
             teamRootSecurityBlocked = true;
@@ -4956,6 +4963,7 @@ export class Config {
           if (syncResult?.pulled) {
             teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
               teamProjectRoot,
+              { deliveryId: this.getMemoryHookDeliveryId() },
             ).catch(() => teamAutoMemoryIndex);
           }
         }

@@ -9557,11 +9557,11 @@ class QwenAgent implements Agent {
         const effectiveEnabled =
           settings.merged.memory?.enableManagedAutoMemory ?? true;
         if (effectiveEnabled !== previousEnabled) {
-          await notifyMemoryEnabledChange(
-            settingsCwd,
-            effectiveEnabled,
-            this.config.getMemoryHookDeliveryId(),
-          );
+          // Pass no delivery id: this.config's id is registered on the LAUNCH
+          // directory, and a request-scoped toggle must fall back to the
+          // settings workspace's own newest registration instead of
+          // resolving to the bootstrap Config there.
+          await notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);
         }
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),

@@ -297,6 +297,7 @@ export class TeamMemoryRootSecurityError extends Error {
  */
 export async function rebuildTeamAutoMemoryIndex(
   projectRoot: string,
+  options: { deliveryId?: symbol } = {},
 ): Promise<string | null> {
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   if (!existsSync(teamRoot)) {
@@ -346,15 +347,12 @@ export async function rebuildTeamAutoMemoryIndex(
   );
   const content = buildTeamAutoMemoryIndex(ordered);
   const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
-  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
-  // its mtime and produce no-op commits that ping-pong between collaborators.
-  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
-  if (existing === content) {
-    return content;
-  }
   // noFollow: never follow a symlink at MEMORY.md itself — replace the link with
   // the regular index instead of writing through it to an attacker path.
-  await writeMemoryIndex(projectRoot, indexPath, content, { noFollow: true });
+  await writeMemoryIndex(projectRoot, indexPath, content, {
+    noFollow: true,
+    deliveryId: options.deliveryId,
+  });
   return content;
 }
 
@@ -364,7 +362,16 @@ async function writeMemoryIndex(
   content: string,
   options: { noFollow?: boolean; deliveryId?: symbol } = {},
 ): Promise<void> {
-  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
+  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would
+  // churn its mtime and, for the committed team index, produce no-op commits
+  // that ping-pong between collaborators. Only ENOENT means 'absent': an
+  // existing but unreadable index is still rewritten (rename needs only
+  // directory write permission) and announced as 'update', not 'create'.
+  const existing = await fs
+    .readFile(indexPath, 'utf-8')
+    .catch((err: unknown) =>
+      (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null,
+    );
   if (existing === content) {
     return;
   }
@@ -375,7 +382,7 @@ async function writeMemoryIndex(
   await notifyMemoryFileChange(
     indexPath,
     projectRoot,
-    existing === null ? 'create' : 'update',
+    existing === undefined ? 'create' : 'update',
     options.deliveryId,
   );
 }

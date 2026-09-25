@@ -19273,6 +19273,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings setMemory emits the toggle without the bootstrap delivery id', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockResolvedValue(undefined);
+    // The bootstrap Config's delivery id is registered on the LAUNCH
+    // directory; a request-scoped toggle must not carry it.
+    const bootstrapId = Symbol('bootstrap-registration');
+    mockConfig = {
+      ...mockConfig,
+      getMemoryHookDeliveryId: vi.fn(() => bootstrapId),
+    } as unknown as Config;
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+          mergedMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: false },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+    });
+    // No id: the event falls back to the settings workspace's own newest
+    // registration instead of the bootstrap Config's launch-directory one.
+    expect(notify).toHaveBeenCalledWith(expect.any(String), false);
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings setCoreValue syncs output language rule file', async () => {
     const settings = makeCoreSettings();
     vi.mocked(loadSettings).mockReturnValue(settings);
