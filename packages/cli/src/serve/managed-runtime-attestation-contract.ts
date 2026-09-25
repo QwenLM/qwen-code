@@ -10,6 +10,8 @@ import express from 'express';
 import type { Application, ErrorRequestHandler, RequestHandler } from 'express';
 
 export const MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES = 16 * 1024;
+export const MANAGED_RUNTIME_TOOL_REQUEST_BODY_LIMIT_BYTES = 256 * 1024;
+export const MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES = 1024 * 1024;
 
 export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
   Object.freeze({
@@ -19,6 +21,33 @@ export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
     protocolVersion: 2,
     requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
     responseBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'execute',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/execute',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_TOOL_REQUEST_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'status',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/status',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
+  Object.freeze({
+    key: 'cancel',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/cancel',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
     cacheControl: 'no-store',
   }),
 ] as const);
@@ -133,12 +162,12 @@ function isClosedAttestationRequest(
   );
 }
 
-const noStore: RequestHandler = (_req, res, next) => {
+export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
   res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
   next();
 };
 
-function authorize(
+export function authorizeManagedRuntime(
   identity: ManagedRuntimeAttestationIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
@@ -217,7 +246,12 @@ function handleAttestation(
   };
 }
 
-const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
+export const handleManagedRuntimeJsonError: ErrorRequestHandler = (
+  error,
+  _req,
+  res,
+  next,
+) => {
   if (res.headersSent) {
     next(error);
     return;
@@ -230,7 +264,7 @@ const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
   ) {
     res.status(413).json({
       code: 'managed_runtime_attestation_too_large',
-      error: 'Managed Runtime attestation request exceeds 16 KiB.',
+      error: 'Managed Runtime request exceeds its body size limit.',
     });
     return;
   }
@@ -262,8 +296,8 @@ export function registerManagedRuntimeAttestationRoute(
   >;
   app[method](
     ATTEST_ROUTE.path,
-    noStore,
-    authorize(identitySnapshot),
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identitySnapshot),
     express.json({
       // Compressed private requests add no value at 16 KiB. Refusing them
       // keeps the limit on wire bytes and makes corrupt streams use the JSON
@@ -274,7 +308,7 @@ export function registerManagedRuntimeAttestationRoute(
       type: 'application/json',
     }),
     handleAttestation(identitySnapshot, responseJson),
-    handleJsonError,
+    handleManagedRuntimeJsonError,
   );
 }
 

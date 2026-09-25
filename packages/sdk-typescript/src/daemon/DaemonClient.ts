@@ -60,6 +60,7 @@ import type {
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionToolCalls,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexPage,
@@ -116,6 +117,9 @@ import type {
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
+  DaemonGitWorktreesResult,
+  DaemonGitWorktreeStatus,
+  DaemonGitWorktreeRemoveResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
@@ -7202,6 +7206,40 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceGitWorktrees(): Promise<DaemonGitWorktreesResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreesResult>(
+      this.workspaceSelector,
+      '/git/worktrees',
+      'GET /workspaces/:workspace/git/worktrees',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitWorktreeStatus(path: string): Promise<DaemonGitWorktreeStatus> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeStatus>(
+      this.workspaceSelector,
+      `/git/worktrees/status?path=${urlEncode(path)}`,
+      'GET /workspaces/:workspace/git/worktrees/status',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemoveWorktree(
+    path: string,
+    opts?: { force?: boolean },
+  ): Promise<DaemonGitWorktreeRemoveResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeRemoveResult>(
+      this.workspaceSelector,
+      '/git/worktrees/remove',
+      'POST /workspaces/:workspace/git/worktrees/remove',
+      {
+        method: 'POST',
+        body: { path, force: opts?.force === true },
+        mode: 'rest',
+      },
+    );
+  }
+
   workspaceGitPush(
     opts?: {
       setUpstream?: boolean;
@@ -7613,6 +7651,20 @@ export class WorkspaceDaemonClient {
       `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /workspaces/:workspace/session/:id/transcript',
       { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /** Read all persisted calls in one turn without loading or attaching a session. */
+  getSessionToolCalls(
+    sessionId: string,
+    turnId: string,
+  ): Promise<DaemonSessionToolCalls> {
+    const query = new URLSearchParams({ turnId });
+    return this.client.workspaceJsonRequest<DaemonSessionToolCalls>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/tool-calls?${query.toString()}`,
+      'GET /workspaces/:workspace/session/:id/tool-calls',
+      { mode: 'rest' },
     );
   }
 
