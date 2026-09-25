@@ -716,6 +716,10 @@
   padding: 16px 20px;
 }
 
+.managedPanelBody {
+  overflow: hidden;
+}
+
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
    of losing them on unmount. */

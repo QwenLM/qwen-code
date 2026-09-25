@@ -222,14 +222,11 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 ## 启动信封
 
-启动信封是一个单独的切片（W0a-2）。#12380 要求现在就定下它的形状，叠在 execute 契约（#12630，现已合入）之上；它会在本切片之后单独提交。本切片先固定信封将要携带的内容：ContextBinding 的字段、它们的规范化方式和摘要。W0a-2 随后需要完成以下工作：
+启动信封是一个单独的切片 W0a-2，现在由[托管上下文信封](2026-09-25-managed-context-envelope.zh-CN.md)定义：`managed-context/1` 的协商、boot v2 与 ready v2、attestation v3，以及上下文安装请求及其回执。它与这里最初写下的计划有三点不同：
 
-- 协商 `managed-context/1`。
-- 新增一个 boot 文档版本，携带 ContextBinding 以及计算挂载根和实际 cwd 所需的输入。daemon 式的路径哈希只作为兼容别名保留。
-- 新增一个 attestation 身份版本，让 W0c 复用现有 gate，而不是另造一套 Workspace attestation。
-- 同时修改以下各处：TypeScript 键列表、schema、fixtures、Java 的字段集断言，以及假 worker `fake-attestation-worker.mjs`。这个假 worker 目前不校验封闭键集，所以字段对不上时 Java 测试发现不了。
-
-该切片或 W0c 还必须决定哪些字段进入 Runtime 放置范围。按 Workspace 隔离的 Runtime 由 `cwdRelative` 各不相同的多个 Session 共享。因此 `cwdRelative` 和 `contextRevision` 不能进入 `RuntimeScope` 的放置身份；加入它们会改变 Broker 的 request key 和 scope key，使 Runtime 无法复用。它们应改为按 Session、按调用绑定。
+- boot v2 携带 Workspace 绑定和挂载根目录，但不携带 Session 上下文，因为按 Workspace 隔离的 Runtime 由 `cwdRelative` 各不相同的多个 Session 共享。每个 Session 改为通过安装请求安装自己的 `ContextBinding`，因此 `cwdRelative` 和 `contextRevision` 不会进入 `RuntimeScope`。
+- 完全不携带 daemon 式的路径哈希。需要路径哈希的 worker 从验证过的挂载根目录自行推导。
+- W0a-2 只定义契约。worker、provisioner 和假 worker `fake-attestation-worker.mjs` 在接通协议的 W0c 中修改。
 
 ## 错误
 
@@ -300,7 +297,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 | 切片  | 范围                                                                                                                               |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| W0a-2 | 带版本的启动信封与 attestation 身份。                                                                                              |
+| W0a-2 | 带版本的启动信封、attestation v3 与上下文安装，由[托管上下文信封](2026-09-25-managed-context-envelope.zh-CN.md)定义。              |
 | W0b   | Session 绑定与创建回执的原子提交、按原始幂等键恢复，以及明确标记为未绑定的旧 Session。                                             |
 | W0c   | 通过 `HarnessSessionResolver` 按 Session 解析 Broker、存储到挂载点的解析器、worker 的安装与 attestation，以及 Workspace 轮次租约。 |
 | W0d   | WebShell 的 Workspace 选择、相对目录输入，以及默认与空状态。                                                                       |

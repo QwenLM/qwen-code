@@ -222,14 +222,11 @@ The cases cover both sides of each rule's boundaries, including non-ASCII names,
 
 ## Boot envelope
 
-The boot envelope is a separate slice (W0a-2). #12380 asked for its shape to be decided now, on top of the execute contract (#12630, since merged); it follows this slice as a change of its own. This slice fixes what the envelope will carry: the ContextBinding fields, their normalization and the digest. W0a-2 must then do the following:
+The boot envelope is its own slice, W0a-2, and the [managed context envelope](2026-09-25-managed-context-envelope.md) now defines it: the negotiation of `managed-context/1`, boot v2 and ready v2, attestation v3, and the context installation request with its receipt. It differs from the plan first written here in three ways:
 
-- Negotiate `managed-context/1`.
-- Add a new boot-document version that carries the ContextBinding and the inputs for the mount root and effective cwd. The daemon-style path hash survives only as a compatibility alias.
-- Add a new attestation identity version, so that W0c reuses the existing gate instead of inventing a separate Workspace attestation.
-- Change these together: the TypeScript key lists, the schema, the fixtures, the Java field-set assertions and the fake worker `fake-attestation-worker.mjs`. The fake worker does not enforce the closed key set today, so Java tests would not catch a mismatch.
-
-That slice, or W0c, must also decide which fields enter the Runtime placement scope. A Workspace-isolated Runtime is shared by Sessions whose `cwdRelative` differ. So `cwdRelative` and `contextRevision` must stay out of the placement identity in `RuntimeScope`; adding them would change the Broker's request and scope keys and stop Runtime reuse. They bind per Session and per invocation instead.
+- Boot v2 carries the Workspace binding and the mount root but no Session context, because a Workspace-isolated Runtime is shared by Sessions whose `cwdRelative` differ. Each Session installs its `ContextBinding` through the installation request instead, so `cwdRelative` and `contextRevision` stay out of `RuntimeScope`.
+- The daemon-style path hash is not carried at all. A worker that needs one derives it from the verified mount root.
+- W0a-2 defines the contract only. The worker, the provisioner and the fake worker `fake-attestation-worker.mjs` change in W0c, which wires the protocol.
 
 ## Errors
 
@@ -300,7 +297,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
 
 | Slice | Scope                                                                                                                                                               |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0a-2 | The versioned boot envelope and attestation identity.                                                                                                               |
+| W0a-2 | The versioned boot envelope, attestation v3 and context installation, defined in the [managed context envelope](2026-09-25-managed-context-envelope.md).            |
 | W0b   | Atomic Session binding with the creation receipt, original-key recovery, and explicitly unbound old Sessions.                                                       |
 | W0c   | Session-based Broker resolution through `HarnessSessionResolver`, the storage-to-mount resolver, worker installation and attestation, and the Workspace turn lease. |
 | W0d   | WebShell selection, the relative-directory field, and the default and empty states.                                                                                 |

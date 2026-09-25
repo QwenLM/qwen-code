@@ -213,6 +213,8 @@ export {
   type DaemonProtocolVersions,
   type DaemonRestoredSession,
   type DaemonSession,
+  type SessionStartupConfig,
+  type SessionStartupConfigApplied,
   type DaemonSessionClosedReason,
   type DaemonWorktreeInfo,
   type DaemonBranchInfo,
@@ -414,6 +416,7 @@ export {
 export {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonStandaloneProtocolError,
+  DaemonStartupConfigError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,

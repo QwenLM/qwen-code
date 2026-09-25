@@ -49,5 +49,8 @@ A change to the directory rule or to the `ContextBinding` encoding must
 update, in the same change, the shared fixtures in
 `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`
 and `packages/cli/src/serve/managed-workspace-binding.ts`, so both languages
-keep producing the same bytes. Compute new expected values with an
-implementation independent of both.
+keep producing the same bytes. The installation requests and receipts in
+`packages/cli/src/serve/contracts/managed-context-v1.fixtures.json` carry
+context digests computed with the same encoding, and
+`ManagedContextEnvelopeConformanceTest` recomputes them, so update them too.
+Compute new expected values with an implementation independent of both.

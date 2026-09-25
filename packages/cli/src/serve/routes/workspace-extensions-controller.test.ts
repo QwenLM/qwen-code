@@ -250,6 +250,261 @@ describe('createExtensionsController', () => {
     expect(refreshCache).toHaveBeenCalledOnce();
   });
 
+  it('coalesces cold and expired status loads while preserving cache hits', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let release!: () => void;
+    const refresh = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      isWorkspaceTrusted: () => true,
+    });
+    for (const expectedLoads of [1, 2]) {
+      const requests = Array.from({ length: 5 }, () =>
+        controller.buildLocalExtensionsStatus(),
+      );
+      expect(refresh).toHaveBeenCalledTimes(expectedLoads);
+      release();
+      const statuses = await Promise.all(requests);
+      expect(statuses.every((status) => status === statuses[0])).toBe(true);
+      expect(await controller.buildLocalExtensionsStatus()).toBe(statuses[0]);
+      expect(refresh).toHaveBeenCalledTimes(expectedLoads);
+      vi.setSystemTime(Date.now() + 2_001);
+    }
+  });
+
+  it('shares a failed load and retries on the next request', async () => {
+    let reject!: (error: Error) => void;
+    const refresh = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, rejectLoad) => {
+            reject = rejectLoad;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      isWorkspaceTrusted: () => true,
+    });
+    const requests = Promise.allSettled([
+      controller.buildLocalExtensionsStatus(),
+      controller.buildLocalExtensionsStatus(),
+    ]);
+    const error = new Error('load failed');
+    reject(error);
+    expect(await requests).toEqual([
+      { status: 'rejected', reason: error },
+      { status: 'rejected', reason: error },
+    ]);
+    await expect(
+      controller.buildLocalExtensionsStatus(),
+    ).resolves.toMatchObject({ initialized: true });
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['locale', 'trust', 'controller'] as const)(
+    'does not share pending status loads across %s changes',
+    async (change) => {
+      const releases: Array<() => void> = [];
+      const refresh = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              releases.push(resolve);
+            }),
+        );
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'getLoadedExtensions',
+      ).mockReturnValue([]);
+      let trusted = true;
+      const deps = {
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => trusted,
+      };
+      const controller = createExtensionsController(deps);
+      const first = controller.buildLocalExtensionsStatus();
+      if (change === 'locale')
+        vi.mocked(resolveLanguageSetting).mockReturnValue('zh');
+      if (change === 'trust') trusted = false;
+      const nextController =
+        change === 'controller'
+          ? createExtensionsController({
+              ...deps,
+              boundWorkspace: '/work/other',
+            })
+          : controller;
+      const second = nextController.buildLocalExtensionsStatus();
+      expect(refresh).toHaveBeenCalledTimes(2);
+      releases[1]!();
+      const fresh = await second;
+      releases[0]!();
+      await first;
+      expect(await nextController.buildLocalExtensionsStatus()).toBe(fresh);
+      expect(refresh).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('invalidates a completed status cache when trust changes', async () => {
+    let trusted = true;
+    const refresh = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockResolvedValue(undefined);
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      isWorkspaceTrusted: () => trusted,
+    });
+    await controller.buildLocalExtensionsStatus();
+    trusted = false;
+    await controller.buildLocalExtensionsStatus();
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['old-first', 'new-first', 'old-fails'] as const)(
+    'does not let an invalidated status load overwrite or clear its replacement (%s)',
+    async (order) => {
+      const releases: Array<{
+        resolve: () => void;
+        reject: (error: Error) => void;
+      }> = [];
+      const refresh = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockImplementation(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              releases.push({ resolve, reject });
+            }),
+        );
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'getLoadedExtensions',
+      ).mockReturnValue([]);
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {} as AcpSessionBridge,
+        workspace: {
+          refreshExtensionsForAllSessions: vi
+            .fn()
+            .mockResolvedValue({ refreshed: 0, failed: 0 }),
+        } as unknown as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      const old = controller
+        .buildLocalExtensionsStatus()
+        .catch(() => undefined);
+      await controller.refreshExtensionsForAllSessions();
+      const fresh = controller.buildLocalExtensionsStatus();
+      expect(refresh).toHaveBeenCalledTimes(2);
+      if (order === 'new-first') {
+        releases[1]!.resolve();
+        await fresh;
+      }
+      if (order === 'old-fails') releases[0]!.reject(new Error('old failure'));
+      else releases[0]!.resolve();
+      await old;
+      const joined = controller.buildLocalExtensionsStatus();
+      expect(refresh).toHaveBeenCalledTimes(2);
+      releases[1]!.resolve();
+      expect(await joined).toBe(await fresh);
+      expect(await controller.buildLocalExtensionsStatus()).toBe(await fresh);
+    },
+  );
+
+  it.each([false, true])(
+    'invalidates pending status after a committed mutation (post-commit failure: %s)',
+    async (failAfterCommit) => {
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let release!: () => void;
+      const refresh = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        )
+        .mockResolvedValue(undefined);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'getLoadedExtensions',
+      ).mockReturnValue([]);
+      const controller = createExtensionsController({
+        boundWorkspace: '/work/bound',
+        bridge: {
+          broadcastExtensionsChanged: vi.fn(),
+        } as unknown as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      const old = controller.buildLocalExtensionsStatus();
+      const json = vi.fn();
+      const response = {
+        status: vi.fn().mockReturnThis(),
+        location: vi.fn().mockReturnThis(),
+        set: vi.fn().mockReturnThis(),
+        json,
+      } as unknown as Response;
+      controller.runQueuedExtensionMutation(
+        'enable',
+        { name: 'demo' },
+        response,
+        async (_manager, _signal, context) => {
+          await context!.commit(async (onCommitted) => {
+            onCommitted(1);
+            if (failAfterCommit) throw new Error('post-commit failure');
+            return { generation: 1 };
+          });
+          return { status: 'enabled', name: 'demo' };
+        },
+        {
+          manager: {
+            refreshCache: vi.fn().mockResolvedValue(undefined),
+          } as unknown as ExtensionManager,
+          skipRefresh: true,
+        },
+      );
+      const operationId = json.mock.calls[0]![0].operationId as string;
+      await vi.waitFor(() =>
+        expect(controller.getOperation(operationId)?.status).toBe(
+          failAfterCommit ? 'succeeded_with_warnings' : 'succeeded',
+        ),
+      );
+      const fresh = await controller.buildLocalExtensionsStatus();
+      expect(refresh).toHaveBeenCalledTimes(2);
+      release();
+      await old;
+      expect(await controller.buildLocalExtensionsStatus()).toBe(fresh);
+      expect(refresh).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('normalizes the current language when resolving extension metadata', async () => {
     vi.mocked(resolveLanguageSetting).mockImplementation((language) =>
       language === 'zh_TW' ? 'zh_TW' : 'en',

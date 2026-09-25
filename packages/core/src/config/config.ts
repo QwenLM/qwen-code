@@ -2267,6 +2267,8 @@ export type DerivedConfigOverrides = Partial<
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
+    | 'getEffectiveInputModalities'
+    | 'getFileReadCache'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
