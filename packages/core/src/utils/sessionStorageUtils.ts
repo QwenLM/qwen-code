@@ -11,6 +11,7 @@
  * file reading for fast session metadata access on large JSONL files.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import { getProjectHash } from './paths.js';
@@ -832,6 +833,52 @@ function lastLineContaining(text: string, marker: string): string | undefined {
   return undefined;
 }
 
+function lastCommittedDomainLine(
+  text: string,
+  marker: string,
+): string | undefined {
+  const lines = text.split('\n');
+  lines.pop();
+  let committed: { firstSequence: number; lastSequence: number } | undefined;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    const record = JSON.parse(line) as {
+      subtype?: string;
+      managedSession?: {
+        firstSequence?: number;
+        lastSequence?: number;
+        eventCount?: number;
+        sequence?: number;
+        kind?: string;
+      };
+    };
+    const body = record.managedSession;
+    if (record.subtype === 'managed_session_commit_v1') {
+      const first = body?.firstSequence;
+      const last = body?.lastSequence;
+      committed =
+        Number.isSafeInteger(first) &&
+        Number.isSafeInteger(last) &&
+        first! > 0 &&
+        last! >= first! &&
+        body?.eventCount === last! - first! + 1
+          ? { firstSequence: first!, lastSequence: last! }
+          : undefined;
+    } else if (
+      committed !== undefined &&
+      record.subtype === 'managed_session_event_v1' &&
+      body?.kind === 'domain.committed' &&
+      Number.isSafeInteger(body.sequence) &&
+      body.sequence! >= committed.firstSequence &&
+      body.sequence! <= committed.lastSequence &&
+      line.includes(marker)
+    ) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
 /**
  * True when the transcript carries a Managed Session header.
  *
@@ -994,14 +1041,25 @@ function readManagedDomainBodySync(
     const tailOffset = fileSize - tailLength;
     if (tailOffset > 0) {
       const tailBytes = fs.readSync(fd, buffer, 0, tailLength, tailOffset);
-      line = lastLineContaining(buffer.toString('utf-8', 0, tailBytes), marker);
+      const tailText = buffer.toString('utf-8', 0, tailBytes);
+      line = lastCommittedDomainLine(
+        tailText.slice(tailText.indexOf('\n') + 1),
+        marker,
+      );
     }
-    line ??= lastLineContaining(headText, marker);
+    line ??= lastCommittedDomainLine(headText, marker);
     if (line === undefined) return {};
 
     const record = JSON.parse(line) as {
       managedSession?: {
-        payload?: { recordRef?: { kind?: unknown; resourceId?: unknown } };
+        payload?: {
+          recordRef?: {
+            kind?: unknown;
+            resourceId?: unknown;
+            byteLength?: unknown;
+            digest?: unknown;
+          };
+        };
       };
     };
     const ref = record.managedSession?.payload?.recordRef;
@@ -1014,14 +1072,16 @@ function readManagedDomainBodySync(
     ) {
       return {};
     }
-    return {
-      body: JSON.parse(
-        fs.readFileSync(
-          path.join(resourceRoot, ref.kind, ref.resourceId),
-          'utf-8',
-        ),
-      ) as unknown,
-    };
+    const bytes = fs.readFileSync(
+      path.join(resourceRoot, ref.kind, ref.resourceId),
+    );
+    if (
+      bytes.byteLength !== ref.byteLength ||
+      createHash('sha256').update(bytes).digest('hex') !== ref.digest
+    ) {
+      return {};
+    }
+    return { body: JSON.parse(bytes.toString('utf8')) as unknown };
   } catch {
     return {};
   } finally {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -839,6 +840,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (isSessionStartupConfigError(err)) {
+    res.status(err.code === 'invalid_startup_config' ? 400 : 422).json({
+      error: err.message,
+      code: err.code,
+    });
+    return;
+  }
   if (err instanceof InvalidSessionScopeError) {
     // Same wire shape as the route-layer 400 (`server.ts` validates
     // body['sessionScope'] before calling the bridge). A direct embed
@@ -1034,6 +1042,15 @@ export function sendBridgeError(
       if (kind === 'session_writer_unavailable') {
         res.status(503).json({
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_execution_engine_unavailable') {
+        res.status(409).json({
+          error:
+            'This session cannot be resumed with the current execution engine.',
           code: kind,
           errorKind: kind,
         });

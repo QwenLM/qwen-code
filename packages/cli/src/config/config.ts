@@ -2332,6 +2332,12 @@ export async function loadCliConfig(
       }
     }
 
+    // A Managed host restores through its own engine check below; only a
+    // legacy host must refuse a Managed transcript before touching it.
+    if (sessionId && !hostPolicy?.managedToolSessionFactory) {
+      sessionService.assertLegacySessionExecution(sessionId);
+    }
+
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
       const forkedSessionId = randomUUID();

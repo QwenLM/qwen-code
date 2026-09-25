@@ -70,6 +70,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
   loadSession: vi.fn(),
   readExecutionEngine: vi.fn(),
   forkSession: vi.fn(),
+  assertLegacySessionExecution: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
   findSessionIdIgnoringCase: vi.fn(),
@@ -2990,6 +2991,35 @@ describe('loadCliConfig', () => {
       config.getSessionId(),
     );
   });
+
+  it.each([
+    { resume: '123e4567-e89b-42d3-a456-426614174000' },
+    { continue: true },
+  ])(
+    'rejects a Managed session before binding a legacy recorder for $resume$continue',
+    async (args) => {
+      const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+      mockSessionServiceInstance.loadSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.loadLastSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.assertLegacySessionExecution.mockImplementation(
+        () => {
+          throw new Error('belongs to managed');
+        },
+      );
+
+      await expect(loadCliConfig({}, args as CliArgs)).rejects.toThrow(
+        'belongs to managed',
+      );
+      expect(
+        mockSessionServiceInstance.assertLegacySessionExecution,
+      ).toHaveBeenCalledWith(sessionId);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+    },
+  );
 
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';

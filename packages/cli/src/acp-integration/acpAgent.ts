@@ -1172,6 +1172,12 @@ function mapSessionRestoreRequestError(
       sessionId,
     });
   }
+  if (error instanceof SessionExecutionEngineError) {
+    return new RequestError(-32024, error.message, {
+      errorKind: error.errorKind,
+      sessionId,
+    });
+  }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
       errorKind: 'transcript_snapshot_unavailable',
@@ -15897,7 +15903,12 @@ class QwenAgent implements Agent {
           sessionId: error.sessionId,
         });
       }
-      if (error instanceof SessionExecutionEngineError) {
+      // A restore reports the engine refusal with its own code and the
+      // Session it names; see mapSessionRestoreRequestError below.
+      if (
+        error instanceof SessionExecutionEngineError &&
+        !(sessionId && restoreOptions)
+      ) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
           errorKind: error.errorKind,
         });

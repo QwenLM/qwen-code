@@ -157,6 +157,7 @@ export function useResumeCommand(
       try {
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
+        sessionService.assertLegacySessionExecution(sessionId);
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {

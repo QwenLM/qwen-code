@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  applySessionStartupConfig,
+  parseSessionStartupConfig,
+  type SessionStartupConfig,
+} from './session-startup-config.js';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import {
@@ -4837,6 +4842,7 @@ export function createSessionControlPlane(
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
+    startupConfig?: SessionStartupConfig,
   ): Promise<BridgeSession> {
     // Get-or-create the selected engine's channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -5253,6 +5259,28 @@ export function createSessionControlPlane(
         );
       }
 
+      let startupConfigApplied;
+      if (startupConfig) {
+        try {
+          startupConfigApplied = await applySessionStartupConfig(
+            bridgeApi,
+            entry.sessionId,
+            startupConfig,
+          );
+          modelApplied = true;
+        } catch (error) {
+          try {
+            await closeSessionImpl(entry.sessionId, undefined, {
+              reason: 'startup_config_failed',
+            });
+            sessionRemovedDuringInitialization = true;
+          } catch {
+            /* preserve the preparation failure */
+          }
+          throw error;
+        }
+      }
+
       if (approvalMode) {
         try {
           await applyApprovalMode(entry, approvalMode, false, clientId);
@@ -5302,6 +5330,7 @@ export function createSessionControlPlane(
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
         ...(modelApplied !== undefined ? { modelApplied } : {}),
+        ...(startupConfigApplied ? { startupConfigApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
       };
@@ -9845,8 +9874,9 @@ export function createSessionControlPlane(
       ) {
         throw new InvalidSessionScopeError(req.sessionScope);
       }
+      const startupConfig = parseSessionStartupConfig(req.startupConfig, req);
       const effectiveScope =
-        req.sessionId !== undefined
+        req.sessionId !== undefined || startupConfig !== undefined
           ? 'thread'
           : (req.sessionScope ?? defaultSessionScope);
       const source = parseSessionSource(req.sourceType, req.sourceId);
@@ -10188,6 +10218,7 @@ export function createSessionControlPlane(
               );
             }
           },
+          startupConfig,
         );
       // The engine selector is asynchronous, so a paired spawn starts on a
       // later tick; a selector failure then rejects like any spawn failure.

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -3317,6 +3321,13 @@ export function registerSessionRoutes(
     }
     const assertRuntimeGenerationOpen =
       captureRuntimeGenerationAssertion(runtime);
+    let startupConfig;
+    try {
+      startupConfig = parseSessionStartupConfig(body['startupConfig'], body);
+    } catch (error) {
+      sendBridgeError(res, error, { route: 'POST /session' });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -3711,6 +3722,7 @@ export function registerSessionRoutes(
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
+        ...(startupConfig ? { startupConfig } : {}),
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
@@ -4101,6 +4113,54 @@ export function registerSessionRoutes(
           branchBaseCommit,
           daemonLog,
         );
+      }
+      // A definite startup-config rejection already closed the live
+      // session in the bridge, but the recording the spawn persisted
+      // survives — and reserveCreate would answer every retry of the
+      // caller-supplied id with 409 session_id_conflict, while a
+      // daemon-generated id leaves a listed, resumable phantom. Roll the
+      // recording back the way the other spawn-failure paths do, naming
+      // the session the rejection was actually applied to. Uncertain
+      // outcomes keep it: the close result is unknown.
+      const rejectedSessionId =
+        (isSessionStartupConfigError(err) ? err.sessionId : undefined) ??
+        requestedSessionId;
+      if (
+        rejectedSessionId !== undefined &&
+        isSessionStartupConfigError(err) &&
+        err.code === 'startup_config_rejected'
+      ) {
+        let rollbackError: unknown;
+        const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          deleteDaemonSessionIfOrphan({
+            sessionId: rejectedSessionId,
+            service: createWorkspaceRuntimeSessionService(runtime),
+            bridge: runtime.bridge,
+            coordinator: archiveCoordinator,
+          }),
+        ).catch((cleanupError: unknown) => {
+          rollbackError = cleanupError;
+          return false;
+        });
+        if (!removed) {
+          // The definite rejection still owes the caller its 422, so an
+          // inconclusive rollback — refused because the session stayed
+          // live, or failed outright — is a daemon-log line, not a throw.
+          daemonLog?.warn(
+            'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+            {
+              sessionId: rejectedSessionId,
+              ...(rollbackError === undefined
+                ? {}
+                : {
+                    error:
+                      rollbackError instanceof Error
+                        ? rollbackError.message
+                        : String(rollbackError),
+                  }),
+            },
+          );
+        }
       }
       // Only the plain creation path can promise that the initialize
       // handshake preceded every durable mutation: `branch`/`worktree`

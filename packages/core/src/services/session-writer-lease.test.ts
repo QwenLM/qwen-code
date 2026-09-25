@@ -2938,12 +2938,18 @@ describe('SessionWriterLease', () => {
         fixture.runtimeBaseDir,
         fixture.options.sessionId,
       );
+      await lease.appendJsonLine({ record: 'managed' });
       const activeRaw = await fs.readFile(lockPath, 'utf8');
+      let transcriptOpens = 0;
+      fsOpenTestHook.beforeOpen = (filePath) => {
+        if (filePath === fixture.options.transcriptPath) transcriptOpens++;
+      };
 
       await expect(lease.sealForHandoff()).rejects.toBeInstanceOf(
         SessionWriterUnavailableError,
       );
       await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(activeRaw);
+      expect(transcriptOpens).toBe(0);
       // A failed seal is terminal for the lease; the active lock is left for
       // the owning process, which this test then abandons.
       await lease.release().catch(() => undefined);
@@ -2998,6 +3004,50 @@ describe('SessionWriterLease', () => {
       await replacement.release();
     });
 
+    it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
+      const fixture = await createFixture('managed-truncate-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'committed' });
+      const prefix = await fs.readFile(fixture.options.transcriptPath);
+      await lease.appendJsonLine({ record: 'uncommitted' });
+      await lease.truncateTo(prefix.byteLength);
+      await lease.appendJsonLine({ record: 'replacement' });
+      await lease.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+        takeoverPolicy: 'certified',
+      });
+      expect(await fs.readFile(fixture.options.transcriptPath, 'utf8')).toBe(
+        `${prefix.toString('utf8')}{"record":"replacement"}\n`,
+      );
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      await replacement.release();
+    });
+
+    it('rejects truncation after the transcript changes outside the writer', async () => {
+      const fixture = await createFixture('managed-truncate-changed-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'committed' });
+      await fs.appendFile(fixture.options.transcriptPath, '{"foreign":true}\n');
+      const changed = await fs.readFile(fixture.options.transcriptPath);
+
+      await expect(lease.truncateTo(0)).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(await fs.readFile(fixture.options.transcriptPath)).toEqual(
+        changed,
+      );
+      await lease.release();
+    });
+
     it('does not reclaim a stale managed lock for a baseline writer', async () => {
       const fixture = await createFixture('managed-stale-session');
       const owner = startLeaseProcess();
@@ -3022,7 +3072,6 @@ describe('SessionWriterLease', () => {
       await managed.release();
     });
   });
-
   it('waits for an accepted append before sealing the transcript', async () => {
     const fixture = await createFixture('sealed-append-race-session');
     const lease = await SessionWriterLease.acquire(fixture.options);

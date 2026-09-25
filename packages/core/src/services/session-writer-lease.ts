@@ -339,6 +339,12 @@ export interface AcquireSessionWriterLeaseOptions {
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
 }
 
+export interface SealedManagedMaintenanceLease {
+  assertOwnedAndUnchanged(): Promise<void>;
+  assertCleanupOwned(): void;
+  release(): Promise<void>;
+}
+
 type ExistingLockState =
   | { kind: 'missing' }
   | { kind: 'live'; record: ActiveLockRecord; raw: string }
@@ -1782,6 +1788,106 @@ export class SessionWriterLease {
     }
   }
 
+  static async acquireSealedManagedMaintenance(options: {
+    runtimeBaseDir: string;
+    sessionId: string;
+    activeTranscriptPath: string;
+    transcriptPath: string;
+  }): Promise<SealedManagedMaintenanceLease> {
+    const lockPath = getSessionWriterLockPath(
+      options.runtimeBaseDir,
+      options.sessionId,
+    );
+    const claimPath = `${lockPath}.claim`;
+    await assertPathMissing(claimPath);
+    const observed = await this.inspectExistingLock(
+      lockPath,
+      options.sessionId,
+    );
+    if (observed.kind !== 'sealed' || !isManagedLockRecord(observed.record)) {
+      throw new SessionWriterUnavailableError();
+    }
+    if (
+      observed.record.transcript.relative_path !==
+      getTranscriptRelativePath(
+        options.runtimeBaseDir,
+        options.activeTranscriptPath,
+      )
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    const claimRecord = { ...observed.record, owner_id: randomUUID() };
+    const claimRaw = JSON.stringify(claimRecord);
+    if (!(await installLockRecord(claimPath, claimRecord))) {
+      throw new SessionWriterUnavailableError();
+    }
+    try {
+      const primaryIdentity = nodeFs.lstatSync(lockPath, { bigint: true });
+      const claimIdentity = nodeFs.lstatSync(claimPath, { bigint: true });
+      let released = false;
+      let expectedTranscriptState: TranscriptState | undefined;
+      const assertCleanupOwned = () => {
+        if (released) throw new SessionWriterLostError();
+        for (const [candidate, identity] of [
+          [lockPath, primaryIdentity],
+          [claimPath, claimIdentity],
+        ] as const) {
+          try {
+            const current = nodeFs.lstatSync(candidate, { bigint: true });
+            if (
+              !current.isFile() ||
+              current.isSymbolicLink() ||
+              current.dev !== identity.dev ||
+              current.ino !== identity.ino ||
+              nodeFs.readFileSync(candidate, 'utf8') !==
+                (candidate === lockPath ? observed.raw : claimRaw)
+            ) {
+              throw new SessionWriterLostError();
+            }
+          } catch (error) {
+            if (error instanceof SessionWriterError) throw error;
+            throw new SessionWriterUnavailableError({
+              cause: error instanceof Error ? error : undefined,
+            });
+          }
+        }
+      };
+      const assertOwnedAndUnchanged = async () => {
+        assertCleanupOwned();
+        const proof = await openTranscriptProof(options.transcriptPath);
+        try {
+          if (
+            proof.state.exists !== observed.record.transcript.exists ||
+            proof.state.byteLength !== observed.record.transcript.byte_length ||
+            proof.sha256 !== observed.record.transcript.sha256 ||
+            (expectedTranscriptState !== undefined &&
+              !sameTranscriptState(proof.state, expectedTranscriptState))
+          ) {
+            throw new SessionTranscriptChangedError();
+          }
+          await validateOpenTranscriptProof(options.transcriptPath, proof);
+          assertCleanupOwned();
+          expectedTranscriptState ??= proof.state;
+        } finally {
+          await closeTranscriptProof(proof);
+        }
+      };
+      await assertOwnedAndUnchanged();
+      return {
+        assertOwnedAndUnchanged,
+        assertCleanupOwned,
+        release: async () => {
+          assertCleanupOwned();
+          await removeExactRecord(claimPath, claimRaw);
+          released = true;
+        },
+      };
+    } catch (error) {
+      await removeExactRecord(claimPath, claimRaw);
+      throw error;
+    }
+  }
+
   private static async acquireInternal(
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {
@@ -2812,6 +2918,16 @@ export class SessionWriterLease {
     if (!this.expectedTranscriptState) {
       throw new SessionWriterUnavailableError();
     }
+    if (
+      this.managedFormatVersion !== undefined &&
+      !isValidCommitProof(commitProof)
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          'Managed session writer seal requires the commit proof',
+        ),
+      });
+    }
     const relativePath = getTranscriptRelativePath(
       this.runtimeBaseDir,
       this.transcriptPath,
@@ -2833,23 +2949,14 @@ export class SessionWriterLease {
         transcript: transcriptProof,
       };
     } else {
-      // A Managed seal must pin the commit position the authority flushed;
-      // without it a takeover could adopt a log that drifted after sealing.
-      if (!isValidCommitProof(commitProof)) {
-        throw new SessionWriterUnavailableError({
-          cause: new Error(
-            'Managed session writer seal requires the commit proof',
-          ),
-        });
-      }
       sealedRecord = {
         ...ownedRecord,
         schema_version: MANAGED_LOCK_SCHEMA_VERSION,
         state: 'sealed',
         sealed_at: new Date().toISOString(),
         format_version: this.managedFormatVersion,
-        last_commit_sequence: commitProof.last_commit_sequence,
-        committed_prefix_hash: commitProof.committed_prefix_hash,
+        last_commit_sequence: commitProof!.last_commit_sequence,
+        committed_prefix_hash: commitProof!.committed_prefix_hash,
         transcript: transcriptProof,
       };
     }

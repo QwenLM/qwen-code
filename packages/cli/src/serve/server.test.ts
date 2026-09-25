@@ -617,6 +617,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'daemon_status',
   'capabilities',
   'session_create',
+  'session_startup_config',
   'session_id_override',
   'session_scope_override',
   'session_load',
@@ -14415,6 +14416,290 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rolls back the persisted recording after a definite startup rejection so the caller id stays retryable', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const writeRecording = async () => {
+        // The spawn's model leg persists its transcript record before the
+        // selection is rejected and the bridge closes the live session.
+        const chatsDir = path.join(
+          new Storage(WS_BOUND).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, `${sessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${sessionId}-user-1`,
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'model switch' }] },
+            cwd: WS_BOUND,
+          })}\n`,
+        );
+      };
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          if (req.startupConfig !== undefined) {
+            await writeRecording();
+            throw Object.assign(new Error('unsupported effort'), {
+              code: 'startup_config_rejected',
+            });
+          }
+          return {
+            sessionId: req.sessionId ?? 'fake-startup-rollback',
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-startup-rollback',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(rejected.status).toBe(422);
+      expect(rejected.body.code).toBe('startup_config_rejected');
+      await expect(
+        service.findSessionIdIgnoringCase(sessionId),
+      ).resolves.toBeUndefined();
+
+      const retry = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId });
+      expect(retry.status).toBe(200);
+      expect(retry.body.sessionId).toBe(sessionId);
+    });
+
+    it('rolls back the persisted recording after a definite startup rejection when the daemon generated the id', async () => {
+      // The caller sent no sessionId, so only the rejection's own
+      // `sessionId` can name the recording the spawn persisted before the
+      // selection was rejected.
+      const spawnedId = '550e8400-e29b-41d4-a716-446655440099';
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${spawnedId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${spawnedId}-user-1`,
+              parentUuid: null,
+              sessionId: spawnedId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+            sessionId: spawnedId,
+          });
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(rejected.status).toBe(422);
+      expect(rejected.body.code).toBe('startup_config_rejected');
+      expect(bridge.killCalls).toEqual([
+        { sessionId: spawnedId, opts: { requireZeroAttaches: true } },
+      ]);
+      await expect(
+        service.findSessionIdIgnoringCase(spawnedId),
+      ).resolves.toBeUndefined();
+    });
+
+    it('keeps the persisted recording when a startup failure outcome is uncertain', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${sessionId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${sessionId}-user-1`,
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw new Error('transport closed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(res.status).toBe(500);
+      await expect(service.findSessionIdIgnoringCase(sessionId)).resolves.toBe(
+        sessionId,
+      );
+    });
+
+    it('still answers the definite 422 when the recording rollback fails', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+          });
+        },
+        killImpl: async () => {
+          throw new Error('storage unavailable');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+
+      // A failed rollback must not downgrade the definite rejection to the
+      // uncertain 500 path; the id may stay occupied, so warn instead.
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('startup_config_rejected');
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+        { sessionId, error: 'storage unavailable' },
+      );
+    });
+
+    it('still answers the definite 422 and warns when the recording rollback is refused', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-4466554400a1';
+      const daemonLog = fakeDaemonLog();
+      let spawned = false;
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          spawned = true;
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${sessionId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${sessionId}-user-1`,
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+          });
+        },
+        // The orphan kill is refused (the session stays live), so the
+        // helper removes nothing and reports the refusal by returning false.
+        killImpl: async () => false,
+        summaryImpl: (id) => {
+          if (!spawned) throw new SessionNotFoundError(id);
+          return {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('startup_config_rejected');
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+        { sessionId },
+      );
+      await expect(service.findSessionIdIgnoringCase(sessionId)).resolves.toBe(
+        sessionId,
+      );
+    });
+
     it('503 when persisted session state cannot be inspected', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -14896,6 +15181,35 @@ describe('createServeApp', () => {
       expect(bridge.calls).toEqual([
         { workspaceCwd: WORK_A, modelServiceId: 'qwen-prod' },
       ]);
+    });
+
+    it('forwards startupConfig and rejects conflicts before spawning', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const startupConfig = {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high',
+      };
+      const response = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a', startupConfig });
+      expect(response.status).toBe(200);
+      expect(bridge.calls).toEqual([{ workspaceCwd: WORK_A, startupConfig }]);
+      for (const body of [
+        { startupConfig, sessionScope: 'single' },
+        { startupConfig, modelServiceId: 'legacy' },
+        { startupConfig: { reasoningEffort: 'high' } },
+        { startupConfig: { ...startupConfig, persist: true } },
+      ]) {
+        const rejected = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', ...body });
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.code).toBe('invalid_startup_config');
+      }
+      expect(bridge.calls).toHaveLength(1);
     });
 
     it('passes through a valid `sessionScope` to the bridge (#4175 PR 5)', async () => {

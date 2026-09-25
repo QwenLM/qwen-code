@@ -5,6 +5,10 @@
  */
 
 import {
+  validateStartupConfigRequest,
+  assertStartupConfigApplied,
+} from './session-startup-config.js';
+import {
   MCP_RESTART_SERVER_DEADLINE_MS,
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
@@ -53,6 +57,7 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
   BranchSessionRequest,
   DaemonBranchSessionRequest,
   DaemonBranchSessionResult,
@@ -647,6 +652,7 @@ export function isStaleBranchPointError(
 }
 
 export interface CreateSessionRequest {
+  startupConfig?: SessionStartupConfig;
   /**
    * Workspace path the daemon must have registered. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
@@ -3107,11 +3113,16 @@ export class DaemonClient {
   async createStandaloneSession(
     options: CreateStandaloneSessionOptions = {},
   ): Promise<DaemonStandaloneSession> {
+    validateStartupConfigRequest(options);
     await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    if (options.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
       requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
+    let session: DaemonStandaloneSession;
     try {
       const response = await this.jsonRequest<unknown>(
         '/standalone/sessions',
@@ -3122,7 +3133,7 @@ export class DaemonClient {
           mode: 'rest',
         },
       );
-      return parseStandaloneSession(
+      session = parseStandaloneSession(
         response,
         'POST /standalone/sessions',
         sessionId,
@@ -3141,6 +3152,8 @@ export class DaemonClient {
         error,
       );
     }
+    assertStartupConfigApplied(session, options.startupConfig);
+    return session;
   }
 
   async listStandaloneSessions(
@@ -3367,6 +3380,10 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    validateStartupConfigRequest(req);
+    if (req.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     if (req.sessionId !== undefined && req.sessionId !== null) {
       await this.requireCapability('session_id_override');
     }
@@ -3392,6 +3409,9 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.startupConfig !== undefined
+            ? { startupConfig: req.startupConfig }
+            : {}),
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
@@ -3417,6 +3437,7 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
         const session = (await res.json()) as DaemonSession;
+        assertStartupConfigApplied(session, req.startupConfig);
         if (
           typeof req.sessionId === 'string' &&
           session.sessionId !== req.sessionId.toLowerCase()

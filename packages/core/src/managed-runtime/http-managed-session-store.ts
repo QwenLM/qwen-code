@@ -23,6 +23,7 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
+import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
   scanManagedSessionJournal,
   type ManagedSessionJournalHandle,
@@ -213,15 +214,34 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   }
 
   commitResources(refs: readonly ManagedSessionDurableRef[]): CommitResource[] {
-    if (
-      refs.length >
-      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
-    ) {
-      throw new ManagedSessionRecordError(
-        `a Managed Session transaction references more than ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction} resources.`,
-      );
+    const closure = new Map<string, ManagedSessionDurableRef>();
+    const pending = [...refs];
+    while (pending.length > 0) {
+      const ref = pending.pop()!;
+      const existing = closure.get(ref.resourceId);
+      if (existing !== undefined) {
+        requireSameRef(existing, ref);
+        continue;
+      }
+      closure.set(ref.resourceId, ref);
+      if (
+        closure.size >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
+      ) {
+        throw new ManagedSessionRecordError(
+          `a Managed Session transaction references more than ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction} resources.`,
+        );
+      }
+      const staged = this.staged.get(ref.resourceId);
+      if (staged !== undefined) {
+        requireSameRef(staged.ref, ref);
+        if (ref.kind === 'managed-checkpoint') {
+          const parsed = tryParseHarnessCheckpointV1(staged.bytes);
+          if (parsed.ok) pending.push(...collectRefs([parsed.checkpoint]));
+        }
+      }
     }
-    return refs.map((ref) => {
+    return [...closure.values()].map((ref) => {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) requireSameRef(staged.ref, ref);
       return {
@@ -520,7 +540,7 @@ class ManagedSessionStoreHttpClient {
       lastCommitDigest: descriptor.commitDigest,
       activationEpoch: descriptor.activationEpoch,
     };
-    this.resources.releaseCommitted(descriptor.refs);
+    this.resources.releaseCommitted(commitResources);
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -604,6 +624,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('seal receipt does not match the active writer.');
     }
     this.sealed = true;
+    this.stopRenewal();
     this.resources.clear();
   }
 

@@ -137,6 +137,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   class SessionService {
     constructor(_cwd: string) {}
+    assertLegacySessionExecution = vi.fn();
     async loadSession(_sessionId: string) {
       return (
         resumeMocks.getPendingLoadSession() ??

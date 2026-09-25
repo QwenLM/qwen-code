@@ -92,6 +92,7 @@ import {
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
   SessionWriterUnavailableError,
+  type SealedManagedMaintenanceLease,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
 import {
@@ -116,6 +117,16 @@ export {
 } from './session-resume-token-counts.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+function isManagedFirstRecord(record: ChatRecord): boolean {
+  // New Managed logs write the execution-engine marker before the header.
+  return (
+    record.subtype === 'managed_session_header_v1' ||
+    (record.subtype === 'session_execution_engine' &&
+      (record.systemPayload as { engine?: unknown } | undefined)?.engine ===
+        'managed')
+  );
+}
 
 export class BranchPointInvalidError extends Error {
   constructor(readonly recordId: string) {
@@ -914,6 +925,21 @@ export class SessionService {
     });
   }
 
+  async acquireSealedManagedMaintenanceLease(
+    sessionId: string,
+  ): Promise<SealedManagedMaintenanceLease | undefined> {
+    const location = await this.getSessionLocation(sessionId);
+    if (location !== 'active' && location !== 'archived') return undefined;
+    const transcriptPath = this.getSessionFilePath(sessionId, location);
+    if (!isManagedSessionTranscriptSync(transcriptPath)) return undefined;
+    return SessionWriterLease.acquireSealedManagedMaintenance({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      activeTranscriptPath: this.getSessionFilePath(sessionId, 'active'),
+      transcriptPath,
+    });
+  }
+
   private warn(message: string): void {
     debugLogger.warn(message);
     this.onWarning?.(message);
@@ -1056,6 +1082,17 @@ export class SessionService {
       throw new SessionStorageEntryError(sessionId, 'unknown_project');
     }
     return snapshot.executionEngine;
+  }
+
+  assertLegacySessionExecution(sessionId: string): void {
+    if (
+      isManagedSessionTranscriptSync(this.getSessionTranscriptPath(sessionId))
+    ) {
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'belongs to managed, cannot execute with legacy',
+      );
+    }
   }
 
   getWorktreeSessionPathForArchiveState(
@@ -2042,22 +2079,20 @@ export class SessionService {
   private readSessionTitleInfoFromFile(
     filePath: string,
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     title?: string;
     source?: TitleSource;
   } {
-    const legacy = readSessionTitleInfoFromFileSync(filePath, tailBuffer);
-    if (legacy.title !== undefined) return legacy;
-    /* Only sessions without a legacy title pay for the Managed probe. A
-       Managed transcript never carries a custom_title record, so the scan
-       above cannot return one for it. */
-    return (
-      readManagedSessionTitleInfoSync(
-        filePath,
-        this.storage.getRuntimeBaseDir(),
-        tailBuffer,
-      ) ?? legacy
-    );
+    const managed =
+      knownManaged === false
+        ? undefined
+        : readManagedSessionTitleInfoSync(
+            filePath,
+            this.storage.getRuntimeBaseDir(),
+            tailBuffer,
+          );
+    return managed ?? readSessionTitleInfoFromFileSync(filePath, tailBuffer);
   }
 
   /**
@@ -2113,6 +2148,7 @@ export class SessionService {
     filePath: string,
     records: ChatRecord[],
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     parentSessionId?: string;
     sourceType?: string;
@@ -2122,19 +2158,23 @@ export class SessionService {
     if (metadata.sourceType !== undefined) return metadata;
 
     const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
-    if (tailSource.sourceType !== undefined) {
-      return { ...metadata, ...tailSource };
+    if (tailSource.sourceType === undefined) {
+      const managedSource =
+        knownManaged === false
+          ? undefined
+          : readManagedSessionSourceSync(
+              filePath,
+              this.storage.getRuntimeBaseDir(),
+              tailBuffer,
+            );
+      return managedSource?.sourceType === undefined
+        ? metadata
+        : { ...metadata, ...managedSource };
     }
-    /* Only sessions without a legacy source pay for the Managed probe: a
-       Managed transcript keeps its source in a committed domain body, so
-       neither scan above can find a record for it. */
-    const managedSource = readManagedSessionSourceSync(
-      filePath,
-      this.storage.getRuntimeBaseDir(),
-      tailBuffer,
-    );
-    if (managedSource?.sourceType === undefined) return metadata;
-    return { ...metadata, ...managedSource };
+    return {
+      ...metadata,
+      ...tailSource,
+    };
   }
 
   private readSessionSourceFromTail(
@@ -2712,7 +2752,12 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const knownManaged = isManagedFirstRecord(firstRecord);
+      const titleInfo = this.readSessionTitleInfoFromFile(
+        filePath,
+        tailBuffer,
+        knownManaged,
+      );
       signal?.throwIfAborted();
       const goalObjective = this.resolveGoalObjective(
         prompt,
@@ -2726,6 +2771,7 @@ export class SessionService {
         filePath,
         records,
         tailBuffer,
+        knownManaged,
       );
       items.push({
         sessionId: firstRecord.sessionId,
@@ -2792,8 +2838,18 @@ export class SessionService {
     ) {
       return undefined;
     }
-    const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-    const source = this.extractCreationMetadataFromFile(filePath, records);
+    const knownManaged = isManagedFirstRecord(firstRecord);
+    const titleInfo = this.readSessionTitleInfoFromFile(
+      filePath,
+      undefined,
+      knownManaged,
+    );
+    const source = this.extractCreationMetadataFromFile(
+      filePath,
+      records,
+      undefined,
+      knownManaged,
+    );
     const prompt = this.extractFirstPromptFromRecords(records);
     return {
       sessionId: firstRecord.sessionId,
@@ -3976,6 +4032,13 @@ export class SessionService {
     const chatsDir = this.getChatsDir();
     const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
     const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
+
+    if (isManagedSessionTranscriptSync(sourcePath)) {
+      throw new SessionExecutionEngineError(
+        sourceSessionId,
+        'belongs to managed, cannot fork with the legacy session service',
+      );
+    }
 
     const snapshot = await readSessionTranscriptSnapshot(
       sourcePath,

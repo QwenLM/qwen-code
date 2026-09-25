@@ -52,6 +52,22 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('startup errors across bundle boundaries', () => {
+  it.each([
+    ['invalid_startup_config', 400],
+    ['startup_config_rejected', 422],
+  ] as const)('maps %s by its stable contract', (code, httpStatus) => {
+    const error = Object.assign(new Error('startup rejected'), {
+      name: 'SessionStartupConfigError',
+      code,
+    });
+    const { response, status, json } = responseMock();
+    sendBridgeError(response, error);
+    expect(status).toHaveBeenCalledWith(httpStatus);
+    expect(json).toHaveBeenCalledWith({ code, error: 'startup rejected' });
+  });
+});
+
 describe('workflow parameter errors', () => {
   it.each(['request', 'wire'] as const)(
     'preserves parameter details from a %s error',
@@ -505,6 +521,23 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it('maps a Managed engine rejection to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(-32024, 'belongs to managed', {
+      errorKind: 'session_execution_engine_unavailable',
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: 'session_execution_engine_unavailable',
+      errorKind: 'session_execution_engine_unavailable',
     });
   });
 

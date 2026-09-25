@@ -1155,6 +1155,14 @@ export function parseManagedSessionCommitMarker(
 export function managedSessionEventsDigest(
   events: readonly ManagedSessionEvent[],
 ): string {
+  if (events.length === 0) {
+    return fail('transaction identity must contain at least one event.');
+  }
+  if (events.length > MANAGED_SESSION_LIMITS.maxTransactionEvents) {
+    return fail(
+      `transaction identity must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
+    );
+  }
   return canonicalDigest(
     events,
     MANAGED_SESSION_LIMITS.maxTransactionBytes,

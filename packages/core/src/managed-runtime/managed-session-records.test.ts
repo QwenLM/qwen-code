@@ -86,6 +86,87 @@ function harnessEvent(
   };
 }
 
+function eventForKind(
+  kind:
+    | 'message.committed'
+    | 'tool.intent'
+    | 'tool.receipt'
+    | 'checkpoint.committed'
+    | 'context.compacted'
+    | 'turn.settled'
+    | 'config.bound',
+): Record<string, unknown> {
+  const payloads = {
+    'message.committed': {
+      messageId: 'msg-1',
+      role: 'assistant',
+      contentRef: ref(),
+      modelAttemptId: null,
+      parentMessageId: null,
+    },
+    'tool.intent': {
+      executionCallId: 'call-1',
+      batchId: 'batch-1',
+      ordinal: 0,
+      toolDefinitionRef: ref(),
+      argsRef: ref(),
+      outcomeSource: 'runtime',
+    },
+    'tool.receipt': {
+      executionCallId: 'call-1',
+      toolOutcomeRef: ref(),
+      resultRef: null,
+      resources: [],
+      historyRevision: 0,
+    },
+    'checkpoint.committed': {
+      checkpointId: 'checkpoint-1',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: ref(),
+      boundary: null,
+    },
+    'context.compacted': {
+      compactionId: 'compaction-1',
+      fromSequence: 1,
+      toSequence: 1,
+      summaryRef: ref(),
+      replacedMessageIds: [],
+      tokenCountsRef: null,
+    },
+    'turn.settled': {
+      turnId: 'turn-1',
+      outcome: 'completed',
+      stopReason: null,
+      resultRef: null,
+      usageRef: null,
+      pendingOwnersRef: null,
+    },
+    'config.bound': {
+      revision: 1,
+      previousRevision: null,
+      bundleRef: ref(),
+      rootSnapshotRef: ref(),
+    },
+  } satisfies Record<string, Record<string, unknown>>;
+  const needsActivation = new Set([
+    'message.committed',
+    'tool.intent',
+    'checkpoint.committed',
+    'context.compacted',
+  ]);
+  return {
+    v: 1,
+    sequence: 2,
+    eventId: `evt-${kind}`,
+    sessionKey,
+    kind,
+    occurredAt: 1_700_000_000_001,
+    ...(needsActivation.has(kind) ? { subject: activationSubject } : {}),
+    payload: payloads[kind],
+  };
+}
+
 describe('managed session record envelope', () => {
   it('accepts a well-formed input.accepted event', () => {
     const event = parseManagedSessionEvent(inputEvent());
@@ -426,6 +507,21 @@ describe('managed session per-kind rules', () => {
 });
 
 describe('managed session actor eligibility', () => {
+  it('admits projected input without an activation only from a trusted entry', () => {
+    const input = eventForKind('message.committed');
+    delete input['subject'];
+    const event = parseManagedSessionEvent(input);
+    expect(() =>
+      assertManagedSessionEventActor(event, 'trusted_entry'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionEventActor(event, 'harness')).toThrow(
+      /requires an activation subject/,
+    );
+    expect(() => assertManagedSessionEventActor(event, 'authority')).toThrow(
+      /must not be requested/,
+    );
+  });
+
   it('lets only the coordinator change an activation', () => {
     const event = parseManagedSessionEvent({
       v: 1,
@@ -677,11 +773,38 @@ describe('managed session transactions', () => {
     ).toThrow(/must not exceed 8388608 bytes/);
   });
 
-  it('digests the committed event identities stably', () => {
+  it('digests the complete committed events stably', () => {
     const digest = managedSessionEventsDigest([event(1), event(2)]);
-    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(digest).toBe(
+      '0da902e249ff5ba1e2ce05db968cfaa30b51ef1cb089b27b496dfb7765be09b5',
+    );
     expect(managedSessionEventsDigest([event(1), event(2)])).toBe(digest);
     expect(managedSessionEventsDigest([event(2), event(1)])).not.toBe(digest);
+  });
+
+  it('covers payloads, scope and timestamps in the commit digest', () => {
+    const original = event(1);
+    const digest = managedSessionEventsDigest([original]);
+    for (const changed of [
+      { ...original, occurredAt: original.occurredAt + 1 },
+      { ...original, sessionKey: { ...sessionKey, tenantId: 'other' } },
+      { ...original, payload: { ...original.payload, source: 'changed' } },
+    ]) {
+      expect(managedSessionEventsDigest([changed])).not.toBe(digest);
+    }
+  });
+
+  it('bounds digest input before encoding event content', () => {
+    expect(() => managedSessionEventsDigest([])).toThrow(
+      /must contain at least one event/,
+    );
+    const events = Array.from(
+      { length: MANAGED_SESSION_LIMITS.maxTransactionEvents + 1 },
+      (_, index) => event(index + 1),
+    );
+    expect(() => managedSessionEventsDigest(events)).toThrow(
+      /must not exceed 256 events/,
+    );
   });
 });
 

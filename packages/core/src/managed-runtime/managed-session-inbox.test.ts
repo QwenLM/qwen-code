@@ -286,6 +286,30 @@ describe('FileManagedSessionInbox', () => {
     });
   });
 
+  it('rejects readiness after cancellation without corrupting the inbox', async () => {
+    const inbox = await openInbox();
+    const input = userMessage('m1');
+    await inbox.admit(input, limits);
+    await inbox.requestCancel(input);
+    const contents = await readFile(filePath, 'utf8');
+
+    await expect(inbox.markActivationReady(input)).rejects.toThrow(
+      'already finished',
+    );
+    expect(await readFile(filePath, 'utf8')).toBe(contents);
+    expect(inbox.haltedError).toBeUndefined();
+    const reopened = await openInbox();
+    expect(reopened.get(input)).toMatchObject({
+      state: 'finished',
+      outcome: 'cancelled',
+    });
+    await expect(
+      reopened.admit(userMessage('m2'), limits),
+    ).resolves.toMatchObject({
+      created: true,
+    });
+  });
+
   it('requires the deterministic payload reference and matching fence identity', async () => {
     const inbox = await openInbox();
     const input = userMessage('m1');
