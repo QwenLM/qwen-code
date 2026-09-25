@@ -17,6 +17,7 @@ import {
   getCommandRoots,
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
+  hasShellSubstitution,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
@@ -1499,6 +1500,256 @@ describe('buildShellExecWarnings', () => {
         'diff <(ls /a) <(ls /b)',
       ),
     ).toEqual([COMMAND_SUBSTITUTION_WARNING]);
+  });
+});
+
+// JavaScript's `\s` also matches `\r`, `\v`, `\f` and `\u00a0`. Bash's default
+// IFS is space, tab and newline and it keeps the other four as ordinary word
+// characters, so wherever shell parsing scanned or trimmed with `\s`, a bare
+// `&` behind one of them read as part of the preceding redirection instead of
+// as a command separator — leaving the command behind it joined to the one
+// before it, and so out of every check that walks the segments (#12089).
+describe('bash word separators (#12089)', () => {
+  const NON_SEPARATORS = [
+    ['CR', '\r'],
+    ['VT', '\v'],
+    ['FF', '\f'],
+    ['NBSP', '\u00a0'],
+  ] as const;
+
+  const SEPARATORS = [
+    ['space', ' '],
+    ['tab', '\t'],
+  ] as const;
+
+  describe('splitCommands', () => {
+    it.each(NON_SEPARATORS)(
+      'splits at an & that a %s separates from the redirection',
+      (_name, char) => {
+        expect(splitCommands(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          `echo x >${char}`,
+          'rm -rf /tmp/x',
+        ]);
+      },
+    );
+
+    // Guards the other direction: `>&` / `<&` really are fd duplication, so an
+    // `&` behind a genuine separator must keep the segment whole.
+    it.each(SEPARATORS)(
+      'keeps an & that a %s separates from the redirection in one segment',
+      (_name, char) => {
+        expect(splitCommands(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          `echo x >${char}& rm -rf /tmp/x`,
+        ]);
+      },
+    );
+
+    it('keeps fd duplication targets intact', () => {
+      expect(splitCommands('echo x >&2')).toEqual(['echo x >&2']);
+      expect(splitCommands('echo x <&3')).toEqual(['echo x <&3']);
+      expect(splitCommands('npm run build 2>&1 | head -100')).toEqual([
+        'npm run build 2>&1',
+        'head -100',
+      ]);
+    });
+
+    it('splits on a plain newline', () => {
+      expect(splitCommands('echo a\necho b')).toEqual(['echo a', 'echo b']);
+    });
+
+    it('still splits on CRLF and drops the empty segment', () => {
+      expect(splitCommands('echo a\r\necho b')).toEqual(['echo a', 'echo b']);
+      expect(splitCommands('echo a\r\n\r\necho b')).toEqual([
+        'echo a',
+        'echo b',
+      ]);
+    });
+  });
+
+  describe('getCommandRoots', () => {
+    it.each(NON_SEPARATORS)(
+      'exposes the command hidden behind a %s',
+      (_name, char) => {
+        expect(getCommandRoots(`echo x >${char}& rm -rf /tmp/x`)).toEqual([
+          'echo',
+          'rm',
+        ]);
+      },
+    );
+  });
+
+  describe('hasNonFinalTopLevelBackgroundOperator', () => {
+    it.each(NON_SEPARATORS)('detects the & behind a %s', (_name, char) => {
+      expect(
+        hasNonFinalTopLevelBackgroundOperator(`echo x >${char}& rm -rf /tmp/x`),
+      ).toBe(true);
+    });
+
+    it.each(SEPARATORS)('still reads >%s& as a redirection', (_name, char) => {
+      expect(
+        hasNonFinalTopLevelBackgroundOperator(`echo x >${char}& rm -rf /tmp/x`),
+      ).toBe(false);
+    });
+  });
+
+  describe('hasUnsafeMonitorBackgroundOperator', () => {
+    it('detects a background operator hidden behind a non-separator', () => {
+      expect(
+        hasUnsafeMonitorBackgroundOperator(
+          "bash -c 'echo x >\u00a0& rm -rf /tmp/x'",
+        ),
+      ).toBe(true);
+    });
+
+    it.each(NON_SEPARATORS)(
+      'detects a top-level & glued to the wrapper script by a %s',
+      (_name, char) => {
+        expect(
+          hasUnsafeMonitorBackgroundOperator(
+            `bash -c 'sleep 1'${char}& rm -rf /tmp/x`,
+          ),
+        ).toBe(true);
+      },
+    );
+  });
+
+  describe('wrapper tokens that are not one quoted word', () => {
+    // bash reads `'echo safe''; rm -rf /tmp/x'` as the single script
+    // `echo safe; rm -rf /tmp/x`. Unquoting only the first pair would leave
+    // `echo safe'; rm -rf /tmp/x'`, which reads as one read-only `echo`.
+    it.each([
+      `bash -c 'echo safe''; rm -rf /tmp/x'`,
+      `bash -c "echo ok"" && rm -rf /tmp/x"`,
+      `bash -c 'echo'\r'; rm -rf /tmp/x ;'`,
+    ])('keeps the second command of %j visible', (command) => {
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+    });
+
+    it('unwraps a token with printable text after the close quote', () => {
+      expect(stripShellWrapper(`bash -c 'echo hi'x`)).toBe('echo hix');
+    });
+
+    it.each([
+      `bash -c 'tail -f app.log''; rm -rf /tmp/x'`,
+      `bash -c 'echo'\r'; rm -rf /tmp/x ;'`,
+      `bash -c 'grep '\\''ERROR'\\'' app.log'`,
+    ])('spawns %j exactly as written', (command) => {
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+    });
+
+    it('keeps glued wrapper syntax visible to analysis without rewriting spawn', () => {
+      const command = `bash -c 'echo hi; rm -f poc.flag '\u00a0; echo y`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized).toEqual({
+        analysisCommand: `echo hi; rm -f poc.flag \u00a0;`,
+        safetyCommand: `echo hi; rm -f poc.flag \u00a0; echo y`,
+        spawnCommand: command,
+        strippedTrailingAmp: false,
+      });
+      expect(getCommandRoots(normalized.safetyCommand)).toEqual([
+        'echo',
+        'rm',
+        'echo',
+      ]);
+    });
+
+    it('keeps printable-glue commands visible to monitor analysis', () => {
+      const command = `bash -c 'echo a; rm -rf /tmp/x'z`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe('echo a; rm -rf /tmp/xz');
+      expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+      expect(normalized.spawnCommand).toBe(command);
+    });
+
+    it.each([
+      `bash -c 'pkill -f qwen-code; echo hi'x`,
+      `cmd.exe /c "taskkill /F /IM node.exe & echo hi"\u00a0`,
+    ])('keeps self-kill operations in %j visible', (command) => {
+      expect(detectSelfKillCommand(command)).toBe(true);
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(command);
+    });
+
+    it.each([
+      ['CJK', '\u4e2d'],
+      ['Latin-1', '\u00e9'],
+      ['zero-width space', '\u200b'],
+      ['escape', '\u001b'],
+    ])('keeps commands after %s glue visible', (_name, char) => {
+      const command = `bash -c 'echo hi'${char}; rm -rf /tmp/x`;
+      const normalized = normalizeMonitorCommand(command);
+
+      expect(normalized.analysisCommand).toBe(`echo hi${char};`);
+      expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+      expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+      expect(normalized.spawnCommand).toBe(command);
+    });
+
+    it.each([
+      [
+        `bash -c 'echo a'\u00a0'; rm -rf /tmp/x #'y`,
+        `echo a\u00a0; rm -rf /tmp/x #y`,
+      ],
+      [`bash -c 'echo "hi'\u00e9; rm -rf /tmp/x`, `echo "hi\u00e9;`],
+    ])(
+      'keeps commands after interior quotes in %j visible',
+      (command, analysisCommand) => {
+        const normalized = normalizeMonitorCommand(command);
+
+        expect(normalized.analysisCommand).toBe(analysisCommand);
+        expect(getCommandRoots(stripShellWrapper(command))).toContain('rm');
+        expect(getCommandRoots(normalized.safetyCommand)).toContain('rm');
+        expect(normalized.spawnCommand).toBe(command);
+      },
+    );
+  });
+
+  describe('stripShellWrapper', () => {
+    it.each(NON_SEPARATORS)(
+      'keeps trailing %s glued to an unwrapped command',
+      (_name, char) => {
+        const command = `bash -c 'echo $(whoami)'${char}`;
+        expect(stripShellWrapper(command)).toBe(`echo $(whoami)${char}`);
+        expect(hasShellSubstitution(command)).toBe(true);
+      },
+    );
+
+    it('does not start a wrapper token at a non-separator', () => {
+      // `bash\u00a0-c` is one word to bash, so there is no wrapper to unwrap.
+      expect(stripShellWrapper("bash\u00a0-c 'rm -rf /tmp/x'")).toBe(
+        "bash\u00a0-c 'rm -rf /tmp/x'",
+      );
+      expect(stripShellWrapper("\u00a0bash -c 'rm -rf /tmp/x'")).toBe(
+        "\u00a0bash -c 'rm -rf /tmp/x'",
+      );
+    });
+
+    it('still unwraps a wrapper set off by real whitespace', () => {
+      expect(stripShellWrapper(" bash -c 'rm -rf /tmp/x' ")).toBe(
+        'rm -rf /tmp/x',
+      );
+    });
+  });
+
+  describe('checkCommandPermissions', () => {
+    it('normalizes only bash word separators', async () => {
+      config.getCoreTools = () => ['ShellTool(ls -l)'];
+
+      expect(await checkCommandPermissions('ls\t-l', config)).toEqual({
+        allAllowed: true,
+        disallowedCommands: [],
+      });
+
+      // `ls\u00a0-l` is a single word to bash and is not `ls -l`, so the rule
+      // that allows `ls -l` must not cover it.
+      expect(await checkCommandPermissions('ls\u00a0-l', config)).toEqual({
+        allAllowed: false,
+        disallowedCommands: ['ls\u00a0-l'],
+        blockReason: `Command(s) not in the allowed commands list. Disallowed commands: "ls\u00a0-l"`,
+        isHardDenial: false,
+      });
+    });
   });
 });
 

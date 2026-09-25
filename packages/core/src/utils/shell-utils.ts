@@ -264,6 +264,16 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 }
 
 /**
+ * Bash's lexer separates words on space, tab and newline only. JavaScript's
+ * `\s` also matches `\r`, `\v`, `\f` and `\u00a0`, which bash keeps as
+ * ordinary word characters, so scanning past one of them made a following `&`
+ * look like part of a redirection instead of a command separator (#12089).
+ */
+function isBashWordSeparator(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n';
+}
+
+/**
  * Splits a shell command into a list of individual commands, respecting quotes.
  * This is used to separate chained commands (e.g., using &&, ||, ;).
  * @param command The shell command string to parse
@@ -285,7 +295,7 @@ export function splitCommands(command: string): string[] {
   const previousNonWhitespaceChar = (index: number): string | undefined => {
     for (let j = index - 1; j >= 0; j--) {
       const ch = command[j];
-      if (ch && !/\s/.test(ch)) {
+      if (ch && !isBashWordSeparator(ch)) {
         return ch;
       }
     }
@@ -366,18 +376,18 @@ export function splitCommands(command: string): string[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '|') {
@@ -385,17 +395,17 @@ export function splitCommands(command: string): string[] {
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -406,8 +416,9 @@ export function splitCommands(command: string): string[] {
     i++;
   }
 
-  if (currentCommand.trim()) {
-    commands.push(currentCommand.trim());
+  const lastCommand = trimBashEdgeSeparators(currentCommand);
+  if (lastCommand) {
+    commands.push(lastCommand);
   }
 
   return commands.filter(Boolean); // Filter out any empty strings
@@ -469,7 +480,7 @@ function resolveLeadingParameterExpansion(command: string): string | undefined {
   const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
   if (fields.length === 0) {
     // The empty expansion is removed; the command is whatever follows it.
-    const next = head.rest.trim();
+    const next = trimBashEdgeSeparators(head.rest);
     return next ? getCommandRoot(next) : undefined;
   }
   return fields[0];
@@ -481,7 +492,7 @@ function resolveLeadingParameterExpansion(command: string): string | undefined {
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
-  const trimmedCommand = command.trim();
+  const trimmedCommand = trimBashEdgeSeparators(command);
   if (!trimmedCommand) {
     return undefined;
   }
@@ -596,11 +607,16 @@ export function stripShellWrapper(command: string): string {
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       const commandToken = takeLeadingToken(token.rest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand, quote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const {
+        value: innerCommand,
+        quote,
+        tail,
+      } = stripSymmetricQuotes(commandToken.token);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return token.rest.trimStart() || trimmed;
+      }
+      if (tail && trimBashEdgeSeparators(commandToken.rest)) {
+        return trimmed;
       }
       return innerCommand || trimmed;
     }
@@ -1168,7 +1184,7 @@ export function hasNonFinalTopLevelBackgroundOperator(
   const previousNonWhitespace = (index: number): string | undefined => {
     for (let i = index - 1; i >= 0; i--) {
       const char = command[i];
-      if (char !== undefined && !/\s/.test(char)) return char;
+      if (char !== undefined && !isBashWordSeparator(char)) return char;
     }
     return undefined;
   };
@@ -1254,7 +1270,7 @@ export function hasNonFinalTopLevelBackgroundOperator(
       continue;
     }
 
-    return command.slice(i + 1).trim().length > 0;
+    return trimBashEdgeSeparators(command.slice(i + 1)).length > 0;
   }
 
   return false;
@@ -1264,6 +1280,7 @@ interface ParsedMonitorShellWrapper {
   wrapperTokens?: string[];
   innerCommand: string;
   innerQuote: '"' | "'" | '';
+  rawInnerCommandToken?: string;
   innerArgsSuffix?: string;
 }
 
@@ -1277,7 +1294,7 @@ export interface NormalizedMonitorCommand {
 function takeLeadingToken(
   input: string,
 ): { token: string; rest: string } | null {
-  const trimmed = input.trimStart();
+  const trimmed = trimBashEdgeSeparators(input);
   if (!trimmed) {
     return null;
   }
@@ -1365,7 +1382,7 @@ function takeLeadingToken(
       continue;
     }
 
-    if (/\s/.test(char) && commandSubstitutionDepth === 0) {
+    if (isBashWordSeparator(char) && commandSubstitutionDepth === 0) {
       break;
     }
 
@@ -1388,22 +1405,93 @@ function takeLeadingToken(
   };
 }
 
+function removeQuoting(command: string): string {
+  let value = '';
+  let activeQuote: '"' | "'" | '' = '';
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!;
+
+    if (activeQuote === "'") {
+      if (char === "'") {
+        activeQuote = '';
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '\\' && activeQuote === '"') {
+      const next = command[i + 1];
+      if (next === '$' || next === '`' || next === '"' || next === '\\') {
+        value += next;
+        i++;
+      } else if (next === '\n') {
+        i++;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (activeQuote === '"') {
+      if (char === '"') {
+        activeQuote = '';
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '\\' && !activeQuote) {
+      const next = command[i + 1];
+      if (next) {
+        if (next !== '\n') {
+          value += next;
+        }
+        i++;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      activeQuote = '"';
+    } else if (char === "'") {
+      activeQuote = "'";
+    } else {
+      value += char;
+    }
+  }
+  return value;
+}
+
 function stripSymmetricQuotes(command: string): {
   value: string;
   quote: '"' | "'" | '';
+  tail: string;
 } {
-  const trimmed = command.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return {
-      value: trimmed.substring(1, trimmed.length - 1),
-      quote: trimmed[0] as '"' | "'",
-    };
+  const trimmed = trimBashEdgeSeparators(command);
+  const quote = trimmed[0];
+  if (quote !== '"' && quote !== "'") {
+    return { value: trimmed, quote: '', tail: '' };
+  }
+  let escaped = false;
+  for (let i = 1; i < trimmed.length; i++) {
+    const char = trimmed[i];
+    if (quote === '"' && !escaped && char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (!escaped && char === quote) {
+      const tail = trimmed.slice(i + 1);
+      return { value: removeQuoting(trimmed), quote, tail };
+    }
+    escaped = false;
   }
 
-  return { value: trimmed, quote: '' };
+  return { value: trimmed, quote: '', tail: '' };
 }
 
 function getNormalizedShellToken(token: string): string {
@@ -1494,7 +1582,7 @@ function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
 }
 
 function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
-  const trimmed = command.trim();
+  const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
   const leadingEnvTokens: string[] = [];
 
@@ -1536,13 +1624,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
         };
       }
-      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const {
+        value: innerCommand,
+        quote: innerQuote,
+        tail,
+      } = stripSymmetricQuotes(commandToken.token);
       return {
         wrapperTokens,
         innerCommand,
         innerQuote,
+        rawInnerCommandToken: tail ? commandToken.token : undefined,
         innerArgsSuffix: commandToken.rest.trimStart(),
       };
     }
@@ -1574,12 +1665,20 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    rawInnerCommandToken,
+    innerArgsSuffix,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
-  const rawInnerArgsSuffix = innerArgsSuffix?.trim() ?? '';
+  const normalizedRawInnerCommandToken = rawInnerCommandToken
+    ? stripTrailingBackgroundAmp(rawInnerCommandToken)
+    : undefined;
+  const rawInnerArgsSuffix = trimBashEdgeSeparators(innerArgsSuffix ?? '');
   const normalizedInnerArgsSuffix =
     stripTrailingBackgroundAmp(rawInnerArgsSuffix);
   // Permission safety focuses on command text that the shell may expand or
@@ -1591,19 +1690,42 @@ export function normalizeMonitorCommand(
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
-  const safetyCommand =
+  const dequotedSafetyCommand =
     wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
+      ? trimBashEdgeSeparators(safetyParts.join(' '))
       : analysisCommand;
+  const rawSafetyCommand = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    normalizedRawInnerCommandToken,
+    normalizedInnerArgsSuffix,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const innerSafetyCommand = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    analysisCommand,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  // A literal quote in the dequoted -c value can swallow an outer-shell
+  // suffix during safety parsing. Preserve both views at that boundary.
+  const safetyCommand =
+    normalizedRawInnerCommandToken &&
+    normalizedInnerArgsSuffix &&
+    /['"]/.test(analysisCommand)
+      ? `${rawSafetyCommand}\n${innerSafetyCommand}`
+      : dequotedSafetyCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
-    normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
+    normalizedInnerArgsSuffix !== rawInnerArgsSuffix ||
+    normalizedRawInnerCommandToken !== rawInnerCommandToken;
   const spawnCommand = wrapperTokens
     ? [
         wrapperTokens.join(' '),
-        innerQuote
-          ? `${innerQuote}${analysisCommand}${innerQuote}`
-          : analysisCommand,
+        normalizedRawInnerCommandToken ??
+          (innerQuote
+            ? `${innerQuote}${analysisCommand}${innerQuote}`
+            : analysisCommand),
         normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)
@@ -1621,6 +1743,9 @@ export function normalizeMonitorCommand(
 export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
   const { innerCommand, innerArgsSuffix } = parseMonitorShellWrapper(command);
   return (
+    // The raw command too: a CR/VT/FF/NBSP after the `-c` script glues a
+    // top-level `&` into the wrapper token, so the parsed halves never see it.
+    hasNonFinalTopLevelBackgroundOperator(command) ||
     hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
     hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
   );
@@ -2125,7 +2250,8 @@ export async function checkCommandPermissions(
     };
   }
 
-  const normalize = (cmd: string): string => cmd.trim().replace(/\s+/g, ' ');
+  const normalize = (cmd: string): string =>
+    trimBashEdgeSeparators(cmd).replace(/[ \t\n]+/g, ' ');
   const commandsToValidate = splitCommands(command).map(normalize);
   const invocation: AnyToolInvocation & { params: { command: string } } = {
     params: { command: '' },
