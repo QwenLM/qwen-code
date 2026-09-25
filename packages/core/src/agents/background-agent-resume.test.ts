@@ -1308,7 +1308,7 @@ describe('BackgroundAgentResumeService', () => {
       string,
       { tools?: string[]; disallowedTools?: string[] },
       boolean,
-      { eagerHideSkillUnderCodeMode?: boolean }?,
+      { eagerHideSkillUnderCodeMode?: boolean; codeModeOnly?: boolean }?,
     ]
   >([
     ['inherits every tool', {}, true],
@@ -1324,11 +1324,11 @@ describe('BackgroundAgentResumeService', () => {
     // rows above either resolve nothing on the tools side or resolve only the
     // blocklist).
     ['lists tools by display name', { tools: ['read_file', 'Skill'] }, true],
-    // Exercises the `skillEagerHidden` input: the session's
+    // Exercises the `skillRegistration` input: the session's
     // settings.tools.eager omits `skill` under CodeModeOnly, so the launch
     // side withholds the manager and the resume listing must go dark too —
     // the reminder is rendered from a wrapper that always holds the session
-    // manager, so this flag is the only gate. Dropping the input from
+    // manager, so this input is the only gate. Dropping it from
     // subagentWillHaveSkillTool turns this row red while every row above
     // stays green.
     [
@@ -1336,6 +1336,28 @@ describe('BackgroundAgentResumeService', () => {
       {},
       false,
       { eagerHideSkillUnderCodeMode: true },
+    ],
+    // Exercises the `codeModeOnly` argument subagentWillHaveSkillTool threads
+    // into toolConfigAllowsSkill — the resume path is the third call site,
+    // and the rows above pin nothing: 1-4 run on a config with no tool mode
+    // at all, and the row above reaches its `false` through the registration
+    // probe. Deleting `codeModeOnly:` from that options object turns BOTH
+    // rows red (the exec-only one because the predicate then falls through to
+    // `!inheritsRegistry && !names.includes(SKILL)`, the disallowed-exec one
+    // because the exec bail never fires). The flag must patch getToolMode
+    // WITHOUT the deferral stub the row above uses, or the probe answers
+    // 'deferred' and re-vacuates both rows.
+    [
+      'lists only exec under CodeModeOnly',
+      { tools: [ToolNames.EXEC] },
+      true,
+      { codeModeOnly: true },
+    ],
+    [
+      'disallows exec under CodeModeOnly',
+      { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      false,
+      { codeModeOnly: true },
     ],
   ])(
     'matches the launch-time skill listing when the definition %s',
@@ -1416,6 +1438,13 @@ describe('BackgroundAgentResumeService', () => {
           }
         ).getToolRegistrationStatus = async (name) =>
           name === ToolNames.SKILL ? 'deferred' : 'registered';
+      }
+      if (session?.codeModeOnly) {
+        // Mode only: no deferral stub, so the registration probe still
+        // answers 'registered' and these rows isolate the `codeModeOnly`
+        // argument.
+        (config as unknown as { getToolMode: () => unknown }).getToolMode =
+          () => ToolMode.CodeModeOnly;
       }
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',

@@ -4197,7 +4197,10 @@ bad`);
           tools: [ToolNames.READ_FILE, ToolNames.SKILL],
         });
         expect(context.getSkillManager()).toBe(sessionManager);
-        expect(resolveAgentDelegationSurface(context)).not.toBe('inline');
+        // Positive, not `not.toBe('inline')`: 'withheld' also passes that,
+        // and it is the one surface where the nested Agent tool's description
+        // carries no delegation guidance at all.
+        expect(resolveAgentDelegationSurface(context)).toBe('pointer');
       });
 
       it('restores the session manager for a nested agent that can load skills', async () => {
@@ -4306,8 +4309,9 @@ bad`);
         // exempt from the eager allowlist) and still resolves a deferred
         // Skill tool, so the agent keeps a followable route and withholding
         // would strip a working capability (#10075's deferred-NOT-disabled
-        // contract). Dropping the CodeModeOnly gate from skillEagerHiddenFor
-        // turns this red while the CodeModeOnly cases stay green.
+        // contract). This launch inherits the registry, so prepareTools()
+        // declares both bridge halves: withholding every deferred agent
+        // regardless of its declarations turns this red.
         vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
           getToolRegistrationStatus: async (name: string) =>
             name === ToolNames.SKILL ? 'deferred' : 'registered',
@@ -4315,7 +4319,63 @@ bad`);
 
         const context = await launch({});
         expect(context.getSkillManager()).toBe(sessionManager);
-        expect(resolveAgentDelegationSurface(context)).not.toBe('inline');
+        expect(resolveAgentDelegationSurface(context)).toBe('pointer');
+      });
+
+      it('withholds the manager from a Direct-mode agent whose declarations name no bridge half', async () => {
+        // #12424 on the explicit-list arm: `settings.tools.eager` omits
+        // `skill`, so prepareTools() drops it from the declarations, and this
+        // list never named `tool_search`/`tool_call` either — the nested Agent
+        // tool would resolve `skill-via-tool-search` and tell the model to
+        // reach for two tools it was never declared. Naming `skill` buys
+        // nothing here, so the manager must go and the reference must inline.
+        vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+
+        const context = await launch({
+          tools: [ToolNames.READ_FILE, ToolNames.SKILL],
+        });
+        expect(context.getSkillManager()).toBeNull();
+        expect(resolveAgentDelegationSurface(context)).toBe('inline');
+      });
+
+      it('keeps the manager for a Direct-mode agent that declares both bridge halves', async () => {
+        // Control for the case above: the same session, but these
+        // declarations leave the bridge standing, so the deferred Skill tool
+        // stays reachable and the pointer is followable.
+        vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+
+        const context = await launch({
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        });
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(resolveAgentDelegationSurface(context)).toBe('pointer');
+      });
+
+      it('withholds the manager when a deny rule unregisters the Skill tool', async () => {
+        // The second negative verdict: `permissions.deny: ["skill"]` (or the
+        // SDK's excludeTools) answers 'disabled', and registerLazyTool
+        // registers nothing for it — the name exists in no registry, so not
+        // even an inheriting agent's bridge can surface it. Reading only
+        // 'deferred' from the probe keeps the manager here and leaves the
+        // listing lit for a tool that cannot be called.
+        vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'disabled' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+
+        const context = await launch({});
+        expect(context.getSkillManager()).toBeNull();
+        expect(resolveAgentDelegationSurface(context)).toBe('inline');
       });
 
       it('keeps withholding an eager-hidden Skill tool from a nested agent under CodeModeOnly', async () => {
@@ -4358,7 +4418,8 @@ bad`);
         // The pointer is followable through the visible listing, so the
         // manager must not be withheld even under CodeModeOnly
         // (tool-registry.ts `isDeferredAndHidden` semantics). Dropping the
-        // visibleTools conjunct from skillEagerHiddenFor turns this red.
+        // visibleTools conjunct from skillRegistrationStatusFor turns this
+        // red.
         const codeModeParent = makeFakeConfig({ codeModeOnly: true });
         vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
           sessionManager,
