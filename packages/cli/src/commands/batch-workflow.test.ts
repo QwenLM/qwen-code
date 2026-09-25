@@ -1059,6 +1059,36 @@ describe('usage and cost reporting', () => {
       /INCOMPLETE: 1 request\(s\) reported no usage/,
     );
   });
+
+  it('keeps the billed usage of a collected attempt whose local copy is gone', async () => {
+    const h = (harness = setup());
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    const billed = {
+      promptTokens: 200,
+      completionTokens: 100,
+      requests: 2,
+      missing: 0,
+    };
+    expect(h.store.load(taskId).attempts[0].usage).toEqual(billed);
+
+    // Disk cleanup, or a batch-home migration that copied task.json but not
+    // the attempt dirs. The remote files were deleted at the first collect,
+    // so this pass is neither offered nor able to read any result line —
+    // recomputing from nothing must not erase the only record of the bill.
+    fs.rmSync(path.join(h.store.attemptDir(taskId, 1), 'output.jsonl'));
+    h.out.length = 0;
+    const calls = h.api.getBatch.mock.calls.length;
+
+    await collectTask(h.deps, taskId);
+
+    expect(h.api.getBatch.mock.calls.length).toBe(calls);
+    expect(h.store.load(taskId).attempts[0].usage).toEqual(billed);
+    expect(h.out.join('\n')).toMatch(/Batch usage, all attempts/);
+  });
 });
 
 describe('cleanTask', () => {
@@ -1107,6 +1137,38 @@ describe('cleanTask', () => {
 
     await cleanTask(h.deps, taskId, { force: true });
     expect(fs.existsSync(h.store.fileOf(taskId))).toBe(false);
+  });
+
+  it('says a forced clean destroyed held results, as it says for an uncancelled batch', async () => {
+    const h = (harness = setup());
+    fs.mkdirSync(path.join(h.root, 'docs', 'en'), { recursive: true });
+    fs.writeFileSync(path.join(h.root, 'docs', 'en', 'b.md'), 'user edits');
+    await runAndSettle(h, {
+      output: `${outputLine('a#1', '# A\n\nAlpha.')}\n${outputLine('b#1', '# B\n\nBeta.')}\n`,
+    });
+    const taskId = taskIdOf(h);
+    await collectTask(h.deps, taskId);
+    expect(h.store.load(taskId).items[1].state).toBe('held');
+    // A retry leaves a second, uncollected attempt, so the refusal the user
+    // meets first is the open-batch one — and its own text ends "or pass
+    // --force". Re-running with --force then skips the held check entirely,
+    // which is how a paid generation is destroyed without ever being named.
+    const task = h.store.load(taskId);
+    task.attempts.push({
+      attempt: 2,
+      itemIds: [],
+      submitState: 'created',
+      batchId: 'batch-2',
+    });
+    h.store.save(task);
+
+    await expect(cleanTask(h.deps, taskId)).rejects.toThrow(/batch-2/);
+    await cleanTask(h.deps, taskId, { force: true });
+    expect(fs.existsSync(h.store.fileOf(taskId))).toBe(false);
+    const warned = h.err.join('\n');
+    expect(warned).toMatch(/batch-2 was not cancelled/);
+    expect(warned).toMatch(/1 undelivered result\(s\) \(b\)/);
+    expect(warned).toMatch(/only copy/);
   });
 });
 

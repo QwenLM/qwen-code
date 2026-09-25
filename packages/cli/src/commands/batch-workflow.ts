@@ -863,6 +863,8 @@ async function collectLocked(
       requests: 0,
       missing: 0,
     };
+    /** Whether this pass actually read a local result file. */
+    let parsedAFile = false;
     const reportMalformed = (message: string) =>
       deps.err(`[batch] attempt ${attempt.attempt}: skipping ${message}`);
     // The item a result line belongs to, if it is one of this attempt's.
@@ -873,6 +875,7 @@ async function collectLocked(
         : undefined;
     };
     if (attempt.outputPath && fs.existsSync(attempt.outputPath)) {
+      parsedAFile = true;
       for (const line of parseOutputJsonl(
         fs.readFileSync(attempt.outputPath, 'utf8'),
         reportMalformed,
@@ -946,6 +949,7 @@ async function collectLocked(
       }
     }
     if (attempt.errorPath && fs.existsSync(attempt.errorPath)) {
+      parsedAFile = true;
       for (const line of parseOutputJsonl(
         fs.readFileSync(attempt.errorPath, 'utf8'),
         reportMalformed,
@@ -993,7 +997,10 @@ async function collectLocked(
       }
     }
     if (job) attempt.finalStatus = job.status;
-    attempt.usage = usage;
+    // A pass that read no local result file recomputed nothing, so writing
+    // these empty totals back would erase the billed usage of an
+    // already-collected attempt whose local copy has since gone.
+    if (parsedAFile) attempt.usage = usage;
     refreshTaskStatus(task);
     store.save(task);
 
@@ -1342,6 +1349,17 @@ export async function cleanTask(
               ', ',
             )}); the remote copies are already deleted, so this record is their only one. ` +
             `Resolve the held targets and re-run \`qwen batch collect ${taskId}\`, or pass --force.`,
+        );
+      }
+      if (held.length > 0) {
+        // Forced, so say what the force cost: an uncancelled batch above gets
+        // a warning, and destroying a paid result silently is the worse of
+        // the two to leave unannounced.
+        deps.err(
+          `[batch] warning: ${held.length} undelivered result(s) (${held
+            .map((item) => item.id)
+            .join(', ')}) were the only copy; the remote files are already ` +
+            `deleted, so they are now lost.`,
         );
       }
       store.remove(taskId);
