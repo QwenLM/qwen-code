@@ -260,7 +260,7 @@ describe('main CI failure issue workflow', () => {
     );
     expect(plan).toContain('break 2');
     const verify = plan.indexOf(
-      'grep -qF "<!-- ${marker} -->" "${candidate_body}"',
+      'grep -qxF "<!-- ${marker} -->" "${candidate_body}"',
     );
     const emit = plan.indexOf('issue_number=${existing_issue}');
     expect(verify).toBeGreaterThanOrEqual(0);

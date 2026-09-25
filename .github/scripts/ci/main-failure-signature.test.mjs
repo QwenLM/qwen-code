@@ -349,9 +349,10 @@ The assertion depends on model output.
     '- `af7a9ec12722` · 2026-07-27T02:42:08Z · [run 302](https://github.com/QwenLM/qwen-code/actions/runs/302)',
     '- `af7a9ec12722` · 2026-07-27T02:42:08Z · [run 301](https://github.com/QwenLM/qwen-code/actions/runs/301)',
   ]);
-  // The kept prose sits above the refreshed block, so the trailer stays last.
+  // Notes written below the occurrence block stay below it; otherwise a quoted
+  // marker in the note could become machine state on the next merge.
   assert.ok(
-    merged.indexOf('## Investigation') < merged.indexOf(OCCURRENCE_MARKER),
+    merged.indexOf('## Investigation') > merged.indexOf(OCCURRENCE_MARKER),
   );
   // The heading is stripped from kept prose and re-emitted once with the
   // machine block — repeated merges must not accumulate duplicate headings.
@@ -1050,6 +1051,39 @@ test('a bridge-less stub only adopts a bridge for its recorded workflow', () => 
   assert.ok(secondForeign.includes('- Workflow: E2E Tests'));
 });
 
+test('a foreign per-commit merge records its failed lane without claiming the bridge', () => {
+  const owner = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const bridgeLessStub = renderIssueBody({
+    analysis: owner,
+    occurrence: OCCURRENCE,
+  }).replace(`<!-- ${workflowBridgeMarker('E2E Tests')} -->\n`, '');
+  const foreign = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [MACOS_JOB],
+  );
+  const merged = renderIssueBody({
+    analysis: foreign,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: bridgeLessStub,
+  });
+
+  assert.ok(merged.includes('- Workflow: E2E Tests'));
+  assert.ok(merged.includes('macos-latest'));
+  assert.ok(
+    merged.includes(
+      '## Previous failed jobs (Qwen Code CI, last reported for run 302)',
+    ),
+  );
+  assert.ok(
+    !merged.includes(`<!-- ${workflowBridgeMarker('Qwen Code CI')} -->`),
+  );
+});
+
 test('a legacy stub is parsed and migrated without losing its bridge', () => {
   const analysis = analyzeLogs(
     'E2E Tests',
@@ -1137,7 +1171,7 @@ test('a note between legacy identity bullets survives without refreshing the hea
   const analysis = analyzeLogs(
     'E2E Tests',
     ['npm error code ERESOLVE'],
-    [WINDOWS_JOB],
+    [MACOS_JOB],
   );
   const existing = [
     `<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`,
@@ -1167,6 +1201,12 @@ test('a note between legacy identity bullets survives without refreshing the hea
   });
 
   assert.ok(merged.includes('- Maintainer note: keep this identity context.'));
+  assert.ok(merged.includes('macos-latest'));
+  assert.ok(
+    merged.includes(
+      '## Previous failed jobs (E2E Tests, last reported for run 302)',
+    ),
+  );
   assert.ok(merged.includes('- Run ID: 301'));
   assert.ok(merged.includes('- Commit: af7a9ec12722ab34'));
   assert.ok(!merged.includes('- Run ID: 302'));
@@ -1175,7 +1215,10 @@ test('a note between legacy identity bullets survives without refreshing the hea
       '- Run: https://github.com/QwenLM/qwen-code/actions/runs/301',
     ),
   );
-  assert.ok(merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  // An identity block containing a human bullet is not well-formed machine
+  // state, so it records the run without promoting a bridge from it.
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.ok(merged.includes('macos-latest'));
   assert.ok(merged.includes('[run 301]'));
   assert.ok(merged.includes('[run 302]'));
 });
@@ -1400,6 +1443,63 @@ test('a per-test run adopting a per-commit stub rewrites the stub head', () => {
   // R1-1: the adopted issue is a per-test issue now — it must not stay
   // reachable by the bridge search.
   assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+});
+
+test('marker-shaped prose cannot block per-commit stub adoption', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: OCCURRENCE,
+  });
+  const quotedMarker = `<!-- ${TEST_MARKER_PREFIX}quoted-human-note -->`;
+  const poisoned = stub.replace(
+    'A main-branch CI run failed',
+    `A maintainer note quotes ${quotedMarker}.\n\nA main-branch CI run failed`,
+  );
+  const testRun = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const merged = renderIssueBody({
+    analysis: testRun,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: poisoned,
+  });
+
+  assert.ok(merged.includes('## Failing tests'));
+  assert.ok(merged.includes(quotedMarker));
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.ok(
+    merged.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`),
+  );
+});
+
+test('marker-shaped prose below recurrences cannot block per-commit stub adoption', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: OCCURRENCE,
+  });
+  const quotedMarker = `<!-- ${TEST_MARKER_PREFIX}quoted-tail -->`;
+  const withTail = `${stub}\n\nA maintainer note quotes ${quotedMarker}.`;
+  const testRun = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const merged = renderIssueBody({
+    analysis: testRun,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: withTail,
+  });
+
+  assert.ok(merged.includes('## Failing tests'));
+  assert.ok(merged.includes(quotedMarker));
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  assert.ok(
+    merged.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`),
+  );
 });
 
 test('a malformed stub is retained below the adopted per-test head', () => {

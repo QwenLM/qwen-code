@@ -435,15 +435,47 @@ const LEGACY_MARKER_LINE_RE = new RegExp(
 const WORKFLOW_MARKER_LINE_RE = new RegExp(
   `^<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->$`,
 );
+const MACHINE_MARKER_LINE_RE = /^<!-- \S+ -->$/;
+
+/**
+ * Return only the contiguous, whole-line marker block at the start of a
+ * rendered head. Human notes may quote marker-shaped text, but that prose is
+ * never machine state and must not change the body's classification.
+ */
+function topMachineMarkers(text) {
+  const markers = [];
+  for (const rawLine of String(text ?? '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (markers.length) break;
+      continue;
+    }
+    if (!MACHINE_MARKER_LINE_RE.test(line)) break;
+    markers.push(line.slice('<!-- '.length, -' -->'.length));
+  }
+  return markers;
+}
+
+function hasMarkerLine(text, marker) {
+  const expected = `<!-- ${marker} -->`;
+  return String(text ?? '')
+    .split('\n')
+    .some((line) => line.trim() === expected);
+}
+
+function hasTopMarker(text, prefix) {
+  return topMachineMarkers(text).some((marker) => marker.startsWith(prefix));
+}
 
 function stripPerCommitMachineLines(
   text,
   { removeLegacyMarkers = false } = {},
 ) {
-  const withoutFixedText = text
-    .replace(PER_COMMIT_INTRO, '')
-    .replace(PER_COMMIT_FOOTER, '');
-  return withoutFixedText
+  const fixedLines = new Set([
+    ...PER_COMMIT_INTRO.split('\n'),
+    ...PER_COMMIT_FOOTER.split('\n'),
+  ]);
+  return String(text ?? '')
     .split('\n')
     .filter((line) => {
       const trimmed = line.trim();
@@ -454,7 +486,10 @@ function stripPerCommitMachineLines(
       ) {
         return false;
       }
-      return !(removeLegacyMarkers && LEGACY_MARKER_LINE_RE.test(trimmed));
+      if (removeLegacyMarkers && LEGACY_MARKER_LINE_RE.test(trimmed)) {
+        return false;
+      }
+      return !fixedLines.has(trimmed);
     })
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -473,10 +508,10 @@ function preservedPerCommitProse(head, header) {
   return prose ? prose.split('\n') : [];
 }
 
-function appendPreviousFailedJobs(head, failedJobs, runId) {
+function appendPreviousFailedJobs(head, failedJobs, runId, workflow) {
   if (!failedJobs.length) return head;
   const section = [
-    `## Previous failed jobs (last reported for run ${runId})`,
+    `## Previous failed jobs (${workflow}, last reported for run ${runId})`,
     '',
     ...failedJobLines(failedJobs),
   ].join('\n');
@@ -613,19 +648,19 @@ export function renderIssueBody({
     });
     const ownsHeader =
       !existingHeader || existingHeader.workflow === analysis.workflow;
-    const refreshed = existingHeader
-      ? ownsHeader
+    const refreshed =
+      existingHeader?.wellFormed && ownsHeader
         ? replacePerCommitHeader(
             withoutHeading,
             headerBlock,
             existingHeader.remainder,
           )
-        : withoutHeading
-      : appendPreviousFailedJobs(
-          withoutHeading,
-          analysis.failedJobs,
-          occurrence.runId,
-        );
+        : appendPreviousFailedJobs(
+            withoutHeading,
+            analysis.failedJobs,
+            occurrence.runId,
+            analysis.workflow,
+          );
     // R1-8: the bridge funnels every unidentifiable failure of a workflow
     // onto one open issue, and every landing used to add one sha marker to
     // the head permanently — past GitHub's 65,536-character body limit,
@@ -647,27 +682,35 @@ export function renderIssueBody({
     ].slice(-MAX_OCCURRENCES);
     const prose = refreshed
       .split('\n')
-      .filter((line) => !markerLineRe.test(line.trim()))
+      .filter(
+        (line) =>
+          !markerLineRe.test(line.trim()) &&
+          !WORKFLOW_MARKER_LINE_RE.test(line.trim()),
+      )
       .join('\n')
       .replace(/^\n+/, '')
       .trimEnd();
+    const workflowMarkers = topMachineMarkers(head).filter((marker) =>
+      marker.startsWith(WORKFLOW_MARKER_PREFIX),
+    );
     // The bridge is written only by renderPerCommitBody (R1-1) and granted
     // on merge only to a stub-shaped body that carries no bridge yet — the
     // pre-marker stubs this rollout has to adopt. A per-test body never
     // gains one, and a body already bridged (its own or a foreign one) is
     // left with the bridge it has.
     const adoptsStubShape =
-      head.includes(`<!-- ${LEGACY_MARKER_PREFIX}`) &&
-      !head.includes(`<!-- ${TEST_MARKER_PREFIX}`);
-    const hasAnyBridge = new RegExp(
-      `<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`,
-    ).test(prose);
+      hasTopMarker(head, LEGACY_MARKER_PREFIX) &&
+      !hasTopMarker(head, TEST_MARKER_PREFIX);
+    const hasAnyBridge = hasTopMarker(head, WORKFLOW_MARKER_PREFIX);
     const headerCanBridge =
-      existingHeader?.workflow === analysis.workflow &&
+      existingHeader?.wellFormed &&
+      hasTopMarker(head, LEGACY_MARKER_PREFIX) &&
+      existingHeader.workflow === analysis.workflow &&
       Boolean(existingHeader?.runId && existingHeader?.sha);
     const canAdoptBridge = adoptsStubShape && !hasAnyBridge && headerCanBridge;
     const mergedHead = [
       ...shaMarkers.map((marker) => `<!-- ${marker} -->`),
+      ...workflowMarkers.map((marker) => `<!-- ${marker} -->`),
       ...(canAdoptBridge ? [`<!-- ${workflowMarker} -->`] : []),
       '',
       prose,
@@ -679,13 +722,13 @@ export function renderIssueBody({
     });
     return [
       mergedHead,
-      ...(tail ? ['', tail] : []),
       '',
       RECURRENCE_HEADING,
       '',
       OCCURRENCE_MARKER,
       ...nextLines,
       ...footer,
+      ...(tail ? ['', tail] : []),
     ].join('\n');
   }
 
@@ -724,15 +767,17 @@ export function renderIssueBody({
   // replaced with the standard per-test head and the stub's recorded run is
   // promoted to a bullet so the adoption loses no history.
   const adoptsStub =
-    head.includes(`<!-- ${LEGACY_MARKER_PREFIX}`) &&
-    !head.includes(`<!-- ${TEST_MARKER_PREFIX}`);
-  const stubHeader = adoptsStub ? extractPerCommitHeader(head) : null;
+    hasTopMarker(head, LEGACY_MARKER_PREFIX) &&
+    !hasTopMarker(head, TEST_MARKER_PREFIX);
+  const parsedStubHeader = adoptsStub ? extractPerCommitHeader(head) : null;
+  const stubHeader =
+    parsedStubHeader?.wellFormed && hasTopMarker(head, LEGACY_MARKER_PREFIX)
+      ? parsedStubHeader
+      : null;
   const legacyMarkers = adoptsStub
-    ? [
-        ...head.matchAll(
-          new RegExp(`<!-- (${LEGACY_MARKER_PREFIX}\\S+) -->`, 'g'),
-        ),
-      ].map((match) => match[1])
+    ? topMachineMarkers(head).filter((marker) =>
+        marker.startsWith(LEGACY_MARKER_PREFIX),
+      )
     : [];
   const headProse = adoptsStub
     ? stubHeader
@@ -764,7 +809,7 @@ export function renderIssueBody({
       ? stubHeaderBullet(stubHeader, lines, occurrence)
       : lines
     : lines;
-  const prose = tail ? `${headProse}\n\n${tail}` : headProse;
+  const prose = headProse;
 
   // The "## Also failing" list is rebuilt from the current failure set below,
   // so strip the previous one first: a test that has since been fixed must
@@ -776,10 +821,12 @@ export function renderIssueBody({
   // the bridge is deliberately absent — a per-test body never becomes
   // reachable by the bridge search.
   const missingMarkers = bodyMarkers.filter(
-    (marker) => !strippedProse.includes(marker),
+    (marker) => !hasMarkerLine(strippedProse, marker),
   );
   const missingTests = testLines.filter(
-    (line) => line.startsWith('- `') && !strippedProse.includes(line),
+    (line) =>
+      line.startsWith('- `') &&
+      !strippedProse.split('\n').some((candidate) => candidate === line),
   );
   const withMarkers = missingMarkers.length
     ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
@@ -802,6 +849,7 @@ export function renderIssueBody({
     OCCURRENCE_MARKER,
     ...nextLines,
     ...footer,
+    ...(tail ? ['', tail] : []),
     '',
   ].join('\n');
 }

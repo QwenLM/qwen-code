@@ -164,7 +164,7 @@ jobs:
                 rm -f "${candidate_list}"
                 exit 1
               fi
-              if grep -qF "<!-- ${marker} -->" "${candidate_body}"; then
+              if grep -qxF "<!-- ${marker} -->" "${candidate_body}"; then
                 existing_issue="${candidate}"
                 echo "Issue #${existing_issue} already tracks this failure (${marker})."
                 rm -f "${candidate_list}"
