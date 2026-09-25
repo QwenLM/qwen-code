@@ -127,31 +127,15 @@ async function subagentWillHaveSkillTool(
   config: Config,
   subagentConfig: SubagentConfig | undefined,
 ): Promise<boolean> {
-  const codeModeOnly = config.getToolMode?.() === ToolMode.CodeModeOnly;
-  if (
-    !subagentConfig ||
-    ((!subagentConfig.tools || subagentConfig.tools.length === 0) &&
-      (!subagentConfig.disallowedTools ||
-        subagentConfig.disallowedTools.length === 0))
-  ) {
-    return toolConfigAllowsSkill(undefined, { codeModeOnly });
-  }
   const manager = config.getSubagentManager();
+  const resolve = (names: string[] | undefined) =>
+    names?.length ? manager.resolveToolNames(names) : undefined;
   return toolConfigAllowsSkill(
     {
-      tools: subagentConfig.tools
-        ? await manager.resolveToolNames(subagentConfig.tools)
-        : ['*'],
-      ...(subagentConfig.disallowedTools &&
-      subagentConfig.disallowedTools.length > 0
-        ? {
-            disallowedTools: await manager.resolveToolNames(
-              subagentConfig.disallowedTools,
-            ),
-          }
-        : {}),
+      tools: (await resolve(subagentConfig?.tools)) ?? ['*'],
+      disallowedTools: await resolve(subagentConfig?.disallowedTools),
     },
-    { codeModeOnly },
+    { codeModeOnly: config.getToolMode?.() === ToolMode.CodeModeOnly },
   );
 }
 

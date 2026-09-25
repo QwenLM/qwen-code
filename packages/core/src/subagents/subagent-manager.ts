@@ -1193,13 +1193,15 @@ export class SubagentManager {
         modelConfig.reasoningEffort,
       );
 
+      const skillsAvailable = toolConfigAllowsSkill(toolConfig, {
+        codeModeOnly: runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+      });
       const { context: subagentContext, cleanup } =
-        await this.buildSubagentContextOverride(runtimeContext, config, {
-          skillsAvailable: toolConfigAllowsSkill(toolConfig, {
-            codeModeOnly:
-              runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
-          }),
-        });
+        await this.buildSubagentContextOverride(
+          runtimeContext,
+          config,
+          skillsAvailable,
+        );
       disposeSubagentRegistry = cleanup;
 
       // Register per-agent frontmatter hooks. The returned unregister callback
@@ -1279,12 +1281,13 @@ export class SubagentManager {
 
   /**
    * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin factory-derived wrapper: no
-   * method changes, but a distinct
-   * instance triggers the lazy own-property init in
+   * runtime context. The override is a thin factory-derived wrapper: a
+   * distinct instance triggers the lazy own-property init in
    * `Config.getFileReadCache()` so the subagent gets its own cache
    * rather than inheriting the parent's recorded reads — which would
    * silently weaken prior-read enforcement on its mutation paths.
+   * Individual getters (`getMcpServers`, `getSkillManager`) are replaced
+   * below where this agent's own policy differs from the session's.
    *
    * The tool registry is also rebuilt on the override so `EditTool` /
    * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
@@ -1302,15 +1305,8 @@ export class SubagentManager {
   private async buildSubagentContextOverride(
     runtimeContext: Config,
     config: SubagentConfig,
-    options: {
-      /**
-       * Whether this agent's resolved tool policy declares the Skill tool —
-       * {@link toolConfigAllowsSkill} on the ToolConfig the agent will run
-       * with. Decides whether its Config holds a SkillManager. Defaults to
-       * an unrestricted agent, which keeps the inherited manager.
-       */
-      skillsAvailable: boolean;
-    } = { skillsAvailable: true },
+    /** {@link toolConfigAllowsSkill} on the ToolConfig this agent runs with. */
+    skillsAvailable: boolean,
   ): Promise<{
     context: Config;
     /**
@@ -1388,7 +1384,7 @@ export class SubagentManager {
     // one its Config would inherit, so an unrestricted agent — the common case
     // — gets exactly the Config it got before.
     const sessionManager = sessionSkillManager(runtimeContext);
-    const agentManager = options.skillsAvailable ? sessionManager : null;
+    const agentManager = skillsAvailable ? sessionManager : null;
     const reanchorSkillManager =
       agentManager !== runtimeContext.getSkillManager();
     if (reanchorSkillManager) {
