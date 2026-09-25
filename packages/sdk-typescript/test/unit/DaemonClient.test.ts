@@ -2044,6 +2044,11 @@ describe('DaemonClient', () => {
         base: 'main',
       });
       await ws.workspaceGitHubDefaultBranch();
+      await ws.workspaceGitWorktrees();
+      await ws.workspaceGitWorktreeStatus('/work/secondary/.qwen/wt');
+      await ws.workspaceGitRemoveWorktree('/work/secondary/.qwen/wt', {
+        force: true,
+      });
 
       const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
       expect(calls.map((c) => [c.method, c.url])).toEqual([
@@ -2055,7 +2060,19 @@ describe('DaemonClient', () => {
         ['POST', `${base}/git/commit`],
         ['POST', `${base}/github/prs/create`],
         ['GET', `${base}/github/default-branch`],
+        ['GET', `${base}/git/worktrees`],
+        [
+          'GET',
+          `${base}/git/worktrees/status?path=%2Fwork%2Fsecondary%2F.qwen%2Fwt`,
+        ],
+        ['POST', `${base}/git/worktrees/remove`],
       ]);
+      // The destructive one carries the path it was asked for and the force
+      // flag the second click adds.
+      expect(JSON.parse(calls[10]!.body!)).toEqual({
+        path: '/work/secondary/.qwen/wt',
+        force: true,
+      });
       expect(JSON.parse(calls[1]!.body!)).toEqual({ ref: 'feat/thing' });
       expect(JSON.parse(calls[2]!.body!)).toEqual({
         name: 'feat/new',
@@ -10254,6 +10271,40 @@ describe('DaemonClient', () => {
         url: 'http://daemon/workspaces/workspace%2Fid/session/session%2F1/transcript?cursor=cur+1&limit=500',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('reads complete turn calls through encoded workspace REST without pagination', async () => {
+      const body = {
+        v: 1,
+        sessionId: 'session/1',
+        turnId: 'record 1',
+        events: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn(async () => {
+        throw new Error('must use REST');
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: {
+          type: 'acp-http',
+          supportsReplay: true,
+          connected: true,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        },
+      });
+      await expect(
+        client
+          .workspaceById('workspace/id')
+          .getSessionToolCalls('session/1', 'record 1'),
+      ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/workspace%2Fid/session/session%2F1/tool-calls?turnId=record+1',
+      );
     });
 
     it('workspace turn-index paging forces direct REST transport', async () => {

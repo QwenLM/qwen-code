@@ -2362,8 +2362,8 @@ export class BridgeClient implements Client {
         'Invalid Live speak-to-user request.',
       );
     }
-    await handler({ callerSessionId, message });
-    return { accepted: true };
+    const delivered = await handler({ callerSessionId, message });
+    return { accepted: delivered !== false };
   }
 
   /**

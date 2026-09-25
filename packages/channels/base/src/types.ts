@@ -66,6 +66,10 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  /** Exact message prefixes mapped to first-turn session instructions. */
+  messageRoutes?: Record<string, string>;
+  /** Configured route used for messages without a matching prefix. */
+  defaultMessageRoute?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
@@ -110,6 +114,10 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** Selected by the channel's route matcher, never by the remote sender. */
+  messageRoute?: string;
+  /** Internal provider events that are not user-authored messages. */
+  bypassMessageRoutes?: true;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
@@ -165,6 +173,7 @@ export interface Envelope {
 
 export interface SessionTarget {
   channelName: string;
+  messageRoute?: string;
   senderId: string;
   chatId: string;
   threadId?: string;
