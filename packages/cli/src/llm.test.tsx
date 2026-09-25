@@ -230,6 +230,16 @@ vi.mock('./utils/relaunch.js', () => ({
   relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
 
+vi.mock('./utils/processUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/processUtils.js')>()),
+  superviseInProcess: vi.fn(),
+}));
+
+vi.mock('./config/environment.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/environment.js')>()),
+  hasLoadedEnvironmentValues: vi.fn(() => false),
+}));
+
 vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
 }));
@@ -1279,22 +1289,25 @@ describe('llm.tsx main function', () => {
   // standalone installs in-process or prints manual instructions and never
   // emits a relaunch exit code, so it keeps the execve optimization like any
   // other one-shot prompt.
-  describe('replaceProcess predicate', () => {
+  describe('relaunch routing', () => {
+    // 'in-process': no relaunch at all; otherwise the replaceProcess flag
+    // passed to the supervised relaunch.
     const rows: Array<{
       label: string;
       argv: Partial<CliArgs>;
       dualOutputInputFile?: string;
-      expected: boolean;
+      envFileValues?: boolean;
+      expected: 'in-process' | boolean;
     }> = [
       {
         label: 'plain one-shot prompt',
         argv: { prompt: 'summarize this repository' },
-        expected: true,
+        expected: 'in-process',
       },
       {
         label: 'headless slash-command prompt',
         argv: { prompt: '/update' },
-        expected: true,
+        expected: 'in-process',
       },
       {
         label: 'acp mode',
@@ -1304,7 +1317,7 @@ describe('llm.tsx main function', () => {
       {
         label: 'interactive prompt (-i)',
         argv: { prompt: 'hi', promptInteractive: 'follow-up' },
-        expected: false,
+        expected: 'in-process',
       },
       {
         label: 'file input',
@@ -1328,18 +1341,31 @@ describe('llm.tsx main function', () => {
         expected: false,
       },
       {
-        // The term that keeps an interactive TUI launch off execve: with no
-        // prompt the supervisor must survive so in-session relaunch exit
-        // codes still have a consumer.
+        // In-session restarts re-exec this process in place instead of
+        // going through a supervising parent.
         label: 'plain interactive launch (no prompt)',
         argv: {},
+        expected: 'in-process',
+      },
+      {
+        // Modules loaded before .env / settings.env were applied read the old
+        // environment; only a fresh image sees those values.
+        label: 'plain one-shot prompt with env-file values',
+        argv: { prompt: 'hi' },
+        envFileValues: true,
+        expected: true,
+      },
+      {
+        label: 'plain interactive launch with env-file values',
+        argv: {},
+        envFileValues: true,
         expected: false,
       },
     ];
 
     it.each(rows)(
-      'passes replaceProcess=$expected to relaunchAppInChildProcess for $label',
-      async ({ argv, dualOutputInputFile, expected }) => {
+      'routes $label to $expected',
+      async ({ argv, dualOutputInputFile, envFileValues, expected }) => {
         const originalIsTTY = Object.getOwnPropertyDescriptor(
           process.stdin,
           'isTTY',
@@ -1355,6 +1381,13 @@ describe('llm.tsx main function', () => {
         const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
         const { relaunchAppInChildProcess } = await import(
           './utils/relaunch.js'
+        );
+        const { superviseInProcess } = await import('./utils/processUtils.js');
+        const { hasLoadedEnvironmentValues } = await import(
+          './config/environment.js'
+        );
+        vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(
+          envFileValues ?? false,
         );
         vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
         vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
@@ -1376,19 +1409,22 @@ describe('llm.tsx main function', () => {
           getProjectHooks: () => undefined,
         } as never);
 
-        let replaceProcess: boolean | undefined;
+        let route: 'in-process' | boolean | undefined;
         vi.mocked(relaunchAppInChildProcess).mockImplementation(
           async (_memoryArgs, _extraArgs, options) => {
-            replaceProcess = options?.replaceProcess;
-            throw new Error('stop after replaceProcess check');
+            route = options?.replaceProcess;
+            throw new Error('stop after routing check');
           },
         );
+        vi.mocked(superviseInProcess).mockImplementation(() => {
+          route = 'in-process';
+          throw new Error('stop after routing check');
+        });
 
         try {
-          await expect(main()).rejects.toThrow(
-            'stop after replaceProcess check',
-          );
+          await expect(main()).rejects.toThrow('stop after routing check');
         } finally {
+          vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(false);
           vi.unstubAllEnvs();
           if (originalIsTTY) {
             Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
@@ -1397,7 +1433,7 @@ describe('llm.tsx main function', () => {
           }
         }
 
-        expect(replaceProcess).toBe(expected);
+        expect(route).toBe(expected);
       },
     );
   });
@@ -1457,6 +1493,11 @@ describe('llm.tsx main function', () => {
         getProjectHooks: () => undefined,
       } as never);
       vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+        throw new Error('stop after theme baseline');
+      });
+      // A plain one-shot run supervises itself in-process instead.
+      const { superviseInProcess } = await import('./utils/processUtils.js');
+      vi.mocked(superviseInProcess).mockImplementation(() => {
         throw new Error('stop after theme baseline');
       });
 

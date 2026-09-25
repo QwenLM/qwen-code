@@ -13,6 +13,8 @@ import {
   registerManagedRuntimeAttestationRoute,
   type ManagedRuntimeAttestationIdentity,
 } from './managed-runtime-attestation-contract.js';
+import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -120,6 +122,11 @@ export async function startManagedRuntimeAttestationWorker(
   const app = express();
   app.disable('x-powered-by');
   registerManagedRuntimeAttestationRoute(app, boot);
+  const executor = ManagedToolExecutor.forWorkspace(
+    boot.workspaceCwd,
+    boot.runtimeInstanceId,
+  );
+  registerManagedRuntimeToolRoutes(app, boot, executor);
   const server = createServer(ownedManagedRuntimeRouteGate(app));
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
@@ -159,10 +166,13 @@ export async function startManagedRuntimeAttestationWorker(
   return {
     ready,
     close: () => {
-      closing ??= new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-        server.closeAllConnections();
-      });
+      closing ??= executor.close().then(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()));
+            server.closeAllConnections();
+          }),
+      );
       return closing;
     },
   };

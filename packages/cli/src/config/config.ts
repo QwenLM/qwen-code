@@ -102,9 +102,9 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
-import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -898,16 +898,22 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     .command(boardCommand)
-    // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
     .command(sandboxCommand);
+
+  // /review skill helpers (presubmit checks, cleanup). The module pulls in
+  // every review subcommand, so it is only loaded when it can match.
+  if (rawArgv.includes('review')) {
+    const { reviewCommand } = await import('../commands/review.js');
+    yargsInstance.command(reviewCommand);
+  }
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -940,16 +946,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -2294,6 +2304,10 @@ export async function loadCliConfig(
         writeStderrLine(message);
         process.exit(1);
       }
+    }
+
+    if (sessionId) {
+      sessionService.assertLegacySessionExecution(sessionId);
     }
 
     if (argv.forkSession && sessionId) {
