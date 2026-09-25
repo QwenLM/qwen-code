@@ -103,7 +103,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 /**
  * Create a mock child process that emits stdout data and close event.
  */
-function createMockChild(stdoutData: string, exitCode: number = 0) {
+function createMockChild(
+  stdoutData: string,
+  exitCode: number = 0,
+  stderrData: string = '',
+) {
   const stdout = new EventEmitter() as EventEmitter & {
     pipe: (dest: EventEmitter) => EventEmitter;
   };
@@ -114,17 +118,26 @@ function createMockChild(stdoutData: string, exitCode: number = 0) {
     });
     return dest;
   };
+  // The production code pipes fd 2 as well, so every mock child has to expose
+  // a stderr stream. Without it the handler attachment throws inside the
+  // promise executor and the assertions would pass for the wrong reason.
+  const stderr = new EventEmitter();
   const child = new EventEmitter() as EventEmitter & {
     stdout: typeof stdout;
+    stderr: typeof stderr;
     kill: ReturnType<typeof vi.fn>;
     killed: boolean;
   };
   child.stdout = stdout;
+  child.stderr = stderr;
   child.kill = vi.fn();
   child.killed = false;
 
   process.nextTick(() => {
     stdout.emit('data', Buffer.from(stdoutData));
+    if (stderrData) {
+      stderr.emit('data', Buffer.from(stderrData));
+    }
     child.emit('close', exitCode);
   });
 
@@ -139,12 +152,15 @@ function createSpawnErrorChild() {
     pipe: (dest: EventEmitter) => EventEmitter;
   };
   stdout.pipe = (dest: EventEmitter) => dest;
+  const stderr = new EventEmitter();
   const child = new EventEmitter() as EventEmitter & {
     stdout: typeof stdout;
+    stderr: typeof stderr;
     kill: ReturnType<typeof vi.fn>;
     killed: boolean;
   };
   child.stdout = stdout;
+  child.stderr = stderr;
   child.kill = vi.fn();
   child.killed = false;
 
@@ -163,12 +179,15 @@ function createHangingChild() {
     pipe: (dest: EventEmitter) => EventEmitter;
   };
   stdout.pipe = (dest: EventEmitter) => dest;
+  const stderr = new EventEmitter();
   const child = new EventEmitter() as EventEmitter & {
     stdout: typeof stdout;
+    stderr: typeof stderr;
     kill: ReturnType<typeof vi.fn>;
     killed: boolean;
   };
   child.stdout = stdout;
+  child.stderr = stderr;
   child.kill = vi.fn();
   child.killed = false;
 
@@ -406,10 +425,14 @@ describe('clipboardUtils', () => {
   // getLinuxClipboardTool() only probes `command -v`; it never touches the
   // display server, so the probe can pass while the actual clipboard query
   // fails (dead/stale X server, compositor socket gone). Those failures must
-  // notify — only a successful query that finds no image may stay quiet.
+  // notify. Staying quiet is reserved for two benign answers: a successful
+  // query that finds no image, and an empty clipboard (which also exits
+  // non-zero, but is the tool answering correctly).
 
   describe('clipboardHasImage Linux query failures', () => {
     it('notifies when wl-paste --list-types exits non-zero', async () => {
+      // No stderr to classify the exit, so it stays a query failure: the
+      // default for an unexplained non-zero exit is to notify.
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
       mockSpawn.mockReturnValue(createMockChild('', 1));
 
@@ -449,8 +472,9 @@ describe('clipboardUtils', () => {
 
     it('notifies when xclip exits non-zero on X11', async () => {
       // The issue's regression case: X11 session with DISPLAY set and xclip
-      // installed, but the X server is stale/dead — the probe passes while
-      // `xclip -selection clipboard -t TARGETS -o` exits non-zero.
+      // installed, but the query exits non-zero without saying the clipboard
+      // is empty, so it cannot be classified as benign. The dead-X-server
+      // wording itself is pinned further down in this block.
       setupX11Env();
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
       mockSpawn.mockReturnValue(createMockChild('', 1));
@@ -507,6 +531,86 @@ describe('clipboardUtils', () => {
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).not.toHaveBeenCalled();
     });
+
+    // ─── An empty clipboard exits non-zero too, and must stay quiet ───
+    // Linux clipboard tools use one and the same exit code for "the display
+    // server is dead" and for "nothing is on the clipboard", so the exit code
+    // alone cannot separate them — only stderr can. Verified against upstream
+    // sources: xclip xcprint.c `errconvsel()` prints "xclip: Error: There is
+    // no owner for the <selection> selection" then `exit(EXIT_FAILURE)` when
+    // `XGetSelectionOwner()` is None; wl-paste's `bail()` macro
+    // (src/util/misc.h) is `fprintf(stderr, ...) + exit(1)` and is called with
+    // "Nothing is copied" (wl-clipboard >= 2) or "No selection" (1.x) when
+    // there is no offer. Pressing the image-paste binding with an empty
+    // clipboard is routine, so it must not claim the native module is broken.
+
+    it('stays quiet when wl-paste exits non-zero because nothing is copied', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('', 1, 'Nothing is copied\n'));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+      // fd 2 has to be piped for that distinction to be possible at all.
+      expect(mockSpawn).toHaveBeenCalledWith('wl-paste', ['--list-types'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    });
+
+    it('stays quiet when wl-paste 1.x exits non-zero with "No selection"', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('', 1, 'No selection\n'));
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet when xclip exits non-zero because nothing owns the selection', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(
+        createMockChild(
+          '',
+          1,
+          'xclip: Error: There is no owner for the CLIPBOARD selection\n',
+        ),
+      );
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('still notifies when wl-paste cannot reach the Wayland server', async () => {
+      // Real failure, same exit code 1: the compositor socket is gone.
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(
+        createMockChild(
+          '',
+          1,
+          'Failed to connect to a Wayland server: No such file or directory\n',
+        ),
+      );
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('still notifies when xclip cannot open the display', async () => {
+      // Real failure, same exit code as an empty clipboard: xcprint.c
+      // `errxdisplay()` prints this and exits EXIT_FAILURE.
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockReturnValue(
+        createMockChild('', 1, "xclip: Error: Can't open display: :0\n"),
+      );
+
+      const onUnavailable = vi.fn();
+      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
   });
 
   // ─── xclip / X11 path tests ───────────────────────────────────
@@ -524,11 +628,13 @@ describe('clipboardUtils', () => {
 
         const result = await clipboardHasImage();
         expect(result).toBe(true);
-        // Verify xclip was called with correct TARGETS args
+        // Verify xclip was called with correct TARGETS args. fd 2 is piped so
+        // a non-zero exit can be diagnosed and an empty clipboard told apart
+        // from a real failure.
         expect(mockSpawn).toHaveBeenCalledWith(
           'xclip',
           ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
-          { stdio: ['ignore', 'pipe', 'ignore'] },
+          { stdio: ['ignore', 'pipe', 'pipe'] },
         );
       });
 
