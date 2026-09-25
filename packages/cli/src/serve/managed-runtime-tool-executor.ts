@@ -46,10 +46,13 @@ export class ManagedToolConflictError extends Error {
   readonly code = 'managed_runtime_identity_conflict';
 }
 
+export class ManagedToolInvalidError extends Error {}
+
 interface JournalEntry {
   readonly reference: ManagedToolReference;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
+  readonly inputJson: string;
   state: ManagedToolExecutionState;
   lastSequence: number;
   result?: ManagedToolResultPayload;
@@ -106,9 +109,17 @@ export class ManagedToolExecutor {
     toolName: string,
     input: Record<string, unknown>,
   ): Promise<ManagedToolResultPayload> {
+    let inputJson: string;
+    try {
+      inputJson = JSON.stringify(input);
+    } catch {
+      throw new ManagedToolInvalidError(
+        'Managed Runtime tool request is invalid.',
+      );
+    }
     const existing = this.entries.get(reference.callId);
     if (existing) {
-      if (!sameInvocation(existing, reference, toolName, input)) {
+      if (!sameInvocation(existing, reference, toolName, inputJson)) {
         throw new ManagedToolConflictError(
           'Managed Runtime invocation identity conflicts.',
         );
@@ -122,15 +133,28 @@ export class ManagedToolExecutor {
         `Managed Runtime does not admit tool ${toolName}.`,
       );
     }
-    if (toolName === ShellTool.Name && input['is_background'] === true) {
-      throw new ManagedToolConflictError(
-        'Managed Runtime does not admit background shell execution.',
-      );
+    if (toolName === ShellTool.Name) {
+      let isBackground = false;
+      try {
+        const params = structuredClone(input);
+        // Admission must see the same normalized parameters as build().
+        isBackground =
+          tool.validateToolParams(params) === null &&
+          params['is_background'] === true;
+      } catch {
+        // Let run() journal parameter failures through its normal error path.
+      }
+      if (isBackground) {
+        throw new ManagedToolConflictError(
+          'Managed Runtime does not admit background shell execution.',
+        );
+      }
     }
     const entry: JournalEntry = {
       reference,
       toolName,
       input,
+      inputJson,
       state: 'prepared',
       lastSequence: 0,
       controller: new AbortController(),
@@ -254,12 +278,12 @@ function sameInvocation(
   entry: JournalEntry,
   reference: ManagedToolReference,
   toolName: string,
-  input: Record<string, unknown>,
+  inputJson: string,
 ): boolean {
   return (
     sameReference(entry.reference, reference) &&
     entry.toolName === toolName &&
-    JSON.stringify(entry.input) === JSON.stringify(input)
+    entry.inputJson === inputJson
   );
 }
 

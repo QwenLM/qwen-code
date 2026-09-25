@@ -2,8 +2,8 @@
 
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
-Status: contract and worker handlers implemented; the Java tool transport
-remains a follow-up
+Status: contract, worker handlers, and Java tool transport implemented;
+Broker transport wiring remains follow-up work
 
 Related: #12380 (Managed Agent staged delivery), the attestation contract in
 [2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md),
@@ -29,10 +29,11 @@ design already demands:
 In scope: route manifest declarations, the shared schema and conformance
 fixtures, and the worker handlers with their raw HTTP gate admission.
 TypeScript contract tests and the Java fixture consumer share the contract;
-the worker tests exercise the mounted handlers.
+the worker tests exercise the mounted handlers. The Java `HttpRuntimeTransport`
+implements `execute`, `status`, and `cancel` against this contract.
 
-Out of scope: the Java `HttpRuntimeTransport` implementation of
-`execute`/`status`/`cancel`, Harness-side tool wiring, and a
+Out of scope: wiring `HttpRuntimeTransport` into `RuntimeTransport`,
+Harness-side tool wiring, and a
 `not_started_proven` outcome, which needs the durable receipt store.
 
 ## 3. Design
@@ -69,6 +70,11 @@ Every request is a closed object:
 The reference is the original call identity the harness assigned; the Runtime
 never learns any Broker-side identifier.
 
+Tool input must also be encodable by the Runtime's JSON encoder for identity
+comparison. Unencodable input, including excessive nesting within the byte
+limit, is rejected with 400 before creating a journal entry. The journal keeps
+the encoded input so retries compare strings without re-encoding stored data.
+
 ### 3.3 Responses
 
 Every success is a closed object carrying `protocolVersion` and a `state` of
@@ -83,7 +89,7 @@ Every success is a closed object carrying `protocolVersion` and a `state` of
   cursor. The current Broker lookup does not consume it.
 
 This slice fixes `responseParts` as an array only. Its element shape is
-deliberately deferred to the worker extraction and transport slice, which must
+deliberately deferred to the worker handler and Broker wiring slices, which must
 derive it from the actual tool-result path (`ToolCallResponseInfo.responseParts`
 uses SDK `Part[]`) and add shared conformance coverage before serving results.
 The text parts in these fixtures are illustrative, not a new part format.
@@ -125,14 +131,43 @@ Run `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/s
 fixtures, schema mutations, exact gate admission, and real tool execution.
 The Java suite consumes the same contract files.
 
+### 4.1 Java transport
+
+`HttpRuntimeTransport` validates the caller's reference keys before sending.
+For `execute`, the caller map contains the four identity fields plus
+`toolName` and `input`; the wire request separates those two fields from
+`reference`. `status` and `cancel` send only the four identity fields and may
+reuse that caller map. The `session` parameter remains for the future service
+adapter; it is not sent or substituted for the original call identity.
+
+This caller map is a transport request, not a new persisted identity format.
+The Broker's stored reference remains the four-field identity. Before wiring
+physical dispatch, the service adapter must obtain `toolName` and `input`
+separately and assemble the transport request without adding the payload to
+`reference_json` or changing execution idempotency.
+
+Requests exceeding the route's cap are rejected before sending: 256 KiB for
+`execute`, 16 KiB for `status` and `cancel`. Responses are bounded at 1 MiB and
+must carry `no-store` and JSON headers. Parsing enforces closed envelope,
+result, and error objects; protocol version 2; contract states and execution
+statuses; non-empty error strings; and a result exactly when settled.
+`lastSequence` is an optional non-negative integer on `status` only.
+`execute` requires settlement and returns the result map. `status` and
+`cancel` return the validated wire map. Shared error codes remain unchanged;
+messages identify the operation and applicable limit. Server failures are
+retryable; other HTTP failures are terminal.
+
+Run `mvn test` and `mvn checkstyle:check` in
+`packages/sdk-java/runtime-broker`. HTTP fixture replays verify the canonical
+requests, success and unknown answers, malformed references and responses,
+route-specific request limits, and tool results above 16 KiB through 1 MiB.
+The worker handlers described below serve these routes.
+
 ## 5. Follow-up work
 
-- Replace the unused pre-contract `HttpRuntimeTransport.execute` stub and
-  implement the three operations as a `RuntimeTransport`. The stub sends a
-  session envelope, discards results, and caps responses at 16 KiB; it is not
-  connected to Broker dispatch. The follow-up must supply `toolName`/`input`,
-  use the reference-only identity envelope and the per-route limits here,
-  and adapt execute's settled envelope to the Broker's result shape.
+- Complete the session verbs and wire `HttpRuntimeTransport` into
+  `RuntimeTransport`. Supply `toolName`/`input` separately from the stored
+  reference as described in §4.1, and cover real Broker dispatch end to end.
 - The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
   validate the status wire envelope, then project it to `{state, result}`
   (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;
@@ -162,8 +197,11 @@ Semantics mounted on the contract:
   in-flight invocation or returns its settled result; the same `callId` with
   a different digest or payload is a 409 identity conflict. An unadmitted
   tool name is a 409 as well — it can never be valid for this generation.
-  `run_shell_command` with `is_background: true` is rejected before creating
-  a journal entry or starting a process; omitted or false remains foreground.
+  `run_shell_command` whose validated input normalizes to `is_background: true`
+  is rejected before creating a journal entry or starting a process. This
+  includes case-insensitive string `"true"`; omitted, false, or string `"false"`
+  remains foreground. After protocol admission, parameter validation or copying
+  failures settle as errors without execution.
   Tools receive a copy of the input so parameter normalization cannot change
   the original payload used to identify retries.
 - `status` is read-only and answers `unknown` (200) for a reference the
@@ -192,8 +230,9 @@ behavioral cases execute a real `read_file` in a temporary workspace, answer
 `unknown` for unseen references, join a concurrent duplicate execute, reject
 a same-callId different-digest retry with 409, refuse an unadmitted tool, and
 cancel an in-flight foreground shell command. Additional regression cases
-reject background shell calls without recording them and admit both omitted
-and explicit false `is_background` values.
+reject background shell calls without recording them, including normalized
+string booleans; admit omitted and boolean/string false `is_background`
+values; and settle invalid values without starting a command.
 
 Still follow-up: harness-side `RuntimeBackedTool` wiring, file-history
 settlement, capability-digest verification against the admitted tool set,

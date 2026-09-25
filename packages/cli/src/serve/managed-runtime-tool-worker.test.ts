@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import {
   startManagedRuntimeAttestationWorker,
   type ManagedRuntimeAttestationWorkerHandle,
@@ -307,6 +308,44 @@ describe('Managed Runtime tool worker', () => {
     });
   });
 
+  it.each(['read_file', 'run_shell_command'])(
+    'rejects %s input too deeply nested for identity comparison',
+    async (toolName) => {
+      const origin = await start();
+      const { reference } = executeBody({});
+      const nested = `${'['.repeat(10_000)}0${']'.repeat(10_000)}`;
+      const body = `{"protocolVersion":2,"reference":${JSON.stringify(reference)},"toolName":${JSON.stringify(toolName)},"input":{"extra":${nested}}}`;
+      expect(Buffer.byteLength(body)).toBeLessThan(256 * 1024);
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await fetch(
+          `${origin}/internal/managed-runtime/v2/execute`,
+          { method: 'POST', headers: HEADERS, body },
+        );
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          code: 'managed_runtime_attestation_invalid',
+          error: 'Managed Runtime tool request is invalid.',
+        });
+      }
+      for (const operation of ['status', 'cancel']) {
+        const response = await fetch(
+          `${origin}/internal/managed-runtime/v2/${operation}`,
+          {
+            method: 'POST',
+            headers: HEADERS,
+            body: JSON.stringify({ protocolVersion: 2, reference }),
+          },
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          protocolVersion: 2,
+          state: 'unknown',
+        });
+      }
+    },
+  );
+
   it('journals a bounded error when JSON encoding exceeds the result limit', async () => {
     const origin = await start();
     const filePath = path.join(workspace, 'large.svg');
@@ -447,6 +486,7 @@ describe('Managed Runtime tool worker', () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({
       code: 'managed_runtime_identity_conflict',
+      error: 'Managed Runtime invocation identity conflicts.',
     });
   });
 
@@ -466,46 +506,56 @@ describe('Managed Runtime tool worker', () => {
     expect(response.status).toBe(409);
   });
 
-  it('rejects background shell execution without recording an invocation', async () => {
-    const origin = await start();
-    const body = {
-      ...executeBody({ command: 'echo background', is_background: true }),
-      toolName: 'run_shell_command',
-    };
-    const response = await fetch(
-      `${origin}/internal/managed-runtime/v2/execute`,
-      {
-        method: 'POST',
-        headers: HEADERS,
-        body: JSON.stringify(body),
-      },
-    );
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      code: 'managed_runtime_identity_conflict',
-    });
-
-    for (const operation of ['status', 'cancel']) {
-      const lookup = await fetch(
-        `${origin}/internal/managed-runtime/v2/${operation}`,
+  it.each([true, 'true', 'TRUE', 'TrUe'])(
+    'rejects background shell execution with is_background=%j without recording an invocation',
+    async (isBackground) => {
+      const origin = await start();
+      const body = {
+        ...executeBody({
+          command: 'echo background > rejected-background.txt',
+          is_background: isBackground,
+        }),
+        toolName: 'run_shell_command',
+      };
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
         {
           method: 'POST',
           headers: HEADERS,
-          body: JSON.stringify({
-            protocolVersion: 2,
-            reference: body.reference,
-          }),
+          body: JSON.stringify(body),
         },
       );
-      expect(lookup.status).toBe(200);
-      expect(await lookup.json()).toEqual({
-        protocolVersion: 2,
-        state: 'unknown',
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: 'managed_runtime_identity_conflict',
+        error: 'Managed Runtime does not admit background shell execution.',
       });
-    }
-  });
+      expect(
+        fs.existsSync(path.join(workspace, 'rejected-background.txt')),
+      ).toBe(false);
 
-  it.each([false, undefined])(
+      for (const operation of ['status', 'cancel']) {
+        const lookup = await fetch(
+          `${origin}/internal/managed-runtime/v2/${operation}`,
+          {
+            method: 'POST',
+            headers: HEADERS,
+            body: JSON.stringify({
+              protocolVersion: 2,
+              reference: body.reference,
+            }),
+          },
+        );
+        expect(lookup.status).toBe(200);
+        expect(await lookup.json()).toEqual({
+          protocolVersion: 2,
+          state: 'unknown',
+        });
+      }
+    },
+  );
+
+  it.each([false, undefined, 'false', 'FALSE', 'FaLsE'])(
     'executes foreground shell commands with is_background=%s',
     async (isBackground) => {
       const origin = await start();
@@ -530,6 +580,94 @@ describe('Managed Runtime tool worker', () => {
       });
     },
   );
+
+  it.each([1, 'yes', null, {}, [true]])(
+    'settles invalid is_background=%j without starting a command',
+    async (isBackground) => {
+      const origin = await start();
+      const body = {
+        ...executeBody({
+          command: 'echo started > invalid-background.txt',
+          is_background: isBackground,
+        }),
+        toolName: 'run_shell_command',
+      };
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify(body),
+        },
+      );
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'error' },
+      });
+      expect(
+        fs.existsSync(path.join(workspace, 'invalid-background.txt')),
+      ).toBe(false);
+
+      const replay = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify(body),
+        },
+      );
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(settled);
+    },
+  );
+
+  it('journals parameter validation exceptions without executing a command', async () => {
+    const origin = await start();
+    const validation = vi
+      .spyOn(ShellTool.prototype, 'validateToolParams')
+      .mockImplementation(() => {
+        throw new Error('Invalid shell parameters');
+      });
+    try {
+      const body = {
+        ...executeBody({ command: 'echo started > validation-started.txt' }),
+        toolName: 'run_shell_command',
+      };
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        { method: 'POST', headers: HEADERS, body: JSON.stringify(body) },
+      );
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: 'error',
+          error: { message: 'Invalid shell parameters' },
+        },
+      });
+      const status = await fetch(
+        `${origin}/internal/managed-runtime/v2/status`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            protocolVersion: 2,
+            reference: body.reference,
+          }),
+        },
+      );
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject(settled);
+      expect(
+        fs.existsSync(path.join(workspace, 'validation-started.txt')),
+      ).toBe(false);
+    } finally {
+      validation.mockRestore();
+    }
+  });
 
   it('cancels an in-flight shell execution', async () => {
     const origin = await start();

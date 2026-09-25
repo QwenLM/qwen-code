@@ -1568,7 +1568,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
-      onSessionsDeleted?: (sessionIds: string[]) => void;
+      onSessionsDeleted?: (
+        sessionIds: string[],
+        meta?: { attachedSessionId?: string },
+      ) => void;
       onOpenAddWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
@@ -1719,6 +1722,23 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onSessionsDeleted?.(['session-1']),
           },
           'delete session',
+        ),
+        // Stands in for a sidebar row delete whose confirmation happened while
+        // the client was still attached: the real sidebar reports the id it
+        // captured at confirm time, because the daemon's terminal
+        // `session_closed` frame clears the attachment before the delete
+        // response resolves (#12619).
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'delete-session-after-close',
+            type: 'button',
+            onClick: () =>
+              props.onSessionsDeleted?.(['session-1'], {
+                attachedSessionId: 'session-1',
+              }),
+          },
+          'delete session after close',
         ),
         React.createElement(
           'button',
@@ -31311,6 +31331,88 @@ describe('App session callbacks', () => {
         sessionId: 'session-1',
         workspaceCwd: '/tmp/project',
       });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
+  it('lands in the no-workspace area after deleting the current standalone session', async () => {
+    // #12619: an attached standalone session carries no connection cwd, so
+    // the sidebar/picker delete call sites substitute the primary workspace
+    // cwd for the missing one. The post-delete landing must stay in the
+    // no-workspace area instead of following that fallback into the primary
+    // workspace.
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="delete-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    expect(
+      testState.latestChatEditorProps?.selectedWorkspaceCwd,
+    ).toBeUndefined();
+    expect(onSessionIdChange).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      { kind: 'standalone' },
+    );
+  });
+
+  it('still leaves the deleted conversation when session_closed clears the attachment first', async () => {
+    // Real-stack ordering from the maintainer verification of #12619: the
+    // daemon publishes the terminal `session_closed` frame shortly before it
+    // answers POST /sessions/delete, so `connection.sessionId` is already
+    // undefined when the sidebar reports the removal. Reading the attachment
+    // at that point makes the call site return early, and the page keeps
+    // showing the deleted transcript with no way to send another prompt.
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    // The terminal frame lands before the delete response resolves.
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+
+    // The sidebar reports the removal with the id it captured at confirm time.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="delete-session-after-close"]',
+        )!
+        .click();
+      await Promise.resolve();
     });
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();

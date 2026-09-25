@@ -15,6 +15,7 @@ import {
 } from './managed-runtime-attestation-contract.js';
 import {
   ManagedToolConflictError,
+  ManagedToolInvalidError,
   type ManagedToolExecutor,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
@@ -142,10 +143,14 @@ export function registerManagedRuntimeToolRoutes(
         );
         res.status(200).json({ protocolVersion: 2, state: 'settled', result });
       } catch (error) {
+        if (error instanceof ManagedToolInvalidError) {
+          invalid(res);
+          return;
+        }
         if (error instanceof ManagedToolConflictError) {
           res.status(409).json({
             code: 'managed_runtime_identity_conflict',
-            error: 'Managed Runtime invocation identity conflicts.',
+            error: error.message,
           });
           return;
         }
