@@ -9,6 +9,7 @@ import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
+  exitCleanly,
   getRelaunchExecArgv,
   relaunchApp,
   relaunchForUpdate,
@@ -137,6 +138,39 @@ describe('processUtils', () => {
       await relaunchForUpdate();
       expect(runExitCleanup).toHaveBeenCalledTimes(1);
       expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
+      expect(processExit).toHaveBeenCalledWith(44);
+    });
+
+    it('exits without updating when no update was requested', async () => {
+      await exitCleanly(0);
+      expect(onUpdateRelaunch).not.toHaveBeenCalled();
+      expect(processExit).toHaveBeenCalledWith(0);
+    });
+
+    it('keeps a requested update for a clean exit only', async () => {
+      expect(requestUpdateOnExit()).toBe(true);
+      await exitCleanly(130);
+      expect(onUpdateRelaunch).not.toHaveBeenCalled();
+      expect(processExit).toHaveBeenCalledWith(130);
+    });
+
+    it('installs the kept update once, after the first clean exit', async () => {
+      let finishInstall!: (code: number) => void;
+      onUpdateRelaunch.mockImplementationOnce(
+        () =>
+          new Promise<number>((resolve) => {
+            finishInstall = resolve;
+          }),
+      );
+      const firstExit = exitCleanly(0);
+      void exitCleanly(0);
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
+      expect(processExit).not.toHaveBeenCalled();
+
+      finishInstall(44);
+      await firstExit;
+      expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
+      expect(processExit).toHaveBeenCalledTimes(1);
       expect(processExit).toHaveBeenCalledWith(44);
     });
   });

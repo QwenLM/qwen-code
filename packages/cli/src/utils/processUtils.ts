@@ -29,6 +29,8 @@ type UpdateRelaunchHandler = (
 
 let inProcessUpdateRelaunch: UpdateRelaunchHandler | undefined;
 let supervisedInProcess = false;
+let updateOnExitRequested = false;
+let updatingOnExit = false;
 
 /**
  * Marks this process as running without a supervising parent: restarts
@@ -72,6 +74,26 @@ export async function relaunchApp(): Promise<void> {
   process.exit(RELAUNCH_EXIT_CODE);
 }
 
+/**
+ * Exits a session that ended on its own, after its exit cleanup has run. A
+ * process that supervises itself first installs an update requested for exit,
+ * as a supervising parent does after a clean child exit.
+ */
+export async function exitCleanly(code: number): Promise<never> {
+  // A second quit (e.g. another Ctrl+C) must not cut the install short.
+  if (updatingOnExit) return new Promise<never>(() => {});
+  if (code === 0 && updateOnExitRequested && inProcessUpdateRelaunch) {
+    updateOnExitRequested = false;
+    updatingOnExit = true;
+    try {
+      code = await inProcessUpdateRelaunch(false);
+    } catch {
+      code = 1;
+    }
+  }
+  process.exit(code);
+}
+
 export async function relaunchForUpdate(): Promise<void> {
   await runExitCleanup();
   if (inProcessUpdateRelaunch) {
@@ -81,6 +103,10 @@ export async function relaunchForUpdate(): Promise<void> {
 }
 
 export function requestUpdateOnExit(): boolean {
+  if (inProcessUpdateRelaunch) {
+    updateOnExitRequested = true;
+    return true;
+  }
   if (!process.send) return false;
   try {
     process.send({ type: UPDATE_ON_EXIT_MESSAGE });
