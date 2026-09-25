@@ -8,9 +8,9 @@ import { test } from "node:test";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const canonicalRoot = path.resolve(packageRoot, "../../core/src/skills/bundled/computer-use");
-const resources = ["SKILL.md", "references/macos.md", "references/windows-linux.md"];
+const resources = ["SKILL.md"];
 
-test("SDK skill resources match canonical content and npm includes every reference", () => {
+test("SDK skill is self-contained and npm excludes obsolete platform workflows", () => {
   for (const resource of resources) {
     assert.equal(
       readFileSync(path.join(packageRoot, "computer-use", resource), "utf8"),
@@ -28,9 +28,10 @@ test("SDK skill resources match canonical content and npm includes every referen
   for (const resource of resources) {
     assert.ok(files.has(`computer-use/${resource}`), resource);
   }
+  assert.ok(![...files].some(file => /^computer-use\/references\//.test(file)));
 });
 
-test("staging copies both resources, refreshes them and fails before copying when one is absent", () => {
+test("staging refreshes the entrypoint, removes old workflows and fails before copying missing input", () => {
   const root = mkdtempSync(path.join(tmpdir(), "cua-skill-stage-"));
   try {
     const sdk = path.join(root, "packages/cua-driver/typescript");
@@ -47,12 +48,15 @@ test("staging copies both resources, refreshes them and fails before copying whe
     for (const resource of resources) {
       assert.equal(readFileSync(path.join(sdk, "computer-use", resource), "utf8"), resource);
     }
-    const destination = path.join(sdk, "computer-use/references/macos.md");
+    const destination = path.join(sdk, "computer-use/SKILL.md");
+    mkdirSync(path.join(sdk, "computer-use/references"), { recursive: true });
+    const legacy = path.join(sdk, "computer-use/references/macos.md");
+    writeFileSync(legacy, "obsolete");
     writeFileSync(destination, "stale");
     assert.equal(stage().status, 0);
-    assert.equal(readFileSync(destination, "utf8"), "references/macos.md");
-    rmSync(path.join(canonical, "references/windows-linux.md"));
-    writeFileSync(path.join(canonical, "SKILL.md"), "not copied");
+    assert.equal(readFileSync(destination, "utf8"), "SKILL.md");
+    assert.equal(existsSync(legacy), false);
+    rmSync(path.join(canonical, "SKILL.md"));
     const failed = stage();
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /canonical Computer Use skill resource not found/);

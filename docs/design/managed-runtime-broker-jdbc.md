@@ -41,7 +41,7 @@ Scope identity is represented by a deterministic hash and is always checked toge
 
 ## Transaction and concurrency semantics
 
-Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks.
+Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks. The JDBC adapter converts the database clock to Unix epoch time in the query, preventing the connection's session time zone from shifting lease instants, and normalizes it to whole seconds so lease values round-trip consistently through MySQL-compatible drivers that discard fractional seconds.
 
 Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state.
 
@@ -53,7 +53,7 @@ Schema initialization executes idempotent `CREATE TABLE IF NOT EXISTS` statement
 
 ## Recovery boundary
 
-A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation, transport health checks, and authoritative execution reconciliation remain responsibilities of the later runtime integration.
+A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation and transport health checks remain responsibilities of the later runtime integration. On-demand execution reconciliation asks the original Runtime and settles through `resolveUnknown` only on its terminal evidence; see the UNKNOWN reconciliation section of `managed-runtime-broker-service-core.md`.
 
 ## Security and tenancy
 
@@ -75,7 +75,7 @@ The repository contract covers:
 - settled result reconstruction through a new repository instance; and
 - repeatable schema initialization.
 
-The default test suite runs the contract on H2 in MySQL compatibility mode. The optional `mysql-integration` Maven profile runs the same contract against a caller-supplied MySQL database.
+The default test suite runs the contract on H2 in MySQL compatibility mode. CI also runs the `mysql-integration` Maven profile against MariaDB through MySQL Connector/J so session-time-zone handling and persisted lease round trips are exercised on a real MySQL-compatible protocol. The same profile can be run locally against a caller-supplied MySQL database.
 
 ## Acceptance criteria
 
@@ -90,8 +90,8 @@ The default test suite runs the contract on H2 in MySQL compatibility mode. The 
 - A live dispatch lease rejects another owner, while an expired executing claim becomes `UNKNOWN` instead of being replayed.
 - Cancellation intent and settled Tool results survive repository reconstruction.
 - Schema initialization is safe to repeat.
-- The H2 contract and the optional real-MySQL contract pass without process-local fallback.
+- The H2 contract and the CI real-MySQL-compatible contract pass without process-local fallback.
 
 ## Follow-up work
 
-Server wiring, process reconciliation, authoritative `UNKNOWN` resolution, schema migration deployment, and multi-process end-to-end validation remain follow-up work.
+Server wiring, process reconciliation, takeover scans of `UNKNOWN` executions, schema migration deployment, and multi-process end-to-end validation remain follow-up work.

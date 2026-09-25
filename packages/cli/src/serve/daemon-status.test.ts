@@ -1722,6 +1722,73 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('warns once per workspace about channels its serve.channels did not restore', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () => [
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'feishu',
+          message: 'gateway did not answer',
+        },
+        {
+          workspaceCwd: '/ws/b',
+          channel: 'ghost',
+          message: 'not configured',
+        },
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'dingtalk',
+          message: 'rolled back',
+        },
+      ],
+    });
+
+    expect(
+      response.issues.filter(
+        (issue) => issue.code === 'channel_restore_failed',
+      ),
+    ).toEqual([
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/a were not restored: ' +
+          'feishu (gateway did not answer); dingtalk (rolled back).',
+      },
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/b were not restored: ghost (not configured).',
+      },
+    ]);
+    expect(response.status).toBe('warning');
+  });
+
+  it('bounds the restore warning by entry count and channel-name length', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () =>
+        Array.from({ length: 70 }, (_, index) => ({
+          workspaceCwd: '/ws/a',
+          channel: `${'c'.repeat(200)}-${index}`,
+          message: 'down',
+        })),
+    });
+
+    const [issue, ...rest] = response.issues.filter(
+      (item) => item.code === 'channel_restore_failed',
+    );
+    expect(rest).toEqual([]);
+    // 64 entries shown, each name capped at 128, and the remainder counted
+    // rather than silently dropped.
+    expect(issue!.message.split('; ')).toHaveLength(65);
+    expect(issue!.message).toContain(`${'c'.repeat(128)} (down)`);
+    expect(issue!.message).not.toContain('c'.repeat(129));
+    expect(issue!.message).toMatch(/; and 6 more\.$/u);
+  });
+
   it('rolls up statuses inside tools, hooks, and extensions', async () => {
     const response = await buildDaemonStatusResponse(
       'full',
