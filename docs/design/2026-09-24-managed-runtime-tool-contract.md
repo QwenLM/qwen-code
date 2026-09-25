@@ -46,9 +46,14 @@ All three operations are declared in `OWNED_MANAGED_RUNTIME_ROUTES` with the
 attestation discipline: `POST` on an exact path, protocol version 2, closed
 JSON bodies, `no-store` on both directions, bearer authentication before
 parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
-request so a tool call's `input` fits; every operation answers at most 1 MiB.
+request so a tool call's `input` fits; `status` and `cancel` accept up to 16 KiB.
+Every operation answers at most 1 MiB.
 Larger tool outputs travel through the artifact delivery track, never through
 these envelopes.
+
+The fixture header objects are closed to the five protocol headers. This
+constrains fixture declarations, not ordinary HTTP headers added by clients
+or intermediaries. Negative cases use explicit omission/replacement directives.
 
 The declaration list is not the raw gate allowlist. Until the real tool
 handlers are mounted, `ownedManagedRuntimeRouteGate` admits only the exact
@@ -75,14 +80,24 @@ Every success is a closed object carrying `protocolVersion` and a `state` of
 
 - `unknown` means the Runtime holds no record of that reference. It is a 200,
   and it is not evidence of non-execution.
-- `result` is present only when the state is `settled`; it carries
+- `result` is required when the state is `settled` and forbidden otherwise; it carries
   `executionStatus` (`not_started`, `success`, `error`, or `cancelled`),
   `responseParts`, and an optional `error` with `message` and optional `type`.
-- `status` additionally carries `lastSequence`, the Runtime's own progress
-  cursor, so a caller reconciling after a gap can advance without replaying.
+- `status` may additionally carry `lastSequence`, the Runtime's own progress
+  cursor. The current Broker lookup does not consume it.
+
+This slice fixes `responseParts` as an array only. Its element shape is
+deliberately deferred to the worker extraction and transport slice, which must
+derive it from the actual tool-result path (`ToolCallResponseInfo.responseParts`
+uses SDK `Part[]`) and add shared conformance coverage before serving results.
+The text parts in these fixtures are illustrative, not a new part format.
+A settled `not_started` is the Runtime's explicit terminal answer; a missing
+record must still return `unknown` and never imply `not_started`.
 
 Failures keep the shared classification: 401 credentials, 400/413 protocol,
-409 identity, 404 incompatible, each with a stable `code`.
+409 identity, 404 incompatible. JSON errors retain the shared stable codes;
+the gate's incompatible 404 has an empty body. The attestation-named codes do
+not imply a 16 KiB tool limit: future error messages must use the route's cap.
 
 ### 3.4 Conformance fixtures
 
@@ -95,8 +110,11 @@ sets.
 
 The shared schema enforces each route's exact request fields, for both the
 canonical request and any per-case body override. It also requires every `ok`
-case to carry a response body, forbids `result` unless the state is `settled`,
-and permits `lastSequence` only on `status`. TypeScript mutation tests remove
+case to carry a response body, requires `result` exactly when the state is
+`settled`, and permits `lastSequence` only on `status`. Each route has exactly
+one suite, with fixed envelope limits and error-code vocabulary. Cases cover
+all five states and all four execution statuses, including the closed error
+object and a status request without a cursor. TypeScript mutation tests remove
 required fields or add route-invalid fields to prove these constraints are
 load-bearing, and pin the declared manifest to the fixture routes. The raw HTTP
 test separately proves that the gate rejects all three declared tool routes
@@ -115,7 +133,15 @@ tool routes. The Java suite consumes the same contract files.
 
 - Mount the real worker handlers for the three routes and expand raw-gate
   admission in the same change (execute extraction).
-- Implement `execute`, `status`, and `cancel` in `HttpRuntimeTransport`.
-- The `UNKNOWN` execution reconciler consumes `status` (tracked on #12380).
+- Replace the unused pre-contract `HttpRuntimeTransport.execute` stub and
+  implement the three operations as a `RuntimeTransport`. The stub sends a
+  session envelope, discards results, and caps responses at 16 KiB; it is not
+  connected to Broker dispatch. The follow-up must supply `toolName`/`input`,
+  use the reference-only identity envelope and the per-route limits here,
+  and adapt execute's settled envelope to the Broker's result shape.
+- The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
+  validate the status wire envelope, then project it to `{state, result}`
+  (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;
+  the Broker rejects extra fields and has no cursor consumer yet.
 - Whether a cancel of an execution the Runtime reports as still running sends
   the physical cancel is deliberately deferred.

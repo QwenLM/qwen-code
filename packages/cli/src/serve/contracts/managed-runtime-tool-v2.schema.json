@@ -18,7 +18,48 @@
       "type": "array",
       "minItems": 3,
       "maxItems": 3,
-      "items": { "$ref": "#/$defs/suite" }
+      "items": { "$ref": "#/$defs/suite" },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "route": {
+                "const": "execute"
+              }
+            },
+            "required": ["route"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "route": {
+                "const": "status"
+              }
+            },
+            "required": ["route"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "route": {
+                "const": "cancel"
+              }
+            },
+            "required": ["route"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
     }
   },
   "$defs": {
@@ -42,10 +83,36 @@
           "pattern": "^/internal/managed-runtime/v2/(execute|status|cancel)$"
         },
         "protocolVersion": { "const": 2 },
-        "requestBodyLimitBytes": { "type": "integer", "minimum": 1024 },
-        "responseBodyLimitBytes": { "type": "integer", "minimum": 1024 },
+        "requestBodyLimitBytes": { "type": "integer" },
+        "responseBodyLimitBytes": { "const": 1048576 },
         "cacheControl": { "const": "no-store" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "key": {
+                "const": "execute"
+              }
+            },
+            "required": ["key"]
+          },
+          "then": {
+            "properties": {
+              "requestBodyLimitBytes": {
+                "const": 262144
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "requestBodyLimitBytes": {
+                "const": 16384
+              }
+            }
+          }
+        }
+      ]
     },
     "identity": {
       "type": "object",
@@ -149,13 +216,18 @@
               "properties": { "result": true },
               "required": ["result"]
             }
+          },
+          "else": {
+            "type": "object",
+            "properties": { "result": true },
+            "required": ["result"]
           }
         }
       ]
     },
     "headers": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": [
         "authorization",
         "cache-control",
@@ -184,7 +256,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "headers": { "type": "object" },
+            "headers": { "$ref": "#/$defs/headers" },
             "body": { "type": "object" },
             "omitHeader": { "type": "string" },
             "replaceHeader": {
@@ -227,7 +299,14 @@
                 "incompatible"
               ]
             },
-            "code": { "type": "string", "minLength": 1 },
+            "code": {
+              "enum": [
+                "managed_runtime_attestation_invalid",
+                "managed_runtime_attestation_too_large",
+                "managed_runtime_identity_conflict",
+                "managed_runtime_unauthorized"
+              ]
+            },
             "body": { "$ref": "#/$defs/toolResponseBody" }
           },
           "allOf": [

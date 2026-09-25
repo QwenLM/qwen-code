@@ -98,6 +98,10 @@ class ManagedRuntimeAttestationConformanceTest {
             assertEquals("/internal/managed-runtime/v2/" + key,
                     route.required("path").textValue());
             assertEquals(2, route.required("protocolVersion").intValue());
+            assertEquals("execute".equals(key) ? 256 * 1024 : 16 * 1024,
+                    route.required("requestBodyLimitBytes").intValue());
+            assertEquals(1024 * 1024,
+                    route.required("responseBodyLimitBytes").intValue());
             assertEquals("no-store",
                     route.required("cacheControl").textValue());
         }
@@ -112,7 +116,11 @@ class ManagedRuntimeAttestationConformanceTest {
         JsonNode suites = read(TOOL_FIXTURES).required("suites");
         assertEquals(3, suites.size());
         Set<String> classifications = new HashSet<>();
+        Set<String> routes = new HashSet<>();
+        Set<String> states = new HashSet<>();
+        Set<String> executionStatuses = new HashSet<>();
         for (JsonNode suite : suites) {
+            assertTrue(routes.add(suite.required("route").textValue()));
             Set<String> ids = new HashSet<>();
             for (JsonNode fixture : suite.required("cases")) {
                 String id = fixture.required("id").textValue();
@@ -123,8 +131,23 @@ class ManagedRuntimeAttestationConformanceTest {
                         .required("classification").textValue();
                 assertEquals(classify(status), classification, id);
                 classifications.add(classification);
+                JsonNode body = fixture.required("expected").get("body");
+                if (body != null) {
+                    String state = body.required("state").textValue();
+                    states.add(state);
+                    assertEquals("settled".equals(state), body.has("result"), id);
+                    if (body.has("result")) {
+                        executionStatuses.add(body.required("result")
+                                .required("executionStatus").textValue());
+                    }
+                }
             }
         }
+        assertEquals(Set.of("execute", "status", "cancel"), routes);
+        assertEquals(Set.of("prepared", "executing", "cancel_requested",
+                "settled", "unknown"), states);
+        assertEquals(Set.of("not_started", "success", "error", "cancelled"),
+                executionStatuses);
         assertEquals(Set.of("ok", "credentials", "protocol", "identity",
                 "incompatible"), classifications);
     }
@@ -165,6 +188,17 @@ class ManagedRuntimeAttestationConformanceTest {
                 .required("result");
         assertEquals(Set.of("executionStatus", "responseParts"),
                 fieldNames(result));
+        JsonNode errorResult = findSuiteCase(suites, "status", "settled-with-error")
+                .required("expected").required("body").required("result");
+        assertEquals(Set.of("executionStatus", "responseParts", "error"),
+                fieldNames(errorResult));
+        assertEquals("error", errorResult.required("executionStatus").textValue());
+        assertEquals(Set.of("message", "type"),
+                fieldNames(errorResult.required("error")));
+        JsonNode withoutCursor = findSuiteCase(suites, "status", "without-cursor")
+                .required("request").required("body");
+        assertEquals(Set.of("protocolVersion", "reference"),
+                fieldNames(withoutCursor));
 
         JsonNode definitions = read(TOOL_SCHEMA).required("$defs");
         for (String name : new String[] {"executeRequestBody",

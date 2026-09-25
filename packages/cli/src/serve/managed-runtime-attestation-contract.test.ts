@@ -110,13 +110,25 @@ interface ToolFixtureSuite {
 }
 
 interface MutableToolFixtureSuite {
+  routes: Array<{
+    requestBodyLimitBytes: number;
+    responseBodyLimitBytes: number;
+  }>;
   suites: Array<{
     route: 'execute' | 'status' | 'cancel';
-    canonicalRequest: { body: Record<string, unknown> };
+    canonicalRequest: {
+      headers: Record<string, string>;
+      body: Record<string, unknown>;
+    };
     cases: Array<{
-      request?: { body?: Record<string, unknown> };
+      id: string;
+      request?: {
+        headers?: Record<string, string>;
+        body?: Record<string, unknown>;
+      };
       expected: {
         classification: string;
+        code?: string;
         body?: Record<string, unknown>;
       };
     }>;
@@ -397,6 +409,52 @@ describe('Managed Runtime tool contract', () => {
 
   it.each([
     [
+      'a route suite is duplicated',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[2] = structuredClone(clone.suites[0]);
+      },
+    ],
+    [
+      'an error code is misspelled',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[1].expected.code = 'managed_runtime_unauthorised';
+      },
+    ],
+    [
+      'canonical headers contain an undeclared header',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].canonicalRequest.headers['x-trace-id'] = 'trace-01';
+      },
+    ],
+    [
+      'case headers contain an undeclared header',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].request = {
+          headers: {
+            ...clone.suites[0].canonicalRequest.headers,
+            'x-trace-id': 'trace-01',
+          },
+        };
+      },
+    ],
+    [
+      'case headers have an invalid authorization value',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].request = {
+          headers: {
+            ...clone.suites[0].canonicalRequest.headers,
+            authorization: 'fixture-token',
+          },
+        };
+      },
+    ],
+    [
+      'status forbids a negative afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[1].canonicalRequest.body['afterSequence'] = -1;
+      },
+    ],
+    [
       'execute requires toolName',
       (clone: MutableToolFixtureSuite) => {
         delete clone.suites[0].canonicalRequest.body['toolName'];
@@ -471,6 +529,57 @@ describe('Managed Runtime tool contract', () => {
       toolFixtures,
     ) as unknown as MutableToolFixtureSuite;
     mutate(invalidFixtures);
+
+    expect(validate(invalidFixtures)).toBe(false);
+  });
+
+  it.each([0, 1, 2])('pins envelope limits for route %i', (routeIndex) => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    for (const field of [
+      'requestBodyLimitBytes',
+      'responseBodyLimitBytes',
+    ] as const) {
+      const invalidFixtures = structuredClone(
+        toolFixtures,
+      ) as unknown as MutableToolFixtureSuite;
+      invalidFixtures.routes[routeIndex][field]++;
+
+      expect(validate(invalidFixtures)).toBe(false);
+    }
+  });
+
+  it('requires results for every settled response', () => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    for (const [suiteIndex, suite] of toolFixtures.suites.entries()) {
+      for (const [caseIndex, fixture] of suite.cases.entries()) {
+        if (fixture.expected.body?.['state'] !== 'settled') continue;
+        const invalidFixtures = structuredClone(
+          toolFixtures,
+        ) as unknown as MutableToolFixtureSuite;
+        delete invalidFixtures.suites[suiteIndex].cases[caseIndex].expected
+          .body!['result'];
+
+        expect(validate(invalidFixtures), `${suite.route}/${fixture.id}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it.each([
+    ['missing message', { type: 'runtime' }],
+    ['unexpected field', { message: 'tool failed', errorCode: 'runtime' }],
+    ['string error', 'tool failed'],
+  ])('rejects a malformed result error: %s', (_label, error) => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    const invalidFixtures = structuredClone(
+      toolFixtures,
+    ) as unknown as MutableToolFixtureSuite;
+    const fixture = invalidFixtures.suites[1].cases.find(
+      (entry) => entry.id === 'settled-with-error',
+    )!;
+    const result = fixture.expected.body!['result'] as Record<string, unknown>;
+    result['error'] = error;
 
     expect(validate(invalidFixtures)).toBe(false);
   });

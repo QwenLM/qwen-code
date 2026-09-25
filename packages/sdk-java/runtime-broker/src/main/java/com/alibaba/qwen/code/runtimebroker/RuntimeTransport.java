@@ -43,6 +43,10 @@ public interface RuntimeTransport {
      * transport should not complete it on an I/O thread. The default fails
      * closed, so a transport without the lookup can never settle an
      * execution.
+     *
+     * <p>An HTTP adapter must validate the wire envelope and project it to
+     * this shape, stripping {@code protocolVersion} and {@code lastSequence}.
+     * The Broker does not consume the Runtime's response cursor yet.
      */
     default CompletionStage<Map<String, Object>> status(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
