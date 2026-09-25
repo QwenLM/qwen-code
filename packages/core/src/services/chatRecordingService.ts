@@ -1336,6 +1336,15 @@ export class ChatRecordingService {
     }
     if (this.executionEngineWrite) return this.executionEngineWrite.completion;
     if (this.currentExecutionEngine === engine) return;
+    if (!this.managedSink && !fs.existsSync(this.transcriptFilePath())) {
+      // A fresh Session writes its engine record just ahead of its first
+      // record (see createBaseRecord). Writing it now would persist a Session
+      // that never records anything: listed after it closes or dies, and
+      // holding its id.
+      this.currentExecutionEngine = engine;
+      this.pendingExecutionEngine = engine;
+      return;
+    }
     const completion = this.appendRecordStrict({
       ...this.createBaseRecord('system'),
       subtype: 'session_execution_engine',
@@ -1353,6 +1362,7 @@ export class ChatRecordingService {
   private createBaseRecord(
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
+    this.writePendingExecutionEngine();
     const cwd = this.config.getProjectRoot();
     const background = backgroundTurnContext.getStore();
     const backgroundTurn =
@@ -1380,6 +1390,22 @@ export class ChatRecordingService {
       version: this.config.getCliVersion() || 'unknown',
       gitBranch: this.getCachedGitBranch(cwd),
     };
+  }
+
+  /**
+   * Appends the deferred engine record first, so it stays the root of the
+   * chain the new record extends, exactly where an eager write would have put
+   * it.
+   */
+  private writePendingExecutionEngine(): void {
+    const engine = this.pendingExecutionEngine;
+    if (engine === undefined) return;
+    this.pendingExecutionEngine = undefined;
+    this.appendRecord({
+      ...this.createBaseRecord('system'),
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine },
+    });
   }
 
   private getCachedGitBranch(cwd: string): string | undefined {
@@ -1462,6 +1488,12 @@ export class ChatRecordingService {
    */
   private managedSink?: ManagedSessionRecordWriter;
   private managedCommitProof?: SessionWriterCommitProof;
+  private managedLogDiscarded = false;
+  /**
+   * The engine a fresh legacy Session records together with its first record,
+   * so a Session that never records anything leaves no transcript behind.
+   */
+  private pendingExecutionEngine?: SessionExecutionEngine;
 
   /** Binds the controlled sink; a Managed session must be bound before writing. */
   bindManagedSink(sink: ManagedSessionRecordWriter): void {
@@ -1802,9 +1834,17 @@ export class ChatRecordingService {
   close(options?: {
     handoff?: boolean;
     managedCommitProof?: SessionWriterCommitProof;
+    /**
+     * The caller already removed a Managed log that held no Session content,
+     * so there is nothing left for a seal to protect and the lock is released.
+     */
+    discardManagedLog?: boolean;
   }): Promise<void> {
     if (options?.handoff) {
       this.handoffRequested = true;
+    }
+    if (options?.discardManagedLog) {
+      this.managedLogDiscarded = true;
     }
     if (options?.managedCommitProof) {
       this.managedCommitProof = options.managedCommitProof;
@@ -1837,6 +1877,10 @@ export class ChatRecordingService {
     }
   }
 
+  private transcriptFilePath(): string {
+    return path.join(this.ensureChatsDir(), `${this.getSessionId()}.jsonl`);
+  }
+
   private async closeOnce(): Promise<void> {
     let flushFailure: unknown;
     try {
@@ -1860,7 +1904,10 @@ export class ChatRecordingService {
       // at-rest barrier at all: a legacy writer could then acquire it and
       // append, and the authority would refuse to reopen the log afterwards.
       // A Managed seal also pins the authority's commit proof into the lock.
-      if (this.handoffRequested || this.managedSink) {
+      if (
+        (this.handoffRequested || this.managedSink) &&
+        !this.managedLogDiscarded
+      ) {
         await lease?.sealForHandoff(this.managedCommitProof);
       } else {
         await lease?.release();

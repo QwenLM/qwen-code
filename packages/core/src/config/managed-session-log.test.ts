@@ -2283,6 +2283,28 @@ describe('managed session log activation', () => {
     });
   });
 
+  it('discards a managed session nothing was said in when it is closed explicitly', async () => {
+    await withWorkspace(async (activate) => {
+      const first = await activate({ managedSessionLog: true });
+      await first.config.closeSessionWriter({ discardEmptyManagedLog: true });
+
+      // Like a legacy session that never wrote a record: nothing is left to
+      // list, and the id can be used again.
+      await expect(stat(first.transcriptPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(
+        stat(getSessionWriterLockPath(first.runtimeBaseDir, sessionId)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        stat(managedSessionResourceRoot(first.runtimeBaseDir, sessionId)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        first.config.getSessionService().loadSession(sessionId),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   it('loads a managed session that nothing has been said in yet', async () => {
     await withWorkspace(async (activate) => {
       const first = await activate({ managedSessionLog: true });

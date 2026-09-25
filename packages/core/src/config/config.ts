@@ -365,6 +365,7 @@ import {
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
+  managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
 import type {
   ManagedSessionJournalStore,
@@ -411,6 +412,7 @@ import { isSafeModeEnv } from '../utils/safe-mode.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+const managedSessionLogger = createDebugLogger('MANAGED_SESSION');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
@@ -2768,6 +2770,7 @@ export class Config {
   private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
   private sessionWriterHandoffRequested = false;
+  private sessionWriterDiscardEmptyManagedLog = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
   private sessionWriterClosePromise: Promise<void> | undefined;
   /**
@@ -4925,6 +4928,12 @@ export class Config {
         );
         this.sessionExecutionEngine = executionEngine;
       }
+      return;
+    }
+    if (executionEngine === undefined && this.managedSessionLogEnabled) {
+      // Bootstrap and read-only replay configs are not executable sessions. A
+      // Managed log is written as soon as it opens, so opening one here would
+      // persist an empty session that no client created and list it.
       return;
     }
     if (this.sessionWriterShutdownRequested) {
@@ -12186,12 +12195,24 @@ export class Config {
     this.sessionWriterTakeoverPolicy = policy;
   }
 
-  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+  closeSessionWriter(options?: {
+    handoff?: boolean;
+    /**
+     * Set by an explicit close of the Session: a Managed log that recorded no
+     * Session content is removed instead of sealed, as a legacy Session that
+     * never wrote a record leaves nothing behind. Every other close keeps it,
+     * so the Session can still be opened.
+     */
+    discardEmptyManagedLog?: boolean;
+  }): Promise<void> {
     if (isDerivedConfig(this)) {
       throw new SessionWriterUnavailableError();
     }
     if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
       this.sessionWriterHandoffRequested = true;
+    }
+    if (options?.discardEmptyManagedLog) {
+      this.sessionWriterDiscardEmptyManagedLog = true;
     }
     this.sessionWriterShutdownRequested = true;
     this.chatRecordingService?.beginClose({
@@ -12209,6 +12230,53 @@ export class Config {
     return pending;
   }
 
+  /**
+   * On an explicit close, removes a local Managed log that holds no Session
+   * content, the way a legacy Session that never wrote a record leaves no
+   * transcript behind: keeping it would list an empty closed Session and
+   * reserve its id. The writer lock is still held, so no other writer can
+   * reach the log while it is removed; the recorder releases the lock
+   * afterwards instead of sealing it. Returns false, leaving the log to be
+   * sealed, when the close was not explicit, or there is content, a handoff, a
+   * Hosted journal, or the transcript could not be removed.
+   */
+  private async discardEmptyManagedSessionLog(
+    managedSession: ManagedSession,
+  ): Promise<boolean> {
+    if (
+      !this.sessionWriterDiscardEmptyManagedLog ||
+      this.managedSessionStore !== undefined ||
+      this.sessionWriterHandoffRequested ||
+      managedSession.authority.hasSessionContent
+    ) {
+      return false;
+    }
+    try {
+      await fsPromises.unlink(this.getTranscriptPath());
+    } catch (error) {
+      managedSessionLogger.warn(
+        `Keeping empty Managed session log ${this.sessionId}: ${String(error)}`,
+      );
+      return false;
+    }
+    // The transcript is gone, so the Session is discarded even if its
+    // resources linger; they are unreachable without the header.
+    await fsPromises
+      .rm(
+        managedSessionResourceRoot(this.sessionRuntimeBaseDir, this.sessionId),
+        {
+          recursive: true,
+          force: true,
+        },
+      )
+      .catch((error: unknown) => {
+        managedSessionLogger.warn(
+          `Empty Managed session resources for ${this.sessionId} were not removed: ${String(error)}`,
+        );
+      });
+    return true;
+  }
+
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
     const activation = this.sessionWriterActivationPromise;
@@ -12220,6 +12288,7 @@ export class Config {
       }
     }
     const managedSession = this.managedSession;
+    let managedLogDiscarded = false;
     if (managedSession) {
       this.managedSession = undefined;
       this.managedHarness = undefined;
@@ -12228,7 +12297,9 @@ export class Config {
         // this is the one point where no further record can arrive to name a
         // released activation -- which the fence would refuse.
         await this.chatRecordingService?.flush();
-        await managedSession.releaseActivation();
+        managedLogDiscarded =
+          await this.discardEmptyManagedSessionLog(managedSession);
+        if (!managedLogDiscarded) await managedSession.releaseActivation();
       } catch (error) {
         // Collected rather than thrown: the seal below is the at-rest barrier,
         // and losing it is worse than an activation left looking abandoned.
@@ -12243,14 +12314,16 @@ export class Config {
         // boundary above, so the sealed proof covers the final record.
         ...(managedSession === undefined
           ? {}
-          : {
-              managedCommitProof: {
-                last_commit_sequence:
-                  managedSession.authority.commitProof.lastCommitSequence,
-                committed_prefix_hash:
-                  managedSession.authority.commitProof.committedPrefixHash,
-              },
-            }),
+          : managedLogDiscarded
+            ? { discardManagedLog: true }
+            : {
+                managedCommitProof: {
+                  last_commit_sequence:
+                    managedSession.authority.commitProof.lastCommitSequence,
+                  committed_prefix_hash:
+                    managedSession.authority.commitProof.committedPrefixHash,
+                },
+              }),
       });
     } catch (error) {
       failures.push(error);

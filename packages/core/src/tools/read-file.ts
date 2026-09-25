@@ -692,6 +692,13 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
 
+    // Omitted and null options normalize to absent keys, not `undefined`
+    // values, so the params stay exact JSON: a Managed Runtime digests them
+    // and rejects values that JSON would silently drop.
+    for (const key of ['offset', 'limit', 'pages'] as const) {
+      if (params[key] === undefined) delete params[key];
+    }
+
     return null;
   }
 

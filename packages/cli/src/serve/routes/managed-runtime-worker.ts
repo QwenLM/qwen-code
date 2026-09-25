@@ -109,6 +109,9 @@ export function registerManagedRuntimeWorkerRoutes(
   if (deps.owned && 'runtimeInstanceId' in deps.owned) {
     const owned = deps.owned;
     app.post('/internal/managed-runtime/v2/attest', authorize, (req, res) => {
+      // The Broker refuses an attestation it could have cached (see the
+      // owned-route contract), so every answer from this route says so.
+      res.setHeader('Cache-Control', 'no-store');
       const body: unknown = req.body;
       if (
         !body ||

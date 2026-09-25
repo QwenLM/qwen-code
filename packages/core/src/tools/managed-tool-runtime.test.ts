@@ -455,6 +455,23 @@ describe('ManagedToolRuntime', () => {
     await runtime.execute(ref);
   });
 
+  it('leaves an always choice to the Harness and approves the invocation once locally', async () => {
+    tool.setup = (invocation) => {
+      invocation.getDefaultPermission.mockResolvedValue('ask');
+    };
+    const ref = await prepare();
+    await runtime.confirmation(ref);
+    await runtime.confirm(ref, ToolConfirmationOutcome.ProceedAlways);
+    expect(tool.invocations[0].onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+    // The decision itself is still recorded as the choice the Harness made.
+    await expect(
+      runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce),
+    ).rejects.toThrow('already decided');
+  });
+
   it('requires preflight and supports trusted automatic allow without onConfirm', async () => {
     const ref = await prepare();
     expect(() => runtime.execute(ref)).toThrow('preflight');

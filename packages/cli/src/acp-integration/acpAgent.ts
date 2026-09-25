@@ -5374,7 +5374,16 @@ class QwenAgent implements Agent {
 
           let closeError: unknown;
           try {
-            await recorder?.close();
+            const config = session.getConfig();
+            if (config.getSessionExecutionEngine() === 'managed') {
+              // A Managed log is sealed with its authority's commit proof,
+              // which only the Config's writer shutdown supplies; closing the
+              // recorder directly refuses the seal and keeps the lock held.
+              // Closing an empty Session discards it, as a legacy one does.
+              await config.closeSessionWriter({ discardEmptyManagedLog: true });
+            } else {
+              await recorder?.close();
+            }
           } catch (error) {
             closeError = error;
           }

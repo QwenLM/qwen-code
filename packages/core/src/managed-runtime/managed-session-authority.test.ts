@@ -791,6 +791,23 @@ describe('managed session authority activation fences', () => {
       await opened.release();
     });
 
+    it('counts only records beyond activation bookkeeping as session content', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      expect(opened.authority.hasSessionContent).toBe(false);
+      await opened.authority.installActivation({
+        activationId: 'act-empty',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      await opened.authority.releaseActivation();
+      expect(opened.authority.hasSessionContent).toBe(false);
+
+      await opened.authority.submitInput(inputCommand(fixture), inputRequest);
+      expect(opened.authority.hasSessionContent).toBe(true);
+      await opened.release();
+    });
+
     it('does not renew when no activation was ever installed', async () => {
       const fixture = await createFixture();
       const opened = await openRenewable(fixture, () => 1_000_000);

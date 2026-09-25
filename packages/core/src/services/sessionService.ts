@@ -446,6 +446,10 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+// Creation metadata is written before the first prompt, so it sits well inside
+// this head; the bound keeps a transcript without newlines from being read
+// whole just to answer whether it has a parent or a source.
+const CREATION_METADATA_SCAN_BYTES = 1024 * 1024;
 
 export interface SessionContentSearchOptions {
   /** Most recent session files to scan, default 200. */
@@ -1251,6 +1255,7 @@ export class SessionService {
           records = await jsonl.readLines<ChatRecord>(
             filePath,
             MAX_PROMPT_SCAN_LINES,
+            { maxBytes: CREATION_METADATA_SCAN_BYTES },
           );
         }
         if (records.length === 0) continue;

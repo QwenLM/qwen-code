@@ -511,7 +511,9 @@ export class ManagedToolRuntime {
       await this.confirmation(reference);
       this.assertExecutable(entry);
       const details = await entry.confirmation!;
-      await this.scoped(reference, () => details.onConfirm(outcome, payload));
+      await this.scoped(reference, () =>
+        details.onConfirm(runtimeLocalOutcome(outcome), payload),
+      );
       if (outcome === ToolConfirmationOutcome.Cancel) {
         this.requestCancel(entry);
         return;
@@ -798,6 +800,27 @@ export class ManagedToolRuntime {
       this.calls.clear();
     })();
     return this.disposal;
+  }
+}
+
+/**
+ * The Harness applies what an "always" choice means to its own Config -- the
+ * approval mode, persisted rules -- when it forwards the decision. The Runtime
+ * only carries out this one invocation, and its derived tool Config refuses an
+ * approval-mode change, so the tool's own callback sees a single approval.
+ */
+function runtimeLocalOutcome(
+  outcome: ToolConfirmationOutcome,
+): ToolConfirmationOutcome {
+  switch (outcome) {
+    case ToolConfirmationOutcome.ProceedAlways:
+    case ToolConfirmationOutcome.ProceedAlwaysServer:
+    case ToolConfirmationOutcome.ProceedAlwaysTool:
+    case ToolConfirmationOutcome.ProceedAlwaysProject:
+    case ToolConfirmationOutcome.ProceedAlwaysUser:
+      return ToolConfirmationOutcome.ProceedOnce;
+    default:
+      return outcome;
   }
 }
 

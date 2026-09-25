@@ -726,6 +726,8 @@ it.each([false, true])(
           },
         );
         expect(attestation.status).toBe(200);
+        // The Java Broker rejects an attestation it could have cached.
+        expect(attestation.headers.get('cache-control')).toBe('no-store');
         await expect(attestation.json()).resolves.toMatchObject({
           protocolVersion: 2,
           runtimeInstanceId: 'test-runtime',

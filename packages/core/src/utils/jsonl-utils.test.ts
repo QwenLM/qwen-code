@@ -312,6 +312,22 @@ describe('read() / readLines() with malformed lines', () => {
   });
 });
 
+describe('readLines() byte bound', () => {
+  it('stops at maxBytes instead of buffering a long line whole', async () => {
+    const head = `${JSON.stringify({ n: 1 })}\n${JSON.stringify({ n: 2 })}\n`;
+    const file = tmpFile(`${head}${'x'.repeat(1024 * 1024)}`);
+    const readSpy = vi.spyOn(fs, 'createReadStream');
+    try {
+      await expect(
+        readLines(file, 10, { maxBytes: head.length + 16 }),
+      ).resolves.toEqual([{ n: 1 }, { n: 2 }]);
+      expect(readSpy).toHaveBeenCalledWith(file, { end: head.length + 15 });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+});
+
 describe('reader resource cleanup', () => {
   it('propagates the caller abort reason from readLines', async () => {
     const file = tmpFile(

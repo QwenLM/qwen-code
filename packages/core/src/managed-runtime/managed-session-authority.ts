@@ -343,6 +343,17 @@ export class LocalManagedSessionAuthority {
     return this.header;
   }
 
+  /**
+   * Whether the log records anything beyond activation bookkeeping, which is
+   * all a Session that never received input ever writes.
+   */
+  get hasSessionContent(): boolean {
+    return (
+      this.compactedThrough > 0 ||
+      this.events.some((event) => event.kind !== 'activation.changed')
+    );
+  }
+
   /** The highest activation epoch committed so far; 0 when none exists. */
   /** The activation the log currently records, if any. */
   get currentActivation(): ManagedSessionActivationState | undefined {
@@ -1696,11 +1707,18 @@ export class LocalManagedSessionAuthority {
       });
       return;
     }
+    if (event.kind === 'turn.settled') {
+      // A turn that settled before the Harness committed anything -- one
+      // cancelled or failed ahead of its first checkpoint -- left nothing a
+      // later run has to resume, so a session without a checkpoint stays
+      // initial instead of blocking every later turn.
+      if (this.checkpoint !== undefined) this.hasContinuation = true;
+      return;
+    }
     if (
       event.kind === 'model.attempt' ||
       event.kind === 'tool.intent' ||
       event.kind === 'tool.receipt' ||
-      event.kind === 'turn.settled' ||
       (event.kind === 'message.committed' &&
         (event.payload['role'] === 'assistant' ||
           event.payload['role'] === 'tool_result'))

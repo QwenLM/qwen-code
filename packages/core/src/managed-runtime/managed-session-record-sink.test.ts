@@ -453,6 +453,26 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('keeps a session initial when a turn settles before its first checkpoint', async () => {
+    const harness = await createHarness();
+    await harness.sink.write(
+      record({
+        uuid: 'rec-turn-early',
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'turn-early',
+          state: 'cancelled',
+          stopReason: 'cancelled',
+        },
+      } as Partial<ChatRecord>),
+    );
+    await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
+      status: 'initial',
+    });
+    await harness.close();
+  });
+
   it('refuses a turn result with no prompt id or state', async () => {
     const harness = await createHarness();
     await expect(

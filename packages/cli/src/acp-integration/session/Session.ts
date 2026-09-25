@@ -12893,22 +12893,9 @@ export class Session implements SessionContext {
         );
       }
 
-      const tool = this.config.getToolRegistry().getTool(fc.name ?? '');
-      const concurrencySafe = isToolCallConcurrencySafe(
-        fc.name ?? '',
-        tool?.kind,
-        fc.args,
-      );
-      const last = batches[batches.length - 1];
-      if (concurrencySafe && last?.kind === 'execute' && last.concurrent) {
-        last.calls.push(fc);
-      } else {
-        batches.push({
-          kind: 'execute',
-          concurrent: concurrencySafe,
-          calls: [fc],
-        });
-      }
+      // Concurrency is decided after the tool-call cap below, so a turn the
+      // cap stops never resolves a tool.
+      batches.push({ kind: 'execute', concurrent: false, calls: [fc] });
     }
 
     const executableCalls = batches.flatMap((batch) =>
@@ -12947,6 +12934,35 @@ export class Session implements SessionContext {
       planModeEntryBoundaryIndex === undefined
         ? undefined
         : executableCalls[planModeEntryBoundaryIndex];
+    // Merge adjacent concurrency-safe calls, as core's scheduler does. The
+    // plan-mode entry always runs alone: sibling isolation skips every other
+    // batch, so a call merged into its batch would still execute. A call with
+    // no executable neighbour cannot merge, so its tool is not resolved here.
+    const ungroupedBatches = batches.splice(0, batches.length);
+    for (const [index, batch] of ungroupedBatches.entries()) {
+      if (batch.kind !== 'execute') {
+        batches.push(batch);
+        continue;
+      }
+      const fc = batch.calls[0]!;
+      const name = fc.name ?? '';
+      const concurrent =
+        name !== '' &&
+        fc !== planModeEntryBoundary &&
+        (ungroupedBatches[index - 1]?.kind === 'execute' ||
+          ungroupedBatches[index + 1]?.kind === 'execute') &&
+        isToolCallConcurrencySafe(
+          name,
+          this.config.getToolRegistry().getTool(name)?.kind,
+          fc.args,
+        );
+      const last = batches[batches.length - 1];
+      if (concurrent && last?.kind === 'execute' && last.concurrent) {
+        last.calls.push(fc);
+      } else {
+        batches.push({ kind: 'execute', concurrent, calls: [fc] });
+      }
+    }
 
     const appendSkippedAfter = async (
       parts: Part[],
