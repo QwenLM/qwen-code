@@ -540,6 +540,26 @@ for (const theme of THEMES) {
       await expect(page.getByTestId('trajectory-range')).toBeVisible();
       await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
       await captureScreenshot(page, `trajectory-range-${theme}`);
+
+      // Zoomed in on the middle of the run, the selection still drawn.
+      await page.mouse.move(plot!.x + plot!.width * 0.5, y);
+      await page.mouse.wheel(0, -900);
+      await expect(page.getByTestId('trajectory-domain')).toHaveAttribute(
+        'data-zoomed',
+        'true',
+      );
+      await captureScreenshot(page, `trajectory-zoom-${theme}`);
+
+      // The whole run again, over real time: the wait before the retry and
+      // the pause between turns stay on the axis. Switching drops the zoom
+      // and the selection, which belong to the other axis.
+      const clock = page.getByTestId('trajectory-mode-clock');
+      await clock.click();
+      await expect(clock).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('trajectory-domain')).not.toHaveAttribute(
+        'data-zoomed',
+      );
+      await captureScreenshot(page, `trajectory-clock-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
