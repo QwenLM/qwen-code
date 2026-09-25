@@ -6425,12 +6425,17 @@ export function WebShellSidebar({
                     workspaces={workspaces}
                   />
                 )}
-              {footerItems.has('desktopRelay') && (
-                <DesktopRelayControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('desktopRelay') &&
+                ((footer !== false &&
+                  footer?.items?.includes('desktopRelay')) ||
+                  workspace.capabilities?.features?.includes(
+                    'client_mcp_over_ws',
+                  )) && (
+                  <DesktopRelayControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

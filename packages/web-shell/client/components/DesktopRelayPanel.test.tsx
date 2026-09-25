@@ -91,6 +91,14 @@ describe('DesktopRelayPanel', () => {
     expect(button('Connect this computer')).toBeUndefined();
   });
 
+  it('explains how to grant browser local network access', () => {
+    const handlers = mount({ phase: 'permission-required' });
+    expect(text()).toContain('Allow local network access');
+    act(() => button('Check again')?.click());
+    expect(handlers.onCheckAgain).toHaveBeenCalled();
+    expect(text()).not.toContain('desktop-relay install');
+  });
+
   it('explains why the entry is unavailable', () => {
     mount({ phase: 'unavailable', blocker: 'unsupported-daemon' });
     expect(text()).toContain('QWEN_SERVE_CLIENT_MCP_OVER_WS=1');
@@ -175,5 +183,11 @@ describe('deriveDesktopRelayStatus', () => {
     ).toEqual({
       phase: 'missing',
     });
+    expect(
+      deriveDesktopRelayStatus({
+        ...base,
+        probe: { kind: 'permission-required' },
+      }),
+    ).toEqual({ phase: 'permission-required' });
   });
 });

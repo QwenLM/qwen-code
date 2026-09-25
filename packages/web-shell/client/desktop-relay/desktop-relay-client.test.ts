@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectDesktopRelay,
   disconnectDesktopRelay,
@@ -21,6 +21,8 @@ function respond(status: number, body: unknown) {
       }),
   );
 }
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('probeDesktopRelay', () => {
   it('reads the version and the connection this page started', async () => {
@@ -66,6 +68,20 @@ describe('probeDesktopRelay', () => {
     });
     await expect(probeDesktopRelay(respond(404, {}))).resolves.toEqual({
       kind: 'missing',
+    });
+  });
+
+  it('reports when the browser is withholding local network access', async () => {
+    vi.stubGlobal('navigator', {
+      permissions: {
+        query: vi.fn().mockResolvedValue({ state: 'prompt' }),
+      },
+    });
+    const refused = vi.fn<FetchLike>(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    await expect(probeDesktopRelay(refused)).resolves.toEqual({
+      kind: 'permission-required',
     });
   });
 });

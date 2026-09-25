@@ -31,7 +31,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
       },
       workspace: {
         baseUrl: '',
-        capabilities: undefined,
+        capabilities: undefined as { features?: string[] } | undefined,
         client: {
           workspaceByCwd: vi.fn(() => ({
             listWorkspaceSessions: vi.fn().mockResolvedValue([]),
@@ -138,6 +138,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 const LOCAL_FILES_LABEL = 'Local files';
+const DESKTOP_RELAY_LABEL = 'Use this computer';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -177,6 +178,10 @@ function localFilesTrigger(): HTMLElement | null {
   return container.querySelector(`button[aria-label="${LOCAL_FILES_LABEL}"]`);
 }
 
+function desktopRelayTrigger(): HTMLElement | null {
+  return container.querySelector(`button[aria-label="${DESKTOP_RELAY_LABEL}"]`);
+}
+
 function setDesktopShell(enabled: boolean) {
   const win = window as unknown as { __TAURI__?: unknown };
   if (enabled) {
@@ -189,6 +194,7 @@ function setDesktopShell(enabled: boolean) {
 beforeEach(() => {
   window.localStorage.clear();
   workspace.baseUrl = window.location.origin;
+  workspace.capabilities = undefined;
   bridgeHookCalls.count = 0;
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -220,6 +226,29 @@ describe('local files footer entry', () => {
     setDesktopShell(true);
     renderSidebar({ items: ['localFiles'] });
     expect(localFilesTrigger()).not.toBeNull();
+  });
+});
+
+describe('desktop relay footer entry', () => {
+  it('is hidden until the daemon advertises the reverse tool channel', () => {
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
+
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).not.toBeNull();
+  });
+
+  it('stays available when a host explicitly configures it', () => {
+    renderSidebar({ items: ['desktopRelay'] });
+    expect(desktopRelayTrigger()).not.toBeNull();
+  });
+
+  it('is hidden by default inside the desktop shell', () => {
+    setDesktopShell(true);
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
   });
 });
 

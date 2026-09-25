@@ -31,6 +31,7 @@ export interface DesktopRelayActive {
 
 export type DesktopRelayProbe =
   | { kind: 'missing' }
+  | { kind: 'permission-required' }
   | { kind: 'ready'; version: string; active?: DesktopRelayActive };
 
 export interface DesktopRelayConnectRequest {
@@ -94,7 +95,18 @@ function parseActive(value: unknown): DesktopRelayActive | undefined {
   };
 }
 
-/** Any failure reads as "not set up": there is nothing else to tell apart. */
+async function needsLocalNetworkPermission(): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !navigator.permissions) return false;
+  try {
+    const status = await navigator.permissions.query({
+      name: 'local-network-access' as PermissionName,
+    });
+    return status.state !== 'granted';
+  } catch {
+    return false;
+  }
+}
+
 export async function probeDesktopRelay(
   fetchImpl: FetchLike = defaultFetch,
   timeoutMs = 2_000,
@@ -113,7 +125,9 @@ export async function probeDesktopRelay(
       ...(active === undefined ? {} : { active }),
     };
   } catch {
-    return { kind: 'missing' };
+    return (await needsLocalNetworkPermission())
+      ? { kind: 'permission-required' }
+      : { kind: 'missing' };
   }
 }
 

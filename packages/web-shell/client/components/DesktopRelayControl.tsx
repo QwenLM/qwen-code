@@ -29,6 +29,7 @@ export type DesktopRelayPhase =
   | 'unavailable'
   | 'needs-session'
   | 'checking'
+  | 'permission-required'
   | 'missing'
   | 'idle'
   | 'awaiting-approval'
@@ -63,6 +64,7 @@ const COPY = {
     'desktopRelay.needsSessionHint':
       'Start a session first. The connection binds to exactly one session.',
     'desktopRelay.status.checking': 'Checking…',
+    'desktopRelay.status.permissionRequired': 'Browser permission required',
     'desktopRelay.status.missing': 'Not set up',
     'desktopRelay.status.idle': 'Not connected',
     'desktopRelay.status.awaitingApproval': 'Waiting for approval',
@@ -80,6 +82,8 @@ const COPY = {
       "This conversation's workspace cannot use this computer (untrusted or live workspace).",
     'desktopRelay.blocker.workspaceResolving':
       'Which workspace this conversation belongs to is not known yet.',
+    'desktopRelay.permissionHint':
+      'Allow local network access for this site in the browser prompt or site settings, then check again.',
     'desktopRelay.error.denied': 'The request was declined on this computer.',
     'desktopRelay.error.unreachable':
       'Could not reach the desktop relay on this computer.',
@@ -101,6 +105,7 @@ const COPY = {
       '这台电脑已连接到另一个会话。在这里连接会替换那个连接。',
     'desktopRelay.needsSessionHint': '请先创建一个会话。连接只绑定一个会话。',
     'desktopRelay.status.checking': '检测中…',
+    'desktopRelay.status.permissionRequired': '需要浏览器权限',
     'desktopRelay.status.missing': '未设置',
     'desktopRelay.status.idle': '未连接',
     'desktopRelay.status.awaitingApproval': '等待确认',
@@ -117,6 +122,8 @@ const COPY = {
     'desktopRelay.blocker.workspaceIneligible':
       '该会话的工作区不能使用这台电脑（不受信任或 live 工作区）。',
     'desktopRelay.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+    'desktopRelay.permissionHint':
+      '请在浏览器提示或网站设置中允许本地网络访问，然后重新检测。',
     'desktopRelay.error.denied': '请求在这台电脑上被拒绝。',
     'desktopRelay.error.unreachable': '无法连接到这台电脑上的桌面中继。',
   },
@@ -139,6 +146,7 @@ const STATUS_KEY: Record<DesktopRelayPhase, CopyKey> = {
   unavailable: 'desktopRelay.status.unavailable',
   'needs-session': 'desktopRelay.status.needsSession',
   checking: 'desktopRelay.status.checking',
+  'permission-required': 'desktopRelay.status.permissionRequired',
   missing: 'desktopRelay.status.missing',
   idle: 'desktopRelay.status.idle',
   'awaiting-approval': 'desktopRelay.status.awaitingApproval',
@@ -194,6 +202,9 @@ export function deriveDesktopRelayStatus(input: {
   if (!input.sessionId || !input.daemonUrl) return { phase: 'needs-session' };
   if (input.awaitingApproval) return { phase: 'awaiting-approval' };
   if (input.probe === undefined) return { phase: 'checking' };
+  if (input.probe.kind === 'permission-required') {
+    return { phase: 'permission-required' };
+  }
   if (input.probe.kind === 'missing') return { phase: 'missing' };
   const active = input.probe.active;
   const live =
@@ -292,6 +303,22 @@ export function DesktopRelayPanel({
               {t('desktopRelay.checkAgain')}
             </Button>
           </div>
+        </div>
+      ) : null}
+
+      {phase === 'permission-required' ? (
+        <div className="flex flex-col items-start gap-2">
+          <p className="text-xs text-muted-foreground">
+            {t('desktopRelay.permissionHint')}
+          </p>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onCheckAgain}
+          >
+            {t('desktopRelay.checkAgain')}
+          </Button>
         </div>
       ) : null}
 
