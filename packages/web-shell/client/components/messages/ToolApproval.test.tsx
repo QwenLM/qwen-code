@@ -479,14 +479,14 @@ describe('ToolApproval accessibility', () => {
       title: 'ping (sample MCP Server): {}',
       rawInput: {},
       toolName: 'mcp__sample__ping',
-      description: undefined,
+      description: 'ping (sample MCP Server)',
     },
     {
       name: 'provider-normalized MCP server key',
       title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
       rawInput: {},
       toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
-      description: undefined,
+      description: 'ask_question (mcp.deepwiki.com MCP Server)',
     },
     {
       name: 'mismatched MCP tool name',

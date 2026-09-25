@@ -15,7 +15,10 @@ import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
-import { isEmptyMcpToolTitle, localizeToolDisplayName } from './toolFormatting';
+import {
+  getEmptyMcpToolTitleDescription,
+  localizeToolDisplayName,
+} from './toolFormatting';
 import {
   ThinkingTranslateButton,
   type SessionContentGenerator,
@@ -105,8 +108,13 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   if (typeof description === 'string' && description.trim()) {
     return description.trim();
   }
-  if (isEmptyMcpToolTitle(request.toolName, request.title, request.rawInput)) {
-    return undefined;
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    request.toolName,
+    request.title,
+    request.rawInput,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription || undefined;
   }
   return request.title;
 }

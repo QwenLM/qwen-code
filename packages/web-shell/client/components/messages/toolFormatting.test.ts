@@ -102,14 +102,14 @@ describe('toolFormatting', () => {
       name: 'MCP display-name prefix',
       title: 'ping (sample MCP Server): {}',
       args: {},
-      expected: '',
+      expected: 'ping (sample MCP Server)',
     },
     {
       name: 'provider-normalized MCP server key',
       title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
       toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
       args: {},
-      expected: '',
+      expected: 'ask_question (mcp.deepwiki.com MCP Server)',
     },
     {
       name: 'mismatched MCP tool name',
@@ -117,6 +117,16 @@ describe('toolFormatting', () => {
       toolName: 'mcp__sample__ping_other',
       args: {},
       expected: 'ping (sample MCP Server): {}',
+    },
+    {
+      name: 'provider-normalized overlength MCP server key',
+      title:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server): {}',
+      toolName:
+        'mcp__github-enterprise_internal_example_com__list_pull__031yve4',
+      args: {},
+      expected:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server)',
     },
     {
       name: 'meaningful title',

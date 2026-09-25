@@ -326,30 +326,41 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   return truncateText(firstLine, 80);
 }
 
-export function isEmptyMcpToolTitle(
+export function getEmptyMcpToolTitleDescription(
   toolName: string | undefined,
   title: string | undefined,
   input: Record<string, unknown> | undefined,
-): boolean {
+): string | undefined {
   if (
     !toolName?.startsWith('mcp__') ||
     !input ||
     Object.keys(input).length > 0
   ) {
-    return false;
+    return undefined;
   }
   // core's mcp-tool.ts getDescription serializes arguments as JSON; the CLI
   // tool-call-emitter may prefix the MCP display name. Require confirmed-empty
   // input so missing or nonempty arguments keep their original title.
   const trimmed = title?.trim() ?? '';
-  if (trimmed === '{}') return true;
+  if (trimmed === '{}') return '';
   const match = /^(.+) \((.+) MCP Server\): \{\}$/.exec(trimmed);
   // Preserve prose or aliased names when the prefix cannot be confirmed.
-  if (match === null) return false;
+  if (match === null) return undefined;
   const rawName = `mcp__${match[2]}__${match[1]}`;
-  return (
-    toolName === rawName || toolName === normalizeToolNameForProvider(rawName)
-  );
+  if (
+    toolName !== rawName &&
+    toolName !== normalizeToolNameForProvider(rawName)
+  )
+    return undefined;
+  return `${match[1]} (${match[2]} MCP Server)`;
+}
+
+export function isEmptyMcpToolTitle(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): boolean {
+  return getEmptyMcpToolTitleDescription(toolName, title, input) !== undefined;
 }
 
 // The web-shell bundle cannot import core, so keep this provider-name mirror
@@ -389,7 +400,16 @@ function getDescriptionFromTitle(
 
   const displayName = formatToolDisplayName(tool.toolName);
   const title = tool.title.trim();
-  if (isEmptyMcpToolTitle(tool.toolName, title, tool.args)) return null;
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    tool.toolName,
+    title,
+    tool.args,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription
+      ? formatDescriptionPaths(emptyMcpDescription, workspaceCwd)
+      : null;
+  }
   if (title === tool.toolName || title === displayName) return null;
 
   const prefixes = [displayName, tool.toolName];
