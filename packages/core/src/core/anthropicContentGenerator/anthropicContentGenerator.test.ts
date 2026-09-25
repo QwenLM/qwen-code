@@ -783,6 +783,193 @@ describe('AnthropicContentGenerator', () => {
         {}) as Record<string, string>;
     }
 
+    it('keeps Claude Opus 5.5 block-binding controls stable as tools change', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-5-5',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          model: 'claude-opus-5-5',
+          baseUrl: 'https://proxy.example.com',
+        },
+        mockConfig,
+      );
+      const tools = (description: string) => [
+        { functionDeclarations: [{ name: 'exec', description }] },
+      ];
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [{ role: 'user', parts: [{ text: 'search' }] }],
+        config: { tools: tools('initial tools') },
+      } as unknown as GenerateContentParameters);
+      let [request, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const firstTools = (request as { tools: unknown }).tools;
+      expect((request as { thinking: unknown }).thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      });
+      expect(options?.headers?.['anthropic-beta']).toContain(
+        'thinking-binding-controls-2026-08-01',
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user', parts: [{ text: 'search' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'planning\n\n', thought: true, thoughtSignature: 'sig' },
+              { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'exec',
+                  response: { output: 'found' },
+                },
+              },
+            ],
+          },
+        ],
+        config: { tools: tools('updated tools') },
+      } as unknown as GenerateContentParameters);
+      [request, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect((request as { tools: unknown }).tools).not.toEqual(firstTools);
+      expect((request as { thinking: unknown }).thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+        block_binding: { prefix_mismatch_behavior: 'drop_block' },
+      });
+      expect(options?.headers?.['anthropic-beta']).toContain(
+        'thinking-binding-controls-2026-08-01',
+      );
+      expect((request as { messages: unknown[] }).messages[1]).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.arrayContaining([
+            { type: 'thinking', thinking: 'planning\n\n', signature: 'sig' },
+          ]),
+        }),
+      );
+    });
+
+    it.each([
+      ['claude-fable-5-1', true],
+      ['bedrock/claude-fable-5.1', true],
+      ['vertex_ai/claude-opus-5.5', true],
+      ['claude-fable-5', false],
+      ['claude-opus-5-1', false],
+    ])('sets block binding for %s: %s', async (model, expected) => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model,
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        { ...baseConfig, model },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model,
+        contents: 'Hi',
+      } as unknown as GenerateContentParameters);
+      const [request, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const binding = (request as { thinking?: { block_binding?: unknown } })
+        .thinking?.block_binding;
+      expect(Boolean(binding)).toBe(expected);
+      expect(
+        options?.headers?.['anthropic-beta']?.includes(
+          'thinking-binding-controls-2026-08-01',
+        ) ?? false,
+      ).toBe(expected);
+    });
+
+    it('retries a proxy without block binding when it rejects the field', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl
+        .mockRejectedValueOnce(
+          Object.assign(
+            new Error(
+              'thinking.adaptive.block_binding: Extra inputs are not permitted',
+            ),
+            { status: 400 },
+          ),
+        )
+        .mockResolvedValue({
+          id: 'msg-1',
+          model: 'claude-opus-5-5',
+          content: [{ type: 'text', text: 'ok' }],
+        });
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          model: 'claude-opus-5-5',
+          baseUrl: 'https://proxy.example.com',
+        },
+        mockConfig,
+      );
+      const request = {
+        model: 'claude-opus-5-5',
+        contents: 'Hi',
+      } as unknown as GenerateContentParameters;
+
+      await generator.generateContent(request);
+      await generator.generateContent(request);
+
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(3);
+      expect(
+        anthropicState.createImpl.mock.calls[0][0].thinking,
+      ).toHaveProperty('block_binding');
+      for (const [body, options] of anthropicState.createImpl.mock.calls.slice(
+        1,
+      )) {
+        expect(body.thinking).not.toHaveProperty('block_binding');
+        expect(options.headers['anthropic-beta']).not.toContain(
+          'thinking-binding-controls-2026-08-01',
+        );
+      }
+    });
+
+    it('does not retry an unrelated proxy 400', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockRejectedValue(
+        Object.assign(new Error('Invalid signature in thinking block'), {
+          status: 400,
+        }),
+      );
+      const generator = new AnthropicContentGenerator(
+        {
+          ...baseConfig,
+          model: 'claude-opus-5-5',
+          baseUrl: 'https://proxy.example.com',
+        },
+        mockConfig,
+      );
+
+      await expect(
+        generator.generateContent({
+          model: 'claude-opus-5-5',
+          contents: 'Hi',
+        } as unknown as GenerateContentParameters),
+      ).rejects.toThrow('Invalid signature');
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
+    });
+
     it('sends interleaved-thinking + effort beta when both are present in the body', async () => {
       const headers = await callOnce({
         ...baseConfig,
@@ -3801,6 +3988,116 @@ describe('AnthropicContentGenerator', () => {
       }
       return { chunks, error };
     };
+
+    it.each(['creation', 'stream'])(
+      'retries an unsupported proxy binding at %s',
+      async (stage) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        const unsupported = Object.assign(
+          new Error(
+            'thinking.adaptive.block_binding: Extra inputs are not permitted',
+          ),
+          { status: 400 },
+        );
+        const successfulStream = () =>
+          (async function* () {
+            yield {
+              type: 'message_start',
+              message: {
+                id: 'msg-1',
+                model: 'claude-opus-5-5',
+                usage: { input_tokens: 1 },
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: 'ok' },
+            };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'end_turn' },
+              usage: { output_tokens: 1 },
+            };
+          })();
+        if (stage === 'creation') {
+          anthropicState.createImpl.mockRejectedValueOnce(unsupported);
+        } else {
+          anthropicState.createImpl.mockResolvedValueOnce({
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                throw unsupported;
+              },
+            }),
+          });
+        }
+        anthropicState.createImpl.mockResolvedValueOnce(successfulStream());
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-opus-5-5',
+            apiKey: 'test-key',
+            baseUrl: 'https://proxy.example.com',
+            samplingParams: { max_tokens: 100 },
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'claude-opus-5-5',
+          contents: 'Hi',
+        } as unknown as GenerateContentParameters);
+        const chunks: GenerateContentResponse[] = [];
+        for await (const chunk of stream) chunks.push(chunk);
+
+        expect(chunks.some((chunk) => chunk.text === 'ok')).toBe(true);
+        expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+        expect(
+          anthropicState.createImpl.mock.calls[0][0].thinking,
+        ).toHaveProperty('block_binding');
+        expect(
+          anthropicState.createImpl.mock.calls[1][0].thinking,
+        ).not.toHaveProperty('block_binding');
+      },
+    );
+
+    it('does not retry a stream after yielding assistant content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw Object.assign(
+            new Error(
+              'thinking.adaptive.block_binding: Extra inputs are not permitted',
+            ),
+            { status: 400 },
+          );
+        })(),
+      );
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-5-5',
+          apiKey: 'test-key',
+          baseUrl: 'https://proxy.example.com',
+          samplingParams: { max_tokens: 100 },
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'claude-opus-5-5',
+        contents: 'Hi',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('block_binding');
+      expect(chunks.some((chunk) => chunk.text === 'partial')).toBe(true);
+      expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
+    });
 
     it.each([
       [

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
   reloadEnvironment,
@@ -117,6 +118,11 @@ const TRACKED_ENV = [
   'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
   'QWEN_SANDBOX_NET',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'DASHSCOPE_PROXY_BASE_URL',
+  'QWEN_TEST_PROVIDER_KEY',
+  'DEMO_VAR',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -1821,5 +1827,92 @@ describe('loadEnvironment', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(envPath);
     expect(warnings[0]).toContain('NODE_OPTIONS');
+  });
+});
+
+describe('hasLoadedEnvironmentValues', () => {
+  it('ignores a configured provider key that settings.env supplies', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { QWEN_TEST_PROVIDER_KEY: 'from-settings' },
+        modelProviders: {
+          openai: [{ id: 'bench', envKey: 'QWEN_TEST_PROVIDER_KEY' }],
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['QWEN_TEST_PROVIDER_KEY']).toBe('from-settings');
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it('ignores the documented OpenAI variables that ~/.qwen/.env supplies', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envFile = path.join(os.homedir(), '.qwen', '.env');
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(
+      envFile,
+      'OPENAI_API_KEY=sk-file\nOPENAI_BASE_URL=https://api.example/v1\n',
+    );
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['OPENAI_API_KEY']).toBe('sk-file');
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it('never exempts a boot-time key that a provider entry names', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envFile = path.join(os.homedir(), '.qwen', '.env');
+    fs.mkdirSync(path.dirname(envFile), { recursive: true });
+    fs.writeFileSync(envFile, 'NODE_EXTRA_CA_CERTS=/certs/ca.pem\n');
+    loadEnvironment(
+      testSettings({
+        modelProviders: {
+          openai: [{ id: 'bench', envKey: 'NODE_EXTRA_CA_CERTS' }],
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['NODE_EXTRA_CA_CERTS']).toBe('/certs/ca.pem');
+    expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+
+  it('tolerates malformed provider entries', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { OPENAI_API_KEY: 'sk-settings' },
+        modelProviders: {
+          openai: { id: 'not-a-list' },
+          anthropic: [null, { id: 'no-env-key' }],
+        } as unknown as Settings['modelProviders'],
+      }),
+      workspace,
+    );
+
+    expect(hasLoadedEnvironmentValues()).toBe(false);
+  });
+
+  it.each([
+    ['DASHSCOPE_PROXY_BASE_URL', 'https://proxy.example'],
+    ['DEMO_VAR', '1'],
+  ])('still reports any other value, such as %s', (key, value) => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    loadEnvironment(
+      testSettings({
+        env: { OPENAI_API_KEY: 'sk-settings', [key]: value },
+      }),
+      workspace,
+    );
+
+    expect(process.env[key]).toBe(value);
+    expect(hasLoadedEnvironmentValues()).toBe(true);
   });
 });

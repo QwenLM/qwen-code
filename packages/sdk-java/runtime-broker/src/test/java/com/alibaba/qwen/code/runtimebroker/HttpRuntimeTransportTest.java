@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -41,6 +42,7 @@ class HttpRuntimeTransportTest {
     private HttpServer server;
     private HttpRuntimeTransport transport;
     private JsonNode suite;
+    private JsonNode toolSuite;
     private final AtomicReference<Reply> reply = new AtomicReference<>();
     private final AtomicReference<byte[]> captured = new AtomicReference<>();
     private final AtomicReference<String> capturedAuthorization =
@@ -58,6 +60,10 @@ class HttpRuntimeTransportTest {
         suite = JSON.readTree(ManagedRuntimeAttestationConformanceTest
                 .contractDirectory()
                 .resolve("managed-runtime-attestation-v2.fixtures.json")
+                .toFile());
+        toolSuite = JSON.readTree(ManagedRuntimeAttestationConformanceTest
+                .contractDirectory()
+                .resolve("managed-runtime-tool-v2.fixtures.json")
                 .toFile());
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
@@ -332,6 +338,192 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void sendsTheExecuteRequestForTheSharedFixture() throws Exception {
+        JsonNode executeSuite = toolSuite("execute");
+        JsonNode success = findIn(executeSuite, "success");
+        reply.set(json(200, JSON.writeValueAsBytes(
+                success.required("expected").required("body"))));
+
+        Map<String, Object> result = transport
+                .execute(toolLease(server.getAddress().getPort()),
+                        toolSession(), toolReference())
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(HttpRuntimeTransport.EXECUTE_PATH,
+                capturedPath.get());
+        assertEquals("Bearer fixture-token", capturedAuthorization.get());
+        assertEquals("no-store", capturedCacheControl.get());
+        JsonNode sent = JSON.readTree(captured.get());
+        assertEquals(executeSuite.required("canonicalRequest")
+                .required("body"), sent);
+        assertEquals("success",
+                JSON.valueToTree(result).required("executionStatus")
+                        .textValue());
+    }
+
+    @Test
+    void preservesNullValuesInToolInput() throws Exception {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("optional", null);
+        input.put("nested", java.util.Collections.singletonMap("value", null));
+        input.put("items", Arrays.asList(null,
+                java.util.Collections.singletonMap("value", null)));
+        Map<String, Object> reference = toolReference();
+        reference.put("input", input);
+        reply.set(json(200, JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"))));
+
+        transport.execute(toolLease(server.getAddress().getPort()),
+                toolSession(), reference).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(JSON.valueToTree(input), JSON.readTree(captured.get())
+                .required("input"));
+    }
+
+    @Test
+    void statusAnswersUnknownFromTheSharedFixture() throws Exception {
+        JsonNode statusSuite = toolSuite("status");
+        JsonNode unknown = findIn(statusSuite, "unknown-is-ok");
+        reply.set(json(200, JSON.writeValueAsBytes(
+                unknown.required("expected").required("body"))));
+
+        Map<String, Object> answer = transport
+                .status(toolLease(server.getAddress().getPort()),
+                        toolSession(), toolReference(), 0)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(HttpRuntimeTransport.STATUS_PATH, capturedPath.get());
+        JsonNode sent = JSON.readTree(captured.get());
+        assertEquals(statusSuite.required("canonicalRequest")
+                .required("body"), sent);
+        assertEquals("unknown", answer.get("state"));
+        assertEquals(Set.of("state"), answer.keySet());
+        assertNull(answer.get("result"));
+    }
+
+    @Test
+    void sessionVerbsFailClosed() {
+        assertTrue(transport instanceof RuntimeTransport);
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> transport.acquire(toolLease(1), toolSession())
+                        .toCompletableFuture().join());
+        RuntimeBrokerException failure =
+                (RuntimeBrokerException) thrown.getCause();
+        assertEquals(501, failure.getStatusCode());
+        assertEquals("runtime_session_verb_unsupported", failure.getCode());
+        assertFalse(failure.isRetryable());
+    }
+
+    @Test
+    void cancelSettlesAPreparedExecutionFromTheSharedFixture()
+            throws Exception {
+        JsonNode cancelSuite = toolSuite("cancel");
+        JsonNode settled = findIn(cancelSuite, "prepared-settles-cancelled");
+        reply.set(json(200, JSON.writeValueAsBytes(
+                settled.required("expected").required("body"))));
+
+        Map<String, Object> answer = transport
+                .cancel(toolLease(server.getAddress().getPort()),
+                        toolSession(), toolReference())
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(HttpRuntimeTransport.CANCEL_PATH, capturedPath.get());
+        assertEquals("settled", answer.get("state"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result =
+                (Map<String, Object>) answer.get("result");
+        assertEquals("cancelled", result.get("executionStatus"));
+    }
+
+    @Test
+    void executeRejectsAnUnsettledResponse() throws IOException {
+        ObjectNode body = JSON.createObjectNode();
+        body.put("protocolVersion", 2);
+        body.put("state", "executing");
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeBrokerException failure = awaitToolFailure("execute");
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid",
+                failure.getCode());
+    }
+
+    @Test
+    void rejectsASettledResponseWithoutAResult() throws IOException {
+        ObjectNode body = JSON.createObjectNode();
+        body.put("protocolVersion", 2);
+        body.put("state", "settled");
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeBrokerException failure = awaitToolFailure("status");
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid",
+                failure.getCode());
+    }
+
+    @Test
+    void rejectsAnUnknownResponseThatCarriesAResult() throws IOException {
+        ObjectNode result = JSON.createObjectNode();
+        result.put("executionStatus", "success");
+        result.putArray("responseParts");
+        ObjectNode body = JSON.createObjectNode();
+        body.put("protocolVersion", 2);
+        body.put("state", "unknown");
+        body.set("result", result);
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeBrokerException failure = awaitToolFailure("status");
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid",
+                failure.getCode());
+    }
+
+    @Test
+    void rejectsAnUnknownToolState() throws IOException {
+        ObjectNode body = JSON.createObjectNode();
+        body.put("protocolVersion", 2);
+        body.put("state", "running");
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        RuntimeBrokerException failure = awaitToolFailure("cancel");
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid",
+                failure.getCode());
+    }
+
+    @Test
+    void rejectsOversizedToolInputBeforeSending() {
+        Map<String, Object> reference = toolReference();
+        reference.put("input", Map.of("content",
+                "x".repeat(HttpRuntimeTransport.TOOL_REQUEST_LIMIT_BYTES)));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.execute(
+                        toolLease(server.getAddress().getPort()),
+                        toolSession(), reference));
+        assertNull(captured.get());
+    }
+
+    @Test
+    void classifiesToolRouteFailures() {
+        for (int status : new int[] {401, 409, 404, 413, 503}) {
+            reply.set(json(status, "{}".getBytes(StandardCharsets.UTF_8)));
+
+            RuntimeBrokerException failure = awaitToolFailure("status");
+
+            assertEquals(status, failure.getStatusCode());
+            assertEquals(fixtureClassification(status),
+                    HttpRuntimeTransport.classificationFor(status));
+            assertEquals(status == 503, failure.isRetryable());
+        }
+    }
+
+    @Test
     void sendsEveryFixtureRequestHeader() throws Exception {
         JsonNode success = find("success");
         reply.set(json(200, JSON.writeValueAsBytes(
@@ -348,11 +540,12 @@ class HttpRuntimeTransportTest {
 
     @Test
     void sendsTheSameFixtureHeadersWhenExecuting() throws Exception {
-        reply.set(json(200, new byte[0]));
+        reply.set(json(200, JSON.writeValueAsBytes(
+                findIn(toolSuite("execute"), "success").required("expected")
+                        .required("body"))));
 
         transport.execute(lease(server.getAddress().getPort()),
-                new RuntimeSession("harness", "session-1", "bootstrap",
-                        scope()), Map.of("callId", "tool"))
+                toolSession(), toolReference())
                 .toCompletableFuture().get(2, TimeUnit.SECONDS);
 
         assertEquals("/internal/managed-runtime/v2/execute",
@@ -382,6 +575,7 @@ class HttpRuntimeTransportTest {
         replies.put("cache", new Reply(200, valid, "private",
                 "application/json"));
         replies.put("type", new Reply(200, valid, "no-store", "text/plain"));
+        replies.put("separators", new Reply(200, valid, "no-store", ";;"));
         replies.put("charset", new Reply(200, valid, "no-store",
                 "application/json; charset=utf-16"));
         replies.put("field", json(200, JSON.writeValueAsBytes(unknownField)));
@@ -403,6 +597,377 @@ class HttpRuntimeTransportTest {
                     failure.getCode(), planned.getKey());
             assertFalse(failure.isRetryable(), planned.getKey());
         }
+    }
+
+    @Test
+    void rejectsAReferenceWithUndeclaredKeys() {
+        Map<String, Object> reference = toolReference();
+        reference.put("tenantId", "tenant-b");
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.execute(lease, toolSession(), reference));
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.status(lease, toolSession(), reference, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.cancel(lease, toolSession(), reference));
+        assertNull(captured.get());
+    }
+
+    @Test
+    void rejectsAToolResponseWithoutNoStoreJson() throws IOException {
+        byte[] body = JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"));
+        for (Reply invalid : List.of(
+                new Reply(200, body, "", "application/json"),
+                new Reply(200, body, "max-age=60", "application/json"),
+                new Reply(200, body, "no-store", ""),
+                new Reply(200, body, "no-store", ";"),
+                new Reply(200, body, "no-store", ";;"),
+                new Reply(200, body, "no-store", "; ;"),
+                new Reply(200, body, "no-store", "text/html"),
+                new Reply(200, body, "no-store",
+                        "application/json; charset=utf-16"))) {
+            reply.set(invalid);
+            for (String operation : List.of("execute", "status", "cancel")) {
+                RuntimeBrokerException failure = awaitToolFailure(operation);
+                assertEquals(400, failure.getStatusCode());
+                assertEquals("managed_runtime_attestation_invalid",
+                        failure.getCode());
+                assertFalse(failure.isRetryable());
+            }
+        }
+    }
+
+    @Test
+    void rejectsAResultOutsideTheClosedShape() throws IOException {
+        for (String result : new String[] {
+                "{\"executionStatus\":\"success\",\"responseParts\":[],"
+                        + "\"debug\":1}",
+                "{\"executionStatus\":\"error\",\"responseParts\":[],"
+                        + "\"error\":{\"message\":\"\"}}",
+                "{\"executionStatus\":\"error\",\"responseParts\":[],"
+                        + "\"error\":{\"message\":\"x\",\"stack\":\"y\"}}"}) {
+            reply.set(json(200, ("{\"protocolVersion\":2,\"state\":"
+                    + "\"settled\",\"result\":" + result + "}")
+                    .getBytes(StandardCharsets.UTF_8)));
+
+            assertEquals(400, awaitToolFailure("execute").getStatusCode());
+        }
+    }
+
+    @Test
+    void rejectsMalformedToolResponses() {
+        String result = "{\"executionStatus\":\"success\","
+                + "\"responseParts\":[]}";
+        for (String body : new String[] {
+                "{\"protocolVersion\":2,\"state\":\"unknown\",\"x\":1}",
+                "{\"protocolVersion\":1,\"state\":\"unknown\"}",
+                "{\"protocolVersion\":2,\"state\":\"unknown\","
+                        + "\"lastSequence\":-1}",
+                "{\"protocolVersion\":2,\"state\":\"unknown\","
+                        + "\"lastSequence\":1.5}",
+                "{\"protocolVersion\":2,\"state\":\"settled\",\"result\":"
+                        + result.replace("success", "done") + "}",
+                "{\"protocolVersion\":2,\"state\":\"settled\",\"result\":"
+                        + result.replace("[]", "\"x\"") + "}",
+                "{\"protocolVersion\":2,\"state\":\"settled\",\"result\":"
+                        + "{\"executionStatus\":\"error\",\"responseParts\":[],"
+                        + "\"error\":{\"message\":5}}}",
+                "{\"protocolVersion\":2,\"state\":\"settled\",\"result\":"
+                        + "{\"executionStatus\":\"error\",\"responseParts\":[],"
+                        + "\"error\":{\"message\":\"x\",\"type\":5}}}"}) {
+            reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
+
+            assertEquals(400, awaitToolFailure("status").getStatusCode(),
+                    body);
+        }
+    }
+
+    @Test
+    void acceptsAToolResponseAboveTheAttestationBound() throws Exception {
+        String text = "x".repeat(64 * 1024);
+        reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"settled\","
+                + "\"result\":{\"executionStatus\":\"success\","
+                + "\"responseParts\":[{\"text\":\"" + text + "\"}]}}")
+                .getBytes(StandardCharsets.UTF_8)));
+
+        Map<String, Object> answer = transport
+                .status(toolLease(server.getAddress().getPort()),
+                        toolSession(), toolReference(), 0)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals("settled", answer.get("state"));
+    }
+
+    @Test
+    void rejectsAnEmptyIdentityOrANonObjectInput() {
+        Map<String, Object> empty = toolReference();
+        empty.put("callId", "");
+        Map<String, Object> listInput = toolReference();
+        listInput.put("input", List.of("a"));
+        for (Map<String, Object> reference : List.of(empty,
+                listInput)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.execute(
+                            toolLease(server.getAddress().getPort()),
+                            toolSession(), reference));
+        }
+        assertNull(captured.get());
+    }
+
+    @Test
+    void acceptsLastSequenceOnlyOnStatus() throws Exception {
+        ObjectNode body = (ObjectNode) findIn(toolSuite("execute"), "success")
+                .required("expected").required("body").deepCopy();
+        body.put("lastSequence", 0);
+        reply.set(json(200, JSON.writeValueAsBytes(body)));
+
+        assertEquals(400, awaitToolFailure("execute").getStatusCode());
+        assertEquals(400, awaitToolFailure("cancel").getStatusCode());
+        Map<String, Object> status = transport.status(
+                toolLease(server.getAddress().getPort()), toolSession(),
+                toolReference(), 0).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+        assertFalse(status.containsKey("lastSequence"));
+        assertFalse(status.containsKey("protocolVersion"));
+        assertEquals("settled", status.get("state"));
+        assertTrue(status.containsKey("result"));
+    }
+
+    @Test
+    void validatesSequenceNumbersWithoutRoundingOrLongTruncation()
+            throws Exception {
+        for (String invalid : List.of("1.000000000000000001", "-1e-999")) {
+            reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"unknown\","
+                    + "\"lastSequence\":" + invalid + "}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            assertEquals(400, awaitToolFailure("status").getStatusCode(),
+                    invalid);
+        }
+        for (String valid : List.of("0", "1.0", "9007199254740993",
+                "9223372036854775808", "18446744073709551616")) {
+            reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"unknown\","
+                    + "\"lastSequence\":" + valid + "}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            Map<String, Object> answer = transport.status(
+                    toolLease(server.getAddress().getPort()), toolSession(),
+                    toolReference(), 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            assertEquals(Set.of("state"), answer.keySet(), valid);
+            assertEquals("unknown", answer.get("state"), valid);
+        }
+        reply.set(json(200, ("{\"protocolVersion\":2.000000000000000001,"
+                + "\"state\":\"unknown\"}").getBytes(StandardCharsets.UTF_8)));
+        assertEquals(400, awaitToolFailure("status").getStatusCode());
+    }
+
+    @Test
+    void rejectsExplicitNullAndEmptyOptionalResponseFields() throws Exception {
+        ObjectNode settled = (ObjectNode) findIn(toolSuite("execute"), "success")
+                .required("expected").required("body").deepCopy();
+        ObjectNode nullResult = JSON.createObjectNode();
+        nullResult.put("protocolVersion", 2);
+        nullResult.put("state", "unknown");
+        nullResult.putNull("result");
+        ObjectNode nullSequence = settled.deepCopy();
+        nullSequence.putNull("lastSequence");
+        ObjectNode nullError = settled.deepCopy();
+        ((ObjectNode) nullError.required("result")).putNull("error");
+        ObjectNode nullType = settled.deepCopy();
+        ObjectNode error = ((ObjectNode) nullType.required("result"))
+                .putObject("error");
+        error.put("message", "failure");
+        error.putNull("type");
+        ObjectNode emptyType = nullType.deepCopy();
+        ((ObjectNode) emptyType.required("result").required("error"))
+                .put("type", "");
+        for (JsonNode invalid : List.of(nullResult, nullSequence, nullError,
+                nullType, emptyType)) {
+            reply.set(json(200, JSON.writeValueAsBytes(invalid)));
+            assertEquals(400, awaitToolFailure("status").getStatusCode(),
+                    invalid.toString());
+        }
+    }
+
+    @Test
+    void enforcesTheSmallerLookupAndCancelRequestLimit() throws Exception {
+        Map<String, Object> reference = toolReference();
+        reference.put("callId", "x".repeat(16 * 1024));
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        assertEquals(16 * 1024, toolRoute("status")
+                .required("requestBodyLimitBytes").intValue());
+        assertEquals(16 * 1024, toolRoute("cancel")
+                .required("requestBodyLimitBytes").intValue());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.status(lease, toolSession(), reference, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.cancel(lease, toolSession(), reference));
+        assertNull(captured.get());
+
+        reply.set(json(200, JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"))));
+        transport.execute(lease, toolSession(), reference)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertTrue(captured.get().length > 16 * 1024);
+    }
+
+    @Test
+    void boundsToolResponsesAtOneMiB() throws Exception {
+        byte[] valid = JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"));
+        int limit = 1024 * 1024;
+        byte[] padded = new byte[limit];
+        Arrays.fill(padded, (byte) ' ');
+        System.arraycopy(valid, 0, padded, 0, valid.length);
+        reply.set(json(200, padded));
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+
+        transport.execute(lease, session, reference)
+                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+        transport.status(lease, session, reference, 0)
+                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+        transport.cancel(lease, session, reference)
+                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        reply.set(json(200, Arrays.copyOf(padded, limit + 1)));
+        for (String operation : List.of("execute", "status", "cancel")) {
+            assertEquals(limit, toolRoute(operation)
+                    .required("responseBodyLimitBytes").intValue());
+            RuntimeBrokerException failure = awaitToolFailure(operation);
+            assertEquals(413, failure.getStatusCode());
+            assertEquals("managed_runtime_attestation_too_large",
+                    failure.getCode());
+            assertEquals("Managed Runtime " + operation
+                    + " response exceeds 1 MiB.", failure.getMessage());
+            assertFalse(failure.isRetryable());
+        }
+    }
+
+    @Test
+    void retainsTheSharedToolErrorCodes() throws Exception {
+        for (String operation : List.of("execute", "status", "cancel")) {
+            for (JsonNode fixture : toolSuite(operation).required("cases")) {
+                JsonNode expected = fixture.required("expected");
+                int status = expected.required("status").intValue();
+                if (status == 200) {
+                    continue;
+                }
+                reply.set(json(status, errorBody(expected)));
+
+                RuntimeBrokerException failure = awaitToolFailure(operation);
+                assertEquals(status, failure.getStatusCode());
+                assertEquals(expected.path("code").asText(
+                        "managed_runtime_incompatible"), failure.getCode());
+                assertTrue(failure.getMessage().contains(operation));
+                assertFalse(failure.getMessage().contains("attestation"));
+            }
+        }
+    }
+
+    @Test
+    void statusRejectsANegativeSequence() {
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.status(
+                        toolLease(server.getAddress().getPort()),
+                        toolSession(), toolReference(), -1));
+        assertNull(captured.get());
+    }
+
+    private static String fixtureClassification(int status) {
+        return switch (status) {
+            case 401, 403 -> "credentials";
+            case 400, 413 -> "protocol";
+            case 409 -> "identity";
+            default -> "incompatible";
+        };
+    }
+
+    private JsonNode toolRoute(String route) {
+        for (JsonNode candidate : toolSuite.required("routes")) {
+            if (route.equals(candidate.required("key").textValue())) {
+                return candidate;
+            }
+        }
+        throw new AssertionError("missing tool route: " + route);
+    }
+
+    private JsonNode toolSuite(String route) {
+        for (JsonNode candidate : toolSuite.required("suites")) {
+            if (route.equals(candidate.required("route").textValue())) {
+                return candidate;
+            }
+        }
+        throw new AssertionError("missing tool suite: " + route);
+    }
+
+    private static JsonNode findIn(JsonNode suite, String id) {
+        for (JsonNode fixture : suite.required("cases")) {
+            if (id.equals(fixture.required("id").textValue())) {
+                return fixture;
+            }
+        }
+        throw new AssertionError("missing fixture: " + id);
+    }
+
+    private RuntimeBrokerException awaitToolFailure(String operation) {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        ExecutionException thrown = assertThrows(ExecutionException.class,
+                () -> {
+                    switch (operation) {
+                        case "execute" -> transport.execute(lease, session,
+                                reference).toCompletableFuture().get(2,
+                                        TimeUnit.SECONDS);
+                        case "status" -> transport.status(lease, session,
+                                reference, 0).toCompletableFuture().get(2,
+                                        TimeUnit.SECONDS);
+                        case "cancel" -> transport.cancel(lease, session,
+                                reference).toCompletableFuture().get(2,
+                                        TimeUnit.SECONDS);
+                        default -> throw new AssertionError(
+                                "unknown operation");
+                    }
+                });
+        Throwable cause = thrown.getCause();
+        if (cause instanceof CompletionException completion
+                && completion.getCause() != null) {
+            cause = completion.getCause();
+        }
+        assertTrue(cause instanceof RuntimeBrokerException);
+        return (RuntimeBrokerException) cause;
+    }
+
+    private RuntimeLease toolLease(int port) {
+        JsonNode identity = toolSuite.required("identity");
+        return new RuntimeLease("runtime-01",
+                URI.create("http://127.0.0.1:" + port + "/"),
+                identity.required("token").textValue(),
+                identity.required("leaseId").textValue(),
+                identity.required("epoch").longValue());
+    }
+
+    private static RuntimeSession toolSession() {
+        return new RuntimeSession("harness-01", "runtime-session-01",
+                "bootstrap", new RuntimeScope("tenant-a", "workspace-a",
+                        "7", "/runtime/workspace",
+                        "sha256:" + "a".repeat(64), "session"));
+    }
+
+    private static Map<String, Object> toolReference() {
+        Map<String, Object> reference = new LinkedHashMap<>();
+        reference.put("sessionId", "runtime-session-01");
+        reference.put("promptId", "prompt-01");
+        reference.put("callId", "call-01");
+        reference.put("argsDigest", "sha256:0123456789abcdef0123456789abcdef"
+                + "0123456789abcdef0123456789abcdef");
+        reference.put("toolName", "read_file");
+        reference.put("input", Map.of("path", "/workspace/README.md"));
+        return reference;
     }
 
     @Test

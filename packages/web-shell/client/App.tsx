@@ -196,6 +196,12 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
+import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import {
+  managedSelectionFromUrl,
+  saveManagedSelection,
+} from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
@@ -1200,6 +1206,8 @@ export interface WebShellProps {
   }) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
+  managedAgentProvider?: ManagedAgentProvider;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -1542,7 +1550,7 @@ type SessionActionsWithCreate = {
     branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
-  clearSession: () => Promise<void>;
+  clearSession: (options?: { dropSessionContext?: boolean }) => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
 };
 
@@ -1552,7 +1560,10 @@ type NewSessionIntent =
    * Stay in the current context. From a Live chat that means a fresh Live
    * conversation, unless `leaveLive` sends the new chat to the trusted
    * primary workspace the way a cold draft starts (or to a standalone draft
-   * when there is no trusted primary).
+   * when there is no trusted primary, or to a plain cwd-less draft when the
+   * daemon offers neither). Leaving also drops the connection's live session
+   * context, so the resulting draft does not inherit Live on its first
+   * prompt.
    */
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
@@ -3158,6 +3169,7 @@ export function App({
   onSessionIdChange,
   onSessionInfoChange,
   onSessionCreated,
+  managedAgentProvider,
   theme: providedTheme,
   onThemeChange,
   onThemeResolved,
@@ -3838,6 +3850,7 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -9072,12 +9085,26 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'managed'
     | 'workspaces'
     | null
-  >(initialConnectionsSettingsCategory ? 'settings' : null);
+  >(() =>
+    initialConnectionsSettingsCategory
+      ? 'settings'
+      : managedAgentProvider && managedSelectionFromUrl().open
+        ? 'managed'
+        : null,
+  );
+  const [managedSessionId, setManagedSessionId] = useState<string | undefined>(
+    () => managedSelectionFromUrl().sessionId,
+  );
+  useEffect(() => {
+    saveManagedSelection(activePanel === 'managed', managedSessionId);
+  }, [activePanel, managedSessionId]);
   const chatActive =
     !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
+
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -9111,7 +9138,8 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory) &&
+      !(activePanel === 'managed' && externalManagedAgentAvailable)
     ) {
       setActivePanel(null);
     }
@@ -9142,6 +9170,7 @@ export function App({
     }
   }, [
     activePanel,
+    externalManagedAgentAvailable,
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
@@ -9176,6 +9205,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'managed'
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
@@ -13430,10 +13460,15 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live' && intent.leaveLive) {
-          // Clearing keeps the connection's live context, so an undefined
-          // pending context would send the first prompt back to Live. Without
-          // a trusted primary, leave for a standalone draft when the daemon
-          // offers one and otherwise keep the Live path.
+          // Without a trusted primary, leave for a standalone draft when the
+          // daemon offers one; otherwise fall back to a plain cwd-less draft,
+          // the same as a cold draft in that setup, instead of keeping the
+          // Live path — attempting startLive('new') here throws when Live
+          // Voice is unavailable and the New task click is discarded
+          // (#12620). The undefined case only means "plain draft" because the
+          // clear below is told to drop the connection's live context: an
+          // undefined pending context means "inherit from the connection", so
+          // leaving it in place would send the first prompt back to Live.
           const primaryCwd = workspacesRef.current.find(
             (entry) => entry.primary && entry.trusted !== false,
           )?.cwd;
@@ -13445,6 +13480,8 @@ export function App({
             )
           ) {
             nextContext = { kind: 'standalone' };
+          } else {
+            nextContext = undefined;
           }
         }
         if (nextContext?.kind === 'live') {
@@ -13535,12 +13572,23 @@ export function App({
         closePanel();
       }
       if (!opts?.keepView) showChat();
+      // Leaving Live has to reach the connection: `undefined` is the
+      // downstream sentinel for "inherit from the connection", so clearing
+      // alone would hand the first prompt the live context we just left, and
+      // createSession rejects a live context (#12620). Only a context this
+      // click chose to leave is dropped — a workspace connection still
+      // inherits its cwd on the next prompt.
+      const dropSessionContextOnClear =
+        nextContext === undefined &&
+        connectionRef.current.sessionContext?.kind === 'live';
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).clearSession();
+        ).clearSession(
+          dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
+        );
         focusRequest = scheduleComposerFocus();
         await clearPromise;
         if (
@@ -13598,6 +13646,81 @@ export function App({
     (workspaceCwd: string) =>
       createNewSession({ kind: 'workspace', cwd: workspaceCwd }),
     [createNewSession],
+  );
+
+  /**
+   * Post-delete landing for the session the client is currently attached to:
+   * leave the deleted conversation and open a fresh draft in the same
+   * workspace context. Shared by the Session Overview panel, the sidebar row
+   * delete, and the delete-session picker (issue #12619).
+   */
+  const handleCurrentSessionRemoved = useCallback(
+    async (removed: { sessionId: string; workspaceCwd: string }) => {
+      const current = connectionRef.current;
+      // A current session in the no-workspace area (standalone) carries no
+      // cwd of its own; the call sites substitute the primary workspace cwd
+      // for a missing one, which must not pull the post-delete landing into
+      // that workspace (#12619).
+      const removedWorkspaceCwd =
+        current.sessionContext?.kind === 'standalone'
+          ? ''
+          : removed.workspaceCwd;
+      // The daemon publishes the terminal `session_closed` frame before it
+      // answers the delete request, so the attachment is usually already
+      // cleared by the time this runs. Only a *different* attached session
+      // means the client moved on mid-delete (#12619).
+      if (
+        current.sessionId !== undefined &&
+        current.sessionId !== removed.sessionId
+      )
+        return;
+      if (removedWorkspaceCwd) {
+        const currentWorkspaceCwd =
+          current.workspaceCwd ||
+          lockedWorkspaceCwd ||
+          workspacesRef.current.find((entry) => entry.primary)?.cwd;
+        if (currentWorkspaceCwd && currentWorkspaceCwd !== removedWorkspaceCwd)
+          return;
+      } else if (current.workspaceCwd || lockedWorkspaceCwd) {
+        // The client moved into a workspace after the delete started.
+        return;
+      }
+      const cleared = await createNewSession(
+        removedWorkspaceCwd
+          ? {
+              kind: 'workspace',
+              cwd: removedWorkspaceCwd,
+            }
+          : // No-workspace landing: a fresh standalone draft where the daemon
+            // supports one, mirroring the Session Overview delete (#12619).
+            { kind: 'global' },
+        {
+          keepView: true,
+          keepPanel: true,
+        },
+      );
+      const latest = connectionRef.current;
+      const latestWorkspaceCwd =
+        latest.workspaceCwd ||
+        lockedWorkspaceCwd ||
+        workspacesRef.current.find((entry) => entry.primary)?.cwd;
+      const landingMatches = removedWorkspaceCwd
+        ? !latestWorkspaceCwd || latestWorkspaceCwd === removedWorkspaceCwd
+        : // The no-workspace landing only counts while the client stays
+          // cwd-less; the primary fallback is a display default, not where
+          // the deleted session lived.
+          !(latest.workspaceCwd || lockedWorkspaceCwd);
+      if (
+        cleared &&
+        landingMatches &&
+        (latest.sessionId === removed.sessionId ||
+          latest.sessionId === undefined)
+      ) {
+        onSessionIdChange?.(undefined);
+      }
+      return cleared;
+    },
+    [createNewSession, lockedWorkspaceCwd, onSessionIdChange],
   );
 
   const switchWorkspace = useCallback(
@@ -19165,8 +19288,28 @@ export function App({
             >
               <DeleteSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
-                onDeleted={(sessionIds) => {
+                onDeleted={(sessionIds, meta) => {
                   closeUsageTabs(sessionIds);
+                  // Deleting the attached session must leave the deleted
+                  // conversation: open a fresh draft in the same context,
+                  // mirroring the Session Overview (#12619). The daemon's
+                  // terminal `session_closed` frame clears the attachment
+                  // before the delete response resolves, so fall back to the
+                  // id the dialog captured at confirm time.
+                  const current = connectionRef.current;
+                  const attachedId =
+                    current.sessionId ?? meta?.attachedSessionId;
+                  if (attachedId && sessionIds.includes(attachedId)) {
+                    void handleCurrentSessionRemoved({
+                      sessionId: attachedId,
+                      workspaceCwd:
+                        current.workspaceCwd ||
+                        lockedWorkspaceCwd ||
+                        workspacesRef.current.find((entry) => entry.primary)
+                          ?.cwd ||
+                        '',
+                    });
+                  }
                   store.dispatch([
                     {
                       type: 'status',
@@ -19381,6 +19524,14 @@ export function App({
                     closeMobileDrawer();
                     openPanel('channels');
                   }}
+                  onOpenManagedSessions={
+                    managedAgentProvider
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('managed');
+                        }
+                      : undefined
+                  }
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -19456,7 +19607,30 @@ export function App({
                     returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
-                  onSessionsDeleted={closeUsageTabs}
+                  onSessionsDeleted={(sessionIds, meta) => {
+                    closeUsageTabs(sessionIds);
+                    // Deleting the attached session must leave the deleted
+                    // conversation: open a fresh draft in the same context,
+                    // mirroring the Session Overview (#12619). The daemon's
+                    // terminal `session_closed` frame clears the attachment
+                    // before the delete response resolves, so fall back to the
+                    // id the sidebar captured at confirm time.
+                    const current = connectionRef.current;
+                    const attachedId =
+                      current.sessionId ?? meta?.attachedSessionId;
+                    if (!attachedId || !sessionIds.includes(attachedId)) {
+                      return;
+                    }
+                    void handleCurrentSessionRemoved({
+                      sessionId: attachedId,
+                      workspaceCwd:
+                        current.workspaceCwd ||
+                        lockedWorkspaceCwd ||
+                        workspacesRef.current.find((entry) => entry.primary)
+                          ?.cwd ||
+                        '',
+                    });
+                  }}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
@@ -19755,7 +19929,10 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable ||
+                  activePanel === 'status' ||
+                  (activePanel === 'managed' &&
+                    externalManagedAgentAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -19777,8 +19954,10 @@ export function App({
                               ? t('plugins.title')
                             : activePanel === 'channels'
                               ? t('channels.title')
-                            : activePanel === 'workspaces'
-                              ? t('workspacesOverview.title')
+                            : activePanel === 'managed'
+                              ? t('managed.title')
+                              : activePanel === 'workspaces'
+                                ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -19865,11 +20044,13 @@ export function App({
                         ? t('settings.title')
                         : activePanel === 'status'
                           ? t('daemon.title')
-                          : t('sessionsOverview.title')}
+                          : activePanel === 'managed'
+                            ? t('managed.title')
+                            : t('sessionsOverview.title')}
                     </div>
                     </div>
                   )}
-                  <div className={styles.panelBody} key={activePanel}>
+                  <div className={`${styles.panelBody} ${activePanel === 'managed' ? styles.managedPanelBody : ''}`} key={activePanel}>
                     <ShadowDomBoundary
                       enabled={
                         shadowDomOptions.plugins &&
@@ -19990,6 +20171,16 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                       />
+                    ) : activePanel === 'managed' ? (
+                      <ManagedSessionsPage
+                        key={
+                          managedAgentProvider?.storageKey ?? workspace.baseUrl
+                        }
+                        sessionId={managedSessionId}
+                        onSelectSession={setManagedSessionId}
+                        workspaceCwd={lockedWorkspaceCwd}
+                        managedAgentProvider={managedAgentProvider}
+                      />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
                         onClose={() => {
@@ -20030,49 +20221,7 @@ export function App({
                         // Split view cannot exist below the breakpoint; the
                         // panel hides the action when the prop is absent.
                         onOpenSplit={isLargeScreen ? openSplitView : undefined}
-                        onCurrentSessionRemoved={async (removed) => {
-                          const current = connectionRef.current;
-                          const currentWorkspaceCwd =
-                            current.workspaceCwd ||
-                            lockedWorkspaceCwd ||
-                            workspacesRef.current.find(
-                              (entry) => entry.primary,
-                            )?.cwd;
-                          if (
-                            current.sessionId !== removed.sessionId ||
-                            (currentWorkspaceCwd &&
-                              currentWorkspaceCwd !== removed.workspaceCwd)
-                          ) {
-                            return;
-                          }
-                          const cleared = await createNewSession(
-                            {
-                              kind: 'workspace',
-                              cwd: removed.workspaceCwd,
-                            },
-                            {
-                              keepView: true,
-                              keepPanel: true,
-                            },
-                          );
-                          const latest = connectionRef.current;
-                          const latestWorkspaceCwd =
-                            latest.workspaceCwd ||
-                            lockedWorkspaceCwd ||
-                            workspacesRef.current.find(
-                              (entry) => entry.primary,
-                            )?.cwd;
-                          if (
-                            cleared &&
-                            (!latestWorkspaceCwd ||
-                              latestWorkspaceCwd === removed.workspaceCwd) &&
-                            (latest.sessionId === removed.sessionId ||
-                              latest.sessionId === undefined)
-                          ) {
-                            onSessionIdChange?.(undefined);
-                          }
-                          return cleared;
-                        }}
+                        onCurrentSessionRemoved={handleCurrentSessionRemoved}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         manageLiveState={false}
