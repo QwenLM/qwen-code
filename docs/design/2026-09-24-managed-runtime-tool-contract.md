@@ -101,3 +101,44 @@ in `packages/sdk-java/runtime-broker` (6 tests) both pass.
 - The `UNKNOWN` execution reconciler consumes `status` (tracked on #12380).
 - Whether a cancel of an execution the Runtime reports as still running sends
   the physical cancel is deliberately deferred.
+
+## 6. Worker implementation
+
+The merged attestation worker now mounts the three routes beside `attest`.
+Its executor admits exactly the first-slice ordinary tools — `read_file`,
+`write_file`, `edit`, and foreground `run_shell_command` — over a real
+`Config` rooted at the attested workspace cwd, with checkpointing disabled.
+Admission happens on the Harness side; the worker executes with no further
+approval gate. The invocation journal is in-memory by construction: the
+worker process is the Runtime generation, so a restart is a new generation
+rather than a continuation, and `unknown` is the honest answer for anything
+the process never saw.
+
+Semantics mounted on the contract:
+
+- `execute` is idempotent by `reference.callId`: the same identity joins the
+  in-flight invocation or returns its settled result; the same `callId` with
+  a different digest or payload is a 409 identity conflict. An unadmitted
+  tool name is a 409 as well — it can never be valid for this generation.
+- `status` is read-only and answers `unknown` (200) for a reference the
+  Runtime holds no record of; a known invocation answers its state with the
+  journal's monotonic `lastSequence`.
+- `cancel` settles a `prepared` invocation as cancelled without touching the
+  tool, aborts an `executing` one and answers `cancel_requested`, and is
+  idempotent thereafter. A cancel the Runtime honored settles the invocation
+  as `cancelled` whether the tool surfaces the abort as an error or as an
+  early result.
+- The worker's HTTP `requestTimeout` is disabled because an `execute` call
+  holds its connection until settlement; per-tool timeouts govern the work
+  itself. Headers and keep-alive bounds stay as they were.
+
+Validation adds `managed-runtime-tool-worker.test.ts`: every negative shared
+fixture is replayed over raw HTTP against the real mounted routes, and the
+behavioral cases execute a real `read_file` in a temporary workspace, answer
+`unknown` for unseen references, join a concurrent duplicate execute, reject
+a same-callId different-digest retry with 409, refuse an unadmitted tool, and
+cancel an in-flight foreground shell command.
+
+Still follow-up: harness-side `RuntimeBackedTool` wiring, file-history
+settlement, capability-digest verification against the admitted tool set,
+journal retention bounds, and the artifact delivery track for large outputs.

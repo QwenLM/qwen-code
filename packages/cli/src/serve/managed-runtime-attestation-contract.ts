@@ -162,12 +162,12 @@ function isClosedAttestationRequest(
   );
 }
 
-const noStore: RequestHandler = (_req, res, next) => {
+export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
   res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
   next();
 };
 
-function authorize(
+export function authorizeManagedRuntime(
   identity: ManagedRuntimeAttestationIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
@@ -246,7 +246,12 @@ function handleAttestation(
   };
 }
 
-const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
+export const handleManagedRuntimeJsonError: ErrorRequestHandler = (
+  error,
+  _req,
+  res,
+  next,
+) => {
   if (res.headersSent) {
     next(error);
     return;
@@ -291,8 +296,8 @@ export function registerManagedRuntimeAttestationRoute(
   >;
   app[method](
     ATTEST_ROUTE.path,
-    noStore,
-    authorize(identitySnapshot),
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identitySnapshot),
     express.json({
       // Compressed private requests add no value at 16 KiB. Refusing them
       // keeps the limit on wire bytes and makes corrupt streams use the JSON
@@ -303,7 +308,7 @@ export function registerManagedRuntimeAttestationRoute(
       type: 'application/json',
     }),
     handleAttestation(identitySnapshot, responseJson),
-    handleJsonError,
+    handleManagedRuntimeJsonError,
   );
 }
 

@@ -60,3 +60,18 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 - 在 `HttpRuntimeTransport` 实现 `execute`、`status`、`cancel`。
 - `UNKNOWN` 执行对账器消费 `status`（在 #12380 跟踪）。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。
+
+## 6. Worker 实现
+
+合入的 attestation worker 现在在 `attest` 旁边挂载了这三个路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。准入发生在 Harness 侧；worker 执行时不再有审批门。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。
+
+契约之上的语义：
+
+- `execute` 按 `reference.callId` 幂等：同一身份会并入在途调用或返回其已结算结果；同一 `callId` 携带不同摘要或负载则是 409 身份冲突。未准入的工具名同样是 409——它对本代数永远不合法。
+- `status` 只读，对 Runtime 没有记录的 reference 以 200 回答 `unknown`；已知调用按其状态与日志的单调 `lastSequence` 应答。
+- `cancel` 把 `prepared` 调用直接结算为 cancelled（不触碰工具），中止 `executing` 调用并回答 `cancel_requested`，此后幂等。Runtime 兑现的取消会把该调用结算为 `cancelled`——无论工具把中止表现为错误还是提前返回的结果。
+- worker 的 HTTP `requestTimeout` 已停用，因为 `execute` 调用会持有连接直到结算；工具自身的超时管工具本身。headers 与 keep-alive 上限维持不变。
+
+验证新增 `managed-runtime-tool-worker.test.ts`：在真实挂载的路由上用原始 HTTP 回放全部负面共享 fixture；行为用例覆盖在临时工作区真实执行 `read_file`、对未见过的 reference 回答 `unknown`、并入并发的重复 execute、以 409 拒绝同 callId 不同摘要的重试、拒绝未准入工具，以及取消一个在途的前台 shell 命令。
+
+仍为后续工作：Harness 侧 `RuntimeBackedTool` 接线、文件历史结算、对已准入工具集合的 capability digest 校验、日志保留上限，以及大输出的产物交付通道。
