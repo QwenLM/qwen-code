@@ -1542,7 +1542,7 @@ type SessionActionsWithCreate = {
     branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
-  clearSession: () => Promise<void>;
+  clearSession: (options?: { dropSessionContext?: boolean }) => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
 };
 
@@ -1552,7 +1552,10 @@ type NewSessionIntent =
    * Stay in the current context. From a Live chat that means a fresh Live
    * conversation, unless `leaveLive` sends the new chat to the trusted
    * primary workspace the way a cold draft starts (or to a standalone draft
-   * when there is no trusted primary).
+   * when there is no trusted primary, or to a plain cwd-less draft when the
+   * daemon offers neither). Leaving also drops the connection's live session
+   * context, so the resulting draft does not inherit Live on its first
+   * prompt.
    */
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
@@ -3779,6 +3782,9 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
+  const gitWorktreesSupported =
+    workspace.capabilities?.features?.includes('workspace_git_worktrees') ===
+    true;
   const [initialRemoteWorkspaceAddActive] = useState(
     () => standalone && isRemoteWorkspaceAddActive(),
   );
@@ -11009,6 +11015,17 @@ export function App({
       view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenWorktrees = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    // The dialog's tab bar reaches Changes and History from here, and both
+    // read `gitCwd`. Omitting it would answer a session running in a worktree
+    // with the workspace root's diff and log.
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'worktrees',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const handleOpenLog = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -13416,10 +13433,15 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live' && intent.leaveLive) {
-          // Clearing keeps the connection's live context, so an undefined
-          // pending context would send the first prompt back to Live. Without
-          // a trusted primary, leave for a standalone draft when the daemon
-          // offers one and otherwise keep the Live path.
+          // Without a trusted primary, leave for a standalone draft when the
+          // daemon offers one; otherwise fall back to a plain cwd-less draft,
+          // the same as a cold draft in that setup, instead of keeping the
+          // Live path — attempting startLive('new') here throws when Live
+          // Voice is unavailable and the New task click is discarded
+          // (#12620). The undefined case only means "plain draft" because the
+          // clear below is told to drop the connection's live context: an
+          // undefined pending context means "inherit from the connection", so
+          // leaving it in place would send the first prompt back to Live.
           const primaryCwd = workspacesRef.current.find(
             (entry) => entry.primary && entry.trusted !== false,
           )?.cwd;
@@ -13431,6 +13453,8 @@ export function App({
             )
           ) {
             nextContext = { kind: 'standalone' };
+          } else {
+            nextContext = undefined;
           }
         }
         if (nextContext?.kind === 'live') {
@@ -13521,12 +13545,23 @@ export function App({
         closePanel();
       }
       if (!opts?.keepView) showChat();
+      // Leaving Live has to reach the connection: `undefined` is the
+      // downstream sentinel for "inherit from the connection", so clearing
+      // alone would hand the first prompt the live context we just left, and
+      // createSession rejects a live context (#12620). Only a context this
+      // click chose to leave is dropped — a workspace connection still
+      // inherits its cwd on the next prompt.
+      const dropSessionContextOnClear =
+        nextContext === undefined &&
+        connectionRef.current.sessionContext?.kind === 'live';
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).clearSession();
+        ).clearSession(
+          dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
+        );
         focusRequest = scheduleComposerFocus();
         await clearPromise;
         if (
@@ -14565,6 +14600,28 @@ export function App({
     workspace.client,
   ]);
 
+  // Shared by the sidebar entry and the Worktrees tab so both start a
+  // worktree draft the same way.
+  const handleNewWorktreeSession = useCallback(
+    (workspaceCwd?: string) => {
+      // The intent travels with the draft it belongs to: set inside
+      // createNewSession's synchronous step, it is what the first prompt
+      // reads, and any later session start or workspace switch resets it
+      // like any other intent.
+      const targetWorkspaceCwd =
+        workspaceCwd ??
+        lockedWorkspaceCwd ??
+        workspacesRef.current.find(
+          (entry) => entry.primary && entry.trusted !== false,
+        )?.cwd;
+      if (!targetWorkspaceCwd) return false;
+      return createNewSession(
+        { kind: 'workspace', cwd: targetWorkspaceCwd },
+        { gitIntent: { mode: 'worktree' } },
+      );
+    },
+    [createNewSession, lockedWorkspaceCwd],
+  );
   // Clicking a card in the Session Overview panel switches the current window
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
@@ -18992,6 +19049,16 @@ export function App({
               initialView={gitDialog.view}
               sessionId={connection.sessionId}
               resolveSessionForWorkspace={resolveSessionForWorkspace}
+              onOpenSession={(sessionId) => {
+                const { workspaceCwd } = gitDialog;
+                setGitDialog(undefined);
+                handleOpenSessionFromOverview(sessionId, workspaceCwd);
+              }}
+              onNewWorktreeSession={() => {
+                const { workspaceCwd } = gitDialog;
+                setGitDialog(undefined);
+                void handleNewWorktreeSession(workspaceCwd);
+              }}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -19486,26 +19553,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('workspaces');
                   }}
-                  onNewWorktreeSession={(workspaceCwd) => {
-                    // The intent travels with the draft it belongs to: set
-                    // inside createNewSession's synchronous step, it is what
-                    // the first prompt reads, and any later session start or
-                    // workspace switch resets it like any other intent.
-                    const targetWorkspaceCwd =
-                      workspaceCwd ??
-                      lockedWorkspaceCwd ??
-                      workspacesRef.current.find(
-                        (entry) =>
-                          entry.primary && entry.trusted !== false,
-                      )?.cwd;
-                    if (!targetWorkspaceCwd) return false;
-                    return createNewSession(
-                      { kind: 'workspace', cwd: targetWorkspaceCwd },
-                      {
-                        gitIntent: { mode: 'worktree' },
-                      },
-                    );
-                  }}
+                  onNewWorktreeSession={handleNewWorktreeSession}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={
@@ -21251,6 +21299,11 @@ export function App({
                               ? handleOpenCommit
                               : undefined
                           }
+                          onOpenWorktrees={
+                            gitDiffWorkspaceCwd && gitWorktreesSupported
+                              ? handleOpenWorktrees
+                              : undefined
+                          }
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
@@ -21570,6 +21623,13 @@ export function App({
                 onOpenGitCommit={
                   workspaceContextActive && gitDiffWorkspaceCwd
                     ? handleOpenCommit
+                    : undefined
+                }
+                onOpenGitWorktrees={
+                  workspaceContextActive &&
+                  gitDiffWorkspaceCwd &&
+                  gitWorktreesSupported
+                    ? handleOpenWorktrees
                     : undefined
                 }
                 onOpenGitLog={

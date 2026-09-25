@@ -130,9 +130,7 @@ export async function startManagedRuntimeAttestationWorker(
   const server = createServer(ownedManagedRuntimeRouteGate(app));
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
-  // Tool executions run to settlement on the caller's connection; the
-  // per-tool timeouts govern them, not the HTTP layer.
-  server.requestTimeout = 0;
+  server.requestTimeout = 5_000;
   server.keepAliveTimeout = 1_000;
 
   await new Promise<void>((resolve, reject) => {

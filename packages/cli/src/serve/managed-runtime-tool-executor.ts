@@ -14,6 +14,7 @@ import type {
   AnyDeclarativeTool,
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
 
 export interface ManagedToolReference {
   readonly sessionId: string;
@@ -90,6 +91,8 @@ export class ManagedToolExecutor {
         usageStatisticsEnabled: false,
         approvalMode: ApprovalMode.YOLO,
         fileCheckpointingEnabled: false,
+        // The worker has no conversation history to justify cached read elision.
+        fileReadCacheDisabled: true,
       }),
     );
   }
@@ -117,6 +120,11 @@ export class ManagedToolExecutor {
     if (!tool) {
       throw new ManagedToolConflictError(
         `Managed Runtime does not admit tool ${toolName}.`,
+      );
+    }
+    if (toolName === ShellTool.Name && input['is_background'] === true) {
+      throw new ManagedToolConflictError(
+        'Managed Runtime does not admit background shell execution.',
       );
     }
     const entry: JournalEntry = {
@@ -187,7 +195,7 @@ export class ManagedToolExecutor {
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
     try {
-      const invocation = tool.build(entry.input);
+      const invocation = tool.build(structuredClone(entry.input));
       const result: ToolResult = await invocation.execute(
         entry.controller.signal,
       );
@@ -206,6 +214,19 @@ export class ManagedToolExecutor {
     entry.result = payload;
     entry.state = 'settled';
     entry.lastSequence += 1;
+    // Status is the largest envelope because it also carries the sequence.
+    if (
+      Buffer.byteLength(
+        JSON.stringify({ protocolVersion: 2, ...view(entry) }),
+      ) > MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES
+    ) {
+      entry.result = {
+        executionStatus:
+          payload.executionStatus === 'cancelled' ? 'cancelled' : 'error',
+        responseParts: [],
+        error: { message: 'Managed Runtime tool result exceeds 1 MiB.' },
+      };
+    }
   }
 }
 

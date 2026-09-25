@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   startManagedRuntimeAttestationWorker,
   type ManagedRuntimeAttestationWorkerHandle,
@@ -222,6 +222,41 @@ describe('Managed Runtime tool worker', () => {
     expect(view.lastSequence).toBeGreaterThan(0);
   });
 
+  it('returns file contents for separate calls across sessions', async () => {
+    const origin = await start();
+    for (const [index, sessionId] of [
+      'session-a',
+      'session-b',
+      'session-a',
+    ].entries()) {
+      const body = executeBody({
+        file_path: path.join(workspace, 'README.md'),
+      });
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            ...body,
+            reference: {
+              ...body.reference,
+              sessionId,
+              callId: `read-${index}`,
+            },
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const settled = await response.json();
+      expect(settled).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'success' },
+      });
+      expect(JSON.stringify(settled)).toContain('file contents');
+    }
+  });
+
   it('answers unknown for a reference the Runtime never saw', async () => {
     const origin = await start();
     const reference = {
@@ -247,7 +282,68 @@ describe('Managed Runtime tool worker', () => {
     }
   });
 
-  it('joins an in-flight execute for the same reference', async () => {
+  it('accepts a 256 KiB execute body and rejects one byte more', async () => {
+    const origin = await start();
+    const body = JSON.stringify(
+      executeBody({ file_path: path.join(workspace, 'README.md') }),
+    ).padEnd(256 * 1024, ' ');
+    const accepted = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      { method: 'POST', headers: HEADERS, body },
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({
+      result: { executionStatus: 'success' },
+    });
+
+    const rejected = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      { method: 'POST', headers: HEADERS, body: `${body} ` },
+    );
+    expect(rejected.status).toBe(413);
+    expect(await rejected.json()).toEqual({
+      code: 'managed_runtime_attestation_too_large',
+      error: 'Managed Runtime request exceeds its body size limit.',
+    });
+  });
+
+  it('journals a bounded error when JSON encoding exceeds the result limit', async () => {
+    const origin = await start();
+    const filePath = path.join(workspace, 'large.svg');
+    fs.writeFileSync(
+      filePath,
+      `<svg xmlns="http://www.w3.org/2000/svg"><!--${'"'.repeat(600_000)}--></svg>`,
+    );
+    const body = executeBody({ file_path: filePath });
+    let settled: unknown;
+    for (const operation of ['execute', 'status', 'cancel', 'execute']) {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/${operation}`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify(
+            operation === 'execute'
+              ? body
+              : { protocolVersion: 2, reference: body.reference },
+          ),
+        },
+      );
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(1024 * 1024);
+      const result = JSON.parse(text).result as unknown;
+      expect(result).toEqual({
+        executionStatus: 'error',
+        responseParts: [],
+        error: { message: 'Managed Runtime tool result exceeds 1 MiB.' },
+      });
+      settled ??= result;
+      expect(result).toEqual(settled);
+    }
+  });
+
+  it('executes concurrent and settled retries only once', async () => {
     const origin = await start();
     const body = {
       protocolVersion: 2,
@@ -257,8 +353,8 @@ describe('Managed Runtime tool worker', () => {
         callId: 'call-join',
         argsDigest: 'digest-join',
       },
-      toolName: 'read_file',
-      input: { file_path: path.join(workspace, 'README.md') },
+      toolName: 'run_shell_command',
+      input: { command: 'echo invocation >> calls.txt' },
     };
     const [first, second] = await Promise.all([
       fetch(`${origin}/internal/managed-runtime/v2/execute`, {
@@ -274,7 +370,57 @@ describe('Managed Runtime tool worker', () => {
     ]);
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
-    expect(await first.json()).toEqual(await second.json());
+    const settled = await first.json();
+    expect(settled).toMatchObject({
+      result: { executionStatus: 'success' },
+    });
+    expect(settled).toEqual(await second.json());
+    const replay = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(body),
+      },
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(settled);
+    expect(
+      fs.readFileSync(path.join(workspace, 'calls.txt'), 'utf8').trim(),
+    ).toBe('invocation');
+  });
+
+  it('replays identical input after the tool normalizes its parameters', async () => {
+    const origin = await start();
+    const body = JSON.stringify(
+      executeBody({
+        file_path: ` ${path.join(workspace, 'README.md')} `,
+        offset: null,
+        limit: null,
+        pages: null,
+      }),
+    );
+    const first = await fetch(`${origin}/internal/managed-runtime/v2/execute`, {
+      method: 'POST',
+      headers: HEADERS,
+      body,
+    });
+    expect(first.status).toBe(200);
+    const settled = await first.json();
+    expect(settled).toMatchObject({
+      result: { executionStatus: 'success' },
+    });
+
+    const replay = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body,
+      },
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(settled);
   });
 
   it('rejects a second call with the same callId but a different digest', async () => {
@@ -320,6 +466,71 @@ describe('Managed Runtime tool worker', () => {
     expect(response.status).toBe(409);
   });
 
+  it('rejects background shell execution without recording an invocation', async () => {
+    const origin = await start();
+    const body = {
+      ...executeBody({ command: 'echo background', is_background: true }),
+      toolName: 'run_shell_command',
+    };
+    const response = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(body),
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: 'managed_runtime_identity_conflict',
+    });
+
+    for (const operation of ['status', 'cancel']) {
+      const lookup = await fetch(
+        `${origin}/internal/managed-runtime/v2/${operation}`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            protocolVersion: 2,
+            reference: body.reference,
+          }),
+        },
+      );
+      expect(lookup.status).toBe(200);
+      expect(await lookup.json()).toEqual({
+        protocolVersion: 2,
+        state: 'unknown',
+      });
+    }
+  });
+
+  it.each([false, undefined])(
+    'executes foreground shell commands with is_background=%s',
+    async (isBackground) => {
+      const origin = await start();
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/execute`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({
+            ...executeBody({
+              command: 'echo foreground',
+              is_background: isBackground,
+            }),
+            toolName: 'run_shell_command',
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'success' },
+      });
+    },
+  );
+
   it('cancels an in-flight shell execution', async () => {
     const origin = await start();
     const reference = {
@@ -341,7 +552,17 @@ describe('Managed Runtime tool worker', () => {
         },
       }),
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await vi.waitFor(async () => {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/status`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(await response.json()).toMatchObject({ state: 'executing' });
+    });
 
     const cancelResponse = await fetch(
       `${origin}/internal/managed-runtime/v2/cancel`,
@@ -361,6 +582,6 @@ describe('Managed Runtime tool worker', () => {
       result: { executionStatus: string };
     };
     expect(settled.state).toBe('settled');
-    expect(['cancelled', 'error']).toContain(settled.result.executionStatus);
+    expect(settled.result.executionStatus).toBe('cancelled');
   }, 15_000);
 });

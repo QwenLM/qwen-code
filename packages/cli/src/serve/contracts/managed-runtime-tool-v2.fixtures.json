@@ -234,6 +234,72 @@
             "classification": "protocol",
             "code": "managed_runtime_attestation_invalid"
           }
+        },
+        {
+          "id": "without-cursor",
+          "request": {
+            "headers": {
+              "authorization": "Bearer fixture-token",
+              "cache-control": "no-store",
+              "content-type": "application/json",
+              "x-qwen-managed-lease-id": "lease-01",
+              "x-qwen-managed-lease-epoch": "4"
+            },
+            "body": {
+              "protocolVersion": 2,
+              "reference": {
+                "sessionId": "runtime-session-01",
+                "promptId": "prompt-01",
+                "callId": "call-01",
+                "argsDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+              }
+            }
+          },
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "prepared",
+              "lastSequence": 0
+            }
+          }
+        },
+        {
+          "id": "settled-with-error",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "settled",
+              "result": {
+                "executionStatus": "error",
+                "responseParts": [],
+                "error": {
+                  "message": "tool failed",
+                  "type": "runtime"
+                }
+              },
+              "lastSequence": 3
+            }
+          }
+        },
+        {
+          "id": "settled-not-started",
+          "expected": {
+            "status": 200,
+            "classification": "ok",
+            "body": {
+              "protocolVersion": 2,
+              "state": "settled",
+              "result": {
+                "executionStatus": "not_started",
+                "responseParts": []
+              },
+              "lastSequence": 0
+            }
+          }
         }
       ]
     },
