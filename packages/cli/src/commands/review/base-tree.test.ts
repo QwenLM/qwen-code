@@ -126,10 +126,10 @@ const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 // APFS (and NTFS) reject filenames that are not valid UTF-8 with EILSEQ, so
 // a fixture holding a raw 0xff name byte only exists where the filesystem
-// stores name bytes verbatim.
-const itWhereByteExactNamesExist = it.skipIf(
-  process.platform === 'win32' || process.platform === 'darwin',
-);
+// stores name bytes verbatim. Linux is the only one this fixture is verified
+// on, so the gate is linux-only — the sibling `lib/worktree.test.ts` gates its
+// own `itWhereRawByteNamesExist` the same way.
+const itWhereByteExactNamesExist = it.skipIf(process.platform !== 'linux');
 
 describe('runBaseTree', () => {
   let repo: string;
