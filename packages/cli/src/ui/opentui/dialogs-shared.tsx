@@ -285,8 +285,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   );
 
   // BaseSelectionList scroll-follow: the window only moves when the
-  // highlight would leave it.
+  // highlight would leave it. A zero-row window has no anchor to follow to —
+  // the rule would ping-pong between the highlight and the list end — so the
+  // offset is left alone until the budget paints rows again.
   useEffect(() => {
+    if (maxItemsToShow < 1) return;
     const next = followScrollOffset(
       activeIndex,
       scrollOffset,
@@ -363,11 +366,15 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
-        // A digit may only address a row the painted window shows: on a short
-        // terminal the window is narrower than the list, and moving to (or
-        // committing) an unpainted row would persist a choice the user never
-        // saw — on a highlight-driven step like the scope one, the highlight
-        // move alone already retargets what the next Enter writes.
+        // A completed number may only address a row the painted window shows:
+        // on a short terminal the window is narrower than the list, and
+        // moving to (or committing) an unpainted row would persist a choice
+        // the user never saw — on a highlight-driven step like the scope one,
+        // the highlight move alone already retargets what the next Enter
+        // writes. A prefix that could still extend into a painted row keeps
+        // its buffer and waits for the completing digit instead: it never
+        // moves the highlight and never arms the flush, because both commit
+        // the highlight.
         const painted = selectionWindow(
           scrollOffset,
           items.length,
@@ -377,7 +384,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
           result.activeIndex < painted.start ||
           result.activeIndex >= painted.end
         ) {
-          numberBuffer.current = '';
+          if (result.selectNow) numberBuffer.current = '';
           return;
         }
         moveCursor(result.activeIndex);
@@ -414,6 +421,9 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       return;
     }
     if (original.name === 'return') {
+      // A zero-row budget (a region too short for even one list row) leaves
+      // the highlight on a row nothing paints; Enter must not commit it.
+      if (maxItemsToShow < 1) return;
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }

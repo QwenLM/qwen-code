@@ -100,7 +100,14 @@ export function selectionWindow(
   itemCount: number,
   maxItemsToShow: number,
 ): SelectionWindow {
-  const start = Math.max(0, scrollOffset);
+  // The offset can outlive the window it was derived for: the follow rule
+  // leaves it alone while the highlight stays inside, so a region grow (a
+  // larger maxItemsToShow) would otherwise paint fewer rows than the budget
+  // allows. Clamp to the same bound getSelectionScrollOffset derives.
+  const start = Math.max(
+    0,
+    Math.min(scrollOffset, Math.max(0, itemCount - maxItemsToShow)),
+  );
   return {
     start,
     end: Math.min(itemCount, start + maxItemsToShow),

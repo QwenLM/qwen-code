@@ -265,7 +265,7 @@ describe('OpenTuiApprovalModeDialog', () => {
       }),
       setValue,
     } as unknown as LoadedSettings;
-    const { container, unmount } = render(
+    const { container, unmount, rerender } = render(
       <OpenTuiApprovalModeDialog
         config={config}
         settings={settings}
@@ -274,7 +274,23 @@ describe('OpenTuiApprovalModeDialog', () => {
         availableTerminalHeight={options.availableTerminalHeight}
       />,
     );
-    return { setValue, onClose, onApprovalModeChanged, container, unmount };
+    return {
+      setValue,
+      onClose,
+      onApprovalModeChanged,
+      container,
+      unmount,
+      rerender: (availableTerminalHeight?: number) =>
+        rerender(
+          <OpenTuiApprovalModeDialog
+            config={config}
+            settings={settings}
+            onClose={onClose}
+            onApprovalModeChanged={onApprovalModeChanged}
+            availableTerminalHeight={availableTerminalHeight}
+          />,
+        ),
+    };
   }
 
   beforeEach(() => {
@@ -418,6 +434,60 @@ describe('OpenTuiApprovalModeDialog', () => {
     expect(harness.onClose).toHaveBeenCalled();
   });
 
+  it('refuses a digit addressing a row above the scrolled window, too', () => {
+    // The window at region twelve holds two rows; walking the highlight down
+    // twice scrolls it to rows 3. and 4. Both halves of the painted-window
+    // guard are load-bearing: a digit below the window is refused (the case
+    // above), and a digit above it must be refused just the same — row one
+    // is no longer on screen.
+    const harness = renderModeDialog({ availableTerminalHeight: 12 });
+    press('down');
+    press('down');
+    expect(queryRow('plan mode - ')).toBeNull();
+    expect(queryRow('auto-accept edits - ')).not.toBeNull();
+    expect(queryRow('Auto mode - ')).not.toBeNull();
+
+    press('1');
+
+    expect(harness.setValue).not.toHaveBeenCalled();
+    expect(harness.onClose).not.toHaveBeenCalled();
+
+    // A row inside the scrolled window still quick-selects.
+    press('4');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.approvalMode',
+      ApprovalMode.AUTO,
+    );
+    expect(harness.onClose).toHaveBeenCalled();
+  });
+
+  it('re-clamps the painted window when a resize grows the budget', () => {
+    // The window is a live function of the region height, and growing the
+    // terminal widens it — but the scroll offset only moves when the
+    // highlight leaves it, so the grown budget painted two rows of five,
+    // with no arrows, and the digit guard refused the three rows it could
+    // not see. The painted window clamps to the list end instead.
+    const harness = renderModeDialog({ availableTerminalHeight: 12 });
+    expectBudget({ spacer: 1, footerHint: true, arrows: true, rowCount: 2 });
+    press('down');
+    press('down');
+    press('down');
+    expect(queryRow('YOLO mode - ')).not.toBeNull();
+    expect(queryRow('plan mode - ')).toBeNull();
+
+    harness.rerender(14);
+
+    expectBudget({ spacer: 1, footerHint: true, arrows: false, rowCount: 5 });
+    press('1');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.approvalMode',
+      ApprovalMode.PLAN,
+    );
+    expect(harness.onClose).toHaveBeenCalled();
+  });
+
   it('refuses a digit that addresses an unpainted scope row', () => {
     // The scope step windows to one row at region six. The same keystroke
     // there ran adoptScope through onHighlight — retargeting the scope the
@@ -521,6 +591,9 @@ describe('OpenTuiApprovalModeDialog', () => {
 
   it.each([
     // region rows, spacer rows, footer hint, scroll arrows, mode rows
+    // Below five rows the chrome alone fills the region: no list row paints.
+    [4, 0, false, false, 0],
+    [5, 0, false, false, 0],
     [6, 0, false, false, 1],
     [8, 0, false, true, 1],
     [9, 1, false, true, 1],
@@ -607,6 +680,32 @@ describe('OpenTuiApprovalModeDialog', () => {
     expect(queryRow('Workspace Settings')).toBeNull();
   });
 
+  it('paints no list row below a five-row region, and Enter commits nothing', () => {
+    // Region four leaves nothing after the mandatory chrome, so the budget
+    // shows the title only. Painting a row anyway overpaints the title (the
+    // measured pre-fix frame), and a live Enter would commit a highlighted
+    // mode the user cannot read.
+    const harness = renderModeDialog({ availableTerminalHeight: 4 });
+    expect(screen.getByText(/^> Approval Mode/)).not.toBeNull();
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(0);
+
+    press('return');
+
+    expect(harness.setValue).not.toHaveBeenCalled();
+    expect(harness.onClose).not.toHaveBeenCalled();
+  });
+
+  it('drops the warning box entirely when the region cannot pay a row of it', () => {
+    // Region six leaves the notices nothing after the chrome and the list
+    // floor, so the warning's charge is capped to zero — and the gate is what
+    // keeps an empty clipped box (margin row plus height zero) off the
+    // layout engine.
+    renderModeDialog({ availableTerminalHeight: 6, workspaceModified: true });
+
+    expect(screen.queryByText(/Workspace approval mode exists/)).toBeNull();
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+  });
+
   it('reads the footer hint from the step on screen, not the step it left', () => {
     // At region 11 with the warning up, the mode step's budget hides the hint
     // (the warning's rows raise its threshold to 12) while the scope step's
@@ -631,7 +730,10 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     mocks.state.width = 100;
   });
 
-  function renderUntrusted(availableTerminalHeight?: number) {
+  function renderUntrusted(
+    availableTerminalHeight?: number,
+    workspaceModified = false,
+  ) {
     const setApprovalMode = vi.fn();
     const setValue = vi.fn();
     const config = {
@@ -641,10 +743,15 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     } as unknown as Config;
     const settings = {
       merged: { tools: {} },
-      forScope: () => ({ settings: {} }),
+      forScope: (scope: SettingScope) => ({
+        settings:
+          workspaceModified && scope === SettingScope.Workspace
+            ? { tools: { approvalMode: ApprovalMode.YOLO } }
+            : {},
+      }),
       setValue,
     } as unknown as LoadedSettings;
-    render(
+    const { unmount } = render(
       <OpenTuiApprovalModeDialog
         config={config}
         settings={settings}
@@ -653,7 +760,7 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
-    return { setApprovalMode, setValue };
+    return { setApprovalMode, setValue, unmount };
   }
 
   it('applies the effective mode after saving a shadowed user choice', () => {
@@ -733,6 +840,46 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
       height: 2,
       overflow: 'hidden',
     });
+    expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+  });
+
+  it.each([9, 7])(
+    'paints the refusal ahead of the warning at region %i',
+    (height) => {
+      // The warning is advisory and the refusal is what explains a rejected
+      // Enter, so the refusal is charged first and keeps one painted text
+      // row: at these heights the warning used to take its three-row floor
+      // first and leave the refusal charged a row it paints nothing with.
+      renderUntrusted(height, true);
+      press('return');
+
+      const refusal = screen.getByText(
+        /Cannot enable privileged approval modes in an untrusted folder/,
+      );
+      expect(layoutOf(refusal.parentElement)).toMatchObject({
+        marginTop: 1,
+        height: 1,
+        overflow: 'hidden',
+      });
+      // The advisory warning is what shrinks to nothing.
+      expect(screen.queryByText(/Workspace approval mode exists/)).toBeNull();
+    },
+  );
+
+  it('charges the refusal nothing where the region cannot pay a text row', () => {
+    // Region six leaves one row after the mandatory chrome — not enough for
+    // the refusal's margin plus one text row — so rather than charging a row
+    // that paints nothing, the notice is not rendered and the list keeps the
+    // row.
+    const { setValue } = renderUntrusted(6, true);
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(
+        /Cannot enable privileged approval modes in an untrusted folder/,
+      ),
+    ).toBeNull();
     expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
   });
 
@@ -1439,6 +1586,76 @@ describe('OpenTuiSettingsDialog region budget', () => {
     expect(screen.getByText(items[1]!.label)).not.toBeNull();
     expect(screen.getByText(items[2]!.label)).not.toBeNull();
     expect(screen.queryByText(items[3]!.label)).toBeNull();
+  });
+
+  it('re-clamps the window when the region shrinks under the highlight', () => {
+    // Walking the highlight to the last painted row at region 25, then
+    // shrinking the region to 19, left the window at [0,3) while the
+    // highlight sat on row eight — invisible, yet Enter still committed it.
+    // The window re-follows the highlight, the way useDialogSelect's
+    // scroll-follow effect does.
+    const items = buildSettingsListItems();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const onSelect = vi.fn();
+    const { rerender } = render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={onSelect}
+        availableTerminalHeight={25}
+      />,
+    );
+    for (let i = 0; i < 7; i++) press('down');
+    const highlighted = items[7]!;
+    expect(screen.getByText(highlighted.label)).not.toBeNull();
+
+    rerender(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={onSelect}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    // The highlighted row is still painted, and Enter still targets it.
+    expect(screen.getByText(highlighted.label)).not.toBeNull();
+    press('return');
+    expect(onSelect).toHaveBeenCalledWith(highlighted.key, SettingScope.User);
+  });
+
+  it('pays for the restart prompt row out of the list window', () => {
+    // Toggling a restart-required setting adds the yellow restart row inside
+    // the same frame; the list window must shrink by that row, or the prompt
+    // paints over the list's last row.
+    const items = buildSettingsListItems();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+    expect(screen.getByText(items[2]!.label)).not.toBeNull();
+
+    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('return');
+
+    expect(
+      screen.getByText(/To see changes, Qwen Code must be restarted/),
+    ).not.toBeNull();
+    expect(screen.getByText(items[0]!.label)).not.toBeNull();
+    expect(screen.getByText(items[1]!.label)).not.toBeNull();
+    expect(screen.queryByText(items[2]!.label)).toBeNull();
   });
 });
 

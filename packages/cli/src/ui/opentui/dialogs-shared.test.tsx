@@ -119,6 +119,29 @@ describe('useDialogSelect numeric quick-select', () => {
     expect(onSelect).toHaveBeenCalledWith('item-2');
   });
 
+  it('lets a multi-digit number reach a painted row past a scrolled window', () => {
+    // Fifteen rows in a three-row window scrolled to rows 11-13: the painted
+    // labels read 11. 12. 13., so typing 12 must select the twelfth row. A
+    // guard that tests every PREFIX against the window refuses the leading 1
+    // (row one is not painted) and clears the buffer, so the row can never be
+    // typed; only a completed number is tested.
+    const onSelect = vi.fn();
+    const { result } = renderHook(() =>
+      useDialogSelect({ items, numbers: true, maxItemsToShow: 3, onSelect }),
+    );
+    for (let i = 0; i < 12; i++) press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(12);
+    expect(result.current.scrollOffset).toBe(10);
+
+    press({ name: '1', sequence: '1' });
+    // The prefix's own row (1) is unpainted, so the highlight must not move
+    // and no flush is armed — but the buffer survives for the next digit.
+    expect(result.current.activeIndex).toBe(12);
+    press({ name: '2', sequence: '2' });
+
+    expect(onSelect).toHaveBeenCalledWith('item-11');
+  });
+
   it('disarms the pending flush when a follow-up digit leaves the window', () => {
     const onSelect = vi.fn();
     renderHook(() =>

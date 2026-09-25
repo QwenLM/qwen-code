@@ -330,6 +330,16 @@ describe('OpenTuiDialogMount routing', () => {
     ).toBe(20);
   });
 
+  it('hands the region height to the settings dialog, which windows its list from it', () => {
+    // The settings list windows to the region it is handed; without the
+    // forwarding it silently reverts to the flat eight-row window and
+    // overpaints the frame on a short terminal.
+    mount({ dialog: 'settings' }, { availableTerminalHeight: 20 });
+    expect(
+      mocks.state.dialogProps['settings']?.['availableTerminalHeight'],
+    ).toBe(20);
+  });
+
   it.each([true, false])(
     'gates the hooks reload notice on hook system availability: %s',
     (available) => {

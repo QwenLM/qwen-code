@@ -317,12 +317,22 @@ function modeListBudget(
           rowsWithoutFooter > 2 &&
           rowsWithoutFooter < itemCount
         ));
-  const listRows = Math.max(
-    1,
+  const listRows =
     constrainedHeight -
-      chromeWithoutFooter -
-      (showFooterHint ? FOOTER_HINT_ROWS : 0),
-  );
+    chromeWithoutFooter -
+    (showFooterHint ? FOOTER_HINT_ROWS : 0);
+  if (listRows < 1) {
+    // The chrome alone fills a region this short: a list row squeezed in
+    // anyway overpaints its neighbours, so the step paints its title only
+    // and the keys have no painted row to commit (the hook refuses Enter
+    // below a one-row window, and the digit guard's window is empty).
+    return {
+      showModeSpacer,
+      showFooterHint,
+      showScrollArrows: false,
+      maxItemsToShow: 0,
+    };
+  }
   const showScrollArrows = listRows > 2 && listRows < itemCount;
   const maxItemsToShow = Math.max(
     1,
@@ -390,31 +400,38 @@ export function OpenTuiApprovalModeDialog(props: {
   // mandatory chrome and the one-row list floor — and the boxes below are
   // clipped to the same figure, since a capped charge beside an unclipped
   // notice would still overpaint the rows the budget just took back. The
-  // warning is charged first: its three-row floor is the ink parity a wide
-  // enough region keeps.
-  const noticeCap =
+  // refusal is charged first: it is the actionable notice, and a rejected
+  // Enter whose explanation paints nothing reads as a dead key, so it keeps
+  // one painted text row whenever the region can pay it — even at the list
+  // floor's expense. The advisory warning takes only what the refusal leaves.
+  const rowsAfterChrome =
     regionHeight === undefined
       ? Number.POSITIVE_INFINITY
       : Math.max(
           0,
           regionHeight -
             MODE_LIST_CHROME_ROWS -
-            (regionHeight >= MIN_HEIGHT_WITH_MODE_SPACER ? 1 : 0) -
-            1,
+            (regionHeight >= MIN_HEIGHT_WITH_MODE_SPACER ? 1 : 0),
         );
+  const noticeCap = Math.max(0, rowsAfterChrome - 1);
+  const chargedErrorRows = error
+    ? Math.max(
+        Math.min(noticeRows(error, contentWidth), noticeCap),
+        Math.min(2, rowsAfterChrome),
+      )
+    : 0;
+  // A charge under one margin row plus one text row would paint nothing; a
+  // region that short charges nothing instead of paying for an invisible row.
+  const errorRows = chargedErrorRows >= 2 ? chargedErrorRows : 0;
   const warningRows = warningText
     ? Math.min(
-        noticeCap,
+        Math.max(0, noticeCap - errorRows),
         Math.max(
           WORKSPACE_PRIORITY_WARNING_ROWS,
           noticeRows(warningText, contentWidth),
         ),
       )
     : 0;
-  const errorRows = Math.min(
-    noticeRows(error, contentWidth),
-    Math.max(0, noticeCap - warningRows),
-  );
   const budget = modeListBudget(
     regionHeight,
     warningRows,
@@ -477,8 +494,11 @@ export function OpenTuiApprovalModeDialog(props: {
   );
   // Deliberate divergence: ink's ScopeSelector keeps an unconditional spacer
   // and an unwindowed list, and its frame absorbs the overrun with
-  // `overflow="hidden"`. Here the same rows overpaint each other at region
-  // heights 4 to 6 (measured), and Enter commits a scope the user cannot read.
+  // `overflow="hidden"`. This frame does not clip, so the step runs the same
+  // budget as the mode step; below a five-row region the budget paints no
+  // list row at all — the title and the first row were measured overpainting
+  // each other at region heights three and four — and Enter refuses to
+  // commit a row nothing painted.
   const scopeBudget = modeListBudget(regionHeight, 0, 0, scopeItems.length);
   // The trust-gate refusal is charged to the list window, so it must not
   // outlive the state it describes: a scope move clears it, and a successful

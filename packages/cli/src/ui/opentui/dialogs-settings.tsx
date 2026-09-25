@@ -66,6 +66,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
+import { followScrollOffset } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export type SettingsTab = 'settings' | 'status' | 'stats';
@@ -367,6 +368,21 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
               (showRestartPrompt ? 1 : 0),
           ),
         );
+  // Re-follow the highlight when the window's own size changes — a resize,
+  // or the restart prompt taking a row — the way useDialogSelect's
+  // scroll-follow effect does. A window left stale strands the highlight on
+  // a row nothing paints while Enter still commits it.
+  useEffect(() => {
+    setScrollOffset((prev) =>
+      followScrollOffset(
+        activeSettingIndexRef.current,
+        prev,
+        items.length,
+        maxItemsToShow,
+      ),
+    );
+  }, [activeSettingIndexRef, items.length, maxItemsToShow]);
+
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const showScrollUp = scrollOffset > 0;
   const showScrollDown = scrollOffset + maxItemsToShow < items.length;
