@@ -146,27 +146,29 @@ function legacyOptionalMethodTransportError(
     error: { code, message: methodMessage },
     id: 1,
   });
-  return Object.assign(
-    new Error(`Error POSTing to endpoint: ${responseBody}`),
-    { status, text: responseBody },
+  return new ClientLib.SdkHttpError(
+    ClientLib.SdkErrorCode.ClientHttpNotImplemented,
+    `Error POSTing to endpoint: ${responseBody}`,
+    { status, statusText: `HTTP ${status}`, text: responseBody },
   );
 }
 
 function legacyOptionalMethodSseTransportError(
   status?: number,
   code = -32601,
+  responseBody?: string,
 ): Error {
   const methodMessage =
     code === -32601 ? 'Method not found' : 'Session not found';
-  const responseBody = JSON.stringify({
-    jsonrpc: '2.0',
-    error: { code, message: methodMessage },
-    id: null,
-  });
+  const body =
+    responseBody ??
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code, message: methodMessage },
+      id: null,
+    });
   const statusMessage = status === undefined ? '' : ` (HTTP ${status})`;
-  return new Error(
-    `Error POSTing to endpoint${statusMessage}: ${responseBody}`,
-  );
+  return new Error(`Error POSTing to endpoint${statusMessage}: ${body}`);
 }
 
 describe('mcp-client', () => {
@@ -978,6 +980,61 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         description: 'a legacy SSE method-not-found response without a status',
         error: () => legacyOptionalMethodSseTransportError(),
       },
+      {
+        description: 'peer-controlled HTTP metadata on a JSON-RPC error',
+        error: () =>
+          Object.assign(new Error('Unsupported method'), {
+            code: -32601,
+            data: {
+              status: 404,
+              text: JSON.stringify({
+                jsonrpc: '2.0',
+                error: { code: -32601 },
+                id: null,
+              }),
+            },
+          }),
+      },
+      {
+        description: 'an allowlisted legacy SSE status with an HTML body',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            '<html>route not found</html>',
+          ),
+      },
+      {
+        description: 'an allowlisted legacy SSE status with malformed JSON',
+        error: () =>
+          legacyOptionalMethodSseTransportError(400, -32601, '{"jsonrpc":'),
+      },
+      {
+        description:
+          'an allowlisted legacy SSE status without a JSON-RPC version',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            JSON.stringify({ error: { code: -32601 } }),
+          ),
+      },
+      {
+        description: 'a peer-controlled HTTP_STATUS marker under HTTP 401',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            401,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: {
+                code: -32601,
+                message: 'Method not found HTTP_STATUS/400',
+              },
+              id: null,
+            }),
+          ),
+      },
     ])('still disconnects for $description', async ({ error }) => {
       const mockedClient = {
         connect: vi.fn(),
@@ -1014,7 +1071,16 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     });
 
     it('keeps standalone discovery connected for a legacy -32601 error', async () => {
-      const methodNotFoundTransportError = legacyOptionalMethodTransportError();
+      const methodNotFoundTransportError =
+        legacyOptionalMethodSseTransportError(
+          400,
+          -32601,
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32601, message: 'Unsupported method' },
+            id: null,
+          }),
+        );
       const mockedClient = {
         connect: vi.fn(),
         registerCapabilities: vi.fn(),
@@ -2837,6 +2903,24 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(mockDebugLogger.error).not.toHaveBeenCalled();
     });
 
+    it('does not swallow a method-not-found phrase inside an HTTP 401 body', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValue(legacyOptionalMethodSseTransportError(401)),
+      } as unknown as ClientLib.Client;
+
+      await expect(
+        listMcpResources('unauthorized', mockClient),
+      ).resolves.toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Error discovering resources from unauthorized:',
+        ),
+      );
+    });
+
     it('does NOT swallow an unrelated error that merely contains "method not found" (case-sensitive)', async () => {
       // Regression guard for the message-substring narrowing: the old broad
       // /method not found/i would have hidden this genuine failure.
@@ -3177,6 +3261,28 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(response.statusText).toBe('Method Not Allowed');
         expect(await response.text()).toBe('');
       });
+
+      it.each([422, 501])(
+        'treats %i from optional GET SSE stream as unsupported',
+        async (status) => {
+          const fetchFn = vi
+            .fn<typeof fetch>()
+            .mockResolvedValue(new Response('gateway rejection', { status }));
+          const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+            `gateway-${status}`,
+            fetchFn,
+          );
+
+          const response = await fetchWithFallback('http://test-server/mcp', {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          });
+
+          expect(response.status).toBe(405);
+          expect(response.statusText).toBe('Method Not Allowed');
+          expect(await response.text()).toBe('');
+        },
+      );
 
       it('does not rewrite non-SSE GET 404 responses', async () => {
         const fetchFn = vi
