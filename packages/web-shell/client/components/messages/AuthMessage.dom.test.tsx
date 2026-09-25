@@ -35,6 +35,13 @@ let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
   ownerState.version = 0;
+  actions.installAuthProvider.mockReset().mockResolvedValue({
+    v: 1,
+    providerId: 'custom',
+    providerLabel: 'Custom provider',
+    authType: 'openai',
+    message: 'Provider saved.',
+  });
   actions.getAuthProviders.mockResolvedValue({
     v: 1,
     workspaceCwd: '/workspace',
@@ -80,7 +87,10 @@ async function install(
   return openAndSave();
 }
 
-async function openAndSave() {
+async function openAndSave(
+  setup?: (click: (text: string) => Promise<void>) => Promise<void>,
+  allowAdd = true,
+) {
   const onMessage = vi.fn();
   const onClose = vi.fn();
   container = document.createElement('div');
@@ -89,7 +99,11 @@ async function openAndSave() {
   await act(async () => {
     root?.render(
       <I18nProvider language="en">
-        <AuthMessage onMessage={onMessage} onClose={onClose} />
+        <AuthMessage
+          onMessage={onMessage}
+          onClose={onClose}
+          allowAdd={allowAdd}
+        />
       </I18nProvider>,
     );
     await Promise.resolve();
@@ -111,6 +125,7 @@ async function openAndSave() {
     });
   };
   await click('Custom');
+  await setup?.(click);
   await click('Save');
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -183,5 +198,379 @@ describe('AuthMessage runtime provider sync', () => {
       container?.querySelectorAll('button') ?? [],
     ).at(-1);
     expect(saveButton?.disabled).toBe(false);
+  });
+});
+
+describe('AuthMessage API selection', () => {
+  const reviewRows = () => {
+    const rows = Array.from(container?.querySelectorAll('dl > div') ?? []);
+    return rows.map((row) => [
+      row.querySelector('dt')?.textContent ?? '',
+      row.querySelector('dd')?.textContent ?? '',
+    ]);
+  };
+
+  beforeEach(() => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom-openai-compatible',
+          label: 'Custom OpenAI',
+          description: '',
+          protocol: 'openai',
+          protocolOptions: ['openai', 'anthropic', 'gemini'],
+          steps: ['protocol', 'wireApi', 'models'],
+          showAdvancedConfig: true,
+          models: [{ id: 'same' }],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: '',
+          providerIds: ['custom-openai-compatible'],
+        },
+      ],
+    });
+    actions.installAuthProvider.mockResolvedValue({ message: 'Saved' });
+  });
+
+  it('previews canonical Responses routing and forwards the API selection', async () => {
+    await openAndSave(async (click) => {
+      await click('OpenAI-compatible');
+      await click('Responses');
+      await click('previous');
+      await click('next');
+      await click('next');
+      expect(reviewRows()).toContainEqual(['Protocol', 'OpenAI-compatible']);
+      expect(reviewRows()).toContainEqual(['API', 'Responses']);
+    });
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        protocol: 'openai',
+        wireApi: 'responses',
+        modelIds: ['same'],
+      }),
+    );
+  });
+
+  it.each([false, true])(
+    'updates only the default endpoint when changing API (custom URL=%s)',
+    async (customUrl) => {
+      actions.getAuthProviders.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        providers: [
+          {
+            id: 'custom-openai-compatible',
+            label: 'Custom OpenAI',
+            description: '',
+            protocol: 'openai',
+            protocolOptions: ['openai', 'anthropic'],
+            steps: ['protocol', 'wireApi', 'baseUrl', 'models'],
+            showAdvancedConfig: true,
+            models: [{ id: 'same' }],
+          },
+        ],
+        groups: [
+          {
+            id: 'custom',
+            label: 'Custom',
+            description: '',
+            providerIds: ['custom-openai-compatible'],
+          },
+        ],
+      });
+      await openAndSave(async (click) => {
+        // The custom group auto-starts its single provider at the protocol step.
+        await click('OpenAI-compatible');
+        if (customUrl) {
+          await click('Chat Completions');
+          await act(async () =>
+            fillInput('Base URL', 'https://gateway.example/v1'),
+          );
+          await click('previous');
+        }
+        await click('Responses');
+        // The Responses wire dials the /v1-less default endpoint (the pipeline
+        // appends /v1/responses itself); the baseUrl step must show and submit
+        // it, not the Chat Completions /v1 default.
+        const input = container?.querySelector('input');
+        expect(input?.getAttribute('placeholder')).toBe(
+          'https://api.openai.com',
+        );
+        expect(input?.value).toBe(
+          customUrl ? 'https://gateway.example/v1' : 'https://api.openai.com',
+        );
+        await click('next');
+        await click('next');
+        expect(reviewRows()).toContainEqual([
+          'Base URL',
+          customUrl ? 'https://gateway.example/v1' : 'https://api.openai.com',
+        ]);
+        expect(container?.textContent).not.toContain(
+          'https://api.openai.com/v1',
+        );
+      });
+      expect(actions.installAuthProvider).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocol: 'openai',
+          wireApi: 'responses',
+          baseUrl: customUrl
+            ? 'https://gateway.example/v1'
+            : 'https://api.openai.com',
+        }),
+      );
+    },
+  );
+
+  it('uses the displayed protocol index and omits API for Anthropic', async () => {
+    await openAndSave(async (click) => {
+      await click('Anthropic');
+      await click('next');
+      expect(reviewRows()).toContainEqual(['Protocol', 'Anthropic-compatible']);
+      expect(reviewRows().map(([label]) => label)).not.toContain('API');
+    });
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ protocol: 'anthropic' }),
+    );
+    expect(actions.installAuthProvider.mock.calls[0][0]).not.toHaveProperty(
+      'wireApi',
+    );
+  });
+});
+
+async function clickButton(text: string) {
+  const button = Array.from(container!.querySelectorAll('button')).find(
+    (item) => item.textContent?.trim().toLowerCase() === text.toLowerCase(),
+  );
+  if (!button) throw new Error(`Missing button: ${text}`);
+  await act(async () => button.click());
+}
+
+function fillInput(label: string, value: string) {
+  const input =
+    container!.querySelector<HTMLInputElement>(
+      `input[aria-label="${label}"]`,
+    ) ??
+    Array.from(container!.querySelectorAll<HTMLInputElement>('input')).find(
+      (item) =>
+        container!.querySelector(`label[for="${item.id}"]`)?.textContent ===
+        label,
+    );
+  if (!input) throw new Error(`Missing input: ${label}`);
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  return input;
+}
+
+async function openAdvanced(wireApi?: 'responses' | 'chat-completions') {
+  actions.getAuthProviders.mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/workspace',
+    providers: [
+      {
+        id: 'custom',
+        label: 'Custom provider',
+        description: '',
+        protocol: 'openai',
+        showAdvancedConfig: true,
+        steps: [
+          ...(wireApi ? ['wireApi'] : []),
+          'baseUrl',
+          'apiKey',
+          'models',
+          'advancedConfig',
+        ],
+      },
+    ],
+    groups: [
+      {
+        id: 'custom',
+        label: 'Custom',
+        description: '',
+        providerIds: ['custom'],
+      },
+    ],
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onClose = vi.fn();
+  await act(async () =>
+    root!.render(
+      <I18nProvider language="en">
+        <AuthMessage onMessage={vi.fn()} onClose={onClose} />
+      </I18nProvider>,
+    ),
+  );
+  await clickButton('Custom');
+  if (wireApi)
+    await clickButton(
+      wireApi === 'responses' ? 'Responses' : 'Chat Completions',
+    );
+  fillInput('Base URL', 'https://models.example/v1');
+  await clickButton('Next');
+  fillInput('API Key', 'test-secret-do-not-display');
+  await clickButton('Next');
+  fillInput(
+    'Model IDs',
+    wireApi ? 'qwen3-asr-flash' : 'model-a, model-b, model-a',
+  );
+  await clickButton('Next');
+  return { onClose };
+}
+
+describe('AuthMessage model configuration', () => {
+  it.each(['responses', 'chat-completions'] as const)(
+    'validates the voice API before saving (%s)',
+    async (wireApi) => {
+      await openAdvanced(wireApi);
+      const trigger =
+        container!.querySelector<HTMLElement>('[role="combobox"]')!;
+      await act(async () =>
+        trigger.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+      );
+      const voice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) => option.textContent?.trim() === 'Voice transcription');
+      expect(voice).toBeDefined();
+      await act(async () =>
+        voice!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+      );
+      await clickButton('Next');
+      if (wireApi === 'responses') {
+        expect(
+          container!.querySelector('[role="alert"]')?.textContent,
+        ).toContain('OpenAI Chat Completions');
+        expect(actions.installAuthProvider).not.toHaveBeenCalled();
+      } else {
+        await clickButton('Save');
+        expect(actions.installAuthProvider).toHaveBeenCalledWith(
+          expect.objectContaining({
+            wireApi: 'chat-completions',
+            advancedConfig: expect.objectContaining({ purpose: 'voice' }),
+          }),
+        );
+      }
+    },
+  );
+
+  it('reviews and saves token limits without exposing credentials or inventing settings', async () => {
+    await openAdvanced();
+    fillInput('Context window', '131072');
+    fillInput('Maximum output tokens', '8192');
+    await clickButton('Next');
+    expect(container!.textContent).toContain('131072');
+    expect(container!.textContent).toContain('8192');
+    expect(container!.textContent).toContain('https://models.example/v1');
+    expect(container!.textContent).not.toContain('test-secret');
+    expect(container!.textContent).toContain('Set (hidden)');
+    expect(container!.textContent).not.toContain('OPENAI_API_KEY');
+    await clickButton('Save');
+    expect(actions.installAuthProvider).toHaveBeenCalledWith({
+      providerId: 'custom',
+      protocol: 'openai',
+      baseUrl: 'https://models.example/v1',
+      apiKey: 'test-secret-do-not-display',
+      modelIds: ['model-a', 'model-b'],
+      advancedConfig: {
+        replaceExisting: true,
+        contextWindowSize: 131072,
+        maxTokens: 8192,
+      },
+    });
+  });
+
+  it('submits explicit empty advanced configuration when controls are cleared', async () => {
+    await openAdvanced();
+    fillInput('Context window', '131072');
+    fillInput('Maximum output tokens', '8192');
+    fillInput('Context window', '');
+    fillInput('Maximum output tokens', '');
+    await clickButton('Next');
+    await clickButton('Save');
+    expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
+      { replaceExisting: true },
+    );
+  });
+
+  it.each(['0', '-1', '1.5', '10000001', '1e3', 'abc'])(
+    'rejects invalid token limit %s without changing the input',
+    async (value) => {
+      await openAdvanced();
+      const input = fillInput('Maximum output tokens', value);
+      await clickButton('Next');
+      expect(input.value).toBe(value);
+      expect(input.getAttribute('aria-invalid')).toBe('true');
+      expect(container!.querySelector('[role="alert"]')?.textContent).toContain(
+        'whole number',
+      );
+      expect(actions.installAuthProvider).not.toHaveBeenCalled();
+      expect(
+        Array.from(container!.querySelectorAll('button')).some(
+          (b) => b.textContent === 'Save',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('preserves limits across Back and Next and excludes disabled modalities', async () => {
+    await openAdvanced();
+    fillInput('Context window', '10000000');
+    fillInput('Maximum output tokens', '1');
+    const modality = container!.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="Enable modality"]',
+    )!;
+    await act(async () => modality.click());
+    expect(container!.querySelectorAll('[role="checkbox"]')).toHaveLength(4);
+    await act(async () => modality.click());
+    await clickButton('Next');
+    await clickButton('Previous');
+    expect(
+      container!.querySelector<HTMLInputElement>(
+        'input[aria-label="Context window"]',
+      )?.value,
+    ).toBe('10000000');
+    await clickButton('Next');
+    await clickButton('Save');
+    expect(actions.installAuthProvider.mock.calls[0][0].advancedConfig).toEqual(
+      { replaceExisting: true, contextWindowSize: 10000000, maxTokens: 1 },
+    );
+  });
+});
+
+describe('host model management', () => {
+  it('does not install when model addition is disabled', async () => {
+    await openAndSave(undefined, false);
+    expect(actions.installAuthProvider).not.toHaveBeenCalled();
+  });
+  it('checks the latest add policy after setup is already open', async () => {
+    await openAndSave(async () => {
+      await act(async () =>
+        root?.render(
+          <I18nProvider language="en">
+            <AuthMessage
+              allowAdd={false}
+              onMessage={vi.fn()}
+              onClose={vi.fn()}
+            />
+          </I18nProvider>,
+        ),
+      );
+    });
+    expect(actions.installAuthProvider).not.toHaveBeenCalled();
   });
 });

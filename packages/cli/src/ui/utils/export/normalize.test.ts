@@ -14,6 +14,79 @@ describe('normalizeSessionData', () => {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
+  it.each(['', '(empty)', 'Error: literal stdout\n😀'])(
+    'preserves structured shell output and metadata during export: %j',
+    (output) => {
+      const resultDisplay = {
+        type: 'shell_result' as const,
+        version: 1 as const,
+        text: output || 'No output',
+        output,
+        directory: '/workspace',
+        exitCode: 0,
+        signal: null,
+        pid: 42,
+        error: null,
+        outcome: 'completed' as const,
+        notices: ['Saved output'],
+        truncated: true,
+        outputFiles: ['/tmp/output.log'],
+      };
+      const record: ChatRecord = {
+        uuid: 'shell-result',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: '/workspace',
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'shell-1',
+                name: 'run_shell_command',
+                response: { output: 'Legacy model-facing text' },
+              },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'shell-1', resultDisplay },
+      };
+      const normalized = normalizeSessionData(
+        {
+          sessionId: 'session-1',
+          startTime: record.timestamp,
+          messages: [
+            {
+              uuid: 'shell-start',
+              timestamp: record.timestamp,
+              type: 'tool_call',
+              toolCall: {
+                toolCallId: 'shell-1',
+                kind: 'execute',
+                title: 'Shell',
+                status: 'pending',
+                rawInput: { command: 'printf test' },
+              },
+            },
+          ],
+        },
+        [record],
+        config,
+      );
+      expect(normalized.messages).toHaveLength(1);
+      expect(normalized.messages[0].uuid).toBe('shell-start');
+      expect(normalized.messages[0].toolCall).toMatchObject({
+        toolCallId: 'shell-1',
+        status: 'completed',
+        rawOutput: resultDisplay,
+      });
+      expect(normalized.messages[0].toolCall?.rawOutput).toEqual(resultDisplay);
+    },
+  );
+
   it('does not export truncated saved-session previews as full diffs', () => {
     const record: ChatRecord = {
       uuid: 'tool-1',
@@ -67,6 +140,111 @@ describe('normalizeSessionData', () => {
           type: 'text',
           text: 'Full diff omitted from saved session history for /test/file.ts. Original fileDiff length: 200000 chars.',
         },
+      },
+    ]);
+  });
+
+  it('exports the diff path from filePath rather than the fileName basename', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-2',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-2',
+        resultDisplay: {
+          fileName: 'Foo.kt',
+          filePath: '/workspace/app/src/main/java/com/example/Foo.kt',
+          fileDiff: '--- Foo.kt\n+++ Foo.kt\n',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'diff',
+        path: '/workspace/app/src/main/java/com/example/Foo.kt',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
+  });
+
+  it('falls back to the fileName basename when filePath is absent (pre-fix persisted sessions)', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-2b',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2b',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-2b',
+        resultDisplay: {
+          fileName: 'Foo.kt',
+          fileDiff: '--- Foo.kt\n+++ Foo.kt\n',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'diff',
+        path: 'Foo.kt',
+        oldText: 'old',
+        newText: 'new',
       },
     ]);
   });

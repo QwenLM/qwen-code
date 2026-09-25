@@ -45,7 +45,7 @@ export function extractPendingPermission(
       toolName,
       hasDiffPreview: hasPermissionDiffPreview(toolCallRecord),
       ...(planId && sourceCallId ? { todoPlan: { planId, sourceCallId } } : {}),
-      content: getPermissionContent(toolCallRecord, perm.title),
+      ...getPermissionContent(toolCallRecord, perm.title),
       options: perm.options.map((opt) => ({
         id: opt.optionId,
         label: opt.label,
@@ -73,14 +73,43 @@ function hasPermissionDiffPreview(
   });
 }
 
+function escapePreviewText(text: string): string {
+  return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
+    character
+      .split('')
+      .map(
+        (codeUnit) =>
+          `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      )
+      .join(''),
+  );
+}
+
 function getPermissionContent(
   toolCall: Record<string, unknown> | undefined,
   fallback?: string,
-): ContentBlock[] {
+): Pick<PermissionRequest, 'content' | 'contentIsInput'> {
   const rawContent = toolCall?.['content'];
   if (Array.isArray(rawContent)) {
     const content = rawContent.flatMap((value): ContentBlock[] => {
       const block = getRecord(value);
+      if (
+        block?.['type'] === 'diff' &&
+        typeof block['path'] === 'string' &&
+        typeof block['newText'] === 'string'
+      ) {
+        return [
+          {
+            type: 'diff',
+            path: escapePreviewText(block['path']),
+            oldText:
+              typeof block['oldText'] === 'string'
+                ? escapePreviewText(block['oldText'])
+                : '',
+            newText: escapePreviewText(block['newText']),
+          },
+        ];
+      }
       const nested = getRecord(block?.['content']);
       const text =
         block?.['type'] === 'text' && typeof block['text'] === 'string'
@@ -90,9 +119,27 @@ function getPermissionContent(
             : undefined;
       return text ? [{ type: 'text', text }] : [];
     });
-    if (content.length > 0) return content;
+    if (content.length > 0) return { content };
   }
-  return [{ type: 'text', text: fallback || 'Tool permission' }];
+  const input = getExplicitPermissionInput(toolCall);
+  // An empty input object carries no information; rendering its serialization
+  // would show a bare `{}` as the approval body.
+  if (
+    input &&
+    Object.keys(input).length > 0 &&
+    !hasPermissionDiffPreview(toolCall)
+  ) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: escapePreviewText(JSON.stringify(input, null, 2)),
+        },
+      ],
+      contentIsInput: true,
+    };
+  }
+  return { content: [{ type: 'text', text: fallback || 'Tool permission' }] };
 }
 
 function isPermissionBlock(
@@ -109,11 +156,17 @@ function getPermissionRawInput(
     return undefined;
   }
 
-  const nested =
-    getRecord(record['rawInput']) ??
-    getRecord(record['input']) ??
-    getRecord(record['args']);
-  return nested ?? record;
+  return getExplicitPermissionInput(record) ?? record;
+}
+
+function getExplicitPermissionInput(
+  record: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return (
+    getRecord(record?.['rawInput']) ??
+    getRecord(record?.['input']) ??
+    getRecord(record?.['args'])
+  );
 }
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {

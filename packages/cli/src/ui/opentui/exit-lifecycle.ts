@@ -17,11 +17,13 @@
  * children leaked, and usage was never persisted.
  *
  * Every OpenTUI exit path (Ctrl+C/Ctrl+D double press, /quit, render-error
- * bailout) must go through `exitSession()`, which drains the shared cleanup
- * chain first and only then exits — with signal-style exit codes (130/143)
- * for interrupt-like exits instead of a bare 0.
+ * bailout) must go through `exitSession()`, which signals the client to stop
+ * spawning background work, drains the shared cleanup chain first and only then
+ * exits — with signal-style exit codes (130/143) for interrupt-like exits
+ * instead of a bare 0.
  */
 
+import type { Config } from '@qwen-code/qwen-code-core';
 import { runExitCleanup } from '../../utils/cleanup.js';
 
 /** Exit code for interrupt-style exits (Ctrl+C / Ctrl+D double press). */
@@ -37,18 +39,30 @@ export function isExitInProgress(): boolean {
 }
 
 /**
- * Drain the registered exit-cleanup chain, then `process.exit(code)`.
+ * Tell the client to stop spawning background work, drain the registered
+ * exit-cleanup chain, then `process.exit(code)`.
+ *
+ * `requestShutdown()` first: it sets the client's shutdown flag and cancels the
+ * pending memory prefetch, so extract / dream / skill-review work cannot be
+ * spawned *during* the drain — which is what makes the process able to exit.
+ * ink signals it on its quit path only; every exit here means "this process is
+ * going down", so the signal belongs to the shared drain rather than to one
+ * handler.
  *
  * Idempotent: a second call while a drain is in flight hangs (returns a
  * promise that never resolves) instead of racing the first drain — the
- * process is going down either way.
+ * process is going down either way, and the hanging branch never re-signals.
  */
-export async function exitSession(code: number): Promise<never> {
+export async function exitSession(
+  config: Config,
+  code: number,
+): Promise<never> {
   if (exitInProgress) {
     // The first drain owns the exit; never run the chain twice.
     return new Promise<never>(() => {});
   }
   exitInProgress = true;
+  config.getLlmClient()?.requestShutdown();
   try {
     await runExitCleanup();
   } catch {

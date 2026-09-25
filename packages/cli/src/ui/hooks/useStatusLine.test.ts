@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -67,6 +68,7 @@ const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
 });
 
 const mockConfig = {
+  getShellExecutionSandbox: vi.fn<() => object | undefined>(() => undefined),
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getModelDisplayName: vi.fn(() => 'Test Model'),
@@ -153,6 +155,7 @@ describe('useStatusLine', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mockConfig.getShellExecutionSandbox.mockReturnValue(undefined);
     lastExecCommand = undefined;
     stdinWrittenData = '';
     stdinErrorHandler = undefined;
@@ -211,6 +214,24 @@ describe('useStatusLine', () => {
   // --- getStatusLineConfig validation (tested through the hook) ---
 
   describe('config validation', () => {
+    it.each([
+      { type: 'command', command: 'touch outside' },
+      { type: 'preset' as const, items: ['pull-request-number', 'model'] },
+    ])(
+      'never starts host status commands in tool sandbox: $type',
+      (setting) => {
+        mockConfig.getShellExecutionSandbox.mockReturnValue({
+          network: 'closed',
+        });
+        setStatusLineConfig(setting);
+        renderHook(() => useStatusLine());
+        act(() => {
+          vi.advanceTimersByTime(10_000);
+        });
+        expect(child_process.exec).not.toHaveBeenCalled();
+      },
+    );
+
     it('renders the default preset when no statusLine config is set', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(child_process.exec).not.toHaveBeenCalled();

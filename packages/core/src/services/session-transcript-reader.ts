@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -20,6 +25,7 @@ import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
   isValidSessionModelPayload,
+  isTurnResultRecordPayload,
   type AttributionSnapshotPayload,
   type ChatRecord,
   type ParentSessionRecordPayload,
@@ -49,14 +55,6 @@ import {
   type GoalRecoveryRecord,
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
-import {
-  EvidenceSourceUnavailableError,
-  GoalEvidenceCheckpointAccumulator,
-  GoalEvidenceRecordIndexAccumulator,
-  InvalidGoalEvidenceReferenceError,
-  type GoalEvidenceCheckpointWindow,
-  type GoalEvidenceRecordIndexHint,
-} from '../goals/goal-evidence.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
@@ -68,7 +66,10 @@ import {
 } from './session-artifact-persistence.js';
 import {
   aggregateTranscriptRecordFragments,
+  isUserPromptSubmitContextPartText,
   isTranscriptConversationRecord,
+  projectUserTranscriptForDisplay,
+  stripGeneratedAttachmentTokens,
   type TranscriptRecordInput,
   validateTranscriptRecord,
   walkTranscriptUuidChain,
@@ -81,6 +82,7 @@ import {
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
+export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
@@ -98,6 +100,13 @@ export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
     super(message);
     this.name = 'InvalidSessionTranscriptCursorError';
+  }
+}
+
+export class InvalidSessionTranscriptTurnAnchorError extends Error {
+  constructor(message = 'Invalid transcript turn anchor') {
+    super(message);
+    this.name = 'InvalidSessionTranscriptTurnAnchorError';
   }
 }
 
@@ -150,8 +159,55 @@ export interface SessionTranscriptCursorState {
   replay?: unknown;
 }
 
+export interface SessionTranscriptSnapshotState {
+  v: typeof SESSION_TRANSCRIPT_TURN_INDEX_VERSION;
+  kind: 'turn_index';
+  sessionId: string;
+  fileIdentity: SessionTranscriptFileIdentity;
+  snapshotSize: number;
+  leafUuid: string;
+  startTime: string;
+  lastUpdated: string;
+}
+
+export type SessionTranscriptNavigationTurnKind =
+  | 'prompt'
+  | 'realtime'
+  | 'scheduled';
+
+export interface SessionTranscriptNavigationTurn {
+  ordinal: number;
+  turnId: string;
+  kind: SessionTranscriptNavigationTurnKind;
+  promptId?: string;
+  timestamp?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface SessionTranscriptReadTurnIndexOptions {
+  snapshot?: string;
+  start?: number;
+  limit?: number;
+}
+
+export interface SessionTranscriptTurnIndexPage {
+  v: typeof SESSION_TRANSCRIPT_TURN_INDEX_VERSION;
+  sessionId: string;
+  snapshot: string;
+  totalTurns: number;
+  start: number;
+  turns: SessionTranscriptNavigationTurn[];
+  startTime?: string;
+  lastUpdated?: string;
+}
+
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
+  /** Start a forward page containing this navigation turn record. */
+  atRecordId?: string;
+  /** Freeze an explicit anchor to a turn-index snapshot. */
+  snapshot?: string;
   /** Start a newest-to-oldest snapshot immediately before this active record. */
   beforeRecordId?: string;
   /** Start at the persisted tail and page newest-to-oldest. */
@@ -172,6 +228,8 @@ export interface SessionTranscriptRecordPage {
   startTime: string;
   lastUpdated: string;
   branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
+  targetRecordId?: string;
+  hasOlder?: boolean;
 }
 
 export type SessionRestoreReplaySelection =
@@ -197,8 +255,9 @@ export interface SessionRestoreReplayPage {
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
 
-export interface SessionRuntimeResumeState {
+export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
+  completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -218,7 +277,6 @@ export interface SessionRuntimeResumeState {
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
-  goalCheckpointWindow?: GoalEvidenceCheckpointWindow;
   initialTurn: number;
   backgroundNotificationTaskIds: string[];
 }
@@ -232,7 +290,8 @@ export interface SessionRestoreProjection {
   replay?: SessionRestoreReplayPage;
 }
 
-export interface SessionLiveRestoreProjection {
+export interface SessionLiveRestoreProjection
+  extends SessionSourcesRestoreState {
   sessionId: string;
   startTime: string;
   lastUpdated: string;
@@ -289,9 +348,22 @@ interface UuidIndexEntry {
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
   goalRecoveryCandidate: boolean;
-  goalEvidenceHint: GoalEvidenceRecordIndexHint;
   turnHint: SessionTurnRecordHint;
+  navigationKind?: SessionTranscriptNavigationTurnKind;
+  navigationOrdinal?: number;
+  navigationTextSuppressed: boolean;
+  assistantPreviewCandidate: boolean;
+  turnResultPromptId?: string;
+  daemonPromptId?: string;
   segments: RecordSegment[];
+}
+
+interface TranscriptNavigationTurnHint {
+  turnId: string;
+  replayPosition: number;
+  kind: SessionTranscriptNavigationTurnKind;
+  promptId?: string;
+  finalAssistantRecordId?: string;
 }
 
 interface TranscriptIndex {
@@ -301,8 +373,10 @@ interface TranscriptIndex {
   leafUuid: string;
   firstRecordUuid: string;
   physicalRecords: PhysicalRecordHint[];
+  sourceReadComplete: boolean;
   runtimeUuids: string[];
   replayUuids: string[];
+  navigationTurns: TranscriptNavigationTurnHint[];
   goalStatePositions: number[];
   gaps: HistoryGap[];
   restoreStartTime: string;
@@ -596,6 +670,24 @@ function cursorPayload(
   };
 }
 
+function snapshotPayload(
+  state: SessionTranscriptSnapshotState,
+): Record<string, unknown> {
+  return {
+    v: state.v,
+    kind: state.kind,
+    sessionId: state.sessionId,
+    fileIdentity: {
+      dev: state.fileIdentity.dev,
+      ino: state.fileIdentity.ino,
+    },
+    snapshotSize: state.snapshotSize,
+    leafUuid: state.leafUuid,
+    startTime: state.startTime,
+    lastUpdated: state.lastUpdated,
+  };
+}
+
 function getCursorHmacKeyPath(workspaceCwd: string): string {
   // This key binds cursors to one workspace and prevents remote cursor
   // tampering or cross-workspace replay. It is not intended to protect against
@@ -770,6 +862,70 @@ function decodeCursorState(
   }
 }
 
+function encodeSnapshotState(
+  state: SessionTranscriptSnapshotState,
+  key: Uint8Array,
+): string {
+  const payload = snapshotPayload(state);
+  return Buffer.from(
+    JSON.stringify({
+      ...payload,
+      mac: signCursorPayloadWithKey(payload, key),
+    }),
+    'utf8',
+  ).toString('base64url');
+}
+
+function decodeSnapshotState(
+  snapshot: string,
+  key: Uint8Array,
+): SessionTranscriptSnapshotState {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(snapshot, 'base64url').toString('utf8'),
+    ) as unknown;
+    if (!isObjectRecord(parsed)) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    const fileIdentity = parsed['fileIdentity'];
+    if (
+      parsed['v'] !== SESSION_TRANSCRIPT_TURN_INDEX_VERSION ||
+      parsed['kind'] !== 'turn_index' ||
+      typeof parsed['sessionId'] !== 'string' ||
+      !isObjectRecord(fileIdentity) ||
+      !isFiniteNonNegativeFileId(fileIdentity['dev']) ||
+      !isFiniteNonNegativeFileId(fileIdentity['ino']) ||
+      !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
+      typeof parsed['leafUuid'] !== 'string' ||
+      typeof parsed['startTime'] !== 'string' ||
+      typeof parsed['lastUpdated'] !== 'string' ||
+      typeof parsed['mac'] !== 'string'
+    ) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    const state: SessionTranscriptSnapshotState = {
+      v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+      kind: 'turn_index',
+      sessionId: parsed['sessionId'],
+      fileIdentity: {
+        dev: fileIdentity['dev'],
+        ino: fileIdentity['ino'],
+      },
+      snapshotSize: parsed['snapshotSize'],
+      leafUuid: parsed['leafUuid'],
+      startTime: parsed['startTime'],
+      lastUpdated: parsed['lastUpdated'],
+    };
+    if (!hasValidCursorMacWithKey(snapshotPayload(state), parsed['mac'], key)) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    return state;
+  } catch (error) {
+    if (error instanceof InvalidSessionTranscriptCursorError) throw error;
+    throw new InvalidSessionTranscriptCursorError();
+  }
+}
+
 export class SessionTranscriptCursorCodec {
   private readonly key: Buffer;
 
@@ -789,6 +945,14 @@ export class SessionTranscriptCursorCodec {
   decode(cursor: string): SessionTranscriptCursorState {
     return decodeCursorState(cursor, this.key);
   }
+
+  encodeSnapshot(state: SessionTranscriptSnapshotState): string {
+    return encodeSnapshotState(state, this.key);
+  }
+
+  decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
+    return decodeSnapshotState(snapshot, this.key);
+  }
 }
 
 export function encodeSessionTranscriptCursor(
@@ -803,6 +967,20 @@ export function decodeSessionTranscriptCursor(
   workspaceCwd: string,
 ): SessionTranscriptCursorState {
   return decodeCursorState(cursor, getCursorHmacKey(workspaceCwd));
+}
+
+export function encodeSessionTranscriptSnapshot(
+  state: SessionTranscriptSnapshotState,
+  workspaceCwd: string,
+): string {
+  return encodeSnapshotState(state, getCursorHmacKey(workspaceCwd));
+}
+
+export function decodeSessionTranscriptSnapshot(
+  snapshot: string,
+  workspaceCwd: string,
+): SessionTranscriptSnapshotState {
+  return decodeSnapshotState(snapshot, getCursorHmacKey(workspaceCwd));
 }
 
 function normalizeLimit(limit: number | undefined): number {
@@ -827,6 +1005,153 @@ function normalizeMaxBytes(maxBytes: number | undefined): number | undefined {
     );
   }
   return maxBytes;
+}
+
+function navigationDisplayText(text: string, systemPayload: unknown): string {
+  const stripped = stripGeneratedAttachmentTokens(text, systemPayload);
+  return isUserPromptSubmitContextPartText(stripped) ? '' : stripped;
+}
+
+export function navigationKindForRecord(
+  record: ChatRecord,
+): SessionTranscriptNavigationTurnKind | undefined {
+  if (record.type !== 'user') return undefined;
+  if (
+    record.subtype === 'goal_runtime' ||
+    record.subtype === 'notification' ||
+    record.subtype === 'mid_turn_user_message'
+  ) {
+    return undefined;
+  }
+  if (record.subtype === 'cron') {
+    const payload = isObjectRecord(record.systemPayload)
+      ? record.systemPayload
+      : undefined;
+    const displayText =
+      typeof payload?.['displayText'] === 'string'
+        ? navigationDisplayText(payload['displayText'], record.systemPayload)
+        : '';
+    return displayText.trim().length > 0 ? 'scheduled' : undefined;
+  }
+
+  const projection = projectUserTranscriptForDisplay(record);
+  const displayText =
+    projection.displayText === undefined
+      ? undefined
+      : navigationDisplayText(projection.displayText, record.systemPayload);
+  const hasVisibleText =
+    displayText !== undefined
+      ? displayText.trim().length > 0
+      : projection.parts.some(
+          (part) =>
+            isObjectRecord(part) &&
+            typeof part['text'] === 'string' &&
+            part['text'].trim().length > 0 &&
+            !isUserPromptSubmitContextPartText(part['text']),
+        );
+  const hasVisibleAttachment =
+    projection.parts.some((part) => {
+      if (!isObjectRecord(part) || !isObjectRecord(part['inlineData'])) {
+        return false;
+      }
+      const inlineData = part['inlineData'];
+      return (
+        typeof inlineData['data'] === 'string' &&
+        typeof inlineData['mimeType'] === 'string' &&
+        inlineData['mimeType'].startsWith('image/')
+      );
+    }) ||
+    (isObjectRecord(record.systemPayload) &&
+      Array.isArray(record.systemPayload['attachmentReferences']) &&
+      record.systemPayload['attachmentReferences'].some(
+        (reference) =>
+          isObjectRecord(reference) &&
+          (reference['type'] === 'image' || reference['type'] === 'resource') &&
+          typeof reference['attachmentId'] === 'string' &&
+          typeof reference['mimeType'] === 'string' &&
+          typeof reference['size'] === 'number',
+      ));
+  if (!hasVisibleText && !hasVisibleAttachment) return undefined;
+  return record.subtype === 'realtime_message' ? 'realtime' : 'prompt';
+}
+
+function isAssistantPreviewCandidate(record: ChatRecord): boolean {
+  return (
+    record.type === 'assistant' &&
+    (record.message?.parts ?? []).some(
+      (part) =>
+        isObjectRecord(part) &&
+        part['thought'] !== true &&
+        typeof part['text'] === 'string' &&
+        part['text'].trim().length > 0,
+    )
+  );
+}
+
+function compactPreviewText(text: string, maxCodePoints: number): string {
+  const compacted = text.replace(/\s+/gu, ' ').trim();
+  const codePoints = Array.from(compacted);
+  if (codePoints.length <= maxCodePoints) return compacted;
+  return `${codePoints.slice(0, maxCodePoints - 1).join('')}…`;
+}
+
+function projectNavigationLabel(
+  record: ChatRecord,
+  kind: SessionTranscriptNavigationTurnKind,
+): string {
+  const payload = isObjectRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  let text = '';
+  if (kind === 'scheduled') {
+    if (typeof payload?.['displayText'] === 'string') {
+      text = navigationDisplayText(
+        payload['displayText'],
+        record.systemPayload,
+      );
+    }
+  } else {
+    const projection = projectUserTranscriptForDisplay(record);
+    const projectedText =
+      projection.displayText === undefined
+        ? projection.parts
+            .flatMap((part) =>
+              isObjectRecord(part) &&
+              typeof part['text'] === 'string' &&
+              !isUserPromptSubmitContextPartText(part['text'])
+                ? [part['text']]
+                : [],
+            )
+            .join(' ')
+        : projection.displayText;
+    text = navigationDisplayText(projectedText, record.systemPayload);
+  }
+  const label = compactPreviewText(text, 160);
+  if (label.length > 0) return label;
+  return kind === 'scheduled'
+    ? 'Scheduled prompt'
+    : kind === 'realtime'
+      ? 'Realtime message'
+      : 'Prompt';
+}
+
+function projectNavigationDetail(record: ChatRecord): string | undefined {
+  const detail = compactPreviewText(
+    stripGeneratedAttachmentTokens(
+      (record.message?.parts ?? [])
+        .flatMap((part) =>
+          isObjectRecord(part) &&
+          part['thought'] !== true &&
+          typeof part['text'] === 'string'
+            ? [part['text']]
+            : [],
+        )
+        .join(' '),
+      record.systemPayload,
+    ),
+    240,
+  );
+  return detail.length > 0 ? detail : undefined;
 }
 
 function recordSegmentBytes(index: TranscriptIndex, uuid: string): number {
@@ -856,6 +1181,54 @@ function selectPageUuids(
     selectedBytes += bytes;
   }
   return selected;
+}
+
+function selectAnchoredPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  targetPosition: number,
+  limit: number,
+  maxBytes: number | undefined,
+): { uuids: string[]; startPosition: number } {
+  const base = selectPageUuids(index, targetPosition, limit, maxBytes);
+  const floor = Math.max(0, targetPosition - limit);
+  const candidate = findReplayBoundaryAtOrBefore(
+    index,
+    targetPosition,
+    floor,
+    isReplayPageStart,
+  );
+  if (
+    candidate === targetPosition ||
+    !isReplayPageStart(index, index.replayUuids[candidate]!)
+  ) {
+    return { uuids: base, startPosition: targetPosition };
+  }
+
+  const expanded = [
+    ...index.replayUuids.slice(candidate, targetPosition),
+    ...base,
+  ];
+  const expansionByteBudget =
+    maxBytes === undefined
+      ? getExpandedPageBytes()
+      : Math.min(2 * maxBytes, getExpandedPageBytes());
+  if (
+    backwardPageBytesFit(
+      index,
+      candidate,
+      candidate + expanded.length,
+      expansionByteBudget,
+    )
+  ) {
+    return { uuids: expanded, startPosition: candidate };
+  }
+
+  debugLogger.debug(
+    `anchored boundary expansion skipped session=${sessionId} ` +
+      `target=${index.replayUuids[targetPosition]!} reason=byte-budget`,
+  );
+  return { uuids: base, startPosition: targetPosition };
 }
 
 // User-role records the turn loop persists mid-turn. Replay renders them
@@ -1211,10 +1584,11 @@ function estimateStringBytes(value: string | null | undefined): number {
 function estimateIndexCacheBytes(index: TranscriptIndex): number {
   let total =
     INDEX_ENTRY_BASE_BYTES +
-    INDEX_CONTAINER_BASE_BYTES * 6 +
+    INDEX_CONTAINER_BASE_BYTES * 7 +
     (index.physicalRecords.length +
       index.runtimeUuids.length +
       index.replayUuids.length +
+      index.navigationTurns.length +
       index.goalStatePositions.length +
       index.gaps.length) *
       INDEX_CONTAINER_SLOT_BYTES +
@@ -1251,7 +1625,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     total +=
       INDEX_ENTRY_BASE_BYTES +
       INDEX_HINT_BASE_BYTES * 2 +
-      (entry.goalEvidenceHint.parsedGoalContext ? INDEX_HINT_BASE_BYTES : 0) +
       INDEX_MAP_ENTRY_BYTES +
       INDEX_CONTAINER_BASE_BYTES +
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
@@ -1259,13 +1632,21 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.parentUuid) +
       estimateStringBytes(entry.type) +
       estimateStringBytes(entry.subtype) +
+      estimateStringBytes(entry.navigationKind) +
+      estimateStringBytes(entry.turnResultPromptId) +
+      estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.goalId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.turnId) +
-      estimateStringBytes(entry.goalEvidenceHint.claimedGoalId) +
-      estimateStringBytes(entry.goalEvidenceHint.provenance) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
+  }
+  for (const turn of index.navigationTurns) {
+    total +=
+      INDEX_HINT_BASE_BYTES +
+      INDEX_CONTAINER_SLOT_BYTES +
+      estimateStringBytes(turn.turnId) +
+      estimateStringBytes(turn.kind) +
+      estimateStringBytes(turn.promptId) +
+      estimateStringBytes(turn.finalAssistantRecordId);
   }
   for (const [
     assistantUuid,
@@ -1576,12 +1957,9 @@ async function buildIndex(params: {
   // Retain only the fields required by the shared branch resolver while the
   // frozen snapshot is parsed, so page reads never reopen the full active chain.
   const branchPointRecords = new Map<string, BranchPointRecord>();
-  const goalEvidenceAccumulators = new Map<
-    string,
-    GoalEvidenceRecordIndexAccumulator
-  >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
+  let sourceReadComplete = true;
   let leafUuid: string | undefined;
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
@@ -1595,9 +1973,15 @@ async function buildIndex(params: {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
+        const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+          text,
+          filePath,
+        );
+        sourceReadComplete &&= parsed.complete;
+        for (const value of parsed.records) {
           const record = validateTranscriptRecord(value).record;
           if (!record) {
+            sourceReadComplete = false;
             continue;
           }
           if (firstRecordUuid === undefined) {
@@ -1634,8 +2018,19 @@ async function buildIndex(params: {
           };
           fragmentIndex++;
           if (existing) {
+            const fragmentRecord = {
+              ...(record as unknown as ChatRecord),
+              type: existing.type,
+              subtype: existing.subtype,
+              systemPayload: existing.navigationTextSuppressed
+                ? { displayText: '', hookContext: '' }
+                : undefined,
+            } as ChatRecord;
             existing.segments.push(segment);
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
+            existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
+            existing.assistantPreviewCandidate ||=
+              isAssistantPreviewCandidate(fragmentRecord);
             if (existing.type === 'assistant' && record.usageMetadata) {
               existing.resumeTokenCountsCandidate =
                 isResumeTokenCountsCandidate({
@@ -1648,20 +2043,13 @@ async function buildIndex(params: {
               record as unknown as ChatRecord,
               sessionId,
             ).countsAsUserPrompt;
-            goalEvidenceAccumulators
-              .get(record.uuid)
-              ?.addFragment(record as unknown as ChatRecord);
           } else {
             const chatRecord = record as unknown as ChatRecord;
-            const goalEvidenceAccumulator =
-              new GoalEvidenceRecordIndexAccumulator(chatRecord);
-            const goalEvidenceHint = goalEvidenceAccumulator.finish();
-            if (goalEvidenceHint.provenance) {
-              goalEvidenceAccumulators.set(
-                record.uuid,
-                goalEvidenceAccumulator,
-              );
-            }
+            const navigationKind = navigationKindForRecord(chatRecord);
+            const navigationTextSuppressed =
+              chatRecord.subtype === 'cron' ||
+              projectUserTranscriptForDisplay(chatRecord).displayText !==
+                undefined;
             byUuid.set(record.uuid, {
               parentUuid: record.parentUuid,
               sessionIdMatchesFile: record.sessionId === sessionId,
@@ -1678,8 +2066,18 @@ async function buildIndex(params: {
               attributionSnapshotCandidate:
                 isAttributionSnapshotCandidate(chatRecord),
               goalRecoveryCandidate: isGoalRecoveryCandidate(chatRecord),
-              goalEvidenceHint,
               turnHint: getSessionTurnRecordHint(chatRecord, sessionId),
+              ...(navigationKind ? { navigationKind } : {}),
+              ...(typeof chatRecord.daemonPromptId === 'string'
+                ? { daemonPromptId: chatRecord.daemonPromptId }
+                : {}),
+              navigationTextSuppressed,
+              assistantPreviewCandidate:
+                isAssistantPreviewCandidate(chatRecord),
+              ...(record.subtype === 'turn_result' &&
+              isTurnResultRecordPayload(record.systemPayload)
+                ? { turnResultPromptId: record.systemPayload.promptId }
+                : {}),
               segments: [segment],
             });
           }
@@ -1691,10 +2089,6 @@ async function buildIndex(params: {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
     throw error;
-  }
-
-  for (const [uuid, accumulator] of goalEvidenceAccumulators) {
-    byUuid.get(uuid)!.goalEvidenceHint = accumulator.finish();
   }
 
   for (const [uuid, entry] of byUuid) {
@@ -1738,11 +2132,42 @@ async function buildIndex(params: {
           .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
       : [...runtimeUuids];
   const goalStatePositions: number[] = [];
+  const navigationTurns: TranscriptNavigationTurnHint[] = [];
+  let currentPromptTurn: TranscriptNavigationTurnHint | undefined;
+  let currentRealtimeTurn: TranscriptNavigationTurnHint | undefined;
   for (let position = 0; position < replayUuids.length; position++) {
     const uuid = replayUuids[position]!;
     const entry = byUuid.get(uuid);
     if (entry?.type === 'system' && entry.subtype === 'goal_state') {
       goalStatePositions.push(position);
+    }
+    if (entry?.navigationKind) {
+      const turn: TranscriptNavigationTurnHint = {
+        turnId: uuid,
+        replayPosition: position,
+        kind: entry.navigationKind,
+        ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
+      };
+      entry.navigationOrdinal = navigationTurns.length;
+      navigationTurns.push(turn);
+      if (entry.navigationKind === 'realtime') {
+        currentRealtimeTurn = turn;
+      } else {
+        currentPromptTurn = turn;
+        currentRealtimeTurn = undefined;
+      }
+      continue;
+    }
+    if (entry?.assistantPreviewCandidate) {
+      const targetTurn =
+        entry.subtype === 'realtime_message'
+          ? currentRealtimeTurn
+          : currentPromptTurn;
+      if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
+    }
+    if (entry?.turnResultPromptId && currentPromptTurn) {
+      currentPromptTurn.promptId ??= entry.turnResultPromptId;
+      currentPromptTurn = undefined;
     }
   }
   const gaps: HistoryGap[] = [...chain.gaps];
@@ -1766,7 +2191,8 @@ async function buildIndex(params: {
   debugLogger.debug(
     `index build complete session=${sessionId} records=${byUuid.size} ` +
       `runtime=${runtimeUuids.length} replay=${replayUuids.length} ` +
-      `gaps=${gaps.length} branchPoints=${branchPointsByAssistantUuid.size}`,
+      `turns=${navigationTurns.length} gaps=${gaps.length} ` +
+      `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
   await indexBuildCompleteHookForTest?.(filePath);
@@ -1778,8 +2204,10 @@ async function buildIndex(params: {
     leafUuid,
     firstRecordUuid,
     physicalRecords,
+    sourceReadComplete,
     runtimeUuids,
     replayUuids,
+    navigationTurns,
     goalStatePositions,
     gaps,
     restoreStartTime,
@@ -2042,6 +2470,157 @@ export class SessionTranscriptReader {
     );
   }
 
+  private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
+    return (
+      this.cursorCodec?.decodeSnapshot(snapshot) ??
+      decodeSessionTranscriptSnapshot(snapshot, this.workspaceCwd)
+    );
+  }
+
+  private encodeSnapshot(state: SessionTranscriptSnapshotState): string {
+    return (
+      this.cursorCodec?.encodeSnapshot(state) ??
+      encodeSessionTranscriptSnapshot(state, this.workspaceCwd)
+    );
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const snapshot =
+      options.snapshot === undefined
+        ? undefined
+        : this.decodeSnapshot(options.snapshot);
+    if (snapshot && snapshot.sessionId !== sessionId) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+
+    const filePath = this.getSessionFilePath(sessionId);
+    const stats = await fsp.stat(filePath);
+    const currentIdentity = fileIdentityFromStats(stats);
+    const snapshotSize = snapshot?.snapshotSize ?? stats.size;
+    const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
+    if (
+      stats.size < snapshotSize ||
+      !sameFileIdentity(currentIdentity, fileIdentity)
+    ) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    const lastUpdated =
+      snapshot?.lastUpdated ?? new Date(stats.mtimeMs).toISOString();
+
+    let index: TranscriptIndex | undefined;
+    try {
+      index = await getCachedIndex({
+        filePath,
+        fileIdentity,
+        snapshotSize,
+        lastUpdated,
+      });
+    } catch (error) {
+      if (!(error instanceof EmptySessionTranscriptError)) throw error;
+    }
+    if (snapshot && snapshot.leafUuid !== (index?.leafUuid ?? '')) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+
+    const startTime = index?.startTime ?? snapshot?.startTime ?? lastUpdated;
+    const snapshotState: SessionTranscriptSnapshotState = {
+      v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+      kind: 'turn_index',
+      sessionId,
+      fileIdentity,
+      snapshotSize,
+      leafUuid: index?.leafUuid ?? '',
+      startTime,
+      lastUpdated,
+    };
+    const totalTurns = index?.navigationTurns.length ?? 0;
+    const start =
+      options.start ?? Math.max(0, totalTurns - Math.min(limit, totalTurns));
+    if (start > totalTurns) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    const selectedTurns =
+      index?.navigationTurns.slice(start, start + limit) ?? [];
+    const selectedUuids = selectedTurns.flatMap((turn) => [
+      turn.turnId,
+      ...(turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : []),
+    ]);
+    const selectedKinds = new Map(
+      selectedTurns.map((turn) => [turn.turnId, turn.kind]),
+    );
+    const selectedAssistantUuids = new Set(
+      selectedTurns.flatMap((turn) =>
+        turn.finalAssistantRecordId ? [turn.finalAssistantRecordId] : [],
+      ),
+    );
+    const labels = new Map<string, { label: string; timestamp?: string }>();
+    const details = new Map<string, string>();
+    if (index) {
+      await forEachAggregatedRecord(
+        index,
+        [...new Set(selectedUuids)],
+        (record) => {
+          const kind = selectedKinds.get(record.uuid);
+          if (kind) {
+            labels.set(record.uuid, {
+              label: projectNavigationLabel(record, kind),
+              ...(record.timestamp ? { timestamp: record.timestamp } : {}),
+            });
+          }
+          if (selectedAssistantUuids.has(record.uuid)) {
+            const detail = projectNavigationDetail(record);
+            if (detail) details.set(record.uuid, detail);
+          }
+        },
+      );
+    }
+    const turns = selectedTurns.map((turn, offset) => {
+      const preview = labels.get(turn.turnId);
+      const detail = turn.finalAssistantRecordId
+        ? details.get(turn.finalAssistantRecordId)
+        : undefined;
+      return {
+        ordinal: start + offset,
+        turnId: turn.turnId,
+        kind: turn.kind,
+        ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
+        label: preview
+          ? preview.label
+          : turn.kind === 'scheduled'
+            ? 'Scheduled prompt'
+            : turn.kind === 'realtime'
+              ? 'Realtime message'
+              : 'Prompt',
+        ...(detail ? { detail } : {}),
+      } satisfies SessionTranscriptNavigationTurn;
+    });
+
+    return {
+      v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+      sessionId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      totalTurns,
+      start,
+      turns,
+      startTime,
+      lastUpdated,
+    };
+  }
+
   async readRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
@@ -2120,7 +2699,9 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        (entry?.type !== 'system' &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);
@@ -2191,6 +2772,12 @@ export class SessionTranscriptReader {
           )
         : [],
     );
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
@@ -2223,12 +2810,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
-    let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
-    let goalCheckpointAccumulator:
-      | GoalEvidenceCheckpointAccumulator
-      | undefined;
-    let goalEvidenceSet = new Set<string>();
     const deferredPreReadRecords = new Map<string, ChatRecord>();
     const dispatchRecord = (record: ChatRecord): void => {
       if (modelSet.has(record.uuid)) apiHistory.add(record);
@@ -2278,10 +2860,8 @@ export class SessionTranscriptReader {
           );
         }
       }
+      if (record.uuid === sourcesUuid) sourceRecords.push(record);
       if (artifactSet.has(record.uuid)) artifacts.add(record);
-      if (goalEvidenceSet.has(record.uuid)) {
-        goalCheckpointAccumulator?.capture(record);
-      }
       if (replaySet.has(record.uuid)) {
         replayRecordsByUuid.set(record.uuid, record);
       }
@@ -2294,10 +2874,7 @@ export class SessionTranscriptReader {
     );
     const selectedReadsStartedAt = performance.now();
     const selectedReadSet = new Set(preReadUuids);
-    let goalRecovery: {
-      selectedGoalRecovery: GoalRecoverySelection;
-      goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-    };
+    let goalRecovery: { selectedGoalRecovery: GoalRecoverySelection };
     try {
       goalRecovery = await withAggregatedRecordReadContext(
         index,
@@ -2316,7 +2893,6 @@ export class SessionTranscriptReader {
                   );
                 }
                 firstRecordSeen = true;
-                if (!goalSet.has(record.uuid)) firstRecord = record;
               }
               if (goalSet.has(record.uuid)) {
                 const normalized = normalizeGoalRecoveryRecord(record);
@@ -2340,7 +2916,8 @@ export class SessionTranscriptReader {
                 metadataSet.has(record.uuid) ||
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
-                artifactSet.has(record.uuid);
+                artifactSet.has(record.uuid) ||
+                record.uuid === sourcesUuid;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -2360,36 +2937,6 @@ export class SessionTranscriptReader {
 
           const selectedGoalRecovery =
             selectGoalRecoveryFromRecords(goalRecords);
-          const pendingGoal =
-            selectedGoalRecovery.recovery.kind === 'v2'
-              ? selectedGoalRecovery.recovery.payload
-              : undefined;
-          const pendingCheckpoint = pendingGoal?.checkpointPending;
-          if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-            try {
-              goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-                index.runtimeUuids.map(
-                  (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-                ),
-                pendingGoal.snapshot.goal,
-                pendingCheckpoint.permit,
-              );
-            } catch (error) {
-              if (!(error instanceof EvidenceSourceUnavailableError)) {
-                throw error;
-              }
-              debugLogger.warn(
-                `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
-              );
-            }
-          }
-          goalEvidenceSet = new Set(
-            goalCheckpointAccumulator?.getCandidateUuids() ?? [],
-          );
-          if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
-            goalCheckpointAccumulator?.capture(firstRecord);
-          }
-          firstRecord = undefined;
           const selectedRuntimeUuids = index.runtimeUuids.filter(
             (uuid) =>
               modelSet.has(uuid) ||
@@ -2398,13 +2945,16 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid) ||
-              goalEvidenceSet.has(uuid),
+              replaySet.has(uuid),
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
           const remainingUuids = Array.from(
-            new Set([...selectedRuntimeUuids, ...artifactUuids]),
+            new Set([
+              ...selectedRuntimeUuids,
+              ...artifactUuids,
+              ...(sourcesUuid ? [sourcesUuid] : []),
+            ]),
           ).filter(
             (uuid) => !preReadSet.has(uuid) || deferredPreReadRecords.has(uuid),
           );
@@ -2416,18 +2966,7 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          let goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-          try {
-            goalCheckpointWindow = goalCheckpointAccumulator?.finish();
-          } catch (error) {
-            if (!(error instanceof InvalidGoalEvidenceReferenceError)) {
-              throw error;
-            }
-            debugLogger.warn(
-              `restore projection: deferring invalid Goal checkpoint evidence: ${error.message}`,
-            );
-          }
-          return { selectedGoalRecovery, goalCheckpointWindow };
+          return { selectedGoalRecovery };
         },
       );
     } finally {
@@ -2500,8 +3039,10 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
+      ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }
         : {}),
@@ -2522,6 +3063,9 @@ export class SessionTranscriptReader {
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
         : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
@@ -2529,9 +3073,6 @@ export class SessionTranscriptReader {
             goalRecoverySourceUuid:
               goalRecovery.selectedGoalRecovery.sourceUuid,
           }
-        : {}),
-      ...(goalRecovery.goalCheckpointWindow
-        ? { goalCheckpointWindow: goalRecovery.goalCheckpointWindow }
         : {}),
       initialTurn: turnStateValue.initialTurn,
       backgroundNotificationTaskIds:
@@ -2626,6 +3167,12 @@ export class SessionTranscriptReader {
         ? undefined
         : replaySelection.index.replayUuids[goalStatePosition];
     const goalStateSet = new Set(goalStateUuid ? [goalStateUuid] : []);
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const selectedRuntimeUuids = index.runtimeUuids.filter(
@@ -2647,6 +3194,7 @@ export class SessionTranscriptReader {
     const selectedReadSet = new Set([
       ...selectedRuntimeUuids,
       ...artifactUuids,
+      ...(sourcesUuid ? [sourcesUuid] : []),
     ]);
     const selectedReadsStartedAt = performance.now();
     try {
@@ -2672,6 +3220,7 @@ export class SessionTranscriptReader {
             const normalized = normalizeGoalRecoveryRecord(record);
             if (normalized) goalRecords.push(normalized);
           }
+          if (record.uuid === sourcesUuid) sourceRecords.push(record);
           if (artifactSet.has(record.uuid)) artifacts.add(record);
         },
       );
@@ -2715,6 +3264,9 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       ...(replay ? { replay } : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       ...(goalRecords.length > 0 ? { goalRecords } : {}),
       ...(replayGoalRecoverySourceUuid
@@ -2734,9 +3286,31 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
+    const snapshot =
+      options.snapshot !== undefined
+        ? this.decodeSnapshot(options.snapshot)
+        : undefined;
     if (
       cursor &&
-      (options.beforeRecordId !== undefined || options.direction !== undefined)
+      (options.beforeRecordId !== undefined ||
+        options.atRecordId !== undefined ||
+        options.snapshot !== undefined ||
+        options.direction !== undefined)
+    ) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.atRecordId !== undefined &&
+      (options.beforeRecordId !== undefined ||
+        options.direction !== undefined ||
+        snapshot === undefined)
+    ) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      snapshot !== undefined &&
+      options.atRecordId === undefined &&
+      options.beforeRecordId === undefined
     ) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -2746,12 +3320,17 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
+    if (snapshot && snapshot.sessionId !== sessionId) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
 
     const filePath = this.getSessionFilePath(sessionId);
     const stats = await fsp.stat(filePath);
     const currentIdentity = fileIdentityFromStats(stats);
-    const snapshotSize = cursor?.snapshotSize ?? stats.size;
-    const fileIdentity = cursor?.fileIdentity ?? currentIdentity;
+    const snapshotSize =
+      cursor?.snapshotSize ?? snapshot?.snapshotSize ?? stats.size;
+    const fileIdentity =
+      cursor?.fileIdentity ?? snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
       !sameFileIdentity(currentIdentity, fileIdentity)
@@ -2769,12 +3348,16 @@ export class SessionTranscriptReader {
       filePath,
       fileIdentity,
       snapshotSize,
-      lastUpdated: cursor?.lastUpdated ?? new Date(stats.mtimeMs).toISOString(),
+      lastUpdated:
+        cursor?.lastUpdated ??
+        snapshot?.lastUpdated ??
+        new Date(stats.mtimeMs).toISOString(),
     });
-    if (cursor && cursor.leafUuid !== index.leafUuid) {
+    const frozenLeafUuid = cursor?.leafUuid ?? snapshot?.leafUuid;
+    if (frozenLeafUuid !== undefined && frozenLeafUuid !== index.leafUuid) {
       debugLogger.warn(
         `snapshot unavailable: leaf changed session=${sessionId} ` +
-          `cursorLeaf=${cursor.leafUuid} indexLeaf=${index.leafUuid}`,
+          `cursorLeaf=${frozenLeafUuid} indexLeaf=${index.leafUuid}`,
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -2795,6 +3378,22 @@ export class SessionTranscriptReader {
         throw new InvalidSessionTranscriptCursorError();
       }
     }
+    if (!cursor && options.atRecordId !== undefined) {
+      if (options.atRecordId.length === 0) {
+        throw new InvalidSessionTranscriptTurnAnchorError();
+      }
+      const navigationOrdinal = index.byUuid.get(
+        options.atRecordId,
+      )?.navigationOrdinal;
+      const turn =
+        navigationOrdinal === undefined
+          ? undefined
+          : index.navigationTurns[navigationOrdinal];
+      if (!turn || turn.turnId !== options.atRecordId) {
+        throw new InvalidSessionTranscriptTurnAnchorError();
+      }
+      position = turn.replayPosition;
+    }
     if (position > index.replayUuids.length) {
       debugLogger.debug(
         `cursor position out of range session=${sessionId} ` +
@@ -2806,10 +3405,17 @@ export class SessionTranscriptReader {
       direction === 'backward'
         ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
         : undefined;
+    const anchoredPage =
+      options.atRecordId !== undefined
+        ? selectAnchoredPageUuids(index, sessionId, position, limit, maxBytes)
+        : undefined;
     const pageUuids =
-      backwardPage?.uuids ?? selectPageUuids(index, position, limit, maxBytes);
+      backwardPage?.uuids ??
+      anchoredPage?.uuids ??
+      selectPageUuids(index, position, limit, maxBytes);
+    const pageStartPosition = anchoredPage?.startPosition ?? position;
     const nextPosition =
-      backwardPage?.nextPosition ?? position + pageUuids.length;
+      backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
     // Null prototype: record uuids are untrusted, and '__proto__' would
     // silently drop the entry on a plain object.
@@ -2821,8 +3427,11 @@ export class SessionTranscriptReader {
       }
     }
     const backwardGoalState =
-      direction === 'backward'
-        ? await readGoalStatePayloadBeforePosition(index, nextPosition)
+      direction === 'backward' || options.atRecordId !== undefined
+        ? await readGoalStatePayloadBeforePosition(
+            index,
+            options.atRecordId !== undefined ? pageStartPosition : nextPosition,
+          )
         : undefined;
     const hasMore =
       direction === 'backward'
@@ -2872,6 +3481,12 @@ export class SessionTranscriptReader {
       lastUpdated: index.lastUpdated,
       ...(Object.keys(pageBranchPoints).length > 0
         ? { branchPointsByAssistantUuid: pageBranchPoints }
+        : {}),
+      ...(options.atRecordId !== undefined
+        ? {
+            targetRecordId: options.atRecordId,
+            hasOlder: pageStartPosition > 0,
+          }
         : {}),
     };
   }

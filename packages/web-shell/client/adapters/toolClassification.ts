@@ -7,6 +7,16 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+export function resolveToolCallName(
+  toolName: string | undefined,
+  rawInput: unknown,
+): string | undefined {
+  const name = getRecord(rawInput)?.['name'];
+  return toolName === 'tool_call' && typeof name === 'string' && name.trim()
+    ? name
+    : toolName;
+}
+
 export function isActiveToolStatus(
   status: ACPToolCall['status'] | string,
 ): boolean {
@@ -42,6 +52,7 @@ export function isTaskExecutionRaw(raw: unknown): boolean {
 
 export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (name === 'workflow') return false;
   if (name === 'agent' || name === 'task') return true;
   if (tool.subTools || tool.subContent) return true;
   if (isTaskExecutionRaw(tool.rawOutput)) return true;
@@ -93,17 +104,24 @@ export function projectTerminalBackgroundAgentTool(
   tool: ACPToolCall,
   status: unknown,
   endTime?: number,
+  safeToolProjection = false,
 ): ACPToolCall {
   if (!isTerminalBackgroundAgentStatus(status)) return tool;
   const cancelled = status === 'cancelled' || status === 'canceled';
   return {
     ...tool,
-    status: status === 'failed' ? 'failed' : 'completed',
+    status:
+      status === 'failed' || (cancelled && safeToolProjection)
+        ? 'failed'
+        : 'completed',
     ...(endTime !== undefined ? { endTime } : {}),
+    ...(cancelled && safeToolProjection ? { wasCancelled: true } : {}),
     ...(cancelled
       ? {
           rawOutput: {
-            ...(getRecord(tool.rawOutput) ?? {}),
+            ...(safeToolProjection && typeof tool.rawOutput === 'string'
+              ? { text: tool.rawOutput }
+              : (getRecord(tool.rawOutput) ?? {})),
             status: 'cancelled',
           },
         }

@@ -207,7 +207,7 @@ class AdvisorToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return this.config.getAdvisorModel() ?? 'Advisor';
+    return this.config.getAdvisorModel()?.split('\0')[0] ?? 'Advisor';
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -215,8 +215,9 @@ class AdvisorToolInvocation extends BaseToolInvocation<
     if (!model) return advisorErrorResult(new Error('Advisor is disabled.'));
 
     try {
+      const endpointIndex = model.indexOf('\0');
       const resolvedModel = resolveModelId(
-        model,
+        endpointIndex < 0 ? model : model.slice(0, endpointIndex),
         buildModelIdContext(this.config),
       );
       if (!resolvedModel) {
@@ -224,9 +225,13 @@ class AdvisorToolInvocation extends BaseToolInvocation<
           new Error('Advisor model is no longer available.'),
         );
       }
-      const advisorModel = resolvedModel.authType
+      const resolvedSelector = resolvedModel.authType
         ? `${resolvedModel.authType}:${resolvedModel.modelId}`
         : resolvedModel.modelId;
+      const advisorModel =
+        endpointIndex < 0
+          ? resolvedSelector
+          : resolvedSelector + model.slice(endpointIndex);
       const result = await subagentNameContext.run('advisor', () =>
         runForkedAgent({
           config: this.config,

@@ -43,11 +43,13 @@ export default defineConfig({
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      // CI consumes coverage only from the ubuntu lane (the upload and the
-      // coverage comment both pin coverage-reports-*-ubuntu-latest), and the
-      // report generation adds end-of-run main-thread work on the smaller
-      // Windows/macOS runners; skip it there. Local runs keep coverage.
-      enabled: !process.env.CI || process.platform === 'linux',
+      // CI collects coverage only where something keeps it: the post-merge
+      // run on main, which ci.yml marks with QWEN_CI_COVERAGE=1 and whose
+      // reports it uploads. Pull-request runs skip it — nothing read those
+      // reports, and v8 instrumentation plus the per-file merge on the main
+      // thread cost about a fifth of the suite's wall time. Local runs keep
+      // coverage.
+      enabled: !process.env.CI || process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],

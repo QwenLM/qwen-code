@@ -14,8 +14,8 @@
  *                            stripped by default (NO_TOOLS) to prevent
  *                            function calls; pass preserveTools: true to
  *                            keep the parent's tools prefix for Anthropic
- *                            prompt-cache hits. Structured-output requests
- *                            use only the synthetic schema-response tool.
+ *                            prompt-cache hits. Structured-output requests without preserved
+ *                            tools use a synthetic schema-response tool.
  *                            Use for: /btw, suggestions, pipelined suggestions.
  *
  *   WITHOUT cacheSafeParams → AgentHeadless multi-turn, full tool access,
@@ -255,8 +255,13 @@ async function buildForkedModelRuntime(
   contentGeneratorOwner: Config,
   modelSelector: string,
 ): Promise<ForkedModelRuntime> {
+  const endpointIndex = modelSelector.indexOf('\0');
+  const registryBaseUrl =
+    endpointIndex < 0
+      ? undefined
+      : modelSelector.slice(endpointIndex + 1) || null;
   const resolvedModel = resolveModelId(
-    modelSelector,
+    endpointIndex < 0 ? modelSelector : modelSelector.slice(0, endpointIndex),
     buildModelIdContext(base),
   );
   // When the selector cannot resolve (e.g. `fast` with no fast model
@@ -269,6 +274,7 @@ async function buildForkedModelRuntime(
     base,
     contentGeneratorOwner,
     resolvedModel,
+    registryBaseUrl,
   );
 
   return { model, runtimeView };
@@ -278,6 +284,7 @@ async function buildForkedRuntimeContentGeneratorView(
   base: Config,
   contentGeneratorOwner: Config,
   resolvedModel: ResolvedModelId | undefined,
+  registryBaseUrl?: string | null,
 ): Promise<RuntimeContentGeneratorView | undefined> {
   if (!resolvedModel?.authType) return undefined;
 
@@ -287,7 +294,8 @@ async function buildForkedRuntimeContentGeneratorView(
     currentContentGeneratorConfig?.model ?? base.getModel?.();
   if (
     resolvedModel.authType === currentAuthType &&
-    resolvedModel.modelId === currentModel
+    resolvedModel.modelId === currentModel &&
+    registryBaseUrl === undefined
   ) {
     return undefined;
   }
@@ -296,7 +304,10 @@ async function buildForkedRuntimeContentGeneratorView(
     base,
     contentGeneratorOwner,
     resolvedModel.modelId,
-    { authType: resolvedModel.authType },
+    {
+      authType: resolvedModel.authType,
+      ...(registryBaseUrl !== undefined ? { registryBaseUrl } : {}),
+    },
   );
 }
 
@@ -331,7 +342,8 @@ export async function runWithForkedChatModel<T>(
 /**
  * Result from a cache-path runForkedAgent (with cacheSafeParams).
  * Single-turn. Tools are stripped by default, or replaced with a synthetic
- * schema-response tool when structured output is requested.
+ * schema-response tool when structured output is requested. preserveTools
+ * retains the parent tool prefix and uses responseJsonSchema instead.
  */
 export interface ForkedQueryResult {
   /** Extracted text response, or null if no text */
@@ -397,8 +409,8 @@ export interface CachePathParams {
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
    * Default (false/omitted): strip tools via NO_TOOLS to prevent function
-   * calls — appropriate for most forked queries. Ignored when jsonSchema is
-   * set because structured output requires the schema-response tool.
+   * calls — appropriate for most forked queries. Structured output retains
+   * the parent tools when this is true.
    */
   preserveTools?: boolean;
 }
@@ -549,7 +561,10 @@ export async function runForkedAgent(
         ? {}
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
-      if (jsonSchema) {
+      if (jsonSchema && preserveTools) {
+        requestConfig.responseMimeType = 'application/json';
+        requestConfig.responseJsonSchema = jsonSchema;
+      } else if (jsonSchema) {
         requestConfig.tools = [
           {
             functionDeclarations: [

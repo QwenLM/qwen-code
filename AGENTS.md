@@ -52,7 +52,7 @@ approve.**
 ### Building
 
 ```bash
-npm install        # Install all dependencies
+corepack pnpm install --frozen-lockfile  # Install all dependencies (the tree CI tests)
 npm run build      # Build all packages (TypeScript compilation + asset copying)
 npm run build:all  # Build everything including sandbox container
 npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
@@ -62,11 +62,14 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
 ### Development
 
 ```bash
-npm run dev        # Run CLI directly from TypeScript source (no build needed)
+npm run dev        # Run CLI from TypeScript source
 ```
 
 Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
-`packages/cli` are reflected immediately without rebuilding.
+`packages/cli` are reflected immediately without rebuilding. Browser Use reuses
+its built runtime, like other compiled workspace dependencies. After editing
+Browser Use, run `npm run build --workspace=@qwen-code/browser-use` to rebuild
+and stage its runtime for dev. Normal `npm install` prepares it automatically.
 
 ### Unit Testing
 
@@ -78,14 +81,26 @@ packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
 `packages/channels/*`, ...) through their built `dist/` output, and
 `packages/core` tests import the package's own entry
 (`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
-`npm ci` already builds them via the `prepare` script, but a worktree that
-shares the main checkout's `node_modules` (or a deep-cleaned copy) does not
-have them. If any prerequisite is missing, a vitest `globalSetup` guard stops
-the run and names the fix; build once from the repository root:
+`corepack pnpm install --frozen-lockfile` already builds them via the
+`prepare` script, but a worktree that shares the main checkout's
+`node_modules` (or a deep-cleaned copy) does not have them. If any
+prerequisite is missing, a vitest `globalSetup` guard stops the run and names
+the fix; build once from the repository root:
 
 ```bash
 npm run build
 ```
+
+**Installing dependencies:** CI, release and every workflow install with the
+pnpm version pinned in `packageManager` (`corepack pnpm install
+--frozen-lockfile`); scripts still run through `npm run`. An additional Git
+worktree can use `node scripts/setup-worktree.js`, which runs the same install
+from a shared store (≈ 99 MiB on copy-on-write filesystems such as APFS, btrfs,
+and XFS with reflink; ≈ 1.2 GiB on ext4) and skips the `prepare` build, so run
+`npm run build` before package tests. When dependencies change, edit the
+manifest, run `corepack pnpm install` (or `corepack pnpm add`), and commit
+`pnpm-lock.yaml`; every CI install runs with `--frozen-lockfile`, so a
+lockfile that no longer matches the manifests fails the build.
 
 **Run individual test files** (always preferred):
 
@@ -153,6 +168,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
   2-space indent, 80-char width
 - **Linting**: No `any` types, consistent type imports, no relative imports
   between packages
+- **Core imports in cli**: production code in `packages/cli/src` imports core values from the module that defines them (`@qwen-code/qwen-code-core/utils/debugLogger.js`), not the package root, which evaluates all of core in every test that reaches the file. Type-only imports are exempt. Files that predate the rule are allowlisted in `eslint.legacy-core-barrel-imports.mjs`; drop an entry when you move its file off the root, never add one.
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
 - **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for
@@ -194,7 +210,11 @@ npm run preflight  # Full check: clean → install → format → lint → build
 
 1. **Design doc for non-trivial work** — write one in `docs/design/` if the
    change touches multiple files or involves design decisions. Skip for small
-   bugfixes.
+   bugfixes. Provide both an English `<name>.md` and a Chinese
+   `<name>.zh-CN.md` version in the same directory, following the
+   [design documentation requirements](docs/design/README.md). Add reciprocal
+   language links and keep both versions complete and synchronized in the same
+   change, including when updating an existing design.
 2. **Test plan for behavioral changes** — write an E2E test plan in
    `.qwen/e2e-tests/` when the change affects user-observable behavior. Dry-run
    against the global `qwen` CLI first to confirm the baseline.
@@ -260,6 +280,10 @@ things a reviewer of _this_ codebase must check — not general advice.
   longer applies.
 - **A missing test for changed behavior is a Suggestion, not a Critical**, unless
   the untested path is itself the defect.
+- **Check design documentation in both languages.** New or updated designs
+  must include linked English and Chinese versions with matching structure,
+  decisions, constraints, and acceptance criteria. A translation gap alone is
+  a Suggestion, not a Critical.
 
 ## GitHub Operations
 

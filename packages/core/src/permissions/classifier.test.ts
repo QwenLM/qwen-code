@@ -29,6 +29,7 @@ import {
 } from './classifier.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 function makeConfig(
   autoModeSettings: ReturnType<Config['getAutoModeSettings']> = {},
@@ -85,6 +86,65 @@ describe('classifyAction — stage 1 happy path', () => {
 });
 
 describe('classifyAction — stage 1 escalates to stage 2', () => {
+  it('sends the same trusted-answer transcript to both stages', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        messages: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  response: {},
+                },
+              },
+            ],
+          },
+        ],
+        trustedUserAnswers: [
+          {
+            callId: 'ask-1',
+            omitted: false,
+            answers: [
+              {
+                question: 'Create marker?',
+                answer: 'No',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const stage1 = runSideQueryMock.mock.calls[0]?.[1] as {
+      contents: unknown;
+    };
+    const stage2 = runSideQueryMock.mock.calls[1]?.[1] as {
+      contents: unknown;
+    };
+    expect(stage2.contents).toBe(stage1.contents);
+    expect(JSON.stringify(stage1.contents)).toContain('Create marker?');
+    expect(JSON.stringify(stage1.contents)).toContain('No');
+  });
+
   it('returns stage 2 verdict (block + reason) when stage 2 confirms block', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
@@ -350,7 +410,7 @@ describe('sanitizeClassifierReason', () => {
     const adversarial = '<a'.repeat(2000) + '>'.repeat(2000);
     const t0 = Date.now();
     sanitizeClassifierReason(adversarial);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expectWithinLatencyBudget(Date.now() - t0, 1000, { poolMultiplier: 20 });
   });
 
   it('collapses whitespace and newlines to single spaces', () => {

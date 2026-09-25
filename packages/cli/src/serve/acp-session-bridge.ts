@@ -115,6 +115,7 @@ export type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
   SessionNotFoundError,
@@ -135,9 +136,11 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
+  SessionResetPendingError,
   WorkspaceDrainingError,
   BridgeChannelQuarantinedError,
   InvalidRewindTargetError,

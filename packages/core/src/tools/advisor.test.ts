@@ -95,6 +95,23 @@ describe('AdvisorTool', () => {
     });
   });
 
+  it.each(['https://advisor.example/v1', ''])(
+    'forwards the selected registry endpoint %s',
+    async (endpoint) => {
+      const config = makeConfig();
+      config.getAdvisorModel = () => `openai:advisor-model\0${endpoint}`;
+      const tool = new AdvisorTool(config).build({});
+      const result = await tool.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(tool.getDescription()).toBe('openai:advisor-model');
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: `openai:advisor-model\0${endpoint}`,
+        }),
+      );
+    },
+  );
+
   it('declares an empty, no-permission tool contract', async () => {
     const tool = new AdvisorTool(makeConfig());
 

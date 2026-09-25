@@ -7,9 +7,9 @@
 import {
   buildModelIdContext,
   resolveModelId,
-  type AuthType,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/modelId.js';
+import type { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 
 export interface AdvisorModelContext {
   fastModel?: string;
@@ -31,7 +31,7 @@ function resolvesToSameModel(
 ): boolean {
   if (!modelName || !selector) return false;
   try {
-    const resolved = resolveModelId(modelName, {
+    const resolved = resolveModelId(modelName.split('\0')[0], {
       ...context,
       fastModel: undefined,
     });
@@ -80,17 +80,22 @@ export function checkAdvisorModelAvailability(
     currentAuthType:
       runtimeContext.currentAuthType ?? fallbackContext.currentAuthType,
   };
+  const endpointIndex = modelName.indexOf('\0');
+  const modelSelector =
+    endpointIndex < 0 ? modelName : modelName.slice(0, endpointIndex);
+  const registryBaseUrl =
+    endpointIndex < 0 ? undefined : modelName.slice(endpointIndex + 1) || null;
   let selector: ReturnType<typeof resolveModelId> | undefined;
   try {
-    if (modelName.trim() === 'inherit') {
+    if (modelSelector.trim() === 'inherit') {
       throw new Error('Advisor cannot inherit the executor model.');
     }
-    selector = resolveModelId(modelName, context);
+    selector = resolveModelId(modelSelector, context);
   } catch {
     selector = undefined;
   }
   const allowFastOnly = allowsFastOnlyAdvisorModel(
-    modelName,
+    modelSelector,
     selector,
     context,
   );
@@ -98,10 +103,15 @@ export function checkAdvisorModelAvailability(
   const configuredModels = config.getAllConfiguredModels(
     selector?.authType ? [selector.authType] : undefined,
   );
-  const availableModels = configuredModels.filter((model) =>
-    isAdvisorModelEligible(model, allowFastOnly),
+  const availableModels = configuredModels.filter(
+    (model) =>
+      isAdvisorModelEligible(model, allowFastOnly) &&
+      (registryBaseUrl === undefined ||
+        (!model.isRuntimeModel &&
+          (model.registryBaseUrl ?? null) === registryBaseUrl)),
   );
   const uncapturedRuntimeModelId =
+    registryBaseUrl === undefined &&
     selector !== undefined &&
     selector.modelId === context.currentModel &&
     selector.authType === context.currentAuthType &&

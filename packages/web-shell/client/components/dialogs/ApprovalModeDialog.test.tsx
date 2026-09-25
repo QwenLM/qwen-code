@@ -11,7 +11,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['plan', 'default', 'yolo'],
+  DAEMON_APPROVAL_MODES: ['plan', 'default', 'auto', 'yolo'],
 }));
 
 const { ApprovalModeDialog } = await import('./ApprovalModeDialog');
@@ -55,44 +55,28 @@ afterEach(() => {
 });
 
 describe('ApprovalModeDialog', () => {
-  it('renames only the plan entry when Session Workflow is enabled', () => {
+  it('offers execution permissions without Plan, including Auto', () => {
     mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
+    expect(container!.querySelector('[data-mode-id="plan"]')).toBeNull();
     expect(
-      container!.querySelector('[data-mode-id="plan"]')?.textContent,
-    ).toContain('Plan (plan)');
-
-    rerender(
-      <ApprovalModeDialog
-        currentMode="default"
-        sessionWorkflowEnabled
-        onSelect={vi.fn()}
-      />,
-    );
-    expect(
-      container!.querySelector('[data-mode-id="plan"]')?.textContent,
-    ).toContain('Plan & Review (plan)');
-    expect(
-      container!.querySelector('[data-mode-id="default"]')?.textContent,
-    ).toContain('Ask Approval (default)');
-    expect(
-      container!.querySelector('[data-mode-id="yolo"]')?.textContent,
-    ).toContain('Full Access (yolo)');
+      container!.querySelector('[data-mode-id="auto"]')?.textContent,
+    ).toContain('Classifier Approval (auto)');
   });
 
   it('opens with the highlight on the current mode and confirms on Enter', () => {
     const onSelect = vi.fn();
     mount(<ApprovalModeDialog currentMode="default" onSelect={onSelect} />);
 
-    expect(activeDescendant()).toBe('mode-opt-1');
+    expect(activeDescendant()).toBe('mode-opt-0');
 
     press('ArrowDown');
-    expect(activeDescendant()).toBe('mode-opt-2');
+    expect(activeDescendant()).toBe('mode-opt-1');
     press('Enter');
-    expect(onSelect).toHaveBeenCalledWith('yolo');
+    expect(onSelect).toHaveBeenCalledWith('auto');
   });
 
   it('binds aria-selected to the current mode, not the roving highlight', () => {
-    mount(<ApprovalModeDialog currentMode="plan" onSelect={vi.fn()} />);
+    mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
     const selected = () =>
       Array.from(container!.querySelectorAll('[aria-selected="true"]'));
 
@@ -105,7 +89,7 @@ describe('ApprovalModeDialog', () => {
   });
 
   it('re-syncs the highlight when the current mode changes while open', () => {
-    mount(<ApprovalModeDialog currentMode="plan" onSelect={vi.fn()} />);
+    mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
     expect(activeDescendant()).toBe('mode-opt-0');
 
     // Another client sharing the session flips approval mode while the dialog
@@ -115,7 +99,7 @@ describe('ApprovalModeDialog', () => {
   });
 
   it('stops following once the user has navigated', () => {
-    mount(<ApprovalModeDialog currentMode="plan" onSelect={vi.fn()} />);
+    mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
 
     press('ArrowDown');
     expect(activeDescendant()).toBe('mode-opt-1');

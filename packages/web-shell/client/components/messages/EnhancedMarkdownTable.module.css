@@ -309,7 +309,7 @@
 .resizeHandle {
   position: absolute;
   top: 0;
-  right: -3px;
+  right: 0;
   z-index: 7;
   width: 6px;
   height: 100%;
@@ -586,33 +586,35 @@ tr:hover .frozenCell.selectedCell {
   text-align: center;
 }
 
-@container table-toolbar (max-width: 720px) {
-  .selectionMetricSecondary {
-    display: none;
-  }
-}
-
-@container table-toolbar (max-width: 500px) {
-  .compactToolbarLabel,
-  .selectionMetric:not(:first-child) {
-    display: none;
+@supports (container-type: inline-size) {
+  @container table-toolbar (max-width: 720px) {
+    .selectionMetricSecondary {
+      display: none;
+    }
   }
 
-  .compactToolbarControl,
-  .densityTrigger {
-    width: 28px;
-    justify-content: center;
-    gap: 0;
-    padding-inline: 0;
-  }
-}
+  @container table-toolbar (max-width: 500px) {
+    .compactToolbarLabel,
+    .selectionMetric:not(:first-child) {
+      display: none;
+    }
 
-@container table-scroller (max-width: 320px) {
-  .detailPanel {
-    grid-template-columns: minmax(0, 1fr);
+    .compactToolbarControl,
+    .densityTrigger {
+      width: 28px;
+      justify-content: center;
+      gap: 0;
+      padding-inline: 0;
+    }
   }
 
-  .detailItem {
-    grid-template-columns: 72px minmax(0, 1fr);
+  @container table-scroller (max-width: 320px) {
+    .detailPanel {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .detailItem {
+      grid-template-columns: 72px minmax(0, 1fr);
+    }
   }
 }

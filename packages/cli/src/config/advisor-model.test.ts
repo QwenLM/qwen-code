@@ -9,6 +9,57 @@ import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 describe('checkAdvisorModelAvailability', () => {
+  it('validates the selected endpoint without falling back to a same-name model', () => {
+    const config = {
+      getModel: () => 'advisor',
+      getContentGeneratorConfig: () => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'advisor',
+      }),
+      getAllConfiguredModels: () => [
+        {
+          id: 'advisor',
+          authType: AuthType.USE_OPENAI,
+          registryBaseUrl: 'https://a.example/v1',
+          voiceOnly: true,
+        },
+        {
+          id: 'advisor',
+          authType: AuthType.USE_OPENAI,
+          registryBaseUrl: 'https://b.example/v1',
+        },
+        { id: 'advisor', authType: AuthType.USE_OPENAI, isRuntimeModel: true },
+      ],
+    } as unknown as Config;
+    expect(
+      checkAdvisorModelAvailability(
+        config,
+        'openai:advisor\0https://b.example/v1',
+      ).available,
+    ).toBe(true);
+    expect(
+      checkAdvisorModelAvailability(
+        config,
+        'openai:advisor\0https://a.example/v1',
+      ).available,
+    ).toBe(false);
+    expect(
+      checkAdvisorModelAvailability(
+        config,
+        'openai:advisor\0https://missing.example/v1',
+      ).available,
+    ).toBe(false);
+    expect(
+      checkAdvisorModelAvailability(config, 'openai:advisor\0').available,
+    ).toBe(false);
+    config.getAllConfiguredModels = () => [
+      { id: 'advisor', authType: AuthType.USE_OPENAI, label: 'Advisor' },
+    ];
+    expect(
+      checkAdvisorModelAvailability(config, 'openai:advisor\0').available,
+    ).toBe(true);
+  });
+
   it('rejects inheriting the executor model', () => {
     const config = {
       getModel: vi.fn(() => 'executor-model'),

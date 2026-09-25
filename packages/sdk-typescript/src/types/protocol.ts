@@ -239,6 +239,7 @@ export interface SDKPartialAssistantMessage {
  */
 export type AuthType =
   | 'openai'
+  | 'openai-responses'
   | 'anthropic'
   | 'qwen-oauth'
   | 'gemini'
@@ -603,6 +604,8 @@ export interface SubagentConfig {
   model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
+  /** Requires container execution; cannot lower the operator's backend policy. */
+  executionBackend?: 'container';
   readonly isBuiltin?: boolean;
 }
 

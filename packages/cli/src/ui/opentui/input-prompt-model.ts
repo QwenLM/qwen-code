@@ -28,9 +28,8 @@
  * and the keyboard; it delegates every decision here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
 import { Fzf, type FzfResultItem } from 'fzf';
-import type { Suggestion } from '../utils/suggestions.js';
+import type { Suggestion, SuggestionCategory } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
 import {
   CommandKind,
@@ -46,7 +45,10 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
 } from '../commands/commands.js';
-import { getCommandDisplayName } from '../../services/commandMetadata.js';
+import {
+  getCommandDisplayName,
+  getCommandSourceBadge,
+} from '../../services/commandMetadata.js';
 import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
@@ -566,6 +568,26 @@ export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
 }
 
 /**
+ * {@link isPerfectSlashMatch} for a target detected from the buffer as it
+ * stands right now, so a caller holding a key event can answer without the
+ * published completion state — that state is render-derived and trails the
+ * buffer by a render, and reading it on Enter accepts the row of an earlier
+ * keystroke instead of submitting what was typed.
+ */
+export function isPerfectMatchForTarget(
+  target: CompletionTarget,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  if (target.mode !== CompletionMode.SLASH) return false;
+  return isPerfectSlashMatch(
+    parseSlashCommandQuery(
+      target.query,
+      slashCommandPool(target, slashCommands),
+    ),
+  );
+}
+
+/**
  * Suggestion builder over one command level, porting useSlashCompletion's
  * useCommandSuggestions: an empty partial lists every visible command with
  * recently-used ones first; a non-empty partial goes through the fzf fuzzy
@@ -810,6 +832,7 @@ function toCommandSuggestion(
     label: getCommandDisplayName(command, { matchedAlias, includeAliases }),
     value: command.name,
     description: command.description,
+    sourceBadge: getCommandSourceBadge(command) ?? undefined,
     argumentHint: command.argumentHint,
     matchedAlias,
     submitOnAccept: command.submitOnAccept,
@@ -905,18 +928,46 @@ export function applyCompletion(
   };
 }
 
+/** Fixed display order of `@` category tabs (ink's CATEGORY_ORDER). */
+const CATEGORY_ORDER: SuggestionCategory[] = [
+  'file',
+  'session',
+  'mcp',
+  'extension',
+];
+
+export type CompletionCategory = SuggestionCategory | 'all';
+
 /**
- * Maps core FileSearch results onto @-completion suggestions, mirroring
- * useAtCompletion's mapping (directories keep their trailing '/', the value
- * is the shell-escaped path).
+ * Tabs for a raw `@` suggestion set. A single present category yields just
+ * `['all']`, which is what keeps the bar hidden for files-only results.
  */
-export function fileSearchToSuggestions(paths: string[]): Suggestion[] {
-  return paths.map((p) => ({
-    label: p,
-    value: escapePath(p),
-    isDirectory: p.endsWith('/'),
-    category: 'file' as const,
-  }));
+export function atCategoryTabs(
+  suggestions: readonly Suggestion[],
+): CompletionCategory[] {
+  const present = new Set(suggestions.map((s) => s.category ?? 'file'));
+  const ordered = CATEGORY_ORDER.filter((c) => present.has(c));
+  return ordered.length > 1 ? ['all', ...ordered] : ['all'];
+}
+
+export function filterByCategory(
+  suggestions: readonly Suggestion[],
+  category: CompletionCategory,
+): readonly Suggestion[] {
+  return category === 'all'
+    ? suggestions
+    : suggestions.filter((s) => (s.category ?? 'file') === category);
+}
+
+/** Step one tab, wrapping; a tab that left the set falls back to `'all'`. */
+export function nextCategory(
+  tabs: readonly CompletionCategory[],
+  active: CompletionCategory,
+  direction: 1 | -1,
+): CompletionCategory {
+  const idx = tabs.indexOf(active);
+  if (idx === -1) return 'all';
+  return tabs[(idx + direction + tabs.length) % tabs.length];
 }
 
 /** What the view should show in the suggestion window. */

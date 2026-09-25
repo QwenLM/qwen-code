@@ -25,20 +25,28 @@ import {
   mkdirSync,
   utimesSync,
   readdirSync,
+  renameSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  assertChunkPartition,
+  ChunkPartitionError,
   coverageFromTranscripts,
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import * as coverageModule from './lib/coverage.js';
+import { readBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import {
   promptRecordDir,
   briefPath,
   findingsFilePath,
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { buildSelectionIdentity } from './lib/selection.js';
+import * as selectionModule from './lib/selection.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -169,9 +177,15 @@ function transcript(
      * credit narrows to its ranged reads.
      */
     range?: [number, number];
+    /**
+     * The diff path the tool calls name, for a fixture whose plan points at a
+     * real file instead of the module's `DIFF` constant.
+     */
+    toolPath?: string;
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const diffPath = opts.toolPath ?? DIFF;
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
   ].map((m) => m[1]);
@@ -200,11 +214,11 @@ function transcript(
                 name: 'read_file',
                 args: opts.range
                   ? {
-                      file_path: DIFF,
+                      file_path: diffPath,
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: diffPath },
               },
             },
           ],
@@ -1734,6 +1748,338 @@ describe('a drifted launch whose payload provably arrived', () => {
   });
 });
 
+/** Run the `check-coverage` handler over `p` and return what it wrote to stderr. */
+function stderrOfCheckCoverage(p: string): {
+  lines: string[];
+  exitCode: typeof process.exitCode;
+} {
+  const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+  const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+  process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+  process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+  const prevExit = process.exitCode;
+  try {
+    process.exitCode = undefined;
+    vi.mocked(writeStderrLine).mockClear();
+    (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+      plan: p,
+      out: join(dir, 'cov.json'),
+    });
+    return {
+      lines: vi.mocked(writeStderrLine).mock.calls.map((c) => String(c[0])),
+      exitCode: process.exitCode,
+    };
+  } finally {
+    process.exitCode = prevExit;
+    if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+    else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+    if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+    else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+  }
+}
+
+describe('coverage — the outcomes partition the plan', () => {
+  /**
+   * A record written against another chunking of this diff: launched as
+   * `chunk 9 of 12`, on a plan that carries chunks 1 and 2, and returning the
+   * declaration its prompt handed it.
+   */
+  function staleDeclarer(): void {
+    transcript(
+      'stale9',
+      'You are reviewing chunk 9 of 12.\n' +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      {
+        calls: 1,
+        range: [800, 100],
+        text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+      },
+    );
+  }
+
+  it('does not report a chunk the plan does not carry as not reviewed', () => {
+    // The declared id is read out of the launch prompt's text, and nothing
+    // checked it against the plan: the report came back with
+    // `uncoverableChunks: [9]` beside `plannedChunks` 1 and 2 — a chunk that
+    // does not exist, listed as a gap in a diff that was fully read.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    staleDeclarer();
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.plannedChunks.map((c) => c.id)).toEqual([1, 2]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.missingChunks).toEqual([]);
+    expect(r.uncoverableChunks).toEqual([]);
+    // Out of the chunk outcomes, not out of the report: the declaration is
+    // still evidence about this diff, so its id is kept — in a list of its
+    // own, not among this plan's chunks — and still fails the gate, exactly
+    // as it did before.
+    expect(r.unplannedDeclarations).toEqual([9]);
+    // …beside the disclosure it always had: no prompt was built for a chunk 9.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 9');
+    expect(r.ok).toBe(false);
+  });
+
+  it('keeps a stale declarer failing the gate when nothing else discloses it', () => {
+    // Nothing clears the prompt-record dir, and it hangs off the plan path:
+    // a re-capture at the same path leaves the old chunking's `chunk-9.txt`
+    // beside the new plan. A record delivered verbatim from it is no
+    // rewritten launch, so the declaration is the ONLY thing that names it.
+    // It read THIS diff — it names this diff file and ran after this plan was
+    // written — and chunk 2 is credited on a presumption that does not show
+    // its agent reached the line. Dropped with the phantom chunk, this run
+    // was `ok: true` and an Approve.
+    const stale =
+      'You are reviewing chunk 9 of 12.\n' +
+      `read_file(file_path="${chunkBrief(9)}")\n` +
+      `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript('stale9', stale, {
+      calls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = plan();
+    built(p, 9, stale);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.unplannedDeclarations).toEqual([9]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('stands an unplanned declaration down under the same guard as a planned one', () => {
+    // The split is one test under ONE guard, so the two lists together are
+    // exactly the set main computed and `ok` is what it was. A second record
+    // for the same id — launched verbatim, returned, read the diff, declared
+    // nothing — stands the declaration down for a planned chunk, and must for
+    // this one too: without it this run failed a gate main passed.
+    const stale =
+      'You are reviewing chunk 9 of 12.\n' +
+      `read_file(file_path="${chunkBrief(9)}")\n` +
+      `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript('stale9', stale, {
+      calls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    transcript('again9', stale, { calls: 1, range: [800, 100] });
+    const p = plan();
+    built(p, 9, stale);
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.unplannedDeclarations).toEqual([]);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('says so on stderr inside the declared-uncoverable failure, and refuses', () => {
+    // Not a ninth kind of failure: the skill rules eight, and this is the
+    // eighth — an agent declared a line no read can reach — named as an agent
+    // because the plan has no such chunk to list.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    staleDeclarer();
+
+    const { lines, exitCode } = stderrOfCheckCoverage(plan());
+    const line = lines.find((l) => l.includes('declared a line uncoverable'));
+    expect(line).toMatch(
+      /^ERROR: agents launched for 1 chunk\(s\) this plan does not carry declared a line uncoverable — 9\. A diff with a line no read can reach/,
+    );
+    expect(line).toContain('the verdict may not approve on its strength');
+    expect(line).toContain('Report them to the user as an unreviewed gap.');
+    // The plan has no chunk 9, so none is listed as a chunk.
+    expect(lines.some((l) => l.includes('chunk(s) were declared'))).toBe(false);
+    expect(exitCode).toBe(3);
+  });
+
+  it('lists them by chunk id, once each, beside the planned ones', () => {
+    // Ids, like the list beside it — main's was a set, so two declarers of
+    // one id were one entry there and are one entry here.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+    staleDeclarer();
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          calls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9again', 9);
+    declares('stale10', 10);
+
+    const p = plan();
+    expect(coverageFromTranscripts(p, ENV).unplannedDeclarations).toEqual([
+      9, 10,
+    ]);
+    const { lines } = stderrOfCheckCoverage(p);
+    const line = lines.find((l) => l.includes('declared a line uncoverable'));
+    expect(line).toMatch(
+      /^ERROR: 1 chunk\(s\) were declared uncoverable — 2; agents launched for 2 chunk\(s\) this plan does not carry declared a line uncoverable — 9, 10\. /,
+    );
+  });
+
+  it('keeps the planned wording of that failure exactly as it was', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const { lines } = stderrOfCheckCoverage(plan());
+    expect(lines).toContain(
+      'ERROR: 1 chunk(s) were declared uncoverable — 2. A diff with a ' +
+        'line no read can reach was not reviewed; the verdict may not approve on ' +
+        'its strength. Report them to the user as an unreviewed gap.',
+    );
+  });
+
+  it('still admits the declaration of a chunk the plan does carry', () => {
+    // The control: the membership test must not cost an honest declarer.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.uncoverableChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([]);
+  });
+
+  it('prints 2/2, not 2/3, over a two-chunk plan with a stale declarer', () => {
+    // Summed from the three outcome lists, the stale declarer above made this
+    // line read `2/3 chunk(s) reviewed` over a two-chunk plan.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    staleDeclarer();
+
+    const { lines } = stderrOfCheckCoverage(plan());
+    expect(lines.find((l) => l.startsWith('Coverage:'))).toMatch(
+      /^Coverage: 2\/2 chunk\(s\) reviewed\./,
+    );
+  });
+
+  it('counts an uncoverable chunk in the denominator, not in the numerator', () => {
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), {
+      calls: 2,
+      text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+    });
+
+    const { lines } = stderrOfCheckCoverage(plan());
+    expect(lines.find((l) => l.startsWith('Coverage:'))).toMatch(
+      /^Coverage: 1\/2 chunk\(s\) reviewed\./,
+    );
+  });
+
+  it('leaves any other fault of the coverage walk to surface as itself', () => {
+    // The control for the arm below: only a partition failure is reported in
+    // those words. Widened to any error, an unusable plan read as a defect
+    // in the coverage check.
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new Error('coverage: plan.json has no chunks[]');
+      });
+    try {
+      expect(() => stderrOfCheckCoverage(plan())).toThrow(/has no chunks\[\]/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses in its own words when the outcomes contradict the plan', () => {
+    // Unreachable from any input — the sets are built by one walk over one
+    // plan — so the arm is driven directly. What is pinned is the message:
+    // neither the environment's nor an unusable plan's.
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new ChunkPartitionError('chunk 2 is both covered and missing');
+      });
+    try {
+      const { lines, exitCode } = stderrOfCheckCoverage(plan());
+      expect(exitCode).toBe(3);
+      expect(lines.join('\n')).toContain('chunk 2 is both covered and missing');
+      expect(lines.join('\n')).toContain('defect in the coverage check');
+      expect(lines.join('\n')).not.toContain('environment problem');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('assertChunkPartition', () => {
+  const outcomes = (
+    covered: number[],
+    missing: number[] = [],
+    uncoverable: number[] = [],
+  ) => ({ covered, missing, uncoverable });
+
+  /**
+   * The refusal, as the class its callers switch on: every branch must throw
+   * `ChunkPartitionError`, or that branch reaches them as an unusable plan.
+   */
+  const refusal = (run: () => void): string => {
+    try {
+      run();
+    } catch (err) {
+      expect(err).toBeInstanceOf(ChunkPartitionError);
+      return (err as Error).message;
+    }
+    throw new Error('expected a refusal, and nothing was thrown');
+  };
+
+  it('accepts every planned chunk having exactly one outcome', () => {
+    expect(() =>
+      assertChunkPartition([1, 2, 3], outcomes([1], [2], [3])),
+    ).not.toThrow();
+    expect(() => assertChunkPartition([1, 2], outcomes([2, 1]))).not.toThrow();
+  });
+
+  it('refuses a planned chunk with no outcome', () => {
+    expect(refusal(() => assertChunkPartition([1, 2], outcomes([1])))).toMatch(
+      /chunk 2 has no outcome/,
+    );
+  });
+
+  it('refuses an outcome for a chunk the plan does not carry', () => {
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 2], [], [9]))),
+    ).toMatch(/chunk 9 is uncoverable but the plan does not carry it/);
+  });
+
+  it('refuses a chunk with two outcomes', () => {
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 2], [2]))),
+    ).toMatch(/chunk 2 is both covered and missing/);
+  });
+
+  it('refuses a chunk listed twice under one outcome', () => {
+    // A duplicate inside one list is what the old summed denominator counted
+    // twice without any two lists disagreeing.
+    expect(
+      refusal(() => assertChunkPartition([1, 2], outcomes([1, 1, 2]))),
+    ).toMatch(/chunk 1 is listed twice as covered/);
+  });
+});
+
 describe('an agent that paged its chunk still read it', () => {
   it('merges paged reads before asking whether a chunk was covered', () => {
     // The prompt tells an agent to page when a read comes back `isTruncated` — and
@@ -1876,6 +2222,111 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(true);
     expect(r.gaps).toEqual([]);
+  });
+
+  it('a wall that can no longer admit the rebuild waives the FIXes and keeps the gaps — marker or no marker', () => {
+    // Nothing built for Step 4 or Step 5, findings to post, and a 3600s
+    // wall captured 3000s ago (600s left, under the 1200s compose floor):
+    // the rebuild and the verifier build would both exit 4 at the gates, so
+    // neither FIX is owed — but both disclosures are, and the findings stay
+    // unverified. Same with a round-cap marker beside the closed wall: the
+    // marker never waives the not-built gap (its own disclosure claims the
+    // rounds ran), only the wall waives the FIX.
+    const p = plan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(p, captured, captured);
+    const closed = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(closed.ok).toBe(false);
+    expect(closed.unverifiedFindings).toBe(true);
+    expect(closed.gaps.map((g) => g.subject)).toEqual([
+      'verification and reverse audit',
+    ]);
+    expect(closed.remediation).toEqual([]);
+    // Withheld, and said so — with the gate's arithmetic, never silently.
+    expect(closed.waived.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    // In minutes, like every other line on that channel.
+    expect(closed.waived[0]).toMatch(
+      /withheld — the plan's wall can no longer admit that build \((?:10|9\.9) minutes of the wall left, under the 20-minute reserve plus at least the 30-minute round estimate/,
+    );
+    expect(closed.waived[1]).toMatch(
+      /withheld — the plan's wall is at or under the compose floor \((?:10|9\.9) minutes of the wall left, floor 20 minutes\)/,
+    );
+
+    writeRoundCapStop(p, 3, 4);
+    expect(readBudgetStop(p)?.cause).toBe('round-cap');
+    const capped = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(capped.gaps.map((g) => g.subject)).toEqual([
+      'verification and reverse audit',
+    ]);
+    expect(capped.remediation).toEqual([]);
+
+    // The two gates are asked separately: with 2,000s left the rebuild is
+    // refused (2,000 < 1,200 + 1,800) while a verify build still fits
+    // (2,000 > 1,200), so only the verification FIX is owed.
+    const mid = new Date(Date.now() - 1600 * 1000);
+    utimesSync(p, mid, mid);
+    const midway = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(midway.remediation.map((r) => r.split(':')[0])).toEqual([
+      'verification',
+    ]);
+    expect(midway.waived.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+    ]);
+
+    // The same run with hours of wall left owes both FIXes.
+    const open = new Date(Date.now() - 60 * 1000);
+    utimesSync(p, open, open);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 28_800,
+        deadlineSource: 'default',
+      }),
+    );
+    utimesSync(p, open, open);
+    const owed = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(owed.remediation.map((r) => r.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    expect(owed.waived).toEqual([]);
+
+    // Back at 600s left: a relaunch FIX is not a build the gates rule on,
+    // so a closed wall never waives it — a verifier that ran but never
+    // opened its findings list, and an auditor that ran but never opened
+    // its brief, are each told to relaunch the printed prompt.
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    utimesSync(p, captured, captured);
+    step45(p, 'verify', { findings: true, opensFindings: false });
+    step45(p, 'reverse-audit', { opensBrief: false });
+    const relaunch = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(relaunch.remediation.map((r) => r.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+    ]);
+    expect(relaunch.remediation[0]).toContain('relaunch');
+    expect(relaunch.remediation[1]).toContain('relaunch');
+    expect(relaunch.waived).toEqual([]);
   });
 
   it('does not let an OLDER findings digest vouch for the current one', () => {
@@ -2883,11 +3334,319 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
     // EXACT: the prior session holds three recoverable records — the two
-    // chunk agents plus the roster stand-in, which recovers through the
-    // whole-diff branch of `certifies()` (no `chunk N of M` in its launch).
-    // `>= 2` could not see that branch: deleting it read 3 as 2 and stayed
-    // green, silently dropping recovered whole-diff work (verify,
-    // reverse-audit) from the continuity count.
+    // chunk agents plus the roster stand-in (test-matrix; this plan has no
+    // PR identity, so no 6d), which recovers through the whole-diff branch
+    // of `certifies()` (no `chunk N of M` in its launch). `>= 2` could not
+    // see that branch: deleting it under-read the count and stayed green,
+    // silently dropping recovered whole-diff work (verify, reverse-audit)
+    // from the continuity count.
     expect(r.recoveredAgents).toBe(3);
+  });
+});
+
+describe('coverage — a drifted selection identity, end to end', () => {
+  // The plan carries a `selection` identity (as every capture command writes —
+  // see lib/selection.ts) bound to a REAL diff file, and the file is rewritten
+  // after the agents ran. Coverage still computes, and computes the same
+  // thing: the check reports, and nothing reads the report to decide anything.
+  // Not ASCII, on purpose: the identity digests the decoded TEXT, and a
+  // reader that decoded the file any other way than the writers do would
+  // agree with them on every ASCII fixture and report drift on real diffs.
+  const diffText =
+    'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+const s = "变更 — é";\n';
+
+  /** A compliant fully-covered run over a plan with a real identity. */
+  function identityRun(): { p: string; diffPath: string } {
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(diffPath, diffText);
+    const chunks = [
+      { id: 1, startLine: 1, endLine: 100 },
+      { id: 2, startLine: 101, endLine: 200 },
+    ];
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 5000,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks,
+        selection: buildSelectionIdentity(diffText, chunks),
+      }),
+    );
+    // `good()` names the module's `DIFF` constant, a path that does not
+    // exist; these prompts name the fixture's own file.
+    const goodHere = (c: number) =>
+      `You are reviewing chunk ${c} of 2.\n` +
+      `read_file(file_path="${chunkBrief(c)}")\n` +
+      `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
+    for (const c of [1, 2]) built(p, c, goodHere(c));
+    satisfyRoster(p);
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    transcript('a1', goodHere(1), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', goodHere(2), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    return { p, diffPath };
+  }
+
+  it('reports no drift for a plan that carries no identity', () => {
+    // Every other fixture in this file writes a plan without one — they stand
+    // in for plans written before the field existed, and those must not
+    // narrate a defect.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).selectionDrift).toBeNull();
+  });
+
+  it('reports no drift when the identity-carrying diff is unchanged', () => {
+    // The control for the two tests below: a reader digesting the wrong text
+    // would report drift on rewritten diffs as expected AND on unchanged
+    // ones, and only this goes red.
+    const { p } = identityRun();
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.selectionDrift).toBeNull();
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports the drift and moves nothing else', () => {
+    const { p, diffPath } = identityRun();
+    const before = coverageFromTranscripts(p, ENV);
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const after = coverageFromTranscripts(p, ENV);
+    expect(after.selectionDrift).toMatch(/diff file has changed/);
+    // Report-only, stated as strongly as it can be: every other field of the
+    // report is what it was before the diff moved.
+    expect({ ...after, selectionDrift: null }).toEqual(before);
+  });
+
+  it('reports a missing diff file rather than reading it as a match', () => {
+    // `null` means the identity was checked and everything matched. A file
+    // that is gone was not checked — and a swept diff is the one case where
+    // re-capturing is the repair.
+    const { p, diffPath } = identityRun();
+    rmSync(diffPath);
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/is gone/);
+    expect(said).toMatch(/re-capture the diff and re-plan/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names a diff replaced by something that is not a file as replaced',
+    () => {
+      // Every capture command writes a regular file, so a directory at the
+      // path means the file was removed and something else put there — the
+      // same mutation as a missing file, with the same repair.
+      const { p, diffPath } = identityRun();
+      rmSync(diffPath);
+      mkdirSync(diffPath);
+
+      const said = coverageFromTranscripts(p, ENV).selectionDrift;
+      expect(said).toMatch(/is no longer a regular file/);
+      expect(said).toMatch(/re-capture the diff and re-plan/);
+      expect(said).not.toMatch(/may not have moved/);
+    },
+  );
+
+  it('calls a path with nothing at it gone, however the platform says so', () => {
+    // A path THROUGH a regular file is ENOTDIR here and ENOENT on Windows.
+    // Either way no file can be there, and the repair is the same.
+    const { p, diffPath } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        diffPathAbsolute: join(diffPath, 'through-a-file.diff'),
+      }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/is gone/);
+    expect(said).toMatch(/re-capture the diff and re-plan/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a symlink at the diff path to the file it names',
+    () => {
+      const { p, diffPath } = identityRun();
+      const real = join(dir, 'real.diff');
+      renameSync(diffPath, real);
+      symlinkSync(real, diffPath);
+
+      expect(coverageFromTranscripts(p, ENV).selectionDrift).toBeNull();
+    },
+  );
+
+  it('says so, rather than throwing, when the check itself gives out', () => {
+    // A throw out of the coverage walk is a coverage failure, and that caps:
+    // a report-only check must not be able to cost a verdict. Whatever goes
+    // wrong past the read comes back as a sentence.
+    const { p } = identityRun();
+    const spy = vi
+      .spyOn(selectionModule, 'selectionDrift')
+      .mockImplementation(() => {
+        throw new RangeError('Invalid string length');
+      });
+    try {
+      const r = coverageFromTranscripts(p, ENV);
+      expect(r.selectionDrift).toMatch(/could not be checked/);
+      expect(r.selectionDrift).toMatch(/re-plan$/);
+      expect(r.ok).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('names a chunk range that is not numbers, and does not throw on it', () => {
+    // A parsed plan can hold anything where a line number belongs, and only
+    // ids are checked at plan read. 6000 levels of nesting overflow the
+    // serialiser the digest uses: thrown from here, a report-only check
+    // became a coverage failure that caps.
+    const { p } = identityRun();
+    // Spliced in as text: the parser takes any depth, and the serialiser —
+    // which is the point — does not, so the fixture cannot be stringified.
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    planJson.chunks[1].endLine = 'DEEP';
+    const deep = `${'{"a":'.repeat(6000)}1${'}'.repeat(6000)}`;
+    writeFileSync(p, JSON.stringify(planJson).replace('"DEEP"', deep));
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    let said: string | null = null;
+    expect(() => {
+      said = coverageFromTranscripts(p, ENV).selectionDrift;
+    }).not.toThrow();
+    expect(said).toMatch(/not a pair of numbers/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'calls a symlink loop at the path replaced, not unreadable',
+    () => {
+      const { p, diffPath } = identityRun();
+      rmSync(diffPath);
+      symlinkSync(diffPath, diffPath);
+
+      const said = coverageFromTranscripts(p, ENV).selectionDrift;
+      expect(said).toMatch(/is no longer a regular file/);
+      expect(said).toMatch(/re-capture the diff and re-plan/);
+    },
+  );
+
+  it('names the failure of a read that failed for any other reason', () => {
+    // A path Node itself refuses, standing in for the class (EACCES, EIO): a
+    // file that is there and cannot be read may not have moved, and the
+    // message says which failure it was. Chosen because it is the same on
+    // every platform.
+    const { p, diffPath } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({ ...planJson, diffPathAbsolute: `${diffPath}\u0000x` }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).toMatch(/could not be read \(ERR_INVALID_ARG_VALUE\)/);
+    expect(said).toMatch(/may not have moved/);
+    expect(said).not.toMatch(/is gone/);
+  });
+
+  it('does not let a path from the plan open a second stderr line', () => {
+    // The path is plan JSON, and a plan is a file anything can write.
+    // Interpolated raw, a newline in it forged an `ERROR:` line on the
+    // channel the orchestrator reads repairs from, and an ESC reached the
+    // terminal as an escape sequence. Which branch names the path differs by
+    // platform (these characters are not legal in a Windows filename); that
+    // it is named inertly must not.
+    const { p } = identityRun();
+    const hostile = join(dir, 'x\nERROR forged line\u001b[2K\u202e.diff');
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({ ...planJson, diffPathAbsolute: hostile }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    // eslint-disable-next-line no-control-regex
+    expect(said).not.toMatch(/[\u0000-\u001f\u007f]/);
+    expect(said?.split('\n')).toHaveLength(1);
+    // A bidi override survives JSON quoting and is what `inertPath` is for…
+    expect(said).not.toContain('\u202e');
+    // …and the quoting is what keeps prose in a path reading as the path.
+    expect(said).toMatch(/the diff file at "[^"]*ERROR forged line[^"]*" /);
+  });
+
+  it('does not echo a path of unbounded length', () => {
+    const { p } = identityRun();
+    const planJson = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        diffPathAbsolute: join(dir, 'a'.repeat(100_000)),
+      }),
+    );
+    utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    const said = coverageFromTranscripts(p, ENV).selectionDrift;
+    expect(said).not.toBeNull();
+    expect(said!.length).toBeLessThan(1000);
+  });
+
+  it('prints the drift as a NOTE scoped to the whole report, exit unchanged', () => {
+    const { p, diffPath } = identityRun();
+    writeFileSync(diffPath, `${diffText}+rewritten after planning\n`);
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const lines = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const note = lines.find((l) => l.includes('diff file has changed'));
+      expect(note).toBeDefined();
+      expect(note).toMatch(/^NOTE: /);
+      // "The summary line above" has to be true: the NOTE follows it.
+      expect(lines.indexOf(note!)).toBeGreaterThan(
+        lines.findIndex((l) => l.startsWith('Coverage:')),
+      );
+      expect(lines.findIndex((l) => l.startsWith('Coverage:'))).not.toBe(-1);
+      // The summary fraction above the NOTE is the very number a moved diff
+      // qualifies, so the caveat names it rather than only what follows.
+      expect(note).toContain('the summary line above');
+      expect(lines.some((l) => l.startsWith('ERROR:'))).toBe(false);
+      expect(process.exitCode).toBe(prevExit);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
   });
 });

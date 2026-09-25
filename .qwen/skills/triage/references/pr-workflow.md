@@ -264,8 +264,15 @@ latest close was manual), treat the closer as unresolved.
   - **Fully subsumed** — applying this PR's ENTIRE diff to the default
     branch would change nothing: every production line this PR adds already
     exists there, AND every production line this PR deletes is already
-    absent there (check per file via
-    `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`). A diff
+    absent there. URL-encode the path with
+    `PATH_ENCODED=$(jq -rn --arg value "<path>" '$value | @uri')`, then read
+    each file as raw bytes via
+    `gh api -H "Accept: application/vnd.github.raw+json" --method GET "repos/$REPO/contents/$PATH_ENCODED" -f ref="$DEFAULT_BRANCH"`;
+    the default JSON representation leaves `content` empty for files at or
+    above 1 MiB. A 404 from this encoded-path request means the file is absent
+    — apply the predicates above to that known state. If any other raw fetch fails, subsumption is
+    unverified: never close; flag it in the Stage 1 comment and escalate to
+    the maintainer. A diff
     with NO production changes (e.g. tests-only) is never fully subsumed —
     any file it adds outside the production set is itself a remaining
     delta. → post the terminal comment below, then close the PR. This is

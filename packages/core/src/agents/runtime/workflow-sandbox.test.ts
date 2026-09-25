@@ -13,6 +13,7 @@ import {
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -703,6 +704,208 @@ describe('createWorkflowSandbox security', () => {
     expect(sandbox.getPhases()).toEqual(['Search']);
   });
 
+  // effort is validated and normalized on the revived copy, so the host (and
+  // the resume key) sees one canonical tier for every alias /effort accepts.
+  it('agent({effort}) hands the host the canonical tier', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.effort);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { effort: "high" });
+      await agent("b", { effort: "X-High" });
+      await agent("c", { effort: "med" });
+      await agent("d", {});
+      return "done";
+    `);
+    expect(seen).toEqual(['high', 'xhigh', 'medium', undefined]);
+  });
+
+  it.each([['"turbo"'], ['3'], ['{}']])(
+    'agent({effort: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { effort: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{effort\}\): unknown effort tier .*Known tiers are: low, medium, high, xhigh, max\./,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // Order and duplicates are not part of what the list means, so they must
+  // not reach the resume key; an empty list denies nothing and is dropped.
+  it('agent({disallowedTools}) hands the host a sorted, de-duplicated list', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { disallowedTools: ["write_file", "run_shell_command", "write_file"] });
+      await agent("b", { disallowedTools: [] });
+      return "done";
+    `);
+    expect(seen).toEqual([['run_shell_command', 'write_file'], undefined]);
+  });
+
+  it.each([['"run_shell_command"'], ['[""]'], ['[" edit"]'], ['[42]']])(
+    'agent({disallowedTools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { disallowedTools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{disallowedTools\}\): must be an array of non-empty tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names effort, disallowedTools and tools among the known options', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { efort: "low" });`),
+    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools, tools\./);
+  });
+
+  // The allowlist gets the deny list's normalization: one built-in named two
+  // ways, or the same tools in another order, is one resume key. Other names
+  // reach the host as written.
+  it('agent({tools}) hands the host a sorted, de-duplicated list of names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.tools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { tools: ["run_shell_command", "ReadFile", "Shell"] });
+      await agent("b", { tools: ["mcp__warehouse__query"] });
+      await agent("c", {});
+      return "done";
+    `);
+    expect(seen).toEqual([
+      ['read_file', 'run_shell_command'],
+      ['mcp__warehouse__query'],
+      undefined,
+    ]);
+  });
+
+  // Unlike an empty deny list, an empty allowlist would leave nothing to call.
+  it.each([['"read_file"'], ['[]'], ['[""]'], ['[" read_file"]'], ['[42]']])(
+    'agent({tools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{tools\}\): must be a non-empty array of tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['"*"', /"\*" is a pattern, and the allowlist takes exact tool names/],
+    ['"mcp__warehouse__*"', /is a pattern/],
+    ['"mcp__warehouse"', /names a whole MCP server/],
+    ['"exec"', /"exec" is the code-mode surface, not a tool to allow/],
+    ['"Exec"', /is the code-mode surface/],
+  ])(
+    'agent({tools: ["read_file", %s]}) is rejected before dispatch',
+    async (entry, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ["read_file", ${entry}] });`),
+      ).rejects.toThrow(message);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The refused entry is script-controlled and echoed in the message.
+  it('strips control characters from an echoed tools entry', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { tools: ["mcp\u0085__srv__*"] });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(
+      /agent\(\{tools\}\): "mcp__srv__\*" is a pattern/,
+    );
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+  });
+
+  // A rejected call must leave no phase behind: the phase is recorded only
+  // after every option gate has passed.
+  it.each([
+    ['effort: "turbo"', /unknown effort tier/],
+    ['disallowedTools: "edit"', /must be an array/],
+    ['tools: []', /must be a non-empty array/],
+    ['tools: ["exec"]', /is the code-mode surface/],
+  ])(
+    'records no phase for a call rejected over %s',
+    async (option, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("x", { phase: "Verify", ${option} });`),
+      ).rejects.toThrow(message);
+      expect(sandbox.getPhases()).toEqual([]);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The rejected value is script-controlled, and JSON.stringify leaves DEL and
+  // C1 (incl. NEL) in place, so the echo is sanitized before the message.
+  it('strips control characters from an echoed effort value', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { effort: "turbo\u0085inject\u007f" });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(/unknown effort tier "turboinject"/);
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+  });
+
+  // Built-in display names become tool names before the resume key is
+  // derived, so renaming Edit to edit keeps the cache; MCP patterns pass as is.
+  it('hands the host built-in deny names as tool names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(
+      `return agent("a", { disallowedTools: ["Edit", "edit", "WriteFile", "mcp__github"] });`,
+    );
+    expect(seen).toEqual([['edit', 'mcp__github', 'write_file']]);
+  });
+
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
     const emitted: string[] = [];
@@ -1054,7 +1257,7 @@ describe('createWorkflowSandbox security', () => {
     // The banked remainder (~80 ms) fires promptly; a fresh full budget
     // (200 ms) would overshoot the upper bound, and a pause-duration
     // deduction would fire before the lower bound.
-    expect(Date.now() - resumedAt).toBeLessThan(150);
+    expectWithinLatencyBudget(Date.now() - resumedAt, 150);
     expect(Date.now() - resumedAt).toBeGreaterThan(40);
   });
 

@@ -166,15 +166,24 @@ describe('build-and-publish-image workflow', () => {
 
   it('dedups the failure issue by an exact client-side marker match', () => {
     // GitHub search tokenizes the colon out of the marker, so a --search
-    // lookup never finds the issues this job files.
+    // lookup never finds the issues this job files. The lookup itself is
+    // shared with the ECS fleet reporter, which files marker-bearing issues
+    // into the same `scope/ci-cd` label space: a guard applied to one copy
+    // and missed in the other makes the other file duplicates.
     expect(failureIssueJob).toContain(
       'bash .github/scripts/image-build-failure-issue.sh',
     );
-    expect(failureIssueScript).not.toContain('--search');
     expect(failureIssueScript).toContain(
-      'jq -r --arg marker_html "${marker_html}"',
+      'bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"',
     );
-    expect(failureIssueScript).toContain('contains($marker_html)');
+    expect(failureIssueScript).toContain('MARKER_HTML="${marker_html}"');
+    const lookupScript = readFileSync(
+      '.github/scripts/find-marked-issue.sh',
+      'utf8',
+    );
+    expect(lookupScript).not.toContain('--search');
+    expect(lookupScript).toContain('jq -r --arg marker_html "${MARKER_HTML}"');
+    expect(lookupScript).toContain('contains($marker_html)');
   });
 });
 
@@ -197,6 +206,7 @@ describe.skipIf(!replayable)(
       tagName = '',
       inputVersion = '',
       issues,
+      env = {},
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'image-failure-issue-'));
       const callsLog = join(dir, 'calls.log');
@@ -226,7 +236,12 @@ describe.skipIf(!replayable)(
           '  prev="$arg"',
           'done',
           'case "$1 $2" in',
-          '  "issue list") cat "' + fixture + '" ;;',
+          '  "issue list")',
+          '    if [[ -n "${STUB_LIST_FAILS:-}" ]]; then',
+          '      echo "gh: HTTP 502 (api.github.com)" >&2',
+          '      exit 1',
+          '    fi',
+          '    cat "' + fixture + '" ;;',
           '  "issue view") cat "' + dir + '/issue-$3.body" ;;',
           'esac',
           'exit 0',
@@ -249,6 +264,7 @@ describe.skipIf(!replayable)(
             RUN_URL:
               'https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
             RUNNER_TEMP: dir,
+            ...env,
           },
         },
       );
@@ -259,6 +275,52 @@ describe.skipIf(!replayable)(
         body: existsSync(bodyCapture) ? readFileSync(bodyCapture, 'utf8') : '',
       };
     };
+
+    it('picks the tracked issue over a newer one quoting its marker', () => {
+      // The shared lookup lists newest-first and matches the marker as a
+      // substring, so an issue *about* this reporter would otherwise outrank
+      // the one it opened — and this caller REWRITES the selected issue's
+      // body, so a hijack mangles an unrelated issue.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 99,
+            title: 'the image-build reporter files a marker',
+            body: 'it writes <!-- image-build-failure:1.2.3 --> into the body',
+          },
+          {
+            number: 42,
+            title:
+              'Sandbox image for 1.2.3 not published: release build job failed',
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.calls).not.toContain('issue edit 99');
+    });
+
+    it('files anyway when the dedup lookup itself fails', () => {
+      // `set -e` aborts on a failing command substitution feeding an
+      // assignment, so an unguarded lookup would kill the reporter before it
+      // files anything — the silence this job exists to break.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [],
+        env: { STUB_LIST_FAILS: '1' },
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue create');
+    });
 
     it('records the recurrence on the existing issue instead of creating', () => {
       const previousRun =

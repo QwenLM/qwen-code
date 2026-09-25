@@ -36,7 +36,7 @@ import type { DialogListItem } from './dialogs-core.js';
 
 export const THEME_DIALOG_MAX_ITEMS_TO_SHOW = 12;
 
-/** The preview pane's sample sources — byte-for-byte the ink originals. */
+/** The preview pane's code sample — byte-for-byte the ink original. */
 export const THEME_PREVIEW_CODE = `# function
 def fibonacci(n):
     a, b = 0, 1
@@ -44,9 +44,15 @@ def fibonacci(n):
         a, b = b, a + b
     return a`;
 
+/**
+ * The preview pane's sample sources — the ink originals, except the diff
+ * hunk-header counts: OpenTUI's `<diff>` parser rejects the malformed ink
+ * header (two declared lines over one per side; ink's DiffRenderer tolerates
+ * it), and neither renderer displays the header itself.
+ */
 export const THEME_PREVIEW_DIFF = `--- a/util.py
 +++ b/util.py
-@@ -1,2 +1,2 @@
+@@ -1,1 +1,1 @@
 - print("Hello, " + name)
 + print(f"Hello, {name}!")
 `;
@@ -243,14 +249,15 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
               onSelectIndex={themeList.selectIndex}
               onWheel={(direction) =>
                 themeList.setActiveIndex(
-                  themeList.activeIndex + (direction === 'down' ? 1 : -1),
+                  themeList.activeIndexRef.current +
+                    (direction === 'down' ? 1 : -1),
                 )
               }
               renderLabel={(item, { titleColor }) => (
-                <text fg={titleColor}>
-                  {item.themeNameDisplay}{' '}
+                <box flexDirection="row">
+                  <text fg={titleColor}>{`${item.themeNameDisplay} `}</text>
                   <text fg={C.dim}>{item.themeTypeDisplay}</text>
-                </text>
+                </box>
               )}
             />
           </box>
@@ -305,7 +312,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             onWheel={(direction) =>
               scopeList.setActiveIndex(
-                scopeList.activeIndex + (direction === 'down' ? 1 : -1),
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (

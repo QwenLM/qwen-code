@@ -14,6 +14,9 @@ import type {
   DaemonWorkspaceSkillsStatus,
   WorkspaceExtensionProjection,
 } from '@qwen-code/sdk/daemon';
+import type { useI18n } from '../../i18n';
+
+type Translate = ReturnType<typeof useI18n>['t'];
 
 /**
  * Facets the sidebar can summarize per workspace. Each maps to one
@@ -319,4 +322,93 @@ export function mergeOverviewSnapshots(
     if (value !== undefined) Object.assign(merged, { [item]: value });
   }
   return merged;
+}
+
+/** The short value printed for a facet, or `undefined` while it is unknown. */
+export function formatOverviewValue(
+  snapshot: WorkspaceOverviewSnapshot | undefined,
+  item: WorkspaceOverviewItem,
+): string | undefined {
+  if (!isOverviewFacetKnown(snapshot, item) || !snapshot) return undefined;
+  switch (item) {
+    case 'mcp': {
+      const mcp = snapshot.mcp!;
+      const enabled = mcp.configured - mcp.disabled;
+      return enabled === 0 ? '0' : `${mcp.connected}/${enabled}`;
+    }
+    case 'skills':
+      return String(snapshot.skills!.enabled);
+    case 'extensions': {
+      const ext = snapshot.extensions!;
+      return ext.active === ext.total
+        ? String(ext.total)
+        : `${ext.active}/${ext.total}`;
+    }
+    case 'channels': {
+      const ch = snapshot.channels!;
+      return ch.configured === 0 ? '0' : `${ch.connected}/${ch.configured}`;
+    }
+    case 'context':
+      return String(snapshot.context!.fileCount);
+    case 'hooks':
+      return String(snapshot.hooks!.count);
+    default:
+      return undefined;
+  }
+}
+
+/** The long form of a facet's value, used as the tooltip row's title. */
+export function overviewDetail(
+  t: Translate,
+  snapshot: WorkspaceOverviewSnapshot,
+  item: WorkspaceOverviewItem,
+): string {
+  switch (item) {
+    case 'mcp': {
+      const mcp = snapshot.mcp!;
+      return t('sidebar.overview.mcpDetail', {
+        configured: mcp.configured,
+        connected: mcp.connected,
+        failed: mcp.failed,
+        disabled: mcp.disabled,
+      });
+    }
+    case 'skills': {
+      const skills = snapshot.skills!;
+      return t('sidebar.overview.skillsDetail', {
+        total: skills.total,
+        enabled: skills.enabled,
+      });
+    }
+    case 'extensions': {
+      const ext = snapshot.extensions!;
+      return t('sidebar.overview.extensionsDetail', {
+        total: ext.total,
+        active: ext.active,
+      });
+    }
+    case 'channels': {
+      const ch = snapshot.channels!;
+      return t('sidebar.overview.channelsDetail', {
+        configured: ch.configured,
+        connected: ch.connected,
+        failed: ch.failed,
+      });
+    }
+    case 'context': {
+      const ctx = snapshot.context!;
+      return t('sidebar.overview.contextDetail', {
+        files: ctx.fileCount,
+        rules: ctx.ruleCount,
+      });
+    }
+    case 'hooks': {
+      const hooks = snapshot.hooks!;
+      return hooks.disabled
+        ? t('sidebar.overview.hooksDisabled', { count: hooks.count })
+        : t('sidebar.overview.hooksDetail', { count: hooks.count });
+    }
+    default:
+      return '';
+  }
 }

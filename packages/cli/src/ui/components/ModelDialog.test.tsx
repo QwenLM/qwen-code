@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { render, cleanup, act } from '@testing-library/react';
 import process from 'node:process';
@@ -157,6 +158,74 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
+  it('can turn Advisor off when no models are available', async () => {
+    const { mockSettings, mockConfig, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAdvisorModel: () => 'unavailable-advisor',
+        getAllConfiguredModels: () => [],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map(({ value }) => value)).toEqual(['$advisor-off']);
+    await act(async () => {
+      await select.onSelect('$advisor-off');
+    });
+    expect(mockConfig.setAdvisorModel).toHaveBeenCalledWith(undefined);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      '',
+    );
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('persists and highlights the selected Advisor registry endpoint', async () => {
+    const endpoint = 'https://advisor.example/v1';
+    const selector = `openai:advisor\0${endpoint}`;
+    const { mockSettings, mockConfig } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAdvisorModel: () => selector,
+        getAllConfiguredModels: () => [
+          {
+            id: 'advisor',
+            label: 'Default endpoint',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: endpoint,
+          },
+          {
+            id: 'advisor',
+            label: 'Explicit endpoint',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: endpoint,
+            registryBaseUrl: endpoint,
+          },
+        ],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    const selectedKey = `openai::advisor\0${endpoint}`;
+    expect(select.items.map(({ value }) => value)).toEqual([
+      '$advisor-off',
+      'openai::advisor',
+      selectedKey,
+    ]);
+    expect(select.initialIndex).toBe(2);
+    await act(async () => {
+      await select.onSelect(selectedKey);
+    });
+    expect(mockConfig.setAdvisorModel).toHaveBeenCalledWith(selector);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      selector,
+    );
+  });
+
   it('lists Off and persists an Advisor model without switching the executor', async () => {
     const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
     const switchModel = vi.fn();
@@ -194,10 +263,10 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'advisorModel',
-      `${AuthType.USE_OPENAI}:advisor-model`,
+      `${AuthType.USE_OPENAI}:advisor-model\0`,
     );
     expect(setAdvisorModel).toHaveBeenCalledWith(
-      `${AuthType.USE_OPENAI}:advisor-model`,
+      `${AuthType.USE_OPENAI}:advisor-model\0`,
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalled();
@@ -254,10 +323,10 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'advisorModel',
-      `${AuthType.USE_OPENAI}:available-advisor-model`,
+      `${AuthType.USE_OPENAI}:available-advisor-model\0`,
     );
     expect(setAdvisorModel).toHaveBeenCalledWith(
-      `${AuthType.USE_OPENAI}:available-advisor-model`,
+      `${AuthType.USE_OPENAI}:available-advisor-model\0`,
     );
   });
 

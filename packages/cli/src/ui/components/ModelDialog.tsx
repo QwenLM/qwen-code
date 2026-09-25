@@ -326,7 +326,10 @@ export function ModelDialog({
     let advisorSelector: ReturnType<typeof resolveModelId> | undefined;
     if (isAdvisorModelMode && advisorModel) {
       try {
-        advisorSelector = resolveModelId(advisorModel, advisorContext);
+        advisorSelector = resolveModelId(
+          advisorModel.split('\0')[0],
+          advisorContext,
+        );
       } catch {
         advisorSelector = undefined;
       }
@@ -350,9 +353,7 @@ export function ModelDialog({
       const imageModelSelector = encodeVisionModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
-      const advisorModelSelector = encodeAuxModelSelector(
-        buildModelSelectionKey(m.authType, m.id, m.baseUrl),
-      );
+      const advisorModelSelector = `${m.authType}:${m.id}\0${m.registryBaseUrl ?? ''}`;
       const isAvailableAdvisorModel =
         !isAdvisorModelMode ||
         (config !== undefined &&
@@ -392,6 +393,7 @@ export function ModelDialog({
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
+      AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
@@ -445,7 +447,11 @@ export function ModelDialog({
         const value =
           isRuntime && snapshotId
             ? snapshotId
-            : buildModelSelectionKey(t2, model.id, model.baseUrl);
+            : buildModelSelectionKey(
+                t2,
+                model.id,
+                isAdvisorModelMode ? model.registryBaseUrl : model.baseUrl,
+              );
 
         const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
@@ -562,7 +568,10 @@ export function ModelDialog({
     if (!isAdvisorModelMode || !config || !advisorModelSetting)
       return undefined;
     try {
-      return resolveModelId(advisorModelSetting, buildModelIdContext(config));
+      return resolveModelId(
+        advisorModelSetting.split('\0')[0],
+        buildModelIdContext(config),
+      );
     } catch {
       return undefined;
     }
@@ -626,17 +635,22 @@ export function ModelDialog({
             ({ model }) => model.id === parsedFastModelSetting.modelId,
           )
       : undefined;
+  const advisorEndpointIndex = advisorModelSetting?.indexOf('\0') ?? -1;
+  const advisorRegistryBaseUrl =
+    advisorEndpointIndex < 0
+      ? undefined
+      : advisorModelSetting!.slice(advisorEndpointIndex + 1) || null;
   const preferredAdvisorModelEntry =
     isAdvisorModelMode && parsedAdvisorModelSetting
-      ? parsedAdvisorModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedAdvisorModelSetting.authType &&
-              model.id === parsedAdvisorModelSetting.modelId,
-          )
-        : availableModelEntries.find(
-            ({ model }) => model.id === parsedAdvisorModelSetting.modelId,
-          )
+      ? availableModelEntries.find(
+          ({ authType: t2, model, isRuntime }) =>
+            (!parsedAdvisorModelSetting.authType ||
+              t2 === parsedAdvisorModelSetting.authType) &&
+            model.id === parsedAdvisorModelSetting.modelId &&
+            (advisorRegistryBaseUrl === undefined ||
+              (!isRuntime &&
+                (model.registryBaseUrl ?? null) === advisorRegistryBaseUrl)),
+        )
       : undefined;
   const preferredVoiceModelEntry =
     isVoiceModelMode && voiceModelSetting
@@ -735,7 +749,7 @@ export function ModelDialog({
                 ? buildModelSelectionKey(
                     preferredAdvisorModelEntry.authType,
                     preferredAdvisorModelEntry.model.id,
-                    preferredAdvisorModelEntry.model.baseUrl,
+                    preferredAdvisorModelEntry.model.registryBaseUrl,
                   )
                 : preferredFastModelEntry
                   ? buildModelSelectionKey(
@@ -827,11 +841,20 @@ export function ModelDialog({
         const v =
           isRuntime && snapshotId
             ? snapshotId
-            : buildModelSelectionKey(t2, model.id, model.baseUrl);
+            : buildModelSelectionKey(
+                t2,
+                model.id,
+                isAdvisorModelMode ? model.registryBaseUrl : model.baseUrl,
+              );
         return v === key;
       },
     );
-  }, [highlightedValue, preferredKey, availableModelEntries]);
+  }, [
+    highlightedValue,
+    preferredKey,
+    availableModelEntries,
+    isAdvisorModelMode,
+  ]);
 
   const handleSelect = useCallback(
     async (selected: string) => {
@@ -842,7 +865,11 @@ export function ModelDialog({
           const value =
             isRuntime && snapshotId
               ? snapshotId
-              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+              : buildModelSelectionKey(
+                  t2,
+                  model.id,
+                  isAdvisorModelMode ? model.registryBaseUrl : model.baseUrl,
+                );
           return value === selected;
         },
       );
@@ -873,7 +900,10 @@ export function ModelDialog({
         }
 
         hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
-        const advisorModel = encodeAuxModelSelector(selected);
+        const advisorSelector = encodeAuxModelSelector(selected);
+        const advisorModel = selectedEntry.isRuntime
+          ? advisorSelector
+          : `${advisorSelector}\0${selectedEntry.model.registryBaseUrl ?? ''}`;
         if (!checkAdvisorModelAvailability(config, advisorModel).available) {
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;
@@ -892,7 +922,7 @@ export function ModelDialog({
         settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: t('Advisor set to {{model}}', { model: advisorModel }),
+          text: t('Advisor set to {{model}}', { model: advisorSelector }),
         });
         onClose();
         return;
@@ -1213,7 +1243,7 @@ export function ModelDialog({
     ],
   );
 
-  const hasModels = availableModelEntries.length > 0;
+  const hasModels = MODEL_OPTIONS.length > 0;
 
   return (
     <Box

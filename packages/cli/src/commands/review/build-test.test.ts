@@ -57,7 +57,12 @@ afterEach(() => reviewSettingsIsolation?.dispose());
 
 const PKGS: WorkspacePackage[] = [
   { dir: 'packages/core', name: '@x/core', scripts: ['build'], deps: [] },
-  { dir: 'packages/webui', name: '@x/webui', scripts: ['build'], deps: [] },
+  {
+    dir: 'packages/shared-ui',
+    name: '@x/shared-ui',
+    scripts: ['build'],
+    deps: [],
+  },
 ];
 
 describe('unresolvedWorkspaceDeps', () => {
@@ -70,9 +75,9 @@ describe('unresolvedWorkspaceDeps', () => {
 
   it('finds the workspace package a TS2307 names', () => {
     const out =
-      "src/a.ts(23,8): error TS2307: Cannot find module '@x/webui' or its " +
+      "src/a.ts(23,8): error TS2307: Cannot find module '@x/shared-ui' or its " +
       'corresponding type declarations.';
-    expect(unresolvedWorkspaceDeps(out, PKGS)).toEqual(['@x/webui']);
+    expect(unresolvedWorkspaceDeps(out, PKGS)).toEqual(['@x/shared-ui']);
   });
 
   it('resolves a deep import back to its package', () => {
@@ -82,8 +87,11 @@ describe('unresolvedWorkspaceDeps', () => {
 
   it("reads a bundler's wording too", () => {
     expect(
-      unresolvedWorkspaceDeps('✘ [ERROR] Could not resolve "@x/webui"', PKGS),
-    ).toEqual(['@x/webui']);
+      unresolvedWorkspaceDeps(
+        '✘ [ERROR] Could not resolve "@x/shared-ui"',
+        PKGS,
+      ),
+    ).toEqual(['@x/shared-ui']);
   });
 
   it('ignores a third-party module — widening cannot fix it, and would loop', () => {
@@ -416,6 +424,53 @@ describe('runBuildTest', () => {
     });
     // The install ran despite the directory already existing.
     expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
+  });
+
+  it("installs a pnpm repo with corepack pnpm, gated on pnpm's own marker", () => {
+    // pnpm-lock.yaml alone — this repo's own shape once package-lock.json is
+    // gone. The npm marker the beforeEach left must not pass for a pnpm tree.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    rmSync(join(root, 'package-lock.json'), { force: true });
+    writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    const calls: string[] = [];
+    const exec = (command: string, cwd: string): CommandResult => {
+      calls.push(command);
+      if (command.startsWith('corepack pnpm install')) {
+        writeFileSync(join(cwd, 'node_modules', '.modules.yaml'), '');
+      }
+      return { command, exitCode: 0, seconds: 1, timedOut: false, output: '' };
+    };
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec,
+    });
+    expect(calls[0]).toBe(
+      'corepack pnpm install --frozen-lockfile --reporter=append-only',
+    );
+    expect(rep.install?.command).toBe(calls[0]);
+    // Scripts still run through npm.
+    expect(rep.toolchain).toBe('npm');
+    expect(calls.some((c) => c.startsWith('npm run build'))).toBe(true);
+
+    // The next run finds the pnpm tree complete and does not reinstall.
+    calls.length = 0;
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec,
+    });
+    expect(calls.some((c) => c.includes('install'))).toBe(false);
   });
 
   it('builds and tests nothing for a LICENSE-only diff — the license family cannot fail a suite', () => {
@@ -2056,7 +2111,7 @@ describe('runBuildTest', () => {
   });
 
   it('discloses a diff inside a negated member — softly, never as an incomplete scope', () => {
-    // packages/desktop-shell is a separate toolchain (its own lockfile); a diff
+    // packages/desktop is a separate toolchain (its own lockfile); a diff
     // inside it cannot fail any npm workspace's suite, so "nothing to run"
     // stays the answer — disclosed softly (its own suite did not run), never
     // as an incomplete scope.
@@ -2064,7 +2119,7 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({
         name: 'r',
-        workspaces: ['packages/*', '!packages/desktop-shell'],
+        workspaces: ['packages/*', '!packages/desktop'],
         scripts: { test: 'exit 0' },
       }),
     );
@@ -2072,11 +2127,11 @@ describe('runBuildTest', () => {
       name: '@x/core',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/desktop-shell', {
+    pkg('packages/desktop', {
       name: '@x/desktop',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    writePlan(['packages/desktop-shell/src/main.rs']);
+    writePlan(['packages/desktop/src/main.rs']);
 
     const rep = runBuildTest({
       plan: planPath,
@@ -2088,9 +2143,7 @@ describe('runBuildTest', () => {
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
     expect(rep.testScope?.workspaces).toEqual([]);
-    expect(rep.testScope?.caveat).toContain(
-      'packages/desktop-shell/src/main.rs',
-    );
+    expect(rep.testScope?.caveat).toContain('packages/desktop/src/main.rs');
     expect(rep.testScope?.caveat).toContain('were not run');
     expect(rep.note).toContain('were not run');
   });
@@ -2290,7 +2343,10 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
     );
-    pkg('packages/webui', { name: '@x/webui', scripts: { build: 'x' } });
+    pkg('packages/shared-ui', {
+      name: '@x/shared-ui',
+      scripts: { build: 'x' },
+    });
     pkg('packages/leaf', {
       name: '@x/leaf',
       scripts: { build: 'x', test: 'x' },
@@ -2312,7 +2368,7 @@ describe('runBuildTest', () => {
             exitCode: null,
             seconds: 60,
             timedOut: true,
-            output: "error TS2307: Cannot find module '@x/webui'",
+            output: "error TS2307: Cannot find module '@x/shared-ui'",
           };
         }
         return {
@@ -2334,7 +2390,7 @@ describe('runBuildTest', () => {
 
   it('excludes a negated workspace from the build set (integration)', () => {
     // `!packages/excluded` must keep that package out — building it could fail on a
-    // repo where it is a separate toolchain (e.g. packages/desktop-shell, its own lockfile).
+    // repo where it is a separate toolchain (e.g. packages/desktop, its own lockfile).
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({

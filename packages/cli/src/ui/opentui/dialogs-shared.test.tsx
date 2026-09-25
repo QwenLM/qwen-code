@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Hook-level tests for useDialogSelect: the numeric quick-select timer
@@ -32,8 +33,35 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-import { useDialogSelect } from './dialogs-shared.js';
+import {
+  dialogAreaWidth,
+  dialogContentWidth,
+  useDialogSelect,
+} from './dialogs-shared.js';
 import { NUMBER_SELECT_TIMEOUT_MS } from './dialogs-core.js';
+
+describe('dialogAreaWidth', () => {
+  it('leaves room for the two-column margins ink puts around every popup', () => {
+    expect(dialogAreaWidth(100)).toBe(96);
+    expect(dialogAreaWidth(80)).toBe(76);
+  });
+
+  it('caps at 100 so a wide terminal does not stretch the border', () => {
+    expect(dialogAreaWidth(120)).toBe(100);
+    expect(dialogAreaWidth(200)).toBe(100);
+  });
+});
+
+describe('dialogContentWidth', () => {
+  it('drops the frame border and padding on both sides', () => {
+    // 92 is the rule width ink's model dialog measures at a 100-column
+    // terminal, and a full-width rule has to be spelled out to it because
+    // OpenTUI has no single-sided border to draw one with.
+    expect(dialogContentWidth(100)).toBe(92);
+    expect(dialogContentWidth(120)).toBe(96);
+    expect(dialogContentWidth(4)).toBe(0);
+  });
+});
 
 const items = Array.from({ length: 15 }, (_, i) => ({
   key: `item-${i}`,
@@ -44,6 +72,16 @@ const press = (key: { name: string; sequence?: string }) => {
   const handler = handlers[handlers.length - 1];
   if (!handler) throw new Error('no keyboard handler registered');
   act(() => handler(key));
+};
+
+/** One React batch: the renderer delivers a burst of keys to the handler
+ *  registered by the last render, with no re-render in between. */
+const pressBatched = (keys: Array<{ name: string; sequence?: string }>) => {
+  const handler = handlers[handlers.length - 1];
+  if (!handler) throw new Error('no keyboard handler registered');
+  act(() => {
+    for (const key of keys) handler(key);
+  });
 };
 
 describe('useDialogSelect numeric quick-select', () => {
@@ -92,6 +130,32 @@ describe('useDialogSelect numeric quick-select', () => {
     });
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith('item-0');
+  });
+});
+
+describe('useDialogSelect cursor within one key batch', () => {
+  beforeEach(() => {
+    handlers.length = 0;
+  });
+
+  it('moves the highlight once per arrow key in a single batch', () => {
+    const { result } = renderHook(() =>
+      useDialogSelect({ items, numbers: false }),
+    );
+    pressBatched([{ name: 'down' }, { name: 'down' }, { name: 'down' }]);
+    expect(result.current.activeIndex).toBe(3);
+  });
+
+  it('selects the row the batch arrows reached, not the pre-batch one', () => {
+    const onSelect = vi.fn();
+    renderHook(() => useDialogSelect({ items, numbers: false, onSelect }));
+    pressBatched([
+      { name: 'down' },
+      { name: 'down' },
+      { name: 'return', sequence: '\r' },
+    ]);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith('item-2');
   });
 });
 
@@ -154,5 +218,84 @@ describe('useDialogSelect resyncKey', () => {
     expect(result.current.activeIndex).toBe(2);
     rerender({ resyncKey: 'scope-select', initialIndex: 1 });
     expect(result.current.activeIndex).toBe(2);
+  });
+
+  it('disarms an armed numeric flush on view swap (R4-3)', () => {
+    vi.useFakeTimers();
+    try {
+      const onSelect = vi.fn();
+      const { rerender } = renderHook(
+        (props: { resyncKey: string }) =>
+          useDialogSelect({ items, numbers: true, onSelect, ...props }),
+        { initialProps: { resyncKey: 'mount' } },
+      );
+      // Arm a digit flush in the first view.
+      press({ name: '1', sequence: '1' });
+      // Tab to another view before the flush timeout fires.
+      rerender({ resyncKey: 'scope-select' });
+      act(() => {
+        vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+      });
+      // The stale flush must not commit a selection in the new view.
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('useDialogSelect items re-sync (ink INITIALIZE parity)', () => {
+  beforeEach(() => {
+    handlers.length = 0;
+  });
+
+  it('clamps the cursor when the list shrinks below activeIndex', () => {
+    const onSelect = vi.fn();
+    const shrinking = items.slice(0, 3);
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: shrinking } },
+    );
+    press({ name: 'down' });
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(2);
+
+    // Uninstalling the last row: the cursor's item key is gone, ink falls
+    // back to the initial index instead of stranding it past the end.
+    rerender({ items: items.slice(0, 2) });
+    expect(result.current.activeIndex).toBe(0);
+    // Enter on the clamped cursor still selects a real row.
+    press({ name: 'return' });
+    expect(onSelect).toHaveBeenCalledWith('item-0');
+  });
+
+  it('follows the active item by key when the list is reordered', () => {
+    const onSelect = vi.fn();
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: items.slice(0, 3) } },
+    );
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(1);
+
+    // item-1 moves to the front; the cursor follows the item, not the slot.
+    rerender({ items: [items[1]!, items[0]!, items[2]!] });
+    expect(result.current.activeIndex).toBe(0);
+  });
+
+  it('keeps the slot when a new array has the same key at the same index', () => {
+    const onSelect = vi.fn();
+    const { result, rerender } = renderHook(
+      (props: { items: typeof items }) =>
+        useDialogSelect({ items: props.items, numbers: false, onSelect }),
+      { initialProps: { items: items.slice(0, 3) } },
+    );
+    press({ name: 'down' });
+    expect(result.current.activeIndex).toBe(1);
+
+    rerender({ items: [...items.slice(0, 3)] });
+    expect(result.current.activeIndex).toBe(1);
   });
 });

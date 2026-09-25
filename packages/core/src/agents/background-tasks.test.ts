@@ -30,7 +30,11 @@ import {
   type AgentApprovalRequestEvent,
 } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -96,6 +100,24 @@ function makeWaitingEvent(
 }
 
 describe('notification emission and agent context (#7156)', () => {
+  it('omits the internal agent type from the notification card label', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(
+      makeRegistration('bg-1', {
+        description: 'Explore: Check Node.js requirements',
+        subagentType: 'Explore',
+      }),
+    );
+
+    registry.complete('bg-1', 'done');
+
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      label: 'Check Node.js requirements',
+    });
+  });
+
   it('captures the Todo work-chain owner at registration', () => {
     const registry = new BackgroundTaskRegistry();
     const entry = todoWorkChainContext.run('work-chain-1', () =>
@@ -104,6 +126,52 @@ describe('notification emission and agent context (#7156)', () => {
 
     expect(entry.todoWorkChainId).toBe('work-chain-1');
   });
+
+  it('retains the launching execution when completion runs in another context', () => {
+    const registry = new BackgroundTaskRegistry();
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = promptIdContext.run('fallback-turn', () =>
+      runWithInvocationContext(
+        { version: 1, sessionId: 'parent-session', promptId: 'launch-turn' },
+        () => registry.register(makeRegistration('bg-origin')),
+      ),
+    );
+
+    promptIdContext.run('later-turn', () =>
+      registry.complete(entry.id, 'done'),
+    );
+
+    expect(entry.sourceTurnId).toBe('launch-turn');
+    expect(callback.mock.calls[0]![2]).toMatchObject({
+      sourceTurnId: 'launch-turn',
+    });
+  });
+
+  it('captures an automatic execution without an RPC invocation context', () => {
+    const registry = new BackgroundTaskRegistry();
+    const entry = runWithInvocationContext(undefined, () =>
+      promptIdContext.run('automatic-turn', () =>
+        registry.register(makeRegistration('bg-automatic')),
+      ),
+    );
+
+    expect(entry.sourceTurnId).toBe('automatic-turn');
+  });
+
+  it.each([undefined, 'persisted-origin'])(
+    'preserves restored execution metadata %s instead of guessing its owner',
+    (sourceTurnId) => {
+      const registry = new BackgroundTaskRegistry();
+      const entry = promptIdContext.run('restore-turn', () =>
+        registry.register(makeRegistration('bg-restored', { sourceTurnId }), {
+          preserveNotificationState: true,
+        }),
+      );
+
+      expect(entry.sourceTurnId).toBe(sourceTurnId);
+    },
+  );
 
   // A background agent's terminal transition fires inside its own
   // AsyncLocalStorage frame, and ALS context follows every async
@@ -2080,6 +2148,21 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.drainMessages('test-1')).toEqual([]);
     });
 
+    it('refuses messages to running one-shot agents', () => {
+      registry.register({
+        agentId: 'one-shot',
+        description: 'Codex task',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/one-shot.jsonl',
+        resumeBlockedReason: 'Start a new task.',
+      });
+      expect(registry.queueExternalInput('one-shot', 'continue')).toBe(false);
+      expect(registry.drainMessages('one-shot')).toEqual([]);
+    });
+
     it('resolves empty when the wait signal is aborted', async () => {
       registry.register({
         agentId: 'test-1',
@@ -2234,6 +2317,9 @@ describe('BackgroundTaskRegistry', () => {
       expect(callback.mock.calls[0]![1]).toContain(
         '<all-terminal>false</all-terminal>',
       );
+      expect(callback.mock.calls[0]![2]).toMatchObject({
+        label: 'spawned',
+      });
     });
 
     it('counts a top-level reserved background launch as remaining', () => {

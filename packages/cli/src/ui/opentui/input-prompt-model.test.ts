@@ -17,6 +17,7 @@ import {
   LARGE_PASTE_CHAR_THRESHOLD,
   LARGE_PASTE_LINE_THRESHOLD,
   applyCompletion,
+  atCategoryTabs,
   codePointIndexToDisplayCol,
   codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
@@ -25,10 +26,13 @@ import {
   displayColToCodePointIndex,
   displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
+  filterByCategory,
   freePastePlaceholderId,
   isLargePaste,
+  isPerfectMatchForTarget,
   isPerfectSlashMatch,
   largePastePlaceholder,
+  nextCategory,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -460,6 +464,45 @@ describe('isPerfectSlashMatch (usePerfectMatch port)', () => {
   });
 });
 
+describe('isPerfectMatchForTarget (the live verdict Enter reads)', () => {
+  // Single-line ASCII fixtures, so the display column is the code-point index.
+  function perfect(
+    text: string,
+    commands: readonly SlashCommand[] = TEST_COMMANDS,
+  ): boolean {
+    const target = detectCompletionTarget(
+      [text],
+      0,
+      text.length,
+      text,
+      text.length,
+      commands,
+    );
+    return target !== null && isPerfectMatchForTarget(target, commands);
+  }
+
+  it('is true for a line-led exact command (`/help`)', () => {
+    expect(perfect('/help')).toBe(true);
+  });
+
+  it('is false while the name is still partial (`/he`)', () => {
+    expect(perfect('/he')).toBe(false);
+  });
+
+  it('is false for a non-slash target, whatever the buffer says', () => {
+    // The mention deliberately names a runnable command: only the mode guard
+    // keeps an `@` target from being judged as a slash perfect match.
+    expect(perfect('see @help')).toBe(false);
+  });
+
+  it('answers from the target pool, not the whole registry', () => {
+    // `review` is runnable but not model-invocable, so the mid-input pool
+    // excludes it while the line-led registry still sees it.
+    expect(perfect('hello /review', GATING_COMMANDS)).toBe(false);
+    expect(perfect('/review', GATING_COMMANDS)).toBe(true);
+  });
+});
+
 describe('commandCompletionItemsToSuggestions', () => {
   it('maps strings and items, dropping value-less entries', () => {
     const suggestions = commandCompletionItemsToSuggestions([
@@ -682,6 +725,21 @@ describe('suggestion shape stability', () => {
     expect(suggestions[0]?.argumentHint).toBe('<path>');
     expect(suggestions[0]?.description).toBe('cd2 description');
   });
+
+  it('carries the command source badge the dropdown column is measured against', () => {
+    const byValue = new Map(
+      slashSuggestions('/m', [
+        cmd({ name: 'mcp-list', source: 'mcp-prompt' }),
+        cmd({ name: 'model', source: 'builtin-command' }),
+        cmd({ name: 'memory' }),
+      ]).map((s) => [s.value, s.sourceBadge]),
+    );
+    expect(byValue.get('mcp-list')).toBe('[MCP]');
+    // A built-in has no badge; leave it undefined rather than an empty string,
+    // which would still widen the label column by a trailing space.
+    expect(byValue.get('model')).toBeUndefined();
+    expect(byValue.get('memory')).toBeUndefined();
+  });
 });
 
 describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
@@ -730,5 +788,57 @@ describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
       expect(displayOffsetToCodePointIndex(text, i)).toBe(i);
       expect(codePointIndexToDisplayOffset(text, i)).toBe(i);
     }
+  });
+});
+
+describe('@ completion category rules (#143)', () => {
+  const row = (value: string, category?: Suggestion['category']): Suggestion =>
+    ({ value, label: value, category }) as Suggestion;
+
+  it('derives tabs in ink CATEGORY_ORDER, not in arrival order', () => {
+    const tabs = atCategoryTabs([
+      row('session:a', 'session'),
+      row('ext', 'extension'),
+      row('file.txt'),
+      row('@server:uri', 'mcp'),
+    ]);
+    expect(tabs).toEqual(['all', 'file', 'session', 'mcp', 'extension']);
+  });
+
+  it('yields no tabs for a single category, which is what hides the bar', () => {
+    expect(atCategoryTabs([row('a.txt'), row('b.txt')])).toEqual(['all']);
+    expect(atCategoryTabs([])).toEqual(['all']);
+  });
+
+  it('counts a category-less row as a file', () => {
+    expect(atCategoryTabs([row('a.txt'), row('session:a', 'session')])).toEqual(
+      ['all', 'file', 'session'],
+    );
+    expect(
+      filterByCategory([row('a.txt'), row('s', 'session')], 'file'),
+    ).toEqual([row('a.txt')]);
+  });
+
+  it('filters to the active tab and passes everything through on all', () => {
+    const rows = [row('a.txt'), row('session:a', 'session')];
+    expect(filterByCategory(rows, 'all')).toEqual(rows);
+    expect(filterByCategory(rows, 'session')).toEqual([
+      row('session:a', 'session'),
+    ]);
+    expect(filterByCategory(rows, 'mcp')).toEqual([]);
+  });
+
+  it('steps tabs with wrap in both directions', () => {
+    const tabs = ['all', 'file', 'session'] as const;
+    expect(nextCategory(tabs, 'all', 1)).toBe('file');
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'all', -1)).toBe('session');
+    expect(nextCategory(tabs, 'file', -1)).toBe('all');
+  });
+
+  it('falls back to all when the active tab left the result set', () => {
+    const tabs = ['all', 'file'] as const;
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'session', -1)).toBe('all');
   });
 });

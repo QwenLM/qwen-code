@@ -9,16 +9,16 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import { isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import {
-  createDebugLogger,
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SEVERITIES,
   FINDING_SOURCES,
-  isAdvisorReviewDisplay,
-  isVisionBridgeNoticeDisplay,
   REPORT_FINDINGS_LEVELS,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { isAdvisorReviewDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
   type HistoryItemToolGroup,
@@ -343,6 +343,14 @@ function formatToolResultDisplay(
   ) {
     return sanitizeDisplayText(value['fallbackText']);
   }
+  if (
+    isRecord(value) &&
+    (value['type'] === 'ask_user_question_answers' ||
+      value['type'] === 'shell_result') &&
+    typeof value['text'] === 'string'
+  ) {
+    return sanitizeDisplayText(value['text']);
+  }
   if (isRecord(value) && value['type'] === 'findings_list') {
     // Discriminator-first rejection: a findings_list record that fails the
     // full shape check falls back to the text rendering below no matter
@@ -562,6 +570,15 @@ function shouldReportUnsupportedProtocolVersion(version: unknown): boolean {
   return true;
 }
 
+// Wire close-reason tokens are internal identifiers; only the stop path has
+// copy of its own. Everything else renders the same generic line rather than
+// leaking tokens like `client_close` into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
+
 export function reduceDaemonEventToTuiUpdates(
   event: DaemonTuiEvent,
   state?: DaemonTuiReducerState,
@@ -691,6 +708,18 @@ export function reduceDaemonEventToTuiUpdates(
           daemonEventId: event.id,
         },
       ];
+    }
+
+    case 'session_closed': {
+      const data = isRecord(event.data) ? event.data : {};
+      const reason =
+        data['persistenceUnconfirmed'] === true
+          ? 'Workspace runtime stopped; session persistence is unconfirmed'
+          : data['cause'] === 'workspace_runtime_stop'
+            ? 'Workspace runtime stopped.'
+            : (SESSION_CLOSED_REASON_COPY[getString(data['reason']) ?? ''] ??
+              'Session closed');
+      return terminalUpdates(event, reason);
     }
 
     case 'session_died': {

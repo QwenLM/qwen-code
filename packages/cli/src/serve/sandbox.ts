@@ -14,13 +14,15 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
-import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import {
-  FatalSandboxError,
-  Storage,
-  isSubpath,
-  resolveBundleDir,
-} from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SandboxConfig,
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { BWRAP_MIGRATION_MESSAGE } from '../config/execution-sandbox-settings.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -225,6 +227,8 @@ export async function start_sandbox(
   cliArgs: string[] = [],
   childEnv?: Readonly<Record<string, string>>,
 ): Promise<number> {
+  if (config.command === 'bwrap')
+    throw new FatalSandboxError(BWRAP_MIGRATION_MESSAGE);
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
     if (process.env['BUILD_SANDBOX']) {
@@ -399,6 +403,15 @@ export async function start_sandbox(
   const isCustomProjectSandbox = fs.existsSync(projectSandboxDockerfile);
 
   const image = config.image;
+  // `image` is optional on SandboxConfig because the in-place backends never
+  // pull one; `loadSandboxConfig` only emits a container command together with
+  // an image. Fail loudly rather than handing `undefined` to the runtime, where
+  // it would stringify into an "undefined" image reference.
+  if (!image) {
+    throw new FatalSandboxError(
+      `Sandbox command '${config.command}' requires an image`,
+    );
+  }
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 

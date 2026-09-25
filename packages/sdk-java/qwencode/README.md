@@ -119,6 +119,48 @@ Before creating a session, the SDK requires the daemon to advertise the REST tra
 
 An indeterminate completion is an outcome boundary, not a session-reuse boundary. After `PromptAdmissionUnknownException` or `PromptOutcomeIndeterminateException`, that `DaemonSessionClient` permanently rejects further prompts even if local stream cleanup later succeeds; close or destroy the session instead. An observation timeout is published without waiting forever for a blocked stream close, while cleanup continues asynchronously and retains bounded client capacity until it finishes.
 
+## Hosted Harness private API
+
+`HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.
+
+```java
+Map<String, Object> text = Map.of("type", "text", "text", "hello");
+String payloadDigest = SubmitHarnessTurn.computePayloadDigest(List.of(text));
+
+try (HostedHarnessClient harness = HostedHarnessClient.builder()
+        .baseUri(URI.create("http://127.0.0.1:4170"))
+        .bearerToken(System.getenv("QWEN_SERVER_TOKEN"))
+        .capabilityDigest(System.getenv(
+                "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"))
+        .build()) {
+    HarnessSessionRef session = harness.createSession(
+            CreateHarnessSession.builder()
+                    .harnessSessionId(UUID.randomUUID().toString())
+                    .build());
+    PromptReceipt receipt = harness.submitTurn(
+            SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(UUID.randomUUID().toString())
+                    .addContent(text)
+                    .payloadDigest(payloadDigest)
+                    .build());
+    try (HarnessEventStream events = harness.streamEvents(
+            StreamHarnessEvents.builder()
+                    .session(session)
+                    .lastEventId(receipt.getLastEventId())
+                    .eventEpoch(receipt.getEventEpoch())
+                    .build())) {
+        for (DaemonEvent event = events.next(); event != null;
+                event = events.next()) {
+            // Persist/project the raw Harness event in the Java product service.
+        }
+    }
+    harness.detachSession(session);
+}
+```
+
+The client permits only one active prompt identity per Session while allowing different Sessions to run concurrently. A retry after `PromptAdmissionUnknownException` must reuse the same `promptId`, payload digest, prompt content, and deadline. SSE boot, epoch, or sequence changes fail closed for transcript/status reconciliation. `close()` releases local HTTP, heartbeat, timer, and stream resources only; it never destroys remote Sessions implicitly.
+
 ## Legacy stdio API
 
 The existing `com.alibaba.qwen.code.cli` API remains available:
@@ -345,8 +387,10 @@ The SDK uses a thread pool for managing concurrent operations with the following
 - **Keep-Alive Time**: 60 seconds
 - **Queue Capacity**: 300 tasks (using LinkedBlockingQueue)
 - **Thread Naming**: "qwen_code_cli-pool-{number}"
-- **Daemon Threads**: false
+- **Daemon Threads**: true
 - **Rejected Execution Handler**: CallerRunsPolicy
+
+Tasks still running or queued in the default pool are abandoned when the JVM exits. Callers that require completion must wait for those tasks explicitly.
 
 ## Error Handling
 

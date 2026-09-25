@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -32,6 +33,10 @@ import type {
   DaemonTranscriptStore,
   PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  DaemonPendingPromptLimitError,
+} from '@qwen-code/sdk/daemon';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
 import { removeInjectedFromQueue } from '../midTurnDedup';
@@ -51,8 +56,12 @@ interface RefBox<T> {
 }
 
 interface UseQueuedPromptsArgs {
+  /** Synchronous caller policy, checked again immediately before SDK dispatch.
+   * Return a message to reject locally; undefined permits dispatch. */
+  getPromptDispatchError?: (text: string) => string | undefined;
   connected: boolean;
   writeBlocked?: boolean;
+  runtimeStopped?: boolean;
   sessionId?: string;
   workspaceCwd?: string;
   clientId?: string;
@@ -88,6 +97,8 @@ interface UseQueuedPromptsArgs {
   reportError: (error: unknown, fallback: string) => void;
   t: ReturnType<typeof getTranslator>;
 }
+
+class PromptDispatchBlockedError extends Error {}
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
@@ -230,10 +241,11 @@ export function mergeRestoredPromptText(current: string, text: string): string {
 }
 
 type RefreshPendingPromptsResult =
-  | 'refreshed'
-  | 'skipped'
-  | 'superseded'
-  | 'failed';
+  | {
+      status: 'refreshed';
+      pendingPrompts: readonly DaemonPendingPromptSummary[];
+    }
+  | { status: 'skipped' | 'superseded' | 'failed' };
 
 function areQueuedPromptsEqual(
   left: readonly QueuedPrompt[],
@@ -256,6 +268,7 @@ function areQueuedPromptsEqual(
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
       prompt.payloadCompleteness === other.payloadCompleteness &&
+      prompt.submittedPrompt === other.submittedPrompt &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
       (prompt.files?.length ?? 0) === (other.files?.length ?? 0) &&
       (prompt.inputAnnotations?.length ?? 0) ===
@@ -375,6 +388,103 @@ function toStoreFiles(
   }));
 }
 
+// The daemon renders a text-less prompt with an image block as this
+// placeholder (`extractPromptText` in packages/acp-bridge/src/bridge.ts); a
+// text-less prompt without one renders as ''.
+const IMAGE_ONLY_PROMPT_TEXT = '[image]';
+
+function pendingPromptTextsMatch(localText: string, serverText: string) {
+  return (
+    localText === serverText ||
+    (localText.trim().length === 0 && serverText === IMAGE_ONLY_PROMPT_TEXT)
+  );
+}
+
+/**
+ * Whether a payload carries more than its rendered text: attachments, or the
+ * reference chips a rendering drops. A started event cannot reproduce such a
+ * payload, so every route that owes it a transcript copy keeps it under the
+ * daemon's id — and the mid-turn insert route, which sends text only, refuses
+ * such a row rather than drop what it cannot carry.
+ */
+function eventCannotReproducePayload(prompt: QueuedPrompt): boolean {
+  return (
+    (prompt.images?.length ?? 0) > 0 ||
+    (prompt.files?.length ?? 0) > 0 ||
+    (prompt.inputAnnotations?.length ?? 0) > 0
+  );
+}
+
+/**
+ * Whether a local row still in flight is the same message as a server-side
+ * prompt. A rendered text is not an identity: the daemon renders every
+ * text-less prompt with an image block as the same '[image]' placeholder,
+ * and one without an image block as ''. A row without attachments binds by
+ * exact text; the daemon omits the originator when the submitter had no
+ * client id, which is still possibly ours, so that route fails open. A row
+ * carrying attachments may claim a server prompt only through the guarded
+ * placeholder route: stamped with this client's id, rendered text-less, and
+ * carrying fully hydrated media identical to the row's — anything that
+ * cannot be compared is refused.
+ */
+function matchesUnboundSubmittingRow(
+  item: QueuedPrompt,
+  server: {
+    text: string;
+    originatorClientId?: string | undefined;
+    content?: readonly PromptContentBlock[] | undefined;
+  },
+  clientId: string | undefined,
+): boolean {
+  if (item.serverPromptId || item.serverState !== 'submitting') return false;
+  const hasAttachments =
+    (item.images?.length ?? 0) > 0 || (item.files?.length ?? 0) > 0;
+  if (!hasAttachments) {
+    return (
+      item.text === server.text &&
+      (server.originatorClientId === undefined ||
+        server.originatorClientId === clientId)
+    );
+  }
+  if (
+    server.originatorClientId === undefined ||
+    server.originatorClientId !== clientId
+  ) {
+    return false;
+  }
+  // A prompt with text renders that text, so only a text-less row can own a
+  // placeholder rendering.
+  if (item.text.trim().length > 0) return false;
+  if (server.text !== IMAGE_ONLY_PROMPT_TEXT && server.text !== '') {
+    return false;
+  }
+  if (server.content === undefined) {
+    // The started event carries no content to compare media with, so no
+    // attachment row can prove ownership here. An ordinary submission's echo
+    // waits for its own admission id, and a resubmitted row binds in the
+    // submit body's id arm.
+    return false;
+  }
+  if ((item.files?.length ?? 0) > 0) return false;
+  // A partially hydrated payload may be silently shortened — a lost image
+  // degrades to a text placeholder and a transient failure stays a raw
+  // reference, and contentToImages collects neither — so only fully hydrated
+  // images can prove ownership.
+  if (
+    contentHasDegradedMedia(server.content) ||
+    contentHasUnhydratedMedia(server.content)
+  ) {
+    return false;
+  }
+  const serverImages = contentToImages(server.content);
+  if (!serverImages) return false;
+  const itemImages = item.images ?? [];
+  if (itemImages.length !== serverImages.length) return false;
+  return itemImages.every(
+    (image, index) => image.data === serverImages[index]?.data,
+  );
+}
+
 export interface UseQueuedPromptsResult {
   queuedPrompts: QueuedPrompt[];
   queuedTexts: string[];
@@ -385,6 +495,7 @@ export interface UseQueuedPromptsResult {
     onComplete?: () => void,
     inputAnnotations?: DaemonInputAnnotation[],
     onAdmitted?: () => void,
+    submittedPrompt?: string,
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
@@ -394,8 +505,10 @@ export interface UseQueuedPromptsResult {
 }
 
 export function useQueuedPrompts({
+  getPromptDispatchError,
   connected,
   writeBlocked = false,
+  runtimeStopped = false,
   sessionId,
   workspaceCwd,
   clientId,
@@ -406,12 +519,34 @@ export function useQueuedPrompts({
   streamingState,
   sessionHasActivePrompt = false,
   holdQueuedPromptsLocally = false,
-  sessionActions,
+  sessionActions: unguardedSessionActions,
   store,
   editorRef,
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const dispatchPolicyRef = useRef(getPromptDispatchError);
+  dispatchPolicyRef.current = getPromptDispatchError;
+  const sessionActions = useMemo<DaemonSessionActions>(
+    () => ({
+      ...unguardedSessionActions,
+      submitPrompt: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.submitPrompt(text, options);
+      },
+      enqueueMidTurnMessage: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.enqueueMidTurnMessage(text, options);
+      },
+    }),
+    [unguardedSessionActions],
+  );
   const writeBlockedRef = useRef(writeBlocked);
   writeBlockedRef.current = writeBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
@@ -420,9 +555,11 @@ export function useQueuedPrompts({
   const ownerTokenRef = useRef({
     sessionId,
     workspaceCwd,
+    runtimeStopped,
     snapshot: sessionOwnerGuard.capture(),
   });
   if (
+    ownerTokenRef.current.runtimeStopped !== runtimeStopped ||
     ownerTokenRef.current.sessionId !== sessionId ||
     ownerTokenRef.current.workspaceCwd !== workspaceCwd ||
     !ownerTokenRef.current.snapshot.isCurrent()
@@ -430,6 +567,7 @@ export function useQueuedPrompts({
     ownerTokenRef.current = {
       sessionId,
       workspaceCwd,
+      runtimeStopped,
       snapshot: sessionOwnerGuard.capture(),
     };
   }
@@ -458,14 +596,17 @@ export function useQueuedPrompts({
     tail: Promise<void>;
   } | null>(null);
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
+  const stoppedHeldOwnersRef = useRef(new Set<string>());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
+  const latestConnectedRef = useRef(connected);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
+  const settledServerPromptIdsRef = useRef<Set<string>>(new Set());
   const completionCallbacksRef = useRef<Map<string, () => void>>(new Map());
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
@@ -480,10 +621,97 @@ export function useQueuedPrompts({
   );
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
+  /**
+   * The tracked in-flight pending-prompts GET, if any. A caller that finds its
+   * own session's flight under a current owner token waits it out rather than
+   * dispatching beside it, then takes exactly one fresh snapshot — or joins a
+   * flight dispatched after its own `notBefore` anchor, which is what keeps
+   * two re-awaiting submit bodies from invalidating each other forever. One
+   * slot means a dispatch for another session, or one after an owner-token
+   * invalidation, leaves the previous flight untracked while a second GET for
+   * the same session runs beside it; the dispatch-sequence fence, not this
+   * ref, is what stops that older flight from syncing a stale snapshot. `seq`
+   * is the dispatch sequence: the wait path joins only a newer flight, and the
+   * `finally` clears this ref only while it still holds that dispatch.
+   */
+  const inflightRefreshRef = useRef<{
+    sessionId: string;
+    ownerToken: typeof ownerToken;
+    seq: number;
+    promise: Promise<RefreshPendingPromptsResult>;
+  } | null>(null);
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
   const midTurnReconcileSeqRef = useRef(0);
   const restoredPromptIdsRef = useRef<Set<number>>(new Set());
-  const pendingStartedByPromptIdRef = useRef<Map<string, string>>(new Map());
+  const pendingStartedByPromptIdRef = useRef<
+    Map<
+      string,
+      {
+        text: string;
+        rowIdFrontier: number;
+        /**
+         * The one local row that could own this event, when exactly one
+         * could and nothing was echoed. A submit body whose admission fails
+         * after the daemon started the prompt is the only holder of that
+         * row's payload; this is what lets it hand the payload to the right
+         * park rather than guess between two that render alike.
+         */
+        soleCandidateRowId?: number;
+      }
+    >
+  >(new Map());
+  /**
+   * Unbound `submitting` rows the confirming sync spliced out because an
+   * already-displayed server prompt matched their rendered text. A submit
+   * body that finds its row gone after the confirmation refresh reads this
+   * to tell "the sync claimed the row" apart from "the user cleared it" —
+   * only the latter licenses a DELETE.
+   */
+  const syncClaimedSubmittingRowIdsRef = useRef<Set<number>>(new Set());
+  /**
+   * Payloads a started event cannot reproduce — attachments, or the
+   * reference chips its rendered text drops — keyed by the id the daemon
+   * returned. Written by a resubmission's confirmation head, by both claim
+   * arms whose row the sync spliced, by the ordinary discard arm before it
+   * issues a removal, and by the duplicate-drop arm whose row a materialized
+   * copy replaced — so when no payload-complete local row remains, the echo
+   * comes from here instead of the event's rendering.
+   */
+  const pendingEchoByPromptIdRef = useRef<Map<string, QueuedPrompt>>(new Map());
+  /**
+   * Prompts the user cleared while nothing on hand said what the daemon was
+   * doing with them — no snapshot had arrived, or the one that had no longer
+   * listed the prompt. Removing needs positive evidence that the prompt is
+   * still queued, so the clear is applied by the next snapshot that carries it
+   * instead of being dropped on the floor.
+   */
+  const clearedUnconfirmedPromptIdsRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Started events that arrived while the prompt's removal was in flight.
+   * The event cannot be honoured yet: a removal that succeeds means the
+   * daemon either never dispatched the prompt or aborted the turn the user
+   * asked to cancel. The removal can still come back not-removed (the id
+   * absent, or already removed by another client while the doomed prompt
+   * runs on to settle), so every removal failure arm — submit-body,
+   * discard, deferred-clear and both user-action paths — replays from here
+   * instead of dropping the message from the transcript.
+   */
+  const startedDuringRemovalRef = useRef<Map<string, string>>(new Map());
+  /**
+   * Prompts whose submit body returned with the row still unbound because no
+   * confirmation snapshot ever landed, mapped to that row's id. From that
+   * return on, no in-flight admission will echo the message, so the
+   * settle-time last-chance echo must not defer to a row that merely renders
+   * the same text; the id also lets the settle drop a still-unbound row.
+   * It is also that row's remaining identity: a row carrying images or files
+   * renders as a placeholder no content comparison can own, so a later
+   * snapshot listing this id rebinds this exact row instead of leaving it a
+   * phantom. The association is therefore dropped only once it is spent — by
+   * that rebind, by the settle, or by an owner or session change — and never
+   * by a size bound, which could delete the only holder of the id while the
+   * row it names is still alive.
+   */
+  const returnedUnboundPromptIdsRef = useRef<Map<string, number>>(new Map());
 
   const rememberCompletedPromptId = useCallback((promptId: string) => {
     if (completedPromptIdsRef.current.has(promptId)) return;
@@ -498,8 +726,22 @@ export function useQueuedPrompts({
     }
   }, []);
 
+  const removeDaemonOwnedPrompt = useCallback((promptId: string) => {
+    const next = queuedPromptsRef.current.filter(
+      (prompt) =>
+        prompt.isEditing ||
+        prompt.isRemoving ||
+        (prompt.serverPromptId !== promptId &&
+          prompt.midTurnMessageId !== promptId),
+    );
+    if (next.length === queuedPromptsRef.current.length) return;
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+  }, []);
+
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
+  latestConnectedRef.current = connected;
   holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
   const sessionActive = streamingState !== 'idle' || sessionHasActivePrompt;
   useLayoutEffect(() => {
@@ -524,28 +766,100 @@ export function useQueuedPrompts({
         onComplete();
         return;
       }
+      // A settle whose terminal event fired a registered callback is
+      // deliberately not remembered as completed: a registration arriving
+      // after that settle could only ever fire again on a duplicate
+      // terminal event.
+      if (settledServerPromptIdsRef.current.has(promptId)) return;
       completionCallbacksRef.current.set(promptId, onComplete);
     },
     [],
   );
 
   const syncServerQueuedPrompts = useCallback(
-    (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
+    (
+      serverQueued: DaemonPendingPromptSummary[],
+      targetSessionId: string,
+      clientId: string | undefined,
+    ) => {
       const next = queuedPromptsRef.current.filter((p) => {
+        if (
+          (p.isEditing || p.isRemoving) &&
+          (!p.serverPromptId ||
+            removingServerPromptIdsRef.current.has(p.serverPromptId))
+        ) {
+          return true;
+        }
+        const promptId = p.serverPromptId ?? p.midTurnMessageId;
+        if (promptId && settledServerPromptIdsRef.current.has(promptId)) {
+          return false;
+        }
         if (!p.serverPromptId) return true;
+        // A flight dispatched before a submit body bound this row may have
+        // been served before the daemon admitted the prompt — the client's
+        // dispatch order is not the daemon's processing order — so the
+        // snapshot's silence proves nothing: keep a row whose bind is not
+        // older than the dispatch that produced this snapshot. Reading the
+        // counter live is safe here and equals the pass's own dispatch
+        // sequence: nothing awaits between that sequence's fence and this
+        // filter, so no dispatch can land in between.
+        if ((p.boundAtSeq ?? 0) >= refreshRequestSeqRef.current) return true;
         return serverQueued.some(
           (server) => server.promptId === p.serverPromptId,
         );
       });
+      // A row whose submit body already returned this id is the prompt the id
+      // names, whatever that row renders as: an attachment row renders as a
+      // placeholder no content comparison can own. The daemon-issued id is the
+      // stronger identity, so a still-unbound row it points at is bound here
+      // rather than left a phantom.
+      const returnedUnboundRowId = (serverPromptId: string) => {
+        const rowId = returnedUnboundPromptIdsRef.current.get(serverPromptId);
+        if (rowId === undefined) return undefined;
+        const row = next.find((item) => item.id === rowId);
+        if (
+          !row ||
+          row.serverState !== 'submitting' ||
+          row.serverPromptId ||
+          row.midTurnMessageId
+        ) {
+          return undefined;
+        }
+        return rowId;
+      };
+      // Entries that can still rebind are visited first: until their row
+      // binds it counts as an in-flight attachment submission, and that count
+      // suppresses every other possibly-ours prompt in the same snapshot from
+      // materializing.
+      const reboundable: DaemonPendingPromptSummary[] = [];
+      const rest: DaemonPendingPromptSummary[] = [];
       for (const serverPrompt of serverQueued) {
-        if (removingServerPromptIdsRef.current.has(serverPrompt.promptId)) {
+        if (returnedUnboundRowId(serverPrompt.promptId) === undefined) {
+          rest.push(serverPrompt);
+        } else {
+          reboundable.push(serverPrompt);
+        }
+      }
+      for (const serverPrompt of [...reboundable, ...rest]) {
+        if (
+          removingServerPromptIdsRef.current.has(serverPrompt.promptId) ||
+          settledServerPromptIdsRef.current.has(serverPrompt.promptId)
+        ) {
           continue;
         }
-        const existingIndex = next.findIndex(
+        const returnedRowId = returnedUnboundRowId(serverPrompt.promptId);
+        const boundIndex = next.findIndex(
           (p) =>
             p.serverPromptId === serverPrompt.promptId ||
             p.midTurnMessageId === serverPrompt.promptId,
         );
+        const returnedIndex =
+          returnedRowId === undefined
+            ? -1
+            : next.findIndex((p) => p.id === returnedRowId);
+        // A row already bound to the id keeps it: the recovered row is a
+        // different message whose body is still in flight.
+        const existingIndex = boundIndex !== -1 ? boundIndex : returnedIndex;
         const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
           serverPrompt.promptId,
         );
@@ -560,14 +874,25 @@ export function useQueuedPrompts({
           !contentHasDegradedMedia(serverPrompt.content) &&
           !contentHasUnhydratedMedia(serverPrompt.content);
         if (existingIndex !== -1) {
+          if (
+            next[existingIndex]!.isEditing ||
+            next[existingIndex]!.isRemoving
+          ) {
+            continue;
+          }
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
             continue;
           }
+          if (existingIndex === returnedIndex) {
+            // Spent: the row now carries the id itself, so neither the
+            // settle's still-unbound drop nor a later pass can claim it.
+            returnedUnboundPromptIdsRef.current.delete(serverPrompt.promptId);
+          }
           next[existingIndex] = {
             ...next[existingIndex]!,
             ...(next[existingIndex]!.payloadCompleteness === 'summary-only'
-              ? { text: serverPrompt.text }
+              ? { text: serverPrompt.text, submittedPrompt: undefined }
               : {}),
             // Restore images from server content if local row doesn't have
             // them; clearing summary-only makes the restored row editable.
@@ -588,26 +913,72 @@ export function useQueuedPrompts({
           };
           continue;
         }
+        const couldBeOurs =
+          serverPrompt.originatorClientId === undefined ||
+          serverPrompt.originatorClientId === clientId;
+        // A row the drain has stamped `submitting` but not yet handed to a
+        // body has never been POSTed, so it cannot be the prompt this
+        // snapshot lists. Matching it here would either splice it — which
+        // `releaseChainedPrompt` reads as a user cancellation, bailing
+        // without POSTing, reporting or restoring anything — or bind it to an
+        // id it cannot own, which every later drop-by-id then treats as that
+        // prompt's row. Out of the count, no arm below can consume a row that
+        // has not been sent.
         const submittingMatches = next.filter(
           (p) =>
-            !p.serverPromptId &&
-            p.serverState === 'submitting' &&
-            (p.images?.length ?? 0) === 0 &&
-            (p.files?.length ?? 0) === 0 &&
-            p.text === serverPrompt.text,
+            !unreleasedPromptIdsRef.current.has(p.id) &&
+            matchesUnboundSubmittingRow(p, serverPrompt, clientId),
         );
         if (submittingMatches.length === 1) {
-          const submittingIndex = next.indexOf(submittingMatches[0]!);
-          if (hasDisplayedPrompt) {
-            next.splice(submittingIndex, 1);
+          const submittingRow = submittingMatches[0]!;
+          // An attachment row claims through a placeholder rendering, so the
+          // match must be unique on the server side too: with two prompts it
+          // could own, it claims neither and waits for its body to bind by
+          // id.
+          const rowHasAttachments =
+            (submittingRow.images?.length ?? 0) > 0 ||
+            (submittingRow.files?.length ?? 0) > 0;
+          const serverSideUnique =
+            !rowHasAttachments ||
+            serverQueued.filter((candidate) =>
+              matchesUnboundSubmittingRow(submittingRow, candidate, clientId),
+            ).length === 1;
+          if (serverSideUnique) {
+            const submittingIndex = next.indexOf(submittingRow);
+            // A payload-bearing row matched to a prompt already displayed is
+            // left unbound: claiming or content-binding it would
+            // misattribute a deliberate re-send of identical bytes — and the
+            // payload (attachments, or the reference chips the rendered text
+            // drops) would be unrecoverable. Its own body binds it to the id
+            // the daemon returned for it.
+            if (
+              hasDisplayedPrompt &&
+              (rowHasAttachments ||
+                (submittingRow.inputAnnotations?.length ?? 0) > 0)
+            )
+              continue;
+            if (hasDisplayedPrompt) {
+              // Remember the claim: a submit body that later finds this row
+              // gone must not read the splice as a user cancellation. Both
+              // the resubmission branch and the ordinary tail read it.
+              syncClaimedSubmittingRowIdsRef.current.add(submittingRow.id);
+              while (syncClaimedSubmittingRowIdsRef.current.size > 200) {
+                const oldestClaim = syncClaimedSubmittingRowIdsRef.current
+                  .values()
+                  .next().value;
+                if (typeof oldestClaim !== 'number') break;
+                syncClaimedSubmittingRowIdsRef.current.delete(oldestClaim);
+              }
+              next.splice(submittingIndex, 1);
+              continue;
+            }
+            next[submittingIndex] = {
+              ...submittingRow,
+              serverPromptId: serverPrompt.promptId,
+              serverState: serverPrompt.state,
+            };
             continue;
           }
-          next[submittingIndex] = {
-            ...submittingMatches[0]!,
-            serverPromptId: serverPrompt.promptId,
-            serverState: serverPrompt.state,
-          };
-          continue;
         }
         if (serverPrompt.state === 'running' || hasDisplayedPrompt) {
           continue;
@@ -619,7 +990,10 @@ export function useQueuedPrompts({
             ((prompt.images?.length ?? 0) > 0 ||
               (prompt.files?.length ?? 0) > 0),
         );
-        if (hasUnboundAttachmentSubmission) continue;
+        // The suppression guards against duplicating an in-flight attachment
+        // submission of THIS client; a prompt the originator already proved
+        // foreign cannot be its duplicate and must materialize.
+        if (couldBeOurs && hasUnboundAttachmentSubmission) continue;
         next.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
@@ -647,38 +1021,419 @@ export function useQueuedPrompts({
     [],
   );
 
-  const refreshPendingPrompts = useCallback(
-    async (
-      targetSessionId = sessionId,
-    ): Promise<RefreshPendingPromptsResult> => {
-      if (!connected || !targetSessionId) return 'skipped';
-      if (latestSessionIdRef.current !== targetSessionId) return 'skipped';
-      const ownerToken = ownerTokenRef.current;
-      const requestSeq = ++refreshRequestSeqRef.current;
-      try {
-        const result = await sessionActions.getPendingPrompts({
-          sessionId: targetSessionId,
-        });
-        if (requestSeq !== refreshRequestSeqRef.current) return 'superseded';
-        if (
-          !isCurrentOwnerTokenRef.current(ownerToken) ||
-          latestSessionIdRef.current !== targetSessionId
-        ) {
-          return 'skipped';
-        }
-        syncServerQueuedPrompts(
-          result.pendingPrompts.filter(
-            (p) => p.state === 'queued' || p.state === 'running',
-          ),
-          targetSessionId,
+  const appendLocalQueuedPrompt = useCallback(
+    (prompt: QueuedPrompt, promptId: string) => {
+      // A row rebuilt from a snapshot carries the daemon's rendering of an
+      // attachment-only message as its text. That placeholder is not user
+      // content, so it never becomes a caption: the attachments it stands for
+      // speak for it, and with none of them left there is nothing to echo.
+      // Only a row that actually carries an image can have got that text from
+      // the daemon, which renders an image-only message this way and nothing
+      // else — for any other row it is what the user typed.
+      const caption =
+        (prompt.images?.length ?? 0) > 0 &&
+        prompt.text === IMAGE_ONLY_PROMPT_TEXT
+          ? ''
+          : prompt.text;
+      if (
+        displayedServerPromptIdsRef.current.has(promptId) ||
+        prompt.payloadCompleteness === 'summary-only' ||
+        (!caption &&
+          (prompt.images?.length ?? 0) === 0 &&
+          (prompt.files?.length ?? 0) === 0)
+      ) {
+        return;
+      }
+      displayedServerPromptIdsRef.current.add(promptId);
+      pendingEchoByPromptIdRef.current.delete(promptId);
+      store.appendLocalUserMessage(
+        caption,
+        toStoreImages(prompt.images),
+        {
+          promptId,
+          ...(prompt.inputAnnotations?.length
+            ? { inputAnnotations: prompt.inputAnnotations }
+            : {}),
+        },
+        toStoreFiles(prompt.files),
+      );
+    },
+    [store],
+  );
+
+  // The removal failed, so a started event parked on the removing-set guard
+  // was real after all: echo what it carried. The stash holds the payload for
+  // attachments the event cannot reproduce, and so does a payload-complete row
+  // still bound to the id — the removal arms that run while the row is still
+  // queued have no stash to read. A text-only message is reproduced faithfully
+  // by the event's own text; a rendering that is only the daemon's attachment
+  // placeholder carries no message to show, and nothing guarantees any removal
+  // arm held the payload behind it.
+  const replayStartedDuringRemoval = useCallback(
+    (promptId: string) => {
+      const startedText = startedDuringRemovalRef.current.get(promptId);
+      if (startedText === undefined) return;
+      startedDuringRemovalRef.current.delete(promptId);
+      if (displayedServerPromptIdsRef.current.has(promptId)) return;
+      const full =
+        pendingEchoByPromptIdRef.current.get(promptId) ??
+        queuedPromptsRef.current.find(
+          (item) =>
+            item.serverPromptId === promptId &&
+            item.payloadCompleteness !== 'summary-only' &&
+            eventCannotReproducePayload(item),
         );
-        return 'refreshed';
-      } catch (error) {
-        console.warn('Failed to refresh pending prompts', error);
-        return 'failed';
+      if (full) {
+        appendLocalQueuedPrompt(full, promptId);
+      } else if (startedText && startedText !== IMAGE_ONLY_PROMPT_TEXT) {
+        displayedServerPromptIdsRef.current.add(promptId);
+        store.appendLocalUserMessage(startedText, undefined, { promptId });
       }
     },
-    [connected, sessionActions, sessionId, syncServerQueuedPrompts],
+    [appendLocalQueuedPrompt, store],
+  );
+
+  const hideSettledServerPrompt = useCallback(
+    (promptId: string) => {
+      // A start whose raw-text echo was suppressed (an unrelated unbound
+      // submission was in flight) outlives its submit body's own consume;
+      // settling is the last chance to show the message at all. Only an
+      // unechoed park is consumed: an echoed one is dropped together with
+      // the displayed marker below, because the settled set then carries
+      // the same "already started" fact for every reader that dedupes
+      // against the park; a second terminal event for the same prompt must
+      // not re-append it, and a matching unbound submission means this
+      // prompt's own admission is still in flight — its body will echo the
+      // full payload when it lands, unless that body already returned
+      // without binding.
+      const parked = pendingStartedByPromptIdRef.current.get(promptId);
+      const parkedText = parked?.text;
+      // A row already bound to this id proves the park is not the in-flight
+      // own-admission case below, even when a foreign unbound submission
+      // happens to render the same text. A matching row younger than the park
+      // is a different message, not this prompt's own admission in flight.
+      const boundRowExists = queuedPromptsRef.current.some(
+        (item) => item.serverPromptId === promptId,
+      );
+      const pendingOwnSubmission =
+        parked !== undefined &&
+        !returnedUnboundPromptIdsRef.current.has(promptId) &&
+        queuedPromptsRef.current.some(
+          (item) =>
+            !item.serverPromptId &&
+            // A row the drain has stamped but not handed to a body has never
+            // been POSTed, so it cannot be this prompt's own admission still
+            // in flight: deferring the last-chance echo to it strands the
+            // message, which is what the two event-side matchers and the
+            // sync's own match count already exclude those rows to avoid.
+            !unreleasedPromptIdsRef.current.has(item.id) &&
+            item.serverState === 'submitting' &&
+            item.id < parked.rowIdFrontier &&
+            pendingPromptTextsMatch(item.text, parked.text),
+        );
+      // The parked text is the daemon's rendering: for a payload the event
+      // cannot reproduce, echo the stashed or row-held full payload instead
+      // of the placeholder.
+      const full =
+        parkedText !== undefined
+          ? (pendingEchoByPromptIdRef.current.get(promptId) ??
+            queuedPromptsRef.current.find(
+              (item) =>
+                item.serverPromptId === promptId &&
+                item.payloadCompleteness !== 'summary-only',
+            ))
+          : undefined;
+      if (
+        parkedText !== undefined &&
+        // A rendering with no payload source carries no message to show:
+        // leave the park rather than echo a blank bubble, or the daemon's
+        // placeholder for an attachment this client no longer holds. A
+        // surviving park is not dead — a submit body still in flight reads
+        // it and echoes from the payload that body holds — but both
+        // consumers refuse the placeholder itself, since no removal arm is
+        // guaranteed to have stashed the payload behind it.
+        (full !== undefined ||
+          (parkedText !== '' && parkedText !== IMAGE_ONLY_PROMPT_TEXT)) &&
+        !settledServerPromptIdsRef.current.has(promptId) &&
+        !displayedServerPromptIdsRef.current.has(promptId) &&
+        (boundRowExists || !pendingOwnSubmission)
+      ) {
+        pendingStartedByPromptIdRef.current.delete(promptId);
+        // The settle clears the displayed marker below; this marker is what
+        // the prompt's own submit body re-reads to know the echo happened,
+        // so a still-pending body must not echo it again. A body that
+        // already returned unbound has no remaining read of it — skip the
+        // write rather than leave an entry nothing will ever prune.
+        if (!returnedUnboundPromptIdsRef.current.has(promptId)) {
+          appendedBeforeResponsePromptIdsRef.current.add(promptId);
+        }
+        if (full) {
+          appendLocalQueuedPrompt(full, promptId);
+        } else {
+          store.appendLocalUserMessage(parkedText, undefined, { promptId });
+        }
+      }
+      // A marker this settle found already set means either the message
+      // reached the transcript or the start was another client's and was
+      // never ours to echo. Either way the park beside it is a bare "already
+      // started" record: drop it with the marker, or a submit body still in
+      // flight reads that park as an echo it owes and appends the message a
+      // second time. For the same reason the echo has to leave a record that
+      // outlives this marker: an echo sourced from a bound row writes neither
+      // a park nor the flag below, so a body whose admission resolves after
+      // this settle would read the completion as a licence to echo again.
+      if (displayedServerPromptIdsRef.current.delete(promptId)) {
+        pendingStartedByPromptIdRef.current.delete(promptId);
+        if (!returnedUnboundPromptIdsRef.current.has(promptId)) {
+          appendedBeforeResponsePromptIdsRef.current.add(promptId);
+          // A body that returned bound never re-reads this, so the entry
+          // would otherwise outlive the session's prompts one string at a
+          // time: bound it like every sibling collection here.
+          while (appendedBeforeResponsePromptIdsRef.current.size > 200) {
+            const oldestAppended = appendedBeforeResponsePromptIdsRef.current
+              .values()
+              .next().value;
+            if (typeof oldestAppended !== 'string') break;
+            appendedBeforeResponsePromptIdsRef.current.delete(oldestAppended);
+          }
+        }
+      }
+      // A settled prompt will never start, so no echo is owed for it and its
+      // stashed attachments must not stay reachable — unless a start is
+      // parked behind an in-flight removal, whose failure arm replays from
+      // that stash.
+      if (!startedDuringRemovalRef.current.has(promptId)) {
+        pendingEchoByPromptIdRef.current.delete(promptId);
+      }
+      const returnedRowId = returnedUnboundPromptIdsRef.current.get(promptId);
+      returnedUnboundPromptIdsRef.current.delete(promptId);
+      // A settled prompt can never bind its row anymore: for a body that
+      // returned unbound the row has no remaining recovery route, so drop a
+      // still-unbound copy rather than leave a phantom submitting row
+      // suppressing materialization.
+      if (returnedRowId !== undefined) {
+        const returnedRow = queuedPromptsRef.current.find(
+          (item) => item.id === returnedRowId,
+        );
+        if (returnedRow && returnedRow.serverPromptId === undefined) {
+          const next = queuedPromptsRef.current.filter(
+            (item) => item.id !== returnedRowId,
+          );
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+        }
+      }
+      settledServerPromptIdsRef.current.add(promptId);
+      while (
+        settledServerPromptIdsRef.current.size > MAX_COMPLETED_PROMPT_IDS
+      ) {
+        const oldestPromptId = settledServerPromptIdsRef.current
+          .values()
+          .next().value;
+        if (typeof oldestPromptId !== 'string') break;
+        settledServerPromptIdsRef.current.delete(oldestPromptId);
+      }
+      removeDaemonOwnedPrompt(promptId);
+    },
+    [appendLocalQueuedPrompt, removeDaemonOwnedPrompt, store],
+  );
+
+  const refreshPendingPrompts = useCallback(
+    (
+      targetSessionId = sessionId,
+      // Fence anchor: a refresh that follows a local state change must not
+      // sync from a flight dispatched before that change — it waits the
+      // stale flight out and re-dispatches, joining only a flight dispatched
+      // after this anchor.
+      notBefore = refreshRequestSeqRef.current,
+    ): Promise<RefreshPendingPromptsResult> => {
+      if (!latestConnectedRef.current || !targetSessionId)
+        return Promise.resolve({ status: 'skipped' });
+      if (latestSessionIdRef.current !== targetSessionId)
+        return Promise.resolve({ status: 'skipped' });
+      const dispatchRefresh = (): Promise<RefreshPendingPromptsResult> => {
+        const ownerToken = ownerTokenRef.current;
+        const requestSeq = ++refreshRequestSeqRef.current;
+        // The finally clears the ref by dispatch sequence, not by promise
+        // identity: a synchronous throw inside the try would reach the
+        // finally before `promise` below is assigned.
+        const runRefresh = async (): Promise<RefreshPendingPromptsResult> => {
+          try {
+            const result = await sessionActions.getPendingPrompts({
+              sessionId: targetSessionId,
+            });
+            if (requestSeq !== refreshRequestSeqRef.current)
+              return { status: 'superseded' };
+            if (
+              !isCurrentOwnerTokenRef.current(ownerToken) ||
+              latestSessionIdRef.current !== targetSessionId
+            ) {
+              return { status: 'skipped' };
+            }
+            // Apply a clear the user made while the daemon's state was
+            // unknown: this snapshot is the positive evidence that removal
+            // was waiting for. Anything it does not list as still queued has
+            // either started or gone, and removing that would abort a live
+            // turn, so the entry is dropped.
+            const overruledClearedIds = new Set<string>();
+            for (const [clearedPromptId, anchorSeq] of [
+              ...clearedUnconfirmedPromptIdsRef.current,
+            ]) {
+              // A flight dispatched before this clear was recorded cannot be
+              // the evidence the clear is waiting for: its snapshot predates
+              // the cancellation, so its silence proves nothing — the same
+              // staleness the boundAtSeq fence rejects. Leave the entry for a
+              // pass that can prove something rather than consuming it here,
+              // and keep it out of this pass's sync, which would otherwise
+              // materialize the row the user just cleared.
+              if (requestSeq <= anchorSeq) {
+                overruledClearedIds.add(clearedPromptId);
+                continue;
+              }
+              clearedUnconfirmedPromptIdsRef.current.delete(clearedPromptId);
+              if (
+                !result.pendingPrompts.some(
+                  (p) => p.promptId === clearedPromptId && p.state === 'queued',
+                )
+              ) {
+                continue;
+              }
+              // Client-side evidence wins over a snapshot the daemon answered
+              // before the start it shows: removing a prompt that already
+              // started would abort a live turn. The same stale snapshot
+              // must not re-materialize the cancelled message either, so the
+              // id is kept out of this pass's sync.
+              if (
+                displayedServerPromptIdsRef.current.has(clearedPromptId) ||
+                pendingStartedByPromptIdRef.current.has(clearedPromptId) ||
+                startedDuringRemovalRef.current.has(clearedPromptId) ||
+                completedPromptIdsRef.current.has(clearedPromptId) ||
+                settledServerPromptIdsRef.current.has(clearedPromptId) ||
+                // A removal this client already owns decides the prompt's
+                // fate: a second DELETE would answer not-removed and its
+                // `.finally` would clear the flag the owning flight still
+                // needs to park a start behind.
+                removingServerPromptIdsRef.current.has(clearedPromptId)
+              ) {
+                overruledClearedIds.add(clearedPromptId);
+                continue;
+              }
+              removingServerPromptIdsRef.current.add(clearedPromptId);
+              // The daemon publishes pending_prompt_completed
+              // {state:'removed'} inside bridgeApi.removePendingPrompt,
+              // before the DELETE resolves, and an event-first ordering
+              // fires any callback still registered — for a prompt the user
+              // cancelled. Capture and unregister it now; a failed removal
+              // re-settles it, because the prompt may already be running.
+              const clearedCallback =
+                completionCallbacksRef.current.get(clearedPromptId);
+              completionCallbacksRef.current.delete(clearedPromptId);
+              sessionActions
+                .removePendingPrompt(clearedPromptId, {
+                  sessionId: targetSessionId,
+                })
+                .then(
+                  (removeResult) => removeResult.removed,
+                  () => false,
+                )
+                // Clearing the flag before the re-sync matters: a sync that
+                // runs while the id is still marked as being removed skips
+                // the very prompt the failed removal left behind.
+                .finally(() => {
+                  removingServerPromptIdsRef.current.delete(clearedPromptId);
+                })
+                .then((removed) => {
+                  if (removed) {
+                    // The daemon confirmed the removal: the prompt either
+                    // never dispatched or was aborted by it, so a start parked
+                    // inside the flight and the stashed payload are both dead
+                    // weight — the cancellation took effect either way.
+                    startedDuringRemovalRef.current.delete(clearedPromptId);
+                    pendingEchoByPromptIdRef.current.delete(clearedPromptId);
+                  } else {
+                    if (clearedCallback) {
+                      settleCompletionCallback(
+                        clearedPromptId,
+                        clearedCallback,
+                      );
+                    }
+                    replayStartedDuringRemoval(clearedPromptId);
+                    void refreshPendingPrompts(targetSessionId);
+                  }
+                });
+            }
+            syncServerQueuedPrompts(
+              result.pendingPrompts.filter(
+                (p) =>
+                  (p.state === 'queued' || p.state === 'running') &&
+                  !overruledClearedIds.has(p.promptId),
+              ),
+              targetSessionId,
+              clientId,
+            );
+            return {
+              status: 'refreshed',
+              pendingPrompts: result.pendingPrompts,
+            };
+          } catch (error) {
+            console.warn('Failed to refresh pending prompts', error);
+            return { status: 'failed' };
+          } finally {
+            if (inflightRefreshRef.current?.seq === requestSeq) {
+              inflightRefreshRef.current = null;
+            }
+          }
+        };
+        const promise = runRefresh();
+        inflightRefreshRef.current = {
+          sessionId: targetSessionId,
+          ownerToken,
+          seq: requestSeq,
+          promise,
+        };
+        return promise;
+      };
+      const inflight = inflightRefreshRef.current;
+      if (
+        inflight &&
+        inflight.sessionId === targetSessionId &&
+        isCurrentOwnerTokenRef.current(inflight.ownerToken)
+      ) {
+        // The in-flight snapshot was dispatched before the state change the
+        // caller is confirming, so it can prove nothing about it. Wait the
+        // stale flight out rather than storm the daemon, then take exactly
+        // one fresh snapshot — or join one dispatched meanwhile.
+        return inflight.promise.then(() => {
+          // The wait can outlive the session or the connection: re-apply
+          // the entry guards before dispatching against them.
+          if (
+            !latestConnectedRef.current ||
+            latestSessionIdRef.current !== targetSessionId
+          ) {
+            return { status: 'skipped' } as const;
+          }
+          const latest = inflightRefreshRef.current;
+          if (
+            latest &&
+            latest.sessionId === targetSessionId &&
+            isCurrentOwnerTokenRef.current(latest.ownerToken) &&
+            latest.seq > notBefore
+          ) {
+            return latest.promise;
+          }
+          return dispatchRefresh();
+        });
+      }
+      return dispatchRefresh();
+    },
+    [
+      clientId,
+      replayStartedDuringRemoval,
+      sessionActions,
+      sessionId,
+      settleCompletionCallback,
+      syncServerQueuedPrompts,
+    ],
   );
 
   const applyMidTurnSnapshot = useCallback(
@@ -738,7 +1493,9 @@ export function useQueuedPrompts({
             prompt.midTurnMessageId !== undefined &&
             !prompt.isEditing &&
             !prompt.isRemoving &&
-            (settledIds.has(prompt.midTurnMessageId) ||
+            (displayedServerPromptIdsRef.current.has(prompt.midTurnMessageId) ||
+              settledServerPromptIdsRef.current.has(prompt.midTurnMessageId) ||
+              settledIds.has(prompt.midTurnMessageId) ||
               (applyPromoted && promotedIds.has(prompt.midTurnMessageId)))
           ),
       );
@@ -800,7 +1557,13 @@ export function useQueuedPrompts({
       );
       const restoredRows: QueuedPrompt[] = [];
       for (const message of snapshot.messages) {
-        if (localIds.has(message.messageId)) continue;
+        if (
+          localIds.has(message.messageId) ||
+          displayedServerPromptIdsRef.current.has(message.messageId) ||
+          settledServerPromptIdsRef.current.has(message.messageId)
+        ) {
+          continue;
+        }
         // Prefer the in-memory admission's images; after a refresh only the
         // snapshot's media blocks remain.
         const salvaged = salvagedImages.get(message.messageId);
@@ -896,12 +1659,16 @@ export function useQueuedPrompts({
         if (isCurrent()) await refreshPendingPrompts(targetSessionId);
         return undefined;
       }
+      // The pending snapshot must post-date the mid-turn snapshot above: the
+      // fence default refuses to join a GET dispatched before this call,
+      // which would read a queue that cannot list the promoted message and
+      // drop its row.
       const pendingResult = await refreshPendingPrompts(targetSessionId);
       if (!isCurrent()) return undefined;
       const waitingIds = applyMidTurnSnapshot(
         snapshot,
         targetSessionId,
-        pendingResult === 'refreshed',
+        pendingResult.status === 'refreshed',
       );
       pruneMissingMidTurnRows(waitingIds, targetSessionId);
       return snapshot;
@@ -1000,6 +1767,11 @@ export function useQueuedPrompts({
   );
   const restoreQueuedPromptsToEditorRef = useRef(restoreQueuedPromptsToEditor);
   restoreQueuedPromptsToEditorRef.current = restoreQueuedPromptsToEditor;
+  // The owner-change effect below must not gain `sessionActions` as a
+  // dependency: it wipes every marker the hook keeps, so an identity change
+  // in the actions object would reset live state.
+  const sessionActionsRef = useRef(sessionActions);
+  sessionActionsRef.current = sessionActions;
 
   useEffect(() => {
     restoredPromptIdsRef.current = new Set();
@@ -1008,6 +1780,45 @@ export function useQueuedPrompts({
       previousOwner.workspaceCwd,
       previousOwner.sessionId,
     );
+    if (runtimeStopped) {
+      for (const key of heldPromptsByOwnerRef.current.keys()) {
+        // Compare the workspace half of the key, not a prefix: a stash
+        // written while its cwd was still unresolved keys as
+        // `\u0000<sessionId>` and can belong to the stopped workspace.
+        // Fencing an empty half degrades to handing those prompts back to
+        // the editor; missing them would re-queue them to auto-run on
+        // resume, which is what this fence exists to prevent.
+        const workspaceHalf = key.slice(0, key.indexOf('\u0000'));
+        if (
+          workspaceHalf === '' ||
+          (workspaceCwd !== undefined && workspaceHalf === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(key);
+      }
+      if (
+        previousOwner.workspaceCwd === workspaceCwd &&
+        previousOwner.sessionId === sessionId
+      ) {
+        restoreQueuedPromptsToEditorRef.current(
+          queuedPromptsRef.current.filter(
+            (prompt) =>
+              isLocallyHeldPrompt(prompt) ||
+              unreleasedPromptIdsRef.current.has(prompt.id) ||
+              (prompt.midTurnState === 'submitting' &&
+                prompt.midTurnMessageId === undefined) ||
+              prompt.midTurnFailedAction === 'edit',
+          ),
+        );
+        if (previousOwnerKey) {
+          heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+          stoppedHeldOwnersRef.current.delete(previousOwnerKey);
+        }
+        // Nothing queued before an explicit runtime stop may auto-run on resume.
+        queuedPromptsRef.current = [];
+        pendingMidTurnAdmissionsRef.current.clear();
+        clearedUnconfirmedPromptIdsRef.current.clear();
+      }
+    }
     if (previousOwnerKey) {
       const heldPrompts = queuedPromptsRef.current
         .filter(
@@ -1034,6 +1845,14 @@ export function useQueuedPrompts({
         );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
+        // An unresolved previous-owner cwd can still belong to the stopped
+        // workspace; fence conservatively (see the stash scan above).
+        if (
+          runtimeStopped &&
+          (previousOwner.workspaceCwd === undefined ||
+            previousOwner.workspaceCwd === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(previousOwnerKey);
       } else {
         heldPromptsByOwnerRef.current.delete(previousOwnerKey);
       }
@@ -1079,6 +1898,8 @@ export function useQueuedPrompts({
       for (const [key, prompts] of [...heldPromptsByOwnerRef.current]) {
         if (key === nextOwnerKey || !key.endsWith(suffix)) continue;
         heldPromptsByOwnerRef.current.delete(key);
+        if (stoppedHeldOwnersRef.current.delete(key))
+          stoppedHeldOwnersRef.current.add(nextOwnerKey);
         relocated.push(...prompts);
       }
       if (relocated.length > 0) {
@@ -1089,6 +1910,11 @@ export function useQueuedPrompts({
         ].sort((a, b) => a.id - b.id);
         heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
       }
+    }
+    if (nextOwnerKey && stoppedHeldOwnersRef.current.delete(nextOwnerKey)) {
+      restoreQueuedPromptsToEditorRef.current(heldPrompts);
+      heldPromptsByOwnerRef.current.delete(nextOwnerKey);
+      heldPrompts = [];
     }
     // Daemon-owned rows are re-rendered from the next queue snapshot; only the
     // locally held Goal queue survives an owner change.
@@ -1107,35 +1933,32 @@ export function useQueuedPrompts({
     releaseChainRef.current = null;
     removingServerPromptIdsRef.current = new Set();
     displayedServerPromptIdsRef.current = new Set();
+    settledServerPromptIdsRef.current = new Set();
     pendingStartedByPromptIdRef.current = new Map();
+    syncClaimedSubmittingRowIdsRef.current = new Set();
+    pendingEchoByPromptIdRef.current = new Map();
+    // A cancellation recorded for a later snapshot is the only record that
+    // the user cleared that prompt, and this reset would drop it: the next
+    // snapshot would re-materialize the row and the daemon would run a
+    // message the user cancelled. Issue the removals the entries stand for
+    // against the session they were recorded in. A prompt already gone
+    // answers not-removed and nothing happens.
+    for (const clearedPromptId of [
+      ...clearedUnconfirmedPromptIdsRef.current.keys(),
+    ]) {
+      void sessionActionsRef.current
+        .removePendingPrompt(clearedPromptId, {
+          sessionId: previousOwner.sessionId,
+        })
+        .catch(() => undefined);
+    }
+    clearedUnconfirmedPromptIdsRef.current = new Map();
+    startedDuringRemovalRef.current = new Map();
+    returnedUnboundPromptIdsRef.current = new Map();
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
-  }, [ownerToken, sessionId, workspaceCwd]);
-
-  const appendLocalQueuedPrompt = useCallback(
-    (prompt: QueuedPrompt, promptId: string) => {
-      if (
-        displayedServerPromptIdsRef.current.has(promptId) ||
-        prompt.payloadCompleteness === 'summary-only' ||
-        (!prompt.text &&
-          (prompt.images?.length ?? 0) === 0 &&
-          (prompt.files?.length ?? 0) === 0)
-      ) {
-        return;
-      }
-      displayedServerPromptIdsRef.current.add(promptId);
-      store.appendLocalUserMessage(
-        prompt.text,
-        toStoreImages(prompt.images),
-        prompt.inputAnnotations?.length
-          ? { inputAnnotations: prompt.inputAnnotations }
-          : undefined,
-        toStoreFiles(prompt.files),
-      );
-    },
-    [store],
-  );
+  }, [ownerToken, sessionId, workspaceCwd, runtimeStopped]);
 
   const pendingPromptVersion = useSyncExternalStore(
     subscribePendingPromptVersion,
@@ -1193,34 +2016,102 @@ export function useQueuedPrompts({
         pendingMidTurnAdmissionsRef.current.get(promptId)?.prompt;
       pendingMidTurnAdmissionsRef.current.delete(promptId);
       if (event.type === 'pending_prompt_started') {
-        if (removingServerPromptIdsRef.current.has(promptId)) {
-          continue;
-        }
         const shouldAppendLocalUserMessage =
           event.originatorClientId === undefined ||
           event.originatorClientId === clientId;
+        if (removingServerPromptIdsRef.current.has(promptId)) {
+          // Park rather than drop: the removal may still come back
+          // not-removed (the id can be absent, or already removed by another
+          // client while the doomed prompt runs on to settle). Every removal
+          // failure arm — submit-body, discard, deferred-clear and both
+          // user-action paths — replays from here, so only this
+          // client's own message may park: a co-client's prompt reaches this
+          // transcript through the daemon's stream, and replaying its
+          // rendering here would show it a second time.
+          if (shouldAppendLocalUserMessage) {
+            startedDuringRemovalRef.current.set(
+              promptId,
+              typeof event.data.text === 'string' ? event.data.text : '',
+            );
+            while (startedDuringRemovalRef.current.size > 200) {
+              const oldest = startedDuringRemovalRef.current
+                .keys()
+                .next().value;
+              if (typeof oldest !== 'string') break;
+              startedDuringRemovalRef.current.delete(oldest);
+            }
+          }
+          continue;
+        }
         if (
           shouldAppendLocalUserMessage &&
           !displayedServerPromptIdsRef.current.has(promptId)
         ) {
           const eventText =
             typeof event.data.text === 'string' ? event.data.text : '';
+          // A rendered text is not an identity, so ambiguity degrades to no
+          // echo: each submit body echoes its own row once its admission
+          // resolves, and a body that already returned without binding
+          // leaves the echo to this park's settle-time consume.
+          // A row the drain has stamped but not handed to a body has never
+          // been POSTed, so it cannot own this event: counting it would
+          // manufacture an ambiguity and lose an echo. The sync's match count
+          // and the settle's own-submission check exclude them for the same
+          // reason.
+          const unboundMatches = queuedPromptsRef.current.filter(
+            (item) =>
+              !unreleasedPromptIdsRef.current.has(item.id) &&
+              matchesUnboundSubmittingRow(
+                item,
+                {
+                  text: eventText,
+                  originatorClientId: event.originatorClientId,
+                },
+                clientId,
+              ),
+          );
+          // An in-flight attachment row is invisible to that count: the event
+          // carries no content, so the matcher refuses it outright. Since the
+          // daemon renders an attachment message as its caption, such a row
+          // can render exactly like a text row — and then a count of one is
+          // not evidence of uniqueness, so the echo degrades to nothing. Rows
+          // that render differently cannot own this event, and stay out of
+          // the way.
+          const attachmentMatches = queuedPromptsRef.current.filter(
+            (item) =>
+              !item.serverPromptId &&
+              !unreleasedPromptIdsRef.current.has(item.id) &&
+              item.serverState === 'submitting' &&
+              ((item.images?.length ?? 0) > 0 ||
+                (item.files?.length ?? 0) > 0) &&
+              pendingPromptTextsMatch(item.text, eventText),
+          );
+          const uncountableAttachmentRow = attachmentMatches.length > 0;
           const prompt =
             queuedPromptsRef.current.find(
-              (item) => item.serverPromptId === promptId,
+              (item) =>
+                item.serverPromptId === promptId &&
+                item.payloadCompleteness !== 'summary-only',
             ) ??
             queuedPromptsRef.current.find(
               (item) => item.midTurnMessageId === promptId,
             ) ??
             pendingMidTurnPrompt ??
+            // Keyed by the daemon's own id, so this outranks the rendered-text
+            // match below: a text row that happens to render the same must not
+            // steal another message's echo.
+            pendingEchoByPromptIdRef.current.get(promptId) ??
+            // A summary-only bound row still shadows the text matcher and the
+            // raw-text branch: appendLocalQueuedPrompt refuses to echo it, and
+            // silence beats a placeholder or a wrong-row echo. Only the stash
+            // above outranks it, because the stash is the same prompt's full
+            // payload under the same authoritative id.
             queuedPromptsRef.current.find(
-              (item) =>
-                !item.serverPromptId &&
-                item.serverState === 'submitting' &&
-                (item.images?.length ?? 0) === 0 &&
-                (item.files?.length ?? 0) === 0 &&
-                item.text === eventText,
-            );
+              (item) => item.serverPromptId === promptId,
+            ) ??
+            (uncountableAttachmentRow || unboundMatches.length !== 1
+              ? undefined
+              : unboundMatches[0]);
           if (prompt) {
             if (prompt.onComplete) {
               settleCompletionCallback(promptId, prompt.onComplete);
@@ -1237,10 +2128,41 @@ export function useQueuedPrompts({
             )
           ) {
             displayedServerPromptIdsRef.current.add(promptId);
-            store.appendLocalUserMessage(eventText, undefined, undefined);
+            store.appendLocalUserMessage(eventText, undefined, { promptId });
           }
-          if (!prompt?.serverPromptId) {
-            pendingStartedByPromptIdRef.current.set(promptId, eventText);
+          // A summary-only bound row shadows the text matcher and refuses to
+          // echo, so it leaves nothing behind either: park on it as well, or
+          // the body that resolves afterwards has no record that its own
+          // prompt started, and the message the daemon ran reaches no
+          // transcript.
+          if (
+            !prompt?.serverPromptId ||
+            prompt.payloadCompleteness === 'summary-only'
+          ) {
+            // Positive attribution, not a silence vote. `attachmentMatches`
+            // deliberately applies no originator condition, because for
+            // `uncountableAttachmentRow` an over-broad set only degrades an
+            // echo to silence. A single match here does the opposite: it
+            // stamps that row as this event's owner, and the identity matcher
+            // above refuses an attachment row unless the originator is
+            // stamped with this client's id. An event with no originator fails
+            // open for echoing; it cannot be used to hand this row's payload
+            // to a prompt id this client never received.
+            const attributable = event.originatorClientId === clientId;
+            const candidates =
+              prompt || !attributable
+                ? []
+                : [...unboundMatches, ...attachmentMatches];
+            pendingStartedByPromptIdRef.current.set(promptId, {
+              text: eventText,
+              // Only a row that existed when the event was parked can be its
+              // own in-flight admission: a younger row that renders the same
+              // text is a different message and must not suppress the echo.
+              rowIdFrontier: nextQueuedPromptIdRef.current,
+              ...(candidates.length === 1
+                ? { soleCandidateRowId: candidates[0]!.id }
+                : {}),
+            });
             while (pendingStartedByPromptIdRef.current.size > 200) {
               const oldest = pendingStartedByPromptIdRef.current
                 .keys()
@@ -1251,21 +2173,33 @@ export function useQueuedPrompts({
             }
           }
         }
+        if (!shouldAppendLocalUserMessage) {
+          displayedServerPromptIdsRef.current.add(promptId);
+        }
+        if (displayedServerPromptIdsRef.current.has(promptId)) {
+          removeDaemonOwnedPrompt(promptId);
+        }
         void refreshPendingPrompts();
       } else if (event.type === 'turn_complete') {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        // The settle path consumes the suppression park, so read both
+        // started markers first: a cancelled turn for a started prompt
+        // still counts as completed for a callback registered later.
+        const startedBeforeSettle =
+          pendingStartedByPromptIdRef.current.has(promptId) ||
+          startedDuringRemovalRef.current.has(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) {
           callback();
         } else if (
           event.data.stopReason !== 'cancelled' ||
-          pendingStartedByPromptIdRef.current.has(promptId)
+          startedBeforeSettle
         ) {
           rememberCompletedPromptId(promptId);
         }
       } else if (event.type === 'turn_error') {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) callback();
@@ -1274,7 +2208,7 @@ export function useQueuedPrompts({
         event.type === 'pending_prompt_completed' &&
         event.data.state === 'removed'
       ) {
-        displayedServerPromptIdsRef.current.delete(promptId);
+        hideSettledServerPrompt(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
         if (callback) callback();
@@ -1300,12 +2234,18 @@ export function useQueuedPrompts({
     refreshPendingPrompts,
     settleCompletionCallback,
     rememberCompletedPromptId,
+    hideSettledServerPrompt,
+    removeDaemonOwnedPrompt,
   ]);
 
   /**
    * Submit one pending prompt. Returns the admission promise (already
    * error-handled) so callers releasing several prompts can chain them and
-   * keep the daemon's queue in the order the user typed them.
+   * keep the daemon's queue in the order the user typed them. A link settles
+   * at its admission, with one exception: a row the daemon refused at idle
+   * keeps that provenance through the hold and the drain, so its link also
+   * spans the confirming snapshot the body awaits — one extra queue round
+   * trip before the next link can POST.
    */
   const submitPendingPrompt = useCallback(
     (prompt: QueuedPrompt): Promise<void> => {
@@ -1314,9 +2254,13 @@ export function useQueuedPrompts({
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       let admissionStarted = false;
+      let refreshedInBody = false;
 
       return sessionActions
         .submitPrompt(prompt.text, {
+          ...(prompt.submittedPrompt !== undefined
+            ? { submittedPrompt: prompt.submittedPrompt }
+            : {}),
           images: prompt.images,
           files: prompt.files,
           inputAnnotations: prompt.inputAnnotations,
@@ -1327,7 +2271,7 @@ export function useQueuedPrompts({
             admissionStarted = true;
           },
         })
-        .then((result) => {
+        .then(async (result) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
             !isCurrentOwnerTokenRef.current(ownerToken) ||
@@ -1393,7 +2337,375 @@ export function useQueuedPrompts({
             displayedServerPromptIdsRef.current.delete(result.promptId);
             return;
           }
-          if (!latestSessionActiveRef.current) {
+          // Not gated on the client's activity mirror: it lags the daemon
+          // state this confirmation exists to correct.
+          if (prompt.resubmittedAfterIdleRejection && !localMessageAppended) {
+            // The row can be cleared while this await is open, and a started
+            // event carries only rendered text — no attachments and no
+            // annotation chips — so keep the payload under the id the daemon
+            // returned until something echoes it.
+            if (eventCannotReproducePayload(prompt)) {
+              pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+              while (pendingEchoByPromptIdRef.current.size > 200) {
+                const oldest = pendingEchoByPromptIdRef.current
+                  .keys()
+                  .next().value;
+                if (typeof oldest !== 'string') break;
+                pendingEchoByPromptIdRef.current.delete(oldest);
+              }
+            }
+            // A refresh waits out an older same-session flight rather than
+            // racing it, but the single tracked slot cannot guarantee that:
+            // a dispatch for another session leaves the older flight
+            // untracked. The fence is therefore what matters here — its
+            // default anchor refuses to join a GET dispatched before this
+            // call, which would read a queue that cannot list the prompt and
+            // confirm a wrong verdict.
+            // The UI-side writes stay behind the sequence fence inside
+            // `refreshPendingPrompts`.
+            const refresh = await refreshPendingPrompts(targetSessionId);
+            // The started handler may have echoed this message while the
+            // snapshot was in flight, and a terminal event in the same window
+            // clears the displayed-id dedupe, so re-read its flag instead of
+            // trusting the one consumed before the await.
+            if (
+              appendedBeforeResponsePromptIdsRef.current.delete(result.promptId)
+            ) {
+              localMessageAppended = true;
+            }
+            // A row with attachments is still unbound while this snapshot is
+            // applied, and that state suppresses materializing every other
+            // queued prompt in it, so this is not the body's sync: let the
+            // `.finally` refresh re-apply the snapshot once the row stops
+            // being an unbound attachment submission — whether it bound,
+            // echoed and dropped, or was removed.
+            refreshedInBody =
+              refresh.status === 'refreshed' &&
+              (prompt.images?.length ?? 0) === 0 &&
+              (prompt.files?.length ?? 0) === 0;
+            if (
+              !isCurrentOwnerTokenRef.current(ownerToken) ||
+              latestSessionIdRef.current !== targetSessionId
+            ) {
+              return;
+            }
+            const localRowExists = queuedPromptsRef.current.some(
+              (item) => item.id === localId,
+            );
+            // A start or completion that beat the snapshot wins over it:
+            // stamping the id here would mark a running prompt queued, and
+            // its Remove would abort the turn.
+            const startedSinceSnapshot =
+              displayedServerPromptIdsRef.current.has(result.promptId) ||
+              pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              completedPromptIdsRef.current.has(result.promptId);
+            if (!localRowExists) {
+              if (syncClaimedSubmittingRowIdsRef.current.delete(localId)) {
+                // The confirming sync attributed this row to an
+                // already-displayed prompt with the same rendered text and
+                // dropped it — nothing was cleared, so the admitted prompt
+                // stays. The row a later snapshot materializes for it is
+                // summary-only and cannot echo, so the started event's
+                // source is the payload this body still holds: stash it
+                // under the daemon's id.
+                pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+                while (pendingEchoByPromptIdRef.current.size > 200) {
+                  const oldestClaimEcho = pendingEchoByPromptIdRef.current
+                    .keys()
+                    .next().value;
+                  if (typeof oldestClaimEcho !== 'string') break;
+                  pendingEchoByPromptIdRef.current.delete(oldestClaimEcho);
+                }
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+                return;
+              }
+              // removePendingPrompt aborts a prompt the daemon already runs,
+              // and a snapshot that never arrived proves nothing, so only a
+              // snapshot listing the prompt as still queued licenses removing
+              // it; the started event echoes it in every other case.
+              const snapshotState =
+                refresh.status === 'refreshed'
+                  ? refresh.pendingPrompts.find(
+                      (p) => p.promptId === result.promptId,
+                    )?.state
+                  : undefined;
+              if (
+                snapshotState !== 'queued' ||
+                settledServerPromptIdsRef.current.has(result.promptId) ||
+                startedSinceSnapshot
+              ) {
+                // The started event's own echo is suppressed whenever an
+                // unrelated unbound submission is in flight, and the park
+                // that records the suppression has no other consumer on this
+                // path — echo from the copy this body still holds.
+                if (
+                  !localMessageAppended &&
+                  !displayedServerPromptIdsRef.current.has(result.promptId) &&
+                  pendingStartedByPromptIdRef.current.delete(result.promptId)
+                ) {
+                  appendLocalQueuedPrompt(prompt, result.promptId);
+                  localMessageAppended = true;
+                }
+                // A started event carries only rendered text, which loses
+                // attachments and annotation chips, so echo from the copy this
+                // body still holds when the snapshot says the daemon is
+                // already running it. A settle inside this window clears the
+                // displayed marker the echo would otherwise be idempotent
+                // against, and an echo sourced from a bound row writes no
+                // re-read marker for this body — so the settled set is the
+                // only term that can still see it.
+                if (
+                  snapshotState === 'running' &&
+                  !localMessageAppended &&
+                  !settledServerPromptIdsRef.current.has(result.promptId) &&
+                  eventCannotReproducePayload(prompt)
+                ) {
+                  appendLocalQueuedPrompt(prompt, result.promptId);
+                }
+                if (
+                  snapshotState === undefined &&
+                  !displayedServerPromptIdsRef.current.has(result.promptId)
+                ) {
+                  // The user cleared this row and nothing on hand says what
+                  // the daemon is doing with it — either no snapshot arrived,
+                  // or the one that did no longer lists the prompt — so hand
+                  // the clear to the next snapshot instead of dropping it:
+                  // otherwise the message the user cancelled reappears in the
+                  // queue and still runs. A snapshot that already dropped the
+                  // prompt resolves the entry on its next pass.
+                  clearedUnconfirmedPromptIdsRef.current.set(
+                    result.promptId,
+                    refreshRequestSeqRef.current,
+                  );
+                  // Guarantee a later pass exists to apply it: the anchor
+                  // above makes any flight already in flight skip this entry,
+                  // and the `.finally` refresh is what dispatches a newer one.
+                  refreshedInBody = false;
+                }
+                // The confirming sync may already have materialized a row for
+                // the prompt the user cleared — drop it rather than resurrect
+                // the cleared draft, unless an action is pending on that row.
+                const remaining = queuedPromptsRef.current.filter(
+                  (item) =>
+                    item.isEditing ||
+                    item.isRemoving ||
+                    item.serverPromptId !== result.promptId,
+                );
+                if (remaining.length !== queuedPromptsRef.current.length) {
+                  queuedPromptsRef.current = remaining;
+                  setQueuedPrompts(remaining);
+                }
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+                return;
+              }
+              if (removingServerPromptIdsRef.current.has(result.promptId)) {
+                // A delete or edit action already owns this removal; its own
+                // refresh settles the rows.
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+                return;
+              }
+              removingServerPromptIdsRef.current.add(result.promptId);
+              // The echo stash survives the DELETE: if the removal fails and
+              // the daemon goes on to start the prompt, the started event can
+              // only render '[image]' — the stash is the payload's last copy.
+              // It is deleted below once the removal is confirmed.
+              // The confirming sync above may have materialized a row for the
+              // prompt the user already cleared; drop it before the DELETE,
+              // unless an action is already pending on that row.
+              const next = queuedPromptsRef.current.filter(
+                (item) =>
+                  item.isEditing ||
+                  item.isRemoving ||
+                  item.serverPromptId !== result.promptId,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              sessionActions
+                .removePendingPrompt(result.promptId, {
+                  sessionId: targetSessionId,
+                })
+                .then(
+                  (removeResult) => removeResult.removed,
+                  () => false,
+                )
+                // Clearing the flag before acting on the outcome matters: a
+                // re-sync that runs while the id is still marked as being
+                // removed skips the very prompt a failed removal left behind.
+                .finally(() => {
+                  removingServerPromptIdsRef.current.delete(result.promptId);
+                })
+                .then((removed) => {
+                  if (removed) {
+                    startedDuringRemovalRef.current.delete(result.promptId);
+                    pendingEchoByPromptIdRef.current.delete(result.promptId);
+                    const next = queuedPromptsRef.current.filter(
+                      (item) => item.serverPromptId !== result.promptId,
+                    );
+                    queuedPromptsRef.current = next;
+                    setQueuedPrompts(next);
+                  } else {
+                    // The removal came back not-removed — the id is absent,
+                    // or another client already removed it while the doomed
+                    // prompt runs on to settle — so a start may have parked
+                    // for a prompt that really did run: the replay echoes
+                    // it, and the callback must still be registered or no
+                    // terminal event will ever fire it.
+                    if (prompt.onComplete) {
+                      settleCompletionCallback(
+                        result.promptId,
+                        prompt.onComplete,
+                      );
+                    }
+                    replayStartedDuringRemoval(result.promptId);
+                    void refreshPendingPrompts(targetSessionId);
+                  }
+                });
+              return;
+            }
+            const bound = queuedPromptsRef.current.find(
+              (item) => item.serverPromptId === result.promptId,
+            );
+            if (bound?.serverState === 'queued') {
+              if (bound.id !== localId) {
+                // The sync materialized its own row for this prompt, so this
+                // body's duplicate has to go. That row is summary-only and
+                // cannot echo, so the started event's source is the payload
+                // this body still holds: stash it under the daemon's id.
+                pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+                while (pendingEchoByPromptIdRef.current.size > 200) {
+                  const oldestDuplicateEcho = pendingEchoByPromptIdRef.current
+                    .keys()
+                    .next().value;
+                  if (typeof oldestDuplicateEcho !== 'string') break;
+                  pendingEchoByPromptIdRef.current.delete(oldestDuplicateEcho);
+                }
+                const next = queuedPromptsRef.current.filter(
+                  (item) => item.id !== localId,
+                );
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+              }
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              return;
+            }
+            // The daemon returned this prompt id for this very row, so binding
+            // to it is not a guess: the started event corrects the state label
+            // when it lands, while an unbound row can be neither echoed, nor
+            // cleared against the daemon, nor deleted by the user.
+            const bindRowToPrompt = () => {
+              const next = queuedPromptsRef.current.map((item) =>
+                item.id === localId
+                  ? {
+                      ...item,
+                      serverPromptId: result.promptId,
+                      serverState: 'queued' as const,
+                      boundAtSeq: refreshRequestSeqRef.current,
+                    }
+                  : item,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+            };
+            // A start whose raw-text echo was suppressed (an identical
+            // unbound submission was in flight) parked the message, and the
+            // settle's own consume defers to this body while it is in
+            // flight — so this body is the last echo path. Consume the park
+            // here, before the settled arms below drop the row in silence.
+            if (
+              !localMessageAppended &&
+              !displayedServerPromptIdsRef.current.has(result.promptId) &&
+              pendingStartedByPromptIdRef.current.delete(result.promptId)
+            ) {
+              appendLocalQueuedPrompt(prompt, result.promptId);
+              localMessageAppended = true;
+            }
+            if (refresh.status !== 'refreshed') {
+              // A settle that beat the snapshot wins over it: the message
+              // already ran (and the settle cleared the echo guard), so the
+              // row drops without a second echo.
+              const settled =
+                settledServerPromptIdsRef.current.has(result.promptId) ||
+                completedPromptIdsRef.current.has(result.promptId);
+              const startedOrCompleted =
+                settled ||
+                displayedServerPromptIdsRef.current.has(result.promptId) ||
+                pendingStartedByPromptIdRef.current.has(result.promptId);
+              if (startedOrCompleted) {
+                // No echo here: a settle means the message already ran and
+                // the settle cleared the displayed guard, and a start is
+                // either already echoed (displayed) or was consumed by the
+                // park consume above — this arm only drops the row.
+                const next = queuedPromptsRef.current.filter(
+                  (item) => item.id !== localId,
+                );
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+                if (prompt.onComplete) {
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+              } else {
+                returnedUnboundPromptIdsRef.current.set(
+                  result.promptId,
+                  localId,
+                );
+                if (prompt.onComplete) {
+                  // The daemon already holds the prompt, so its callback
+                  // must be registered now or no terminal event will ever
+                  // fire it.
+                  settleCompletionCallback(result.promptId, prompt.onComplete);
+                }
+              }
+              return;
+            }
+            // A settle or removal that beat the confirmation snapshot wins
+            // over it: the sync treats both markers as authoritative, and
+            // stamping the id here would leave a sticky row the next sync
+            // destroys — and the fall-through below would re-echo a message
+            // that never ran.
+            const settledOrRemoving =
+              settledServerPromptIdsRef.current.has(result.promptId) ||
+              removingServerPromptIdsRef.current.has(result.promptId);
+            if (bound === undefined && settledOrRemoving) {
+              const next = queuedPromptsRef.current.filter(
+                (item) => item.id !== localId,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              return;
+            }
+            // Bind by the id the daemon returned, not by rendered text:
+            // identical resubmissions carrying attachments suppress both the
+            // text binding and the materialization, and the fall-through
+            // below echoes a message the daemon still holds queued. The
+            // settled-or-removing case already returned above.
+            const queuedInSnapshot =
+              !startedSinceSnapshot &&
+              refresh.pendingPrompts.some(
+                (p) => p.promptId === result.promptId && p.state === 'queued',
+              );
+            if (bound === undefined && queuedInSnapshot) {
+              bindRowToPrompt();
+              return;
+            }
+          }
+          if (
+            !latestSessionActiveRef.current ||
+            prompt.resubmittedAfterIdleRejection
+          ) {
             if (!localMessageAppended) {
               appendLocalQueuedPrompt(prompt, result.promptId);
             }
@@ -1410,19 +2722,104 @@ export function useQueuedPrompts({
           const current = queuedPromptsRef.current;
           const idx = current.findIndex((p) => p.id === localId);
           if (idx === -1) {
+            if (syncClaimedSubmittingRowIdsRef.current.delete(localId)) {
+              // The confirming sync attributed this row to an
+              // already-displayed prompt with the same rendered text and
+              // dropped it — nothing was cleared, so the admitted prompt
+              // stays. The row the next snapshot materializes for it is
+              // summary-only and cannot echo, so the started event's source
+              // is the payload this body still holds: stash it under the
+              // daemon's id. The `.finally` below issues this path's only
+              // refresh.
+              pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+              while (pendingEchoByPromptIdRef.current.size > 200) {
+                const oldestClaimEcho = pendingEchoByPromptIdRef.current
+                  .keys()
+                  .next().value;
+                if (typeof oldestClaimEcho !== 'string') break;
+                pendingEchoByPromptIdRef.current.delete(oldestClaimEcho);
+              }
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              return;
+            }
+            // The row can also be gone because the prompt already ran: a
+            // sync bound it and the started event's echo dropped the bound
+            // row, leaving no marker this body consumes. Client-side
+            // evidence of a start or settle licenses no cancellation — the
+            // DELETE would abort a live turn.
+            if (
+              displayedServerPromptIdsRef.current.has(result.promptId) ||
+              settledServerPromptIdsRef.current.has(result.promptId) ||
+              pendingStartedByPromptIdRef.current.has(result.promptId) ||
+              completedPromptIdsRef.current.has(result.promptId)
+            ) {
+              if (prompt.onComplete) {
+                settleCompletionCallback(result.promptId, prompt.onComplete);
+              }
+              return;
+            }
+            // The removal can still come back not-removed — the id may be
+            // absent, or already removed by another client while the doomed
+            // prompt runs on to settle — and the started event carries only
+            // rendered text, so keep the payload under the daemon's id until
+            // the outcome: a failed removal replays the echo from here
+            // instead of dropping to the placeholder.
+            if (eventCannotReproducePayload(prompt)) {
+              pendingEchoByPromptIdRef.current.set(result.promptId, prompt);
+              while (pendingEchoByPromptIdRef.current.size > 200) {
+                const oldestEcho = pendingEchoByPromptIdRef.current
+                  .keys()
+                  .next().value;
+                if (typeof oldestEcho !== 'string') break;
+                pendingEchoByPromptIdRef.current.delete(oldestEcho);
+              }
+            }
+            // The removal owns the prompt from here: a start landing inside
+            // the DELETE flight must park like every sibling removal path,
+            // so the outcome — not the event — decides whether it echoes.
+            removingServerPromptIdsRef.current.add(result.promptId);
             sessionActions
               .removePendingPrompt(result.promptId, {
                 sessionId: targetSessionId,
               })
               .then(
-                (removeResult) => {
-                  if (!removeResult.removed)
-                    void refreshPendingPrompts(targetSessionId);
-                },
-                () => {
+                (removeResult) => removeResult.removed,
+                () => false,
+              )
+              // Clearing the flag before acting on the outcome matters: a
+              // re-sync that runs while the id is still marked as being
+              // removed skips the very prompt a failed removal left behind.
+              .finally(() => {
+                removingServerPromptIdsRef.current.delete(result.promptId);
+              })
+              .then((removed) => {
+                if (removed) {
+                  // The daemon confirmed the removal: the prompt never ran
+                  // to completion, so the parked start and the stashed
+                  // payload are both dead weight.
+                  startedDuringRemovalRef.current.delete(result.promptId);
+                  pendingEchoByPromptIdRef.current.delete(result.promptId);
+                } else {
+                  // The removal came back not-removed — the id is absent, or
+                  // already removed by another client while the doomed
+                  // prompt runs on to settle — so a start may have parked
+                  // for a prompt that really did run: replay it, and
+                  // register the callback either way, since no terminal
+                  // event fires a callback that was never registered. The
+                  // success arm stays silent — a removed prompt is a
+                  // cancellation.
+                  if (prompt.onComplete) {
+                    settleCompletionCallback(
+                      result.promptId,
+                      prompt.onComplete,
+                    );
+                  }
+                  replayStartedDuringRemoval(result.promptId);
                   void refreshPendingPrompts(targetSessionId);
-                },
-              );
+                }
+              });
             return;
           }
           const updated = [...current];
@@ -1431,6 +2828,7 @@ export function useQueuedPrompts({
             ...localPrompt,
             serverPromptId: result.promptId,
             serverState: 'queued',
+            boundAtSeq: refreshRequestSeqRef.current,
           };
           queuedPromptsRef.current = updated;
           setQueuedPrompts(updated);
@@ -1446,19 +2844,91 @@ export function useQueuedPrompts({
           ) {
             return;
           }
-          if (!queuedPromptsRef.current.some((p) => p.id === localId)) return;
+          // A row the confirming sync claimed for an already-displayed
+          // prompt is gone without any user cancellation; the failure path
+          // still owns it when nothing reached the daemon, or the draft
+          // would vanish with no error. Once admission started the daemon
+          // may already hold and echo the prompt, so a transport failure
+          // past that point must not report a false queue failure.
+          const syncClaimed =
+            syncClaimedSubmittingRowIdsRef.current.delete(localId);
+          if (
+            !(syncClaimed && !admissionStarted) &&
+            !queuedPromptsRef.current.some((p) => p.id === localId)
+          ) {
+            return;
+          }
+          // A start that arrived while this row was in flight parked its
+          // rendering and echoed nothing: an attachment row is invisible to
+          // the text matcher, so ambiguity degraded the echo to silence.
+          // This body is the only holder of that payload, so echo from here
+          // before the row goes — the settle's last chance refuses the
+          // placeholder such a payload renders as. Admission must have
+          // started, or the daemon never received this message and the park
+          // belongs to some other prompt that merely renders alike. Only a
+          // park that named this row as the single
+          // candidate may be consumed: two messages that render alike stay
+          // silent rather than guess. A row the user already cleared took
+          // the early return above, so this never echoes a cancellation.
+          // `onAdmissionStarted` fires just before the POST is dispatched, so
+          // it says the request left, not that the daemon took it. A definite
+          // rejection is the daemon's own answer — it never accepted this
+          // prompt — so any park in flight belongs to some other prompt, and
+          // echoing under its id would show a message nobody ran while the
+          // real failure went unreported.
+          const definitelyRejected =
+            error instanceof DaemonHttpError ||
+            error instanceof DaemonPendingPromptLimitError;
+          let echoedParkId: string | undefined;
+          if (admissionStarted && !definitelyRejected) {
+            // A text-only payload needs no sole-candidate proof: the parked
+            // rendering *is* the message, so a park that renders exactly like
+            // this row carries the same text whichever of two identical
+            // submissions the daemon started. Without this a text row's park
+            // could never be consumed at all — `soleCandidateRowId` is only
+            // ever stamped for an attachment row, since a text row that
+            // matches uniquely becomes `prompt` and is echoed at event time.
+            const textOnly = !eventCannotReproducePayload(prompt);
+            const ownedParks: string[] = [];
+            pendingStartedByPromptIdRef.current.forEach((park, parkedId) => {
+              if (
+                park.soleCandidateRowId === localId ||
+                (textOnly &&
+                  park.soleCandidateRowId === undefined &&
+                  pendingPromptTextsMatch(prompt.text, park.text))
+              )
+                ownedParks.push(parkedId);
+            });
+            if (ownedParks.length === 1) {
+              echoedParkId = ownedParks[0];
+              pendingStartedByPromptIdRef.current.delete(echoedParkId);
+              appendLocalQueuedPrompt(prompt, echoedParkId);
+            }
+          }
           const next = queuedPromptsRef.current.filter(
             (prompt) => prompt.id !== localId,
           );
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
-          if (!admissionStarted) {
+          if (
+            !admissionStarted &&
+            !(error instanceof PromptDispatchBlockedError)
+          ) {
             restoreQueuedPromptsToEditor([prompt], targetSessionId);
           }
-          reportError(error, t('queue.queueFailed'));
+          // A message now visible in the transcript was admitted and started,
+          // so a queue-failure toast beside it would be false — the reason
+          // admission-started is distinguished at all.
+          if (
+            echoedParkId === undefined ||
+            !displayedServerPromptIdsRef.current.has(echoedParkId)
+          ) {
+            reportError(error, t('queue.queueFailed'));
+          }
         })
         .finally(() => {
           if (
+            !refreshedInBody &&
             isCurrentOwnerTokenRef.current(ownerToken) &&
             latestSessionIdRef.current === targetSessionId
           ) {
@@ -1469,6 +2939,7 @@ export function useQueuedPrompts({
     [
       appendLocalQueuedPrompt,
       refreshPendingPrompts,
+      replayStartedDuringRemoval,
       reportError,
       restoreQueuedPromptsToEditor,
       sessionActions,
@@ -1509,10 +2980,11 @@ export function useQueuedPrompts({
       }
       // Re-check the hold per link, not once for the whole batch: the chain
       // is built synchronously when the hold lifts, but each link runs only
-      // after the previous admission settles. A Goal resumed inside that
-      // window (or a write block) must stop the remaining links instead of
-      // POSTing them against an active Goal — they return to held, and the
-      // next inactive transition re-drains them in order.
+      // after the previous link settles — its admission, plus the confirming
+      // snapshot of a row the daemon once refused at idle. A Goal resumed
+      // inside that window (or a write block) must stop the remaining links
+      // instead of POSTing them against an active Goal — they return to held,
+      // and the next inactive transition re-drains them in order.
       if (holdQueuedPromptsLocallyRef.current || writeBlockedRef.current) {
         // Inline rather than `setQueuedPromptFlags`: that callback is
         // declared below, so naming it here would read it before its
@@ -1564,6 +3036,7 @@ export function useQueuedPrompts({
       onComplete?: () => void,
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
+      submittedPrompt?: string,
     ) => {
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
@@ -1644,6 +3117,7 @@ export function useQueuedPrompts({
           ...pendingAdmission,
           text: trimmed,
           files: fileList.length > 0 ? [...fileList] : undefined,
+          ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
           inputAnnotations: inputAnnotations
             ? [...inputAnnotations]
             : undefined,
@@ -1670,7 +3144,7 @@ export function useQueuedPrompts({
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
           [];
         const removeUploadedAttachments = async () => {
-          await Promise.allSettled(
+          const removals = await Promise.allSettled(
             uploadedAttachmentReferences.map((reference) =>
               sessionActions.removeAttachment(reference.attachmentId, {
                 sessionId: targetSessionId,
@@ -1678,53 +3152,84 @@ export function useQueuedPrompts({
             ),
           );
           uploadedAttachmentReferences = [];
+          // A failed compensating delete leaves the refused prompt's bytes
+          // in the session attachment store; surface it instead of dropping.
+          // A fulfilled `false` — the daemon refused the unlink — counts too,
+          // even though it can also mean both copies were already gone.
+          const failedRemoval = removals.find(
+            (result) => result.status === 'rejected' || result.value === false,
+          );
+          // Every sibling report in this chain is gated on still owning the
+          // work; a toast about a session the user already left is noise.
+          if (failedRemoval && targetIsCurrent()) {
+            const message = t('queue.attachmentCleanupFailed');
+            reportError(
+              new Error(message, {
+                cause:
+                  failedRemoval.status === 'rejected'
+                    ? failedRemoval.reason
+                    : 'removeAttachment returned false',
+              }),
+              message,
+            );
+          }
         };
-        void Promise.allSettled([
-          ...imageList.map(
-            async (image) =>
-              await sessionActions.uploadAttachment(
-                {
-                  data: image.data,
-                  mimeType: image.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...fileList.map(
-            async (file) =>
-              await sessionActions.uploadAttachment(
-                {
-                  name: file.name,
-                  data: file.data,
-                  text: file.text,
-                  mimeType: file.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...annotatedFileList.map(async (file, index) => {
-            const filePath = annotated!.paths[index]!;
-            const data = await readWorkspaceFileAsBlob(
-              (path, options) =>
-                workspaceFileActions!.readFileBytes(path, options),
-              filePath,
-              file.media_type,
-              {
-                statFile: (path) => workspaceFileActions!.stat(path),
-                isCancelled: () => abort.signal.aborted,
-                maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
-              },
+        // Check the caller policy before paying for reads and uploads; the
+        // SDK wrapper still re-checks the latest policy at dispatch time.
+        void Promise.resolve()
+          .then(() => {
+            const blocked = dispatchPolicyRef.current?.(
+              annotated?.displayText ?? trimmed,
             );
-            return await sessionActions.uploadAttachment(
-              {
-                name: file.name,
-                data,
-                mimeType: file.media_type,
-              },
-              { signal: abort.signal, sessionId: targetSessionId },
-            );
-          }),
-        ])
+            if (blocked !== undefined)
+              throw new PromptDispatchBlockedError(blocked);
+            return Promise.allSettled([
+              ...imageList.map(
+                async (image) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      data: image.data,
+                      mimeType: image.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...fileList.map(
+                async (file) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      name: file.name,
+                      data: file.data,
+                      text: file.text,
+                      mimeType: file.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...annotatedFileList.map(async (file, index) => {
+                const filePath = annotated!.paths[index]!;
+                const data = await readWorkspaceFileAsBlob(
+                  (path, options) =>
+                    workspaceFileActions!.readFileBytes(path, options),
+                  filePath,
+                  file.media_type,
+                  {
+                    statFile: (path) => workspaceFileActions!.stat(path),
+                    isCancelled: () => abort.signal.aborted,
+                    maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+                  },
+                );
+                return await sessionActions.uploadAttachment(
+                  {
+                    name: file.name,
+                    data,
+                    mimeType: file.media_type,
+                  },
+                  { signal: abort.signal, sessionId: targetSessionId },
+                );
+              }),
+            ]);
+          })
           .then(async (results) => {
             uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],
@@ -1794,15 +3299,21 @@ export function useQueuedPrompts({
               completionCallbacksRef.current.delete(midTurnMessageId);
               pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               const next = queuedPromptsRef.current.filter(
-                (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
+                (prompt) =>
+                  prompt.midTurnMessageId !== midTurnMessageId &&
+                  prompt.id !== restoreAdmission.id,
               );
               // The daemon rejected the insert outright, so nothing of it is
-              // queued server-side. If the turn has meanwhile ended, send the
-              // message through the ordinary path (or hold it while a Goal
-              // runs) instead of dropping it.
+              // queued server-side. Its idle verdict can precede the UI update;
+              // use the ordinary path (or hold it while a Goal runs) in either
+              // case instead of dropping it. Keep the UI-idle term beside
+              // `reason`: daemons older than that field omit it, and a
+              // rejection with another cause can still land after the turn
+              // ends.
               if (
                 targetIsCurrent() &&
-                latestRawStreamingStateRef.current === 'idle'
+                (result.reason === 'session_idle' ||
+                  latestRawStreamingStateRef.current === 'idle')
               ) {
                 const shouldHold =
                   holdQueuedPromptsLocallyRef.current ||
@@ -1812,6 +3323,15 @@ export function useQueuedPrompts({
                   midTurnState: undefined,
                   midTurnMessageId: undefined,
                   ...(shouldHold ? {} : { serverState: 'submitting' as const }),
+                  // Provenance rather than state: the daemon has already
+                  // refused this message once at idle, so whenever it is
+                  // eventually submitted — now, or later when a hold lifts —
+                  // its body must confirm against a snapshot instead of
+                  // trusting the activity mirror, which another client's
+                  // prompt occupying the FIFO can lag.
+                  ...(result.reason === 'session_idle'
+                    ? { resubmittedAfterIdleRejection: true }
+                    : {}),
                   onComplete,
                   onAdmitted,
                 };
@@ -1847,6 +3367,8 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (error instanceof PromptDispatchBlockedError)
+              enqueueStarted = false;
             if (!enqueueStarted) await removeUploadedAttachments();
             if (!targetIsCurrent()) {
               completionCallbacksRef.current.delete(midTurnMessageId);
@@ -1857,7 +3379,9 @@ export function useQueuedPrompts({
                 // return: restore it to the current editor instead of
                 // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
-                  restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  if (!(error instanceof PromptDispatchBlockedError)) {
+                    restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  }
                   reportError(error, t('queue.queueFailed'));
                 }
               }
@@ -1878,7 +3402,12 @@ export function useQueuedPrompts({
               );
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
-              restoreQueuedPromptsToEditor([restoreAdmission], targetSessionId);
+              if (!(error instanceof PromptDispatchBlockedError)) {
+                restoreQueuedPromptsToEditor(
+                  [restoreAdmission],
+                  targetSessionId,
+                );
+              }
               reportError(error, t('queue.queueFailed'));
               return;
             }
@@ -1919,6 +3448,7 @@ export function useQueuedPrompts({
       }
 
       const prompt: QueuedPrompt = {
+        ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
         id: nextQueuedPromptIdRef.current++,
         sessionId: targetSessionId,
         text: trimmed,
@@ -2125,7 +3655,9 @@ export function useQueuedPrompts({
       // prompt overtake it and reach the daemon's queue out of order.
       //
       // The chain is built synchronously, but each link runs only after the
-      // previous admission settles, so the session can change mid-drain.
+      // previous link settles (its admission, plus the confirming snapshot
+      // of a row the daemon once refused at idle), so the session can change
+      // mid-drain.
       // Pinned here rather than read per link: the guard has to ask "is this
       // still the owner the chain was built for", not "is there an owner".
       const chainOwner = ownerTokenRef.current;
@@ -2258,6 +3790,11 @@ export function useQueuedPrompts({
             isEditing: false,
             isRemoving: false,
           });
+          // The id is absent or already removed, so this action cancelled
+          // nothing: a start that parked inside the flight is owed its echo,
+          // and with no park this is a no-op. The success arm below drops the
+          // park instead — a removed prompt is a cancellation.
+          replayStartedDuringRemoval(target.serverPromptId);
           await refreshPendingPrompts(targetSessionId);
           if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
           reportError(
@@ -2267,9 +3804,14 @@ export function useQueuedPrompts({
           return false;
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
+        pendingEchoByPromptIdRef.current.delete(target.serverPromptId);
+        startedDuringRemovalRef.current.delete(target.serverPromptId);
+        // The confirming snapshot must post-date the DELETE: the fence
+        // default refuses to join a GET dispatched before it, which would
+        // re-list the prompt and keep the row its own removal deleted.
         const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return true;
-        if (refreshResult === 'failed') {
+        if (refreshResult.status === 'failed') {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
             isRemoving: false,
@@ -2287,9 +3829,13 @@ export function useQueuedPrompts({
           isEditing: false,
           isRemoving: false,
         });
+        // The DELETE never reported a verdict, so the prompt a parked start
+        // says the daemon ran is still owed its echo — the sibling removal
+        // arms read a lost DELETE the same way.
+        replayStartedDuringRemoval(target.serverPromptId);
         const refreshResult = await refreshPendingPrompts(targetSessionId);
         if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
-        if (refreshResult !== 'refreshed') {
+        if (refreshResult.status !== 'refreshed') {
           restoreQueuedPrompts([target]);
         }
         reportError(error, fallback);
@@ -2298,6 +3844,7 @@ export function useQueuedPrompts({
     },
     [
       refreshPendingPrompts,
+      replayStartedDuringRemoval,
       reportError,
       restoreQueuedPrompts,
       sessionActions,
@@ -2489,9 +4036,7 @@ export function useQueuedPrompts({
         prompt.isEditing ||
         prompt.isRemoving ||
         prompt.isInserting ||
-        (prompt.images?.length ?? 0) > 0 ||
-        (prompt.files?.length ?? 0) > 0 ||
-        (prompt.inputAnnotations?.length ?? 0) > 0 ||
+        eventCannotReproducePayload(prompt) ||
         isCommandPrompt(prompt.text)
       ) {
         return;
@@ -2581,16 +4126,22 @@ export function useQueuedPrompts({
             'isInserting' | 'midTurnState' | 'midTurnMessageId' | 'serverState'
           >
         >,
+        serverSaidIdle = false,
       ): boolean => {
         const submitAtIdle =
           isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
           insertOwnerMatches() &&
-          !latestSessionActiveRef.current &&
+          (serverSaidIdle || !latestSessionActiveRef.current) &&
           !writeBlockedRef.current &&
           !holdQueuedPromptsLocallyRef.current;
         const nextFlags = {
           ...flags,
           ...(submitAtIdle ? { serverState: 'submitting' as const } : {}),
+          // Persist the provenance on a row that goes back to the hold, the
+          // way the mid-turn requeue does: the drain releases that row later,
+          // and its submission has to confirm against a snapshot instead of
+          // echoing on the activity mirror's say-so.
+          ...(serverSaidIdle ? { resubmittedAfterIdleRejection: true } : {}),
         };
         clearInsertionFlag(nextFlags);
         finishInsertion();
@@ -2674,10 +4225,13 @@ export function useQueuedPrompts({
       }
       if (!isCurrentInsertion()) return;
       if (!result.accepted) {
-        const submitted = recoverAfterSettledInsert({
-          isInserting: false,
-          midTurnMessageId: undefined,
-        });
+        const submitted = recoverAfterSettledInsert(
+          {
+            isInserting: false,
+            midTurnMessageId: undefined,
+          },
+          result.reason === 'session_idle',
+        );
         if (!submitted && insertOwnerMatches()) {
           reportError(
             new Error('Queued message was not accepted for insertion'),
@@ -2882,11 +4436,39 @@ export function useQueuedPrompts({
       const submittingIds = new Set(
         submittingPrompts.map((prompt) => prompt.id),
       );
+      let handedOffClear = false;
+      // A row whose submit body already returned unbound carries a daemon
+      // id this clear path would otherwise lose — the row has no
+      // serverPromptId to DELETE. Hand the id to the deferred clear so the
+      // next snapshot that still lists it queued cancels the message the
+      // user just cleared. The returned-unbound record itself must survive:
+      // the settle-time echo exemption still needs it, and its own cleanup
+      // (the rebind, the settle, or an owner or session change) owns the
+      // delete.
+      for (const prompt of submittingPrompts) {
+        for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
+          if (rowId === prompt.id) {
+            clearedUnconfirmedPromptIdsRef.current.set(
+              promptId,
+              refreshRequestSeqRef.current,
+            );
+            handedOffClear = true;
+            break;
+          }
+        }
+      }
       const remaining = queuedPromptsRef.current.filter(
         (prompt) => !submittingIds.has(prompt.id),
       );
       queuedPromptsRef.current = remaining;
       setQueuedPrompts(remaining);
+      // The deferred clear only runs inside a snapshot pass, and nothing else
+      // on this path requests one — a quiet session would leave the recorded
+      // cancellation unattempted until the daemon promotes the very message
+      // the user cleared. Ask for the evidence the handoff depends on. The
+      // pass cannot resurrect the row: the loop marks the id as being removed
+      // before it DELETEs, and the sync skips every marked id.
+      if (handedOffClear) void refreshPendingPrompts(clearSessionId);
     }
     for (const controller of submitAbortControllersRef.current) {
       controller.abort();
@@ -2934,6 +4516,8 @@ export function useQueuedPrompts({
             });
             if (result.removed) {
               completionCallbacksRef.current.delete(promptId);
+              pendingEchoByPromptIdRef.current.delete(promptId);
+              startedDuringRemovalRef.current.delete(promptId);
               return;
             }
             failedPrompts.push(prompt);
@@ -2951,10 +4535,25 @@ export function useQueuedPrompts({
       ) {
         return;
       }
-      const restoredPrompts = failedPrompts.map((prompt) => ({
-        ...prompt,
-        isRemoving: false,
-      }));
+      // A start that parked inside one of these flights was real: that
+      // prompt ran, so its echo is owed even though the clear did not take.
+      // It must not then go back into the visible queue as well, or the user
+      // is offered a cancel and an edit for a message the transcript already
+      // shows as delivered.
+      const ranPromptIds = new Set(
+        failedPrompts
+          .map((prompt) => prompt.serverPromptId!)
+          .filter((promptId) => startedDuringRemovalRef.current.has(promptId)),
+      );
+      for (const promptId of ranPromptIds) {
+        replayStartedDuringRemoval(promptId);
+      }
+      const restoredPrompts = failedPrompts
+        .filter((prompt) => !ranPromptIds.has(prompt.serverPromptId!))
+        .map((prompt) => ({
+          ...prompt,
+          isRemoving: false,
+        }));
       const next = queuedPromptsRef.current
         .filter((prompt) => {
           if (prompt.serverPromptId) {
@@ -2977,7 +4576,14 @@ export function useQueuedPrompts({
       store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
     })();
     return true;
-  }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
+  }, [
+    refreshPendingPrompts,
+    replayStartedDuringRemoval,
+    reportError,
+    store,
+    t,
+    sessionActions,
+  ]);
 
   return {
     queuedPrompts: visibleQueuedPrompts,

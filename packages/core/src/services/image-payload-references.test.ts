@@ -12,6 +12,7 @@ import {
   countAllInlineImages,
   prepareImagePayloadsForRequest,
   replaceImagePayloadsInPlace,
+  trailingReattachPartCount,
 } from './image-payload-references.js';
 
 function toolImageTurn(data: string): Content {
@@ -74,8 +75,9 @@ describe('prepareImagePayloadsForRequest', () => {
     expect(prepared.at(-1)?.role).toBe('user');
     expect(prepared.at(-1)?.parts?.[0]?.text).toBe('continue');
     expect(prepared.at(-1)?.parts?.[1]?.text).toContain(
-      'Recent images reattached',
+      'Images read earlier in this session',
     );
+    expect(prepared.at(-1)?.parts?.[1]?.text).toContain('may be OUTDATED');
   });
 
   it('reattaches an older image when the current request explicitly references its stable id', () => {
@@ -343,8 +345,8 @@ describe('buildReattachParts', () => {
     ];
     const replaced = replaceImagePayloadsInPlace(contents, store);
     const parts = buildReattachParts(replaced, 2);
-    expect(parts).toHaveLength(3);
-    expect(parts[0]?.text).toContain('Recent images reattached');
+    expect(parts).toHaveLength(5); // marker + (label, image) per image
+    expect(parts[0]?.text).toContain('Images read earlier in this session');
     const data = parts
       .filter((p) => p.inlineData)
       .map((p) => p.inlineData?.data);
@@ -355,6 +357,23 @@ describe('buildReattachParts', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
     expect(buildReattachParts(replaced, 0)).toEqual([]);
+  });
+
+  it('labels reattached snapshots as potentially outdated, not current context (#11601)', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      toolImageTurn('c'),
+      { role: 'user', parts: [{ text: 'continue' }] },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 2, contents, store);
+    const prefix = parts[0]?.text ?? '';
+
+    expect(prefix).not.toContain('Recent images reattached');
+    expect(prefix).toMatch(/outdated|OUTDATED/);
   });
 
   it('resolves stored markers even when the current replacement pass is empty', () => {
@@ -425,6 +444,35 @@ describe('buildReattachParts', () => {
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 
+  it('labels every replayed image with its own id and no turn claim (#12544)', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      toolImageTurn('c'),
+      { role: 'user', parts: [{ text: 'what changed?' }] },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 3, contents, store);
+
+    expect(parts[0]?.text).toContain('Each one is labeled with its id below.');
+    const images = parts.flatMap((part, index) =>
+      part.inlineData
+        ? [{ data: part.inlineData.data, label: parts[index - 1]?.text }]
+        : [],
+    );
+    expect(images.map((image) => image.data)).toEqual(['a', 'b', 'c']);
+    for (const image of images) {
+      const id = store.put({
+        inlineData: { mimeType: 'image/png', data: image.data },
+      }).id;
+      expect(image.label).toBe(
+        `Image #${id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+      );
+    }
+  });
+
   it('does not reattach an image already inline in a tool response', () => {
     const store = new InMemoryImagePayloadStore();
     const markerContents = [toolImageTurn('same')];
@@ -435,5 +483,43 @@ describe('buildReattachParts', () => {
     ];
 
     expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
+  });
+});
+
+describe('trailingReattachPartCount', () => {
+  it('counts the trailing reattach region when reattach is appended to the last content', () => {
+    const store = new InMemoryImagePayloadStore();
+    const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
+    const reattachParts = buildReattachParts(replaced, 1);
+    expect(reattachParts).toHaveLength(3); // marker, label, image
+
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'stable prefix' }] },
+      { role: 'user', parts: [...reattachParts] },
+    ];
+
+    expect(trailingReattachPartCount(contents)).toBe(3);
+  });
+
+  it('counts only the reattach suffix when other parts precede it', () => {
+    const store = new InMemoryImagePayloadStore();
+    const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
+    const reattachParts = buildReattachParts(replaced, 1);
+
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'stable prefix' }, ...reattachParts],
+      },
+    ];
+
+    expect(trailingReattachPartCount(contents)).toBe(3);
+  });
+
+  it('returns 0 when the last content carries no reattach marker', () => {
+    expect(
+      trailingReattachPartCount([{ role: 'user', parts: [{ text: 'plain' }] }]),
+    ).toBe(0);
+    expect(trailingReattachPartCount([])).toBe(0);
   });
 });
