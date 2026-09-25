@@ -660,7 +660,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         entries,
         mode: request.mode,
       });
-      const reportModel = (text: string) => reportResult('/model', text);
+      const reportModel = (text: string) =>
+        reportResult(request.mode === 'advisor' ? '/advisor' : '/model', text);
       return (
         <OpenTuiModelDialog
           entries={entries}
