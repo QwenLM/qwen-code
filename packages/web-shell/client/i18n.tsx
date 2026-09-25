@@ -122,6 +122,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.worktrees': 'Worktrees…',
   'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
@@ -266,6 +267,69 @@ const EN: Messages = {
   'gitLog.allBranches': 'All branches',
   'gitLog.search': 'Search message, author, or hash',
   'gitLog.noMatches': 'No commits match',
+  'gitWorktrees.title': 'Worktrees',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} worktrees`,
+  'gitWorktrees.loading': 'Loading worktrees…',
+  'gitWorktrees.error': 'Failed to load worktrees',
+  'gitWorktrees.unavailable': 'Git is not available for this workspace',
+  'gitWorktrees.empty': 'No worktrees',
+  'gitWorktrees.noMatches': 'No worktrees match',
+  'gitWorktrees.filter': 'Filter by path or branch',
+  'gitWorktrees.newSession': 'New worktree session…',
+  'gitWorktrees.main': 'main',
+  'gitWorktrees.current': 'this workspace',
+  'gitWorktrees.detached': 'detached HEAD',
+  'gitWorktrees.bare': 'bare',
+  'gitWorktrees.locked': 'locked',
+  'gitWorktrees.prunable': 'stale',
+  'gitWorktrees.clean': 'clean',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} change(s)`,
+  'gitWorktrees.statusError': 'status unavailable',
+  'gitWorktrees.remove': 'Remove',
+  'gitWorktrees.removeLabel': (v) => `Remove worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': 'Removing…',
+  'gitWorktrees.cancel': 'Cancel',
+  'gitWorktrees.confirm':
+    'Remove this worktree? Its directory is deleted from disk; the branch is kept.',
+  'gitWorktrees.confirmStale':
+    'Remove this stale entry? Git stops tracking worktrees it can no longer find. Whatever is left in its directory stays; the bookkeeping git keeps for it does not.',
+  'gitWorktrees.confirmDetached':
+    'Remove this worktree? Its directory is deleted from disk. It is on a detached HEAD, so there is no branch to keep.',
+  'gitWorktrees.blockedDirty': (v) =>
+    `${v?.count ?? 0} uncommitted change(s) would be discarded.`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} running session(s) would lose their checkout.`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `Could not read where ${v?.count ?? 0} running session(s) are working. Any working here would lose their checkout.`,
+  'gitWorktrees.blockedUnknown':
+    'The working tree could not be checked for uncommitted changes, and any there would be discarded.',
+  'gitWorktrees.blockedOperation': (v) =>
+    `An unfinished ${v?.operation ?? 'git'} would be lost.`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `No branch keeps the commits here; ${String(v?.head ?? '').slice(0, 7)} would be left for git to collect.`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason
+      ? `This worktree is locked: ${v.reason}`
+      : 'This worktree is locked.',
+  'gitWorktrees.blockedRefused': 'Git refused to remove this worktree.',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `The workspace ${v.name} lives in this worktree, so removing it would take the workspace too. Remove the workspace first.`
+      : 'A registered workspace lives in this worktree, so removing it would take the workspace too. Remove the workspace first.',
+  'gitWorktrees.blockedSubmodules':
+    'A submodule of this worktree keeps a repository of its own, and removing the worktree deletes that repository too.',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    'Whether a submodule of this worktree keeps a repository of its own could not be checked. If one does, removing the worktree deletes it too.',
+  'gitWorktrees.refreshFailed':
+    'The list could not be refreshed, so it may be out of date.',
+  'gitWorktrees.removeAnyway': 'Remove anyway',
+  'gitWorktrees.removeFailed': 'Failed to remove the worktree',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git no longer tracks ${v?.name ?? ''}, but its directory is still on disk.`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `Removing ${v?.name ?? ''} was refused while you were looking elsewhere: ${v.reason}`
+      : `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -1161,7 +1225,8 @@ const EN: Messages = {
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
   'daemon.usage.dailySessionsSub': 'active session counts per day',
-  'delete.cannotCurrent': 'Cannot delete the current active session.',
+  'delete.cannotCurrent':
+    'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,
@@ -1809,7 +1874,10 @@ const EN: Messages = {
   'sidebar.deleteFailed': 'Failed to delete session',
   'sidebar.newSessionFailed': 'Failed to create a new chat',
   'sidebar.switchFailed': 'Failed to switch session',
-  'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
+  'sidebar.currentDeleteDisabled':
+    'The current session is running and cannot be deleted',
+  'sidebar.currentStandaloneDeleteDisabled':
+    'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
@@ -4124,6 +4192,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.worktrees': '管理 Worktree…',
   'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
@@ -4260,6 +4329,64 @@ const ZH: Messages = {
   'gitLog.allBranches': '全部分支',
   'gitLog.search': '搜索提交信息、作者或哈希',
   'gitLog.noMatches': '没有匹配的提交',
+  'gitWorktrees.title': 'Worktree',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} 个 worktree`,
+  'gitWorktrees.loading': '加载 worktree 中…',
+  'gitWorktrees.error': '加载 worktree 失败',
+  'gitWorktrees.unavailable': '此工作区不可用 Git',
+  'gitWorktrees.empty': '没有 worktree',
+  'gitWorktrees.noMatches': '没有匹配的 worktree',
+  'gitWorktrees.filter': '按路径或分支过滤',
+  'gitWorktrees.newSession': '新建 worktree 会话…',
+  'gitWorktrees.main': '主工作树',
+  'gitWorktrees.current': '当前工作区',
+  'gitWorktrees.detached': '游离 HEAD',
+  'gitWorktrees.bare': '裸仓库',
+  'gitWorktrees.locked': '已锁定',
+  'gitWorktrees.prunable': '已失效',
+  'gitWorktrees.clean': '干净',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} 处改动`,
+  'gitWorktrees.statusError': '状态不可用',
+  'gitWorktrees.remove': '删除',
+  'gitWorktrees.removeLabel': (v) => `删除 worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': '删除中…',
+  'gitWorktrees.cancel': '取消',
+  'gitWorktrees.confirm': '删除这个 worktree？其目录会从磁盘删除，分支保留。',
+  'gitWorktrees.confirmStale':
+    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree。目录里剩下的东西会保留，但 git 为它保存的记录不会。',
+  'gitWorktrees.confirmDetached':
+    '删除这个 worktree？其目录会从磁盘删除。它处于游离 HEAD，因此没有分支可留。',
+  'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} 个运行中的会话将失去其检出。`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `无法读取 ${v?.count ?? 0} 个运行中会话所在的位置。若有会话在这里，将失去其检出。`,
+  'gitWorktrees.blockedUnknown':
+    '无法检查该工作树是否有未提交改动，若有也将一并丢弃。',
+  'gitWorktrees.blockedOperation': (v) =>
+    `尚未完成的 ${v?.operation ?? 'git'} 操作将会丢失。`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `没有分支保住这里的提交；${String(v?.head ?? '').slice(0, 7)} 将被 git 回收。`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason ? `该 worktree 已加锁：${v.reason}` : '该 worktree 已加锁。',
+  'gitWorktrees.blockedRefused': 'Git 拒绝删除这个 worktree。',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `工作区 ${v.name} 就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。`
+      : '有已注册的工作区就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。',
+  'gitWorktrees.blockedSubmodules':
+    '该 worktree 的子模块有自己的仓库，删除这个 worktree 会把那个仓库一并删掉。',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    '无法确认该 worktree 的子模块是否有自己的仓库。如果有，删除这个 worktree 会把它一并删掉。',
+  'gitWorktrees.refreshFailed': '列表未能刷新，可能已过时。',
+  'gitWorktrees.removeAnyway': '仍然删除',
+  'gitWorktrees.removeFailed': '删除 worktree 失败',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git 已不再跟踪 ${v?.name ?? ''}，但它的目录仍在磁盘上。`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了：${v.reason}`
+      : `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4294,6 +4421,7 @@ const ZH: Messages = {
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': '智能体',
+  'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -5184,7 +5312,7 @@ const ZH: Messages = {
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
   'daemon.usage.dailySessionsSub': '每日活跃会话数',
-  'delete.cannotCurrent': '无法删除当前活动会话。',
+  'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,
@@ -5773,7 +5901,9 @@ const ZH: Messages = {
   'sidebar.deleteFailed': '删除会话失败',
   'sidebar.newSessionFailed': '创建新对话失败',
   'sidebar.switchFailed': '切换会话失败',
-  'sidebar.currentDeleteDisabled': '不能删除当前会话',
+  'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
+  'sidebar.currentStandaloneDeleteDisabled':
+    '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,

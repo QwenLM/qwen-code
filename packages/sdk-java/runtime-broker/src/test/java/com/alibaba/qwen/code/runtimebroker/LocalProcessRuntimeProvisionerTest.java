@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -55,7 +56,13 @@ class LocalProcessRuntimeProvisionerTest {
                                 () -> transport.execute(lease,
                                         new RuntimeSession("harness",
                                                 "runtime", "bootstrap", scope),
-                                        java.util.Map.of("callId", "tool-1"))
+                                        java.util.Map.of(
+                                                "sessionId", "runtime",
+                                                "promptId", "prompt-1",
+                                                "callId", "tool-1",
+                                                "argsDigest", "digest-1",
+                                                "toolName", "read_file",
+                                                "input", java.util.Map.of()))
                                         .toCompletableFuture()
                                         .get(10, TimeUnit.SECONDS));
                 Throwable cause = failure.getCause();
@@ -319,14 +326,25 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     private static boolean commandExists(String command) {
+        Process process;
         try {
-            return new ProcessBuilder(command, "-v")
+            process = new ProcessBuilder(command, "-v")
                     .redirectErrorStream(true)
                     .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .start().waitFor(2, TimeUnit.SECONDS);
-        } catch (Exception exception) {
+                    .start();
+        } catch (IOException missing) {
             return false;
         }
+        // Starting proves the command exists; a busy runner can take
+        // seconds to print the version, which is not a missing command.
+        try {
+            process.waitFor(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            process.destroyForcibly();
+        }
+        return true;
     }
 
     /**
@@ -385,6 +403,13 @@ class LocalProcessRuntimeProvisionerTest {
                 Duration leaseDuration) {
             return delegate.renewOperation(bindingId, owner,
                     operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
         }
     }
 
