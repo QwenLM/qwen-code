@@ -13,6 +13,7 @@ import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
+import { WebShellCustomizationProvider } from '../../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -137,16 +138,281 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it.each([false, true])(
+    'preserves edit approval changes and warnings (host owns preview: %s)',
+    (hostOwnsEditDiffPreview) => {
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-edit',
+          kind: 'permission',
+          requestId: 'request-edit',
+          sessionId: 'session-edit',
+          title: 'Edit: /outside/example.txt',
+          options: [],
+          toolCall: {
+            kind: 'edit',
+            _meta: { toolName: 'replace' },
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Path is outside the workspace',
+                },
+              },
+              {
+                type: 'diff',
+                path: '/outside/example.txt',
+                oldText: 'before11966',
+                newText: 'after11966',
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+            <I18nProvider language="en">
+              <ToolApproval
+                request={{ ...adapted, options: request.options }}
+                onConfirm={onConfirm}
+              />
+            </I18nProvider>
+          </WebShellCustomizationProvider>,
+        ),
+      );
+      expect(container!.textContent).toContain('Path is outside the workspace');
+      expect(container!.textContent?.includes('before11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      expect(container!.textContent?.includes('after11966')).toBe(
+        !hostOwnsEditDiffPreview,
+      );
+      if (!hostOwnsEditDiffPreview) {
+        const dialog = container!.querySelector('[role="alertdialog"]')!;
+        const descriptions = dialog
+          .getAttribute('aria-describedby')!
+          .split(' ')
+          .map((id) => document.getElementById(id)?.textContent)
+          .join(' ');
+        expect(descriptions).not.toContain('before11966');
+        expect(descriptions).not.toContain('after11966');
+        const diffRegion = container!.querySelector<HTMLElement>(
+          '[aria-label="File diff"]',
+        )!;
+        expect(diffRegion.tabIndex).toBe(0);
+        const arrowDown = new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => diffRegion.dispatchEvent(arrowDown));
+        expect(arrowDown.defaultPrevented).toBe(false);
+      }
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'reject')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-edit',
+        'reject',
+      );
+    },
+  );
+
+  it('rejects on Escape even when focus is inside the edit diff', () => {
+    // The approval panel documents "Escape rejects" and the diff region is
+    // focusable so users can inspect the change before answering. Regression
+    // guard: a blanket stopPropagation on DiffView used to swallow Escape too,
+    // silently breaking the fastest way to decline.
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-esc',
+        kind: 'permission',
+        requestId: 'request-edit-esc',
+        sessionId: 'session-edit-esc',
+        title: 'Edit: /outside/example.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/example.txt',
+              oldText: 'before',
+              newText: 'after',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const diffRegion = container!.querySelector<HTMLElement>(
+      '[aria-label="File diff"]',
+    )!;
+    diffRegion.focus();
+    pressKey(diffRegion, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-edit-esc',
+      'reject',
+    );
+  });
+
+  it('omits oversized edit diffs at the approval boundary', () => {
+    // The approval card renders synchronously into an [role=alertdialog], so
+    // an outsized edit would freeze the panel and drown the accessible
+    // description — surface a short notice instead. The transcript
+    // completed-edit path stays coarse but visible; the cap belongs to the
+    // approval boundary, not to buildUnifiedDiff itself.
+    const bigOld = 'line\n'.repeat(2_000);
+    const bigNew = 'line\n'.repeat(2_000) + 'extra';
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-big',
+        kind: 'permission',
+        requestId: 'request-edit-big',
+        sessionId: 'session-edit-big',
+        title: 'Edit: /outside/big.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/big.txt',
+              oldText: bigOld,
+              newText: bigNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+  });
+
+  it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
+    // The sibling test above uses many short lines, so it only ever trips
+    // `tooManyLines`. The char gate decides on its own for any edit with
+    // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
+    // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
+    // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-wide',
+        kind: 'permission',
+        requestId: 'request-edit-wide',
+        sessionId: 'session-edit-wide',
+        title: 'Edit: /outside/wide.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/wide.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval
+              request={{ ...adapted, options: request.options }}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    expect(container!.textContent).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(container!.textContent).not.toContain('x'.repeat(140));
+    expect(container!.textContent).not.toContain('y'.repeat(140));
+  });
+
   it('renders generic parameter content even when it equals the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
     const adapted = extractPendingPermission([
       {
         id: 'permission-input',
         kind: 'permission',
         requestId: 'request-input',
         sessionId: 'session-input',
-        title: '{}',
+        title: text,
         options: [],
-        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        toolCall: {
+          rawInput: input,
+          _meta: { toolName: 'mcp__sample__write' },
+        },
         preview: { kind: 'generic' },
         createdAt: 1,
         updatedAt: 1,
@@ -154,7 +420,7 @@ describe('ToolApproval accessibility', () => {
     ])!;
     render(undefined, { ...adapted, options: request.options });
     const preview = container!.querySelector('pre');
-    expect(preview?.textContent).toBe('{}');
+    expect(preview?.textContent).toBe(text);
     const describedBy = container!
       .querySelector('[role="alertdialog"]')
       ?.getAttribute('aria-describedby')
@@ -165,6 +431,92 @@ describe('ToolApproval accessibility', () => {
       'request-input',
       'reject',
     );
+  });
+
+  it('omits the content body when the tool input is empty', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-empty-input',
+        kind: 'permission',
+        requestId: 'request-empty-input',
+        sessionId: 'session-input',
+        title: '{}',
+        options: [],
+        toolCall: { rawInput: {}, _meta: { toolName: 'mcp__sample__write' } },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    expect(container!.querySelector('pre')).toBeNull();
+  });
+
+  it('renders the command block for an execute-kind tool under a non-canonical name', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-exec',
+        kind: 'permission',
+        requestId: 'request-exec',
+        sessionId: 'session-exec',
+        title: 'mcp__shell__run: ls -la',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'mcp__shell__run' },
+          rawInput: { command: 'ls -la' },
+          content: [],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const command = container!.querySelector('pre');
+    expect(command?.textContent).toBe('ls -la');
+  });
+
+  it('renders exec warnings alongside the command block', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-monitor',
+        kind: 'permission',
+        requestId: 'request-monitor',
+        sessionId: 'session-monitor',
+        title: 'monitor: ls $(pwd)',
+        options: [],
+        toolCall: {
+          kind: 'execute',
+          _meta: { toolName: 'monitor' },
+          rawInput: { command: 'ls $(pwd)' },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: 'Command substitution detected: $(pwd)',
+              },
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const blocks = Array.from(container!.querySelectorAll('pre')).map(
+      (el) => el.textContent,
+    );
+    expect(blocks).toContain('ls $(pwd)');
+    expect(blocks).toContain('Command substitution detected: $(pwd)');
+    const describedBy = container!
+      .querySelector('[role="alertdialog"]')
+      ?.getAttribute('aria-describedby');
+    for (const el of Array.from(container!.querySelectorAll('pre'))) {
+      expect(describedBy).toContain(el.id);
+    }
   });
 
   it('keeps the complete literal parameter body available without interpreting markup', () => {

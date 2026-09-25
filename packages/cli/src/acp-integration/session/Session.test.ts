@@ -75,6 +75,7 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   BridgeClient,
@@ -10911,6 +10912,125 @@ describe('Session', () => {
       ]);
     });
 
+    it.each([
+      ['file', '@README.md'],
+      ['mcp', '@mcp:o2'],
+      ['extension', '@ext:browser'],
+    ])('records %s input annotations for replay', async (kind, text) => {
+      const inputAnnotations = [
+        {
+          type: 'reference',
+          start: 0,
+          end: text.length,
+          text,
+          reference: { id: text, kind, value: text.slice(1), serialized: text },
+        },
+      ];
+      const expectedAnnotations = structuredClone(inputAnnotations);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text }],
+          _meta: {
+            [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations,
+            privateRequestId: 'not-for-history',
+          },
+        },
+        { version: 1, sessionId: 'test-session-id', promptId: 'tag-prompt' },
+        undefined,
+        'model-only prompt',
+      );
+      inputAnnotations[0].reference.value = 'changed after submission';
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        text,
+        undefined,
+        {
+          displayText: text,
+          hookContext: '',
+          inputAnnotations: expectedAnnotations,
+        },
+        'tag-prompt',
+      );
+      expect(textParts(firstSentMessage())).toEqual(['model-only prompt']);
+    });
+
+    it.each([null, 'invalid', {}, [], [null], ['x'], [[null]]])(
+      'ignores invalid or empty input annotations (%j)',
+      async (inputAnnotations) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: { inputAnnotations },
+        });
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'hello',
+          undefined,
+          undefined,
+          undefined,
+        );
+      },
+    );
+
+    it('drops non-object elements from input annotations', async () => {
+      const valid = {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [null, 'x', valid] },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        {
+          displayText: 'hello',
+          hookContext: '',
+          inputAnnotations: [valid],
+        },
+        undefined,
+      );
+    });
+
+    it('ignores input annotations beyond the daemon cap', async () => {
+      const inputAnnotations = Array.from({ length: 257 }, (_, i) => ({
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: `ref-${i}`, kind: 'file', value: `f${i}` },
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        undefined,
+        undefined,
+      );
+    });
+
     it.each(['read both', ''])(
       'records original resource links independently of model expansion (%j)',
       async (text) => {
@@ -16755,6 +16875,43 @@ describe('Session', () => {
       },
     );
 
+    it('keeps SSH workspace file references for remote tools without reading local files', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ssh-ref-')),
+      );
+      const localImage = path.join(tempDir, 'image.png');
+      await fs.writeFile(localImage, 'must not read locally');
+      mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi
+        .fn()
+        .mockReturnValue({ isPathWithinWorkspace: () => true });
+      const readManyFilesSpy = vi.spyOn(core, 'readManyFiles');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: `Inspect @${localImage}` },
+            {
+              type: 'resource_link',
+              uri: `file://${localImage}`,
+              name: 'image.png',
+              mimeType: 'image/png',
+            },
+          ],
+        });
+        expect(readManyFilesSpy).not.toHaveBeenCalled();
+        expect(textParts(firstSentMessage())).toContain(`@${localImage}`);
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('preserves unsupported image @ files for the vision bridge', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-resource-')),
@@ -19930,10 +20087,19 @@ describe('Session', () => {
                 execution_status?: string;
                 success?: boolean;
                 error_type?: string;
+                started_at_ms?: number;
+                duration_ms?: number;
+                'event.timestamp'?: string;
               },
           )
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.call_id).toBe('call-1');
+        // The start the duration was measured from, so start + duration is the
+        // call's end, which cannot be after the event was logged.
+        expect(toolEvent?.started_at_ms).toEqual(expect.any(Number));
+        expect(
+          toolEvent!.started_at_ms! + toolEvent!.duration_ms!,
+        ).toBeLessThanOrEqual(Date.parse(toolEvent!['event.timestamp']!));
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.execution_status).toBe('error');
         expect(toolEvent?.success).toBe(false);
@@ -27315,10 +27481,69 @@ describe('Session', () => {
           },
         );
 
+        // No display projection and no annotations ⇒ no `systemPayload`:
+        // pins the deferred branch's no-payload arm so a regression to
+        // unconditional payload recording fails here.
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/advisor check my work',
           undefined,
           undefined,
+          'daemon-advisor',
+        );
+      });
+
+      it('records input annotations for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor check my work' }],
+            _meta: {
+              [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [
+                {
+                  type: 'reference',
+                  start: 15,
+                  end: 22,
+                  text: 'my work',
+                  reference: { id: 'work', kind: 'file', value: 'work' },
+                },
+              ],
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            hookContext: '',
+            inputAnnotations: [
+              {
+                type: 'reference',
+                start: 15,
+                end: 22,
+                text: 'my work',
+                reference: { id: 'work', kind: 'file', value: 'work' },
+              },
+            ],
+          },
           'daemon-advisor',
         );
       });
@@ -37975,6 +38200,167 @@ describe('Session', () => {
   });
 
   describe('runToolCalls', () => {
+    it.each([false, true])(
+      'emits approved tool metadata before execution with preparation=%s',
+      async (prepared) => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        const toolName = 'mcp__inventory__lookup';
+        const args = {
+          query: 'approved item',
+          description: 'Lookup approved data',
+        };
+        const updates = vi.spyOn(session, 'sendUpdate');
+        let beforeExecution: Array<Parameters<Session['sendUpdate']>[0]> = [];
+        const execute = vi.fn().mockImplementation(async () => {
+          beforeExecution = updates.mock.calls.map(([update]) => update);
+          return { llmContent: 'executed', returnDisplay: 'executed' };
+        });
+        const tool = mockConfirmingTool(toolName, execute);
+        tool.displayName = 'Inventory lookup';
+        tool.kind = core.Kind.Read;
+        const invocation = tool.build();
+        invocation.getDescription.mockReturnValue('Lookup approved data');
+        invocation.toolLocations.mockReturnValue([
+          { path: '/tmp/approved-item', line: 7 },
+        ]);
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        vi.mocked(mockClient.requestPermission).mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+        if (prepared) {
+          await (
+            session as unknown as {
+              toolCallEmitter: import('./emitters/tool-call-emitter.js').ToolCallEmitter;
+            }
+          ).toolCallEmitter.emitStart({
+            callId: 'approved-metadata',
+            toolName,
+            args: {},
+            phase: 'preparing',
+          });
+        }
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'approved-prompt', [
+          { id: 'approved-metadata', name: toolName, args },
+        ]);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          output: 'executed',
+        });
+        expect(
+          beforeExecution.filter(
+            (update) =>
+              'toolCallId' in update &&
+              update.toolCallId === 'approved-metadata' &&
+              update.status === 'in_progress',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            sessionUpdate: prepared ? 'tool_call_update' : 'tool_call',
+            toolCallId: 'approved-metadata',
+            status: 'in_progress',
+            rawInput: args,
+            title: 'Inventory lookup: Lookup approved data',
+            kind: 'read',
+            locations: [{ path: '/tmp/approved-item', line: 7 }],
+            _meta: expect.objectContaining({
+              toolName,
+              startedAt: expect.any(Number),
+              provenance: 'mcp',
+              serverId: 'inventory',
+            }),
+          }),
+        ]);
+      },
+    );
+
+    it('sends approved arguments before execution starts', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const args = {
+        command: 'printf approved',
+        description: 'Inspect approved command',
+      };
+      const updates = vi.spyOn(session, 'sendUpdate');
+      const execute = vi.fn().mockImplementation(async () => {
+        expect(updates.mock.calls.map(([update]) => update)).toContainEqual(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'approved-call',
+            status: 'in_progress',
+            rawInput: args,
+            _meta: expect.objectContaining({
+              toolName: 'approved_tool',
+              startedAt: expect.any(Number),
+            }),
+          }),
+        );
+        return { llmContent: 'executed', returnDisplay: 'executed' };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('approved_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'approved-prompt', [
+        { id: 'approved-call', name: 'approved_tool', args },
+      ]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
+    it('executes an approved tool even if timing notification fails', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('timing_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      const original = session.sendUpdate.bind(session);
+      let rejectedTiming = 0;
+      vi.spyOn(session, 'sendUpdate').mockImplementation(async (update) => {
+        if (
+          update.sessionUpdate === 'tool_call' &&
+          update.status === 'in_progress' &&
+          update._meta?.['startedAt']
+        ) {
+          rejectedTiming++;
+          throw new Error('timing transport failure');
+        }
+        return original(update);
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as {
+          runToolCalls: (
+            signal: AbortSignal,
+            promptId: string,
+            calls: FunctionCall[],
+          ) => Promise<{ parts: Part[] }>;
+        }
+      ).runToolCalls(new AbortController().signal, 'timing-prompt', [
+        { id: 'timing-call', name: 'timing_tool', args: {} },
+      ]);
+      expect(rejectedTiming).toBe(1);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
     type ToolCallInternals = {
       runToolCalls: (
         abortSignal: AbortSignal,
@@ -38461,7 +38847,7 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
-
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-missing-name', [
@@ -38487,6 +38873,12 @@ describe('Session', () => {
           error_type: core.ToolErrorType.INVALID_TOOL_PARAMS,
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'missing_name_call',
+      )?.[1];
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         result.parts,
         expect.objectContaining({
@@ -38672,6 +39064,7 @@ describe('Session', () => {
         mockAllowedTool('success_tool', execute),
       );
 
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-success', [
@@ -38690,6 +39083,12 @@ describe('Session', () => {
           execution_status: 'success',
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'success_call',
+      )?.[1];
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         1,
       );

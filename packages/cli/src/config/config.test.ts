@@ -37,6 +37,11 @@ import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
+const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('../serve/ssh-workspace-store.js', () => ({
+  readSshWorkspace: sshWorkspaceProbe,
+}));
+
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
@@ -299,6 +304,45 @@ describe('parseArguments', () => {
 
   afterEach(() => {
     process.argv = originalArgv;
+  });
+
+  it.each([
+    ['--sandbox', 'bwrap'],
+    ['--sandbox=bwrap'],
+    ['-s', 'bwrap'],
+    ['-s=bwrap'],
+  ])(
+    'reports bwrap migration before prompt conflicts: %j',
+    async (...flags) => {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+      mockWriteStderrLine.mockClear();
+      try {
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('Whole-CLI bwrap has been removed'),
+        );
+      } finally {
+        exit.mockRestore();
+      }
+    },
+  );
+
+  it('preserves boolean sandbox flags and literal prompt text', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', '-p', 'bwrap'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      prompt: 'bwrap',
+    });
+    process.argv = ['node', 'script.js', '--no-sandbox', 'query'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'query',
+    });
+    process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
+    expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
   });
 
   it('includes every approval mode description in --help', async () => {
@@ -1231,6 +1275,48 @@ describe('loadCliConfig', () => {
     ]);
   });
 
+  it('isolates SSH configuration from local project services and code-mode-only settings', async () => {
+    sshWorkspaceProbe.mockReturnValueOnce({
+      host: 'host',
+      port: 2222,
+      directory: '/srv/project',
+    });
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig(
+      {
+        tools: {
+          codeModeOnly: true,
+          truncateToolOutputThreshold: 2500,
+          shell: { defaultTimeoutMs: 45000 },
+        },
+        mcpServers: { local: { command: 'must-not-run' } },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        codeModeOnly: false,
+        disableAllHooks: true,
+        mcpServers: {},
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableAutoSkill: false,
+        fileCheckpointingEnabled: false,
+        artifactEnabled: false,
+        executionEnvironment: expect.objectContaining({
+          toolNames: expect.any(Set),
+        }),
+        appendSystemPrompt: expect.stringContaining('/srv/project'),
+      }),
+    );
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];
     vi.stubEnv('RESPONSES_KEY', 'responses-key');
@@ -1694,6 +1780,92 @@ describe('loadCliConfig', () => {
     const config = await loadCliConfig({ modelFallbacks: 'settings-a' }, argv);
 
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
+  });
+
+  it('uses advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+  });
+
+  it('lets --advisor override the persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+  });
+
+  it('lets --advisor off disable a persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
   it('should use settings fallback models when the CLI flag is absent', async () => {
@@ -4850,10 +5022,9 @@ describe('loadCliConfig with includeDirectories', () => {
       ...policy,
       maskedPaths: expect.any(Array),
     });
-    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
-      policy.maskedPaths[0],
-      path.join(policy.workspace, '.qwen', 'review-leases'),
-    ]);
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
     expect(config.getCoreTools()).toEqual(
       expect.arrayContaining([
         ToolNames.SHELL,
@@ -4871,8 +5042,6 @@ describe('loadCliConfig with includeDirectories', () => {
     );
     expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
     const rejectedModes: Array<[string, Partial<CliArgs>]> = [
-      ['interactive frontend', { bare: false }],
-      ['missing prompt', { prompt: undefined }],
       ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
       ['stream-json frontend', { inputFormat: 'stream-json' }],
       ['worktree startup', { worktree: 'review' }],
@@ -4892,8 +5061,25 @@ describe('loadCliConfig with includeDirectories', () => {
           false,
           { shellExecutionSandbox: policy },
         ),
-      ).rejects.toThrow('requires bare noninteractive mode');
+      ).rejects.toThrow('does not yet support');
     }
+    const normal = await loadCliConfig(
+      {},
+      { ...argv, bare: false },
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(normal.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(normal.getBareMode()).toBe(false);
     vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
     await expect(
       loadCliConfig(

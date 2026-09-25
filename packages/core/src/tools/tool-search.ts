@@ -27,7 +27,12 @@ import type {
   ToolResult,
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import {
+  canonicalToolName,
+  resolveRegisteredToolName,
+  ToolNames,
+  ToolDisplayNames,
+} from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -178,6 +183,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // to re-issue another ToolSearch for them instead of silently
     // assuming they were reviewed.
     if (query.toLowerCase().startsWith('select:')) {
+      const knownNames = this.config.getToolRegistry().getAllToolNames();
       const seen = new Set<string>();
       const names: string[] = [];
       const truncated: string[] = [];
@@ -190,7 +196,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // for a tool literally named `"foo"` (with quotes) and miss.
         const stripped = stripMatchingQuotes(raw.trim());
         if (!stripped) continue;
-        const key = stripped.toLowerCase();
+        // Key on the RESOLVED tool, not the raw lowercase spelling: two names
+        // differing only by case can be two genuinely different tools, and
+        // collapsing them would silently drop one from every report list. A
+        // name that resolves to nothing keys on the requested spelling, so two
+        // unresolvable spellings of one alias (`task`/`agent`) are both
+        // reported instead of collapsing into one.
+        const aliased = canonicalToolName(stripped);
+        const resolved = resolveRegisteredToolName(aliased, knownNames);
+        const key = Array.isArray(resolved)
+          ? `ambiguous\u0000${resolved.join('\u0000')}`
+          : (resolved ?? `unresolved\u0000${stripped.toLowerCase()}`);
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {
@@ -311,16 +327,29 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const bridgeUnavailable: string[] = [];
     const bridgeAvailable = isDeferredToolBridgeAvailable(registry);
 
-    // Case-insensitive lookup across all known names (instance names + factory
-    // names). Preserve the user-supplied casing in the error list so the
-    // response matches what the model asked for.
-    const lowerIndex = new Map<string, string>();
-    for (const realName of registry.getAllToolNames()) {
-      lowerIndex.set(realName.toLowerCase(), realName);
-    }
+    // Resolve across all known names (instance names + factory names) with
+    // the rule tool_call applies, so the schema reviewed here is the tool
+    // that call invokes. Preserve the user-supplied casing in the error list
+    // so the response matches what the model asked for.
+    const knownNames = registry.getAllToolNames();
+    const ambiguous: Array<{ requested: string; candidates: string[] }> = [];
 
     for (const requested of names) {
-      const canonical = lowerIndex.get(requested.toLowerCase());
+      // Canonicalize the legacy alias first, exactly as tool_call does, so the
+      // two halves answer identically for `replace`/`task`/`search_file_content`:
+      // without it `select:replace` reports "Not found" while `tool_call{replace}`
+      // resolves and invokes `edit`, and the invocation then takes the
+      // never-reviewed pass-through. `resolveBuiltinToolName` is deliberately not
+      // used: it also maps display names, which tool_call does not, so discovery
+      // would become broader than invocation instead of identical.
+      const canonical = resolveRegisteredToolName(
+        canonicalToolName(requested),
+        knownNames,
+      );
+      if (Array.isArray(canonical)) {
+        ambiguous.push({ requested, candidates: canonical });
+        continue;
+      }
       if (!canonical) {
         missing.push(requested);
         continue;
@@ -394,6 +423,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       reviewed.push(tool);
     }
 
+    // Record every tool this returned, not only the currently hidden ones: a
+    // tool revealed here can be hidden again later (session restore, preload
+    // budget), and gating the record on the reveal state at review time made
+    // tool_call's comparison depend on state the model neither controls nor
+    // observes (#11321).
+    for (const tool of reviewed) {
+      registry.recordReviewedDeclaration(tool);
+    }
+
     // Escape tag boundary characters in the JSON-stringified schema so any
     // `</function>`
     // (or `</functions>`) substring inside a tool's description / enum
@@ -412,6 +450,22 @@ class ToolSearchInvocation extends BaseToolInvocation<
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
+    }
+    if (ambiguous.length > 0) {
+      const header = llmContent ? '\n\n' : '';
+      // Mirror the twin refusal on the invocation half (tool-call.ts): quote
+      // the rejected spelling so the response still echoes what the model
+      // asked for, but keep the actionable slot holding names that actually
+      // resolve. Presenting the rejected spelling AS "the exact name" invited a
+      // byte-identical re-issue of the same select:, which loop detection
+      // counts as a duplicate call and can end the turn as a loop.
+      const entries = ambiguous.map(
+        ({ requested, candidates }) =>
+          `"${requested}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
+            .map((name) => `select:${name}`)
+            .join(' or ')}.`,
+      );
+      llmContent += `${header}Ambiguous — ${entries.join('\n')}`;
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
@@ -451,6 +505,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     if (reviewed.length > 0)
       displayParts.push(`Reviewed ${reviewed.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (ambiguous.length > 0)
+      displayParts.push(`${ambiguous.length} ambiguous`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (bridgeUnavailable.length > 0)
       displayParts.push(`${bridgeUnavailable.length} bridge unavailable`);

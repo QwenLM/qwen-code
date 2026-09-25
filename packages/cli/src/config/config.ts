@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
@@ -91,11 +93,15 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
+import {
+  BWRAP_MIGRATION_MESSAGE,
+  validateExecutionSandboxSelection,
+} from './execution-sandbox-settings.js';
+import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
-import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { insertAnswerTextSeparator } from '../commands/sessions/control-commands.js';
@@ -120,6 +126,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
+import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -173,6 +180,7 @@ export function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -627,6 +635,7 @@ export async function parseArguments(): Promise<CliArgs> {
       yargsInstance
         .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
+        .option('advisor', DEFAULT_COMMAND_OPTIONS.advisor)
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],
           string: true,
@@ -766,6 +775,21 @@ export async function parseArguments(): Promise<CliArgs> {
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
+          const optionArgs = rawArgv.slice(
+            0,
+            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
+          );
+          if (
+            optionArgs.some(
+              (arg, index) =>
+                arg === '--sandbox=bwrap' ||
+                arg === '-s=bwrap' ||
+                ((arg === '--sandbox' || arg === '-s') &&
+                  optionArgs[index + 1] === 'bwrap'),
+            )
+          ) {
+            return BWRAP_MIGRATION_MESSAGE;
+          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -879,8 +903,6 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     .command(boardCommand)
-    // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
@@ -889,6 +911,13 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
     .command(sandboxCommand);
+
+  // /review skill helpers (presubmit checks, cleanup). The module pulls in
+  // every review subcommand, so it is only loaded when it can match.
+  if (rawArgv.includes('review')) {
+    const { reviewCommand } = await import('../commands/review.js');
+    yargsInstance.command(reviewCommand);
+  }
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -1227,6 +1256,58 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(
+  config: Config,
+  rawModel: string,
+  startupContext: {
+    fastModel?: string;
+    currentModel?: string;
+    currentAuthType?: AuthType;
+  },
+): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const availability = checkAdvisorModelAvailability(
+    config,
+    modelName,
+    startupContext,
+  );
+  if (!availability.available) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        availability.availableModelIds,
+      ),
+    );
+  }
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1640,32 +1721,28 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
+  const sshWorkspace = readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const requestedShellExecutionSandbox = hostPolicy?.shellExecutionSandbox;
-  const shellExecutionSandbox = requestedShellExecutionSandbox
-    ? {
-        ...requestedShellExecutionSandbox,
-        maskedPaths: [
-          ...(requestedShellExecutionSandbox.maskedPaths ?? []),
-          path.join(
-            requestedShellExecutionSandbox.workspace,
-            '.qwen',
-            'review-leases',
-          ),
-        ],
-      }
-    : undefined;
-  const sandboxEnabled = Boolean(shellExecutionSandbox);
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings,
+    argv,
+  );
+  const sandboxEnabled = Boolean(
+    executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
+  );
+  if (executionSandboxSettings && hostPolicy?.shellExecutionSandbox) {
+    throw new Error(
+      'Choose operator settings or a programmatic execution sandbox policy, not both.',
+    );
+  }
   if (
     sandboxEnabled &&
-    (!bareMode ||
-      !argv.prompt ||
-      argv.promptInteractive !== undefined ||
+    (argv.promptInteractive !== undefined ||
       argv.inputFormat === 'stream-json' ||
       argv.acp ||
       argv.experimentalAcp ||
@@ -1679,7 +1756,7 @@ export async function loadCliConfig(
       provisionalWorkspace)
   ) {
     throw new Error(
-      'The internal tool execution sandbox requires bare noninteractive mode without ACP, worktrees, LSP, MCP, extensions or provisional workspaces.',
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
     );
   }
   const safeMode =
@@ -1720,6 +1797,13 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+  const requestedShellExecutionSandbox =
+    hostPolicy?.shellExecutionSandbox ??
+    (executionSandboxSettings
+      ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
+      : undefined);
+  const shellExecutionSandbox = requestedShellExecutionSandbox;
+
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
@@ -1780,7 +1864,10 @@ export async function loadCliConfig(
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
-    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2332,6 +2419,8 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const advisorModel =
+    bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
   // `undefined` is the meaningful third state here: it defers to core's
   // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
@@ -2659,6 +2748,7 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:
@@ -2732,7 +2822,44 @@ export async function loadCliConfig(
     executionEnvironmentFactory: agentExecutionFactory(),
   };
 
+  if (sshWorkspace) {
+    configParams.executionEnvironment = new SshExecutionEnvironment(
+      sshWorkspace,
+      cwd,
+      {
+        outputThreshold: configParams.truncateToolOutputThreshold,
+        shellDefaultTimeoutMs: configParams.shellDefaultTimeoutMs,
+        customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
+      },
+    );
+    configParams.codeModeOnly = false;
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.enableManagedAutoMemory = false;
+    configParams.enableManagedAutoDream = false;
+    configParams.enableTeamMemory = false;
+    configParams.enableTeamMemorySync = false;
+    configParams.enableAutoSkill = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.appendSystemPrompt = [
+      argv.appendSystemPrompt,
+      `This is an SSH workspace on ${sshWorkspace.host}. The project directory is ${sshWorkspace.directory}. All file, search and shell tools operate on that remote project. The local directory ${cwd} is only for session storage; it is not the project. Use remote absolute paths or paths relative to the remote project. Read QWEN.md and AGENTS.md at the remote project root before working if they exist. Remote hooks, skills, MCP, LSP, subagents, workflows and worktree management are unavailable in this session.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
   const config = new Config(configParams);
+  if (advisorModel) {
+    validateCliAdvisorModel(config, advisorModel, {
+      fastModel: settings.fastModel,
+      currentModel: resolvedModel,
+      currentAuthType: selectedAuthType,
+    });
+  }
 
   // Load the selected transport only when an external subagent is requested.
   config.setExternalAgentExecutor({

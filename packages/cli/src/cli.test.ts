@@ -145,12 +145,15 @@ vi.mock('./commands/mcp.js', () => ({
 }));
 
 describe('resolveBootstrapRoute', () => {
-  it('routes top-level help, version, serve, and mcp correctly', async () => {
+  it('routes top-level help, version, serve, mcp, and the Runtime worker correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
+      'managed-runtime-worker',
+    );
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -858,6 +861,16 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('rejects arguments on the hidden Runtime worker route', async () => {
+    await runCliEntry(['managed-runtime-worker', '--help']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('runs a managed update worker without starting the CLI', async () => {
@@ -2044,7 +2057,9 @@ describe('bootstrap import boundaries', () => {
         expect(JSON.parse(output)).toEqual({
           args: ['--prompt', 'a&b'],
           skip: 'true',
-          hasLauncherPid: true,
+          // Outside Windows the CLI runs inside the launcher process, so
+          // there is no separate launcher pid to wait for.
+          hasLauncherPid: false,
         });
       } finally {
         rmSync(tempDir, { recursive: true, force: true });

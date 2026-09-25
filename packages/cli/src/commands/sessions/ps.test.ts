@@ -10,6 +10,7 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
+const ignoreBrokenPipe = vi.fn();
 const isPidAlive = vi.fn();
 /** The start token the OS would report for a pid right now. */
 const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
@@ -72,6 +73,7 @@ const stdout: string[] = [];
 const stderr: string[] = [];
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: (...args: unknown[]) => ignoreBrokenPipe(...args),
   writeStdoutLine: (line: string) => stdout.push(line),
   writeStderrLine: (line: string) => stderr.push(line),
 }));
@@ -159,6 +161,7 @@ beforeEach(() => {
   stderr.length = 0;
   listLiveSessions.mockReset();
   listAgentViewSessionSnapshots.mockReset();
+  ignoreBrokenPipe.mockReset();
   listAgentViewSessionSnapshots.mockResolvedValue([]);
   isPidAlive.mockReset();
   isPidAlive.mockReturnValue(true);
@@ -580,5 +583,26 @@ describe('qwen sessions ps', () => {
     expect(stringWidth(row.slice(0, row.indexOf('4242')))).toBe(
       NAME_COL + KIND_COL,
     );
+  });
+
+  it('installs the output error guard before reading the managed store', async () => {
+    // Both mocks only record that they ran; the expectation is raised
+    // afterwards, in the test body. An expectation thrown from inside a
+    // mock implementation rides out on the rejection that
+    // `readManagedRows` deliberately catches, so it is swallowed along
+    // with the error and the case passes with the guard deleted.
+    const order: string[] = [];
+    ignoreBrokenPipe.mockImplementation(() => {
+      order.push('guard');
+    });
+    listLiveSessions.mockResolvedValue([record()]);
+    listAgentViewSessionSnapshots.mockImplementation(() => {
+      order.push('store');
+      return Promise.reject(new Error('broken store'));
+    });
+
+    await run({ json: true });
+
+    expect(order).toEqual(['guard', 'store']);
   });
 });
