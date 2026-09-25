@@ -1627,7 +1627,10 @@ function stripBashCommentTail(line: string): string {
       dollarPending = !ansiCIntroducer;
       continue;
     }
-    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) {
+    if (
+      ch === '#' &&
+      (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')
+    ) {
       return line.substring(0, i);
     }
   }
@@ -1642,10 +1645,7 @@ function stripBashCommentTail(line: string): string {
 export function rawCommandCandidatesForRules(
   command: string,
 ): CompoundCommandSegment[] {
-  const stripped = command
-    .split(/\r?\n/)
-    .map(stripBashCommentTail)
-    .join('\n');
+  const stripped = command.split(/\r?\n/).map(stripBashCommentTail).join('\n');
   return splitCompoundCommandSegmentsRaw(stripped);
 }
 
