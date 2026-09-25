@@ -1316,6 +1316,45 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('does not treat a flag-led launch naming the supervisor flag as a spawn', async () => {
+      // `qwen --yolo --internal-agent-view-supervisor audit the release` —
+      // an unquoted $TASK word-split, or a prompt that names the flag. It
+      // has no positional BEFORE the flag, so the scan matched and the
+      // intercept bound the process-global supervisor socket, persisted
+      // supervisor.json naming this foreground pid with a live authToken,
+      // and served silently with empty stdout/stderr until killed: the
+      // requested launch never happened, and every later `qwen --bg`
+      // dispatch connected to a process the user was about to Ctrl-C. The
+      // spawner emits exactly one token, so any trailing word is prompt
+      // data and the launch belongs to the parser.
+      await runCliEntry([
+        '--yolo',
+        INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+        'audit',
+        'the',
+        'release',
+      ]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not treat a pty-host flag with an extra trailing token as a spawn', async () => {
+      // Twin of the case above: the spawner emits exactly [flag,
+      // launchPath, socketPath], so a fourth token means these were prompt
+      // words — reading two of them as a launch record and a socket path
+      // silently dropped the rest and died on an unrelated fs error.
+      await runCliEntry([
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+        'extra-token',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('does not treat the background flag as a value-taking flag’s value', async () => {
       // `qwen -p --bg`: the token sits in the prompt value slot, so it is
       // the launch's data, not a background launch — a bare includes()
@@ -1693,22 +1732,26 @@ describe('runCliEntry', () => {
     // declare must sit in the gate set — a new alias that misses it
     // silently dispatches the subcommand launch as a prompt.
     const { authCommand } = await import('./commands/auth.js');
+    const { boardCommand } = await import('./commands/board.js');
     const { channelCommand } = await import('./commands/channel.js');
     const { extensionsCommand } = await import('./commands/extensions.js');
     const { hooksCommand } = await import('./commands/hooks.js');
     const { mcpCommand } = await import('./commands/mcp.js');
     const { reviewCommand } = await import('./commands/review.js');
+    const { sandboxCommand } = await import('./commands/sandbox.js');
     const { serveCommand } = await import('./commands/serve.js');
     const { sessionsCommand } = await import('./commands/sessions.js');
     const { updateCommand } = await import('./commands/update.js');
 
     const commandModules = [
       authCommand,
+      boardCommand,
       channelCommand,
       extensionsCommand,
       hooksCommand,
       mcpCommand,
       reviewCommand,
+      sandboxCommand,
       serveCommand,
       sessionsCommand,
       updateCommand,

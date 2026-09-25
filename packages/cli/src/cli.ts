@@ -715,8 +715,9 @@ export async function runCliEntry(
     const backgroundFlag = backgroundFlagIndex(argv);
 
     // The internal intercepts fire only on a spawn-shaped argv: the flag
-    // with no positional before it. Both spawners produce exactly that —
-    // the supervisor `[INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]`, the pty host
+    // with no positional before it AND nothing after it that its spawner
+    // does not emit. Both spawners produce exactly one shape — the
+    // supervisor `[INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]`, the pty host
     // `[flag, launchPath, socketPath]`, where the two paths are the
     // positionals that follow. An ordinary positional-led launch whose
     // prompt words merely NAME the flag (`qwen fix the
@@ -726,11 +727,21 @@ export async function runCliEntry(
     // until killed, where the merge base's strict parser rejected the same
     // argv loudly. The pty-host twin died the same way on an unrelated
     // fs/JSON error, having read two prompt words as a launch record and a
-    // socket path.
+    // socket path. A flag-LED launch is not a spawn either — `qwen --yolo
+    // --internal-agent-view-supervisor audit the release` has no
+    // positional before the flag, and without the trailing-arity term it
+    // hijacked the requested launch into the same silent foreground
+    // daemon.
     const firstRoutablePositional = firstPositionalArgIndex(routableArgv);
-    const isSpawnShaped = (flagAt: number): boolean =>
+    // `trailing` counts the tokens AFTER the flag rather than an absolute
+    // argv length: both spawners build the child argv through
+    // buildCurrentQwenCliArgv, whose DEV branch prepends [execPath,
+    // tsxCli, entrypoint], and the child reads the same args back at
+    // slice(2).
+    const isSpawnShaped = (flagAt: number, trailing: number): boolean =>
       flagAt !== -1 &&
-      (firstRoutablePositional === -1 || firstRoutablePositional > flagAt);
+      (firstRoutablePositional === -1 || firstRoutablePositional > flagAt) &&
+      routableArgv.length - flagAt - 1 === trailing;
 
     // This process may have been spawned to BE the Agent View supervisor.
     // The flag that says so is internal — the strict parser below would
@@ -748,7 +759,7 @@ export async function runCliEntry(
             INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
           )
         : -1;
-    if (isSpawnShaped(supervisorFlag)) {
+    if (isSpawnShaped(supervisorFlag, 0)) {
       const { runAsAgentViewSupervisor } = await import(
         './agent-view/background-entry.js'
       );
@@ -765,7 +776,8 @@ export async function runCliEntry(
     // the spawn must be picked up here before parsing, or the host exits
     // on 'Unknown arguments' and every --bg launch fails to start a
     // session. The two tokens after the flag are the launch record and
-    // the socket to serve; a spawn that lacks them falls through to the
+    // the socket to serve; a spawn that carries fewer — or MORE, which is
+    // a prompt naming the flag rather than a spawn — falls through to the
     // parser, which rejects the flag. The scan is value-slot-aware like
     // its twin above.
     const ptyHostFlag =
@@ -776,7 +788,7 @@ export async function runCliEntry(
             INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
           )
         : -1;
-    if (isSpawnShaped(ptyHostFlag)) {
+    if (isSpawnShaped(ptyHostFlag, 2)) {
       const launchPath = routableArgv[ptyHostFlag + 1];
       const socketPath = routableArgv[ptyHostFlag + 2];
       if (launchPath !== undefined && socketPath !== undefined) {
@@ -840,9 +852,7 @@ export async function runCliEntry(
       // help fall-through the whole-argv scan let through. A `--help`
       // inside one quoted token never triggered this; the trigger is a
       // help token as its own argv word.
-      const carriedWord = backgroundFlagPromptWord(
-        argv[backgroundFlag] ?? '',
-      );
+      const carriedWord = backgroundFlagPromptWord(argv[backgroundFlag] ?? '');
       let helpScanEnd = backgroundFlag;
       if (carriedWord !== undefined) {
         helpScanEnd = argv.length;

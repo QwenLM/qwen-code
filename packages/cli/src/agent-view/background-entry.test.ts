@@ -10,6 +10,7 @@ const ensureAgentViewSupervisor = vi.fn();
 const supervisorDispatch = vi.fn();
 const dispatchAgentViewSession = vi.fn();
 const listAgentViewSessionStates = vi.fn();
+const readAgentViewWorker = vi.fn();
 
 vi.mock('./supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: (...args: unknown[]) =>
@@ -22,12 +23,18 @@ vi.mock('./supervisor-dispatch.js', () => ({
 }));
 
 // The store is the positive "the session was already recorded" signal the
-// dispatch rejection cannot carry; the entry reads it through this one
-// helper. Empty by default, so a rejection stays a failure unless a test
-// says the store holds something.
+// dispatch rejection cannot carry; the entry reads it through these two
+// helpers — the row list, and the per-session worker record that carries
+// the pids proving a PTY host was actually spawned. Empty rows by
+// default, so a rejection stays a failure unless a test says the store
+// holds something; a spawned worker record by default, so a test that
+// pins the row predicate is not also silently asserting on pids. Both
+// exports must be present: the entry's fail-closed catch would swallow a
+// missing-helper TypeError and flip every exit-2 case to exit 1.
 vi.mock('./supervisor-store.js', () => ({
   listAgentViewSessionStates: (...args: unknown[]) =>
     listAgentViewSessionStates(...args),
+  readAgentViewWorker: (...args: unknown[]) => readAgentViewWorker(...args),
 }));
 
 const stdout: string[] = [];
@@ -83,6 +90,7 @@ function supervisorClosedError(): Error & { code: string } {
 // launch.
 function recordedSession(
   overrides: Partial<{
+    sessionId: string;
     createdAt: string;
     projectCwd: string;
     ownership: string;
@@ -117,6 +125,14 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
   listAgentViewSessionStates.mockReset().mockResolvedValue([]);
+  // The pids the dispatch handler persists right after the spawn, before
+  // any further store I/O. Present by default so the row-predicate cases
+  // below keep testing rows; the liveness cases override it.
+  readAgentViewWorker.mockReset().mockResolvedValue({
+    sessionId: 'sess-recorded',
+    hostPid: 424242,
+    workerPid: 424243,
+  });
 });
 
 afterEach(() => {
@@ -438,6 +454,71 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).not.toContain(
       'Could not start a background session',
     );
+    // The pid is read for the MATCHED row, not for whatever session this
+    // launch happened to be told about — the dispatch failed, so it was
+    // never told one.
+    expect(readAgentViewWorker).toHaveBeenCalledWith('sess-recorded');
+  });
+
+  it('reports a recorded session that never spawned a PTY host as a failure, not in flight', async () => {
+    // The session-state record is byte-identical before and after the
+    // spawn: the handler writes it first, and the pids go into the WORKER
+    // record afterwards. So a recorded row on its own certified a launch
+    // that spawned nothing — a supervisor killed between the store write
+    // and the spawn, or one that threw while writing the launch record,
+    // which happens OUTSIDE the try that would roll the row back. The
+    // wrapper was told exit 2 means do not retry, so the task was lost
+    // outright while `qwen sessions ps` showed the orphan as `starting`
+    // with recoverability `blocked` forever. The cost the guard exists to
+    // avoid — a retry starting a second agent — is impossible when no host
+    // was ever spawned, so a pid-less worker record is the retryable
+    // exit 1. This is the pid-less shape dispatchAgentViewSession itself
+    // writes, so the term must read the pid FIELDS, not the record's
+    // existence.
+    supervisorDispatch.mockRejectedValue(supervisorClosedError());
+    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
+    readAgentViewWorker.mockResolvedValue({ sessionId: 'sess-recorded' });
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Could not start a background session');
+    expect(stderr.join('')).not.toContain('may still be starting');
+  });
+
+  it('reports a recorded session with no worker record as a failure, not in flight', async () => {
+    // No worker record at all: nothing was spawned, nothing to orphan, so
+    // a retry cannot start a second agent.
+    supervisorDispatch.mockRejectedValue(supervisorClosedError());
+    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
+    readAgentViewWorker.mockResolvedValue(undefined);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Could not start a background session');
+    expect(stderr.join('')).not.toContain('may still be starting');
+  });
+
+  it('keeps a worker pid on one row enough to certify the launch in flight', async () => {
+    // The scan is over rows, so a pid-less sibling must not mask the row
+    // that did spawn: only one matching row with a host is enough to make
+    // a retry dangerous.
+    supervisorDispatch.mockRejectedValue(supervisorClosedError());
+    listAgentViewSessionStates.mockResolvedValue([
+      recordedSession({ sessionId: 'sess-pidless' }),
+      recordedSession({ sessionId: 'sess-spawned' }),
+    ]);
+    readAgentViewWorker.mockImplementation(async (sessionId: string) =>
+      sessionId === 'sess-spawned'
+        ? { sessionId, hostPid: 424242 }
+        : { sessionId },
+    );
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('may still be starting');
   });
 
   it('reports a session the supervisor terminally failed as a failure, not in flight', async () => {
