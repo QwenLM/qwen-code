@@ -72,3 +72,20 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## Workspace binding
+
+The `com.alibaba.qwen.code.runtimebroker.managedworkspace` package holds the
+W0a Workspace binding contract; see
+[Managed Workspace Binding Contract](../../../docs/design/2026-09-25-managed-workspace-binding-contract.md).
+It defines the Workspace Registry record and an immutable snapshot built from
+deployment configuration, actor-scoped access with an explicit-grant policy,
+a catalog that lists Workspaces and resolves a Session's Workspace selection
+to one resolved Workspace or one typed error, the lexical rule for a
+Session's working directory, and `ContextBinding` with its `contextDigest`.
+The TypeScript implementation in
+`packages/cli/src/serve/managed-workspace-binding.ts` produces the same
+normalized directories and digests; both run the shared fixtures in
+`packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`.
+The package uses only the JDK and no other Broker class, and nothing wires
+it into the Broker service yet.
