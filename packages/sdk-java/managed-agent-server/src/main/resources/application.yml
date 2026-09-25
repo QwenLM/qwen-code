@@ -1,0 +1,81 @@
+spring:
+  application:
+    name: 'qwen-managed-agent-server'
+  datasource:
+    url: '${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3306/qwen_managed_agent}'
+    username: '${SPRING_DATASOURCE_USERNAME:qwen}'
+    password: '${SPRING_DATASOURCE_PASSWORD:}'
+    hikari:
+      maximum-pool-size: '${QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE:20}'
+  flyway:
+    enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: '30s'
+
+server:
+  shutdown: 'graceful'
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: 'health,info'
+
+qwen:
+  managed-agent:
+    session-store:
+      enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
+      base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'
+      workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
+      writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
+    harness:
+      enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
+      base-url: '${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}'
+      token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}'
+      capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}'
+      approval-mode: '${QWEN_MANAGED_AGENT_APPROVAL_MODE:yolo}'
+      connect-timeout: '5s'
+      request-timeout: '30s'
+      heartbeat-interval: '30s'
+    dispatch:
+      scan-delay: '1s'
+      lease-duration: '60s'
+      lease-renew-interval: '20s'
+      retry-initial-delay: '1s'
+      retry-max-delay: '1m'
+      max-pre-admission-retries: 5
+    events:
+      poll-interval: '5s'
+      heartbeat-interval: '15s'
+      stream-timeout: '30m'
+      batch-interval: '75ms'
+      materialize-interval: '100ms'
+      batch-max-events: 64
+      batch-max-bytes: 65536
+    runtime-broker:
+      enabled: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED:false}'
+      host: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST:127.0.0.1}'
+      port: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT:4182}'
+      token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN:}'
+      provisioner: '${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}'
+      workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
+      workspace-generation: '${QWEN_MANAGED_AGENT_WORKSPACE_GENERATION:1}'
+      workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
+      isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'
+      state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}'
+      credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}'
+      credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:}'
+      node-executable: '${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}'
+      worker-entry: '${QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY:}'
+      cli-entry: '${QWEN_MANAGED_AGENT_CLI_ENTRY:}'
+      kubernetes-api-server: '${QWEN_MANAGED_AGENT_KUBERNETES_API_SERVER:https://kubernetes.default.svc}'
+      kubernetes-token-file: '${QWEN_MANAGED_AGENT_KUBERNETES_TOKEN_FILE:/var/run/secrets/kubernetes.io/serviceaccount/token}'
+      kubernetes-ca-file: '${QWEN_MANAGED_AGENT_KUBERNETES_CA_FILE:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}'
+      kubernetes-cluster-uid: '${QWEN_MANAGED_AGENT_KUBERNETES_CLUSTER_UID:}'
+      kubernetes-namespace: '${QWEN_MANAGED_AGENT_KUBERNETES_NAMESPACE:qwen-runtimes}'
+      kubernetes-image: '${QWEN_MANAGED_AGENT_KUBERNETES_IMAGE:}'
+      kubernetes-port: '${QWEN_MANAGED_AGENT_KUBERNETES_PORT:4190}'
+      kubernetes-service-account-name: '${QWEN_MANAGED_AGENT_KUBERNETES_SERVICE_ACCOUNT:}'
+      kubernetes-workspace-claim-name: '${QWEN_MANAGED_AGENT_KUBERNETES_WORKSPACE_CLAIM:}'
+      static-endpoint: '${QWEN_MANAGED_AGENT_STATIC_RUNTIME_ENDPOINT:}'
+      static-token: '${QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN:}'
