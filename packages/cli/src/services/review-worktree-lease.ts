@@ -21,14 +21,13 @@ import {
   join,
   relative,
   resolve,
-  sep,
 } from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   LEASE_PREFIX,
   REVIEW_TMP_DIR,
-  REVIEW_LEASE_DIR,
+  reviewTrustStateDir,
   inertPath,
   reviewBranch,
 } from '../commands/review/lib/paths.js';
@@ -49,7 +48,8 @@ function validTarget(target: string): boolean {
 }
 
 /**
- * Whether a filename under `REVIEW_LEASE_DIR` is a review-worktree lease.
+ * Whether a filename under the trusted review-state directory is a
+ * review-worktree lease.
  * Derived from `validTarget` so the writer, `cleanup`'s sweep guard, and the
  * `cleanupReviewWorktreeLeases` scan share one definition of the lease shape
  * (see the `LEASE_PREFIX` comment in `lib/paths.ts`).
@@ -160,26 +160,7 @@ export interface ReviewWorktreeLease {
 }
 
 function leaseDirectory(repositoryRoot: string): string {
-  const resolved = resolve(repositoryRoot);
-  // Nested geometry (R27-6): a review launched from inside another review's
-  // worktree has a repositoryRoot INSIDE the outer review's read-write
-  // mount, and a plain `join(root, REVIEW_LEASE_DIR)` would put this
-  // session's host-trusted state — the records the finalizer force-removes
-  // worktrees and branches on the say-so of — back inside the writable
-  // surface the move out of `.qwen/tmp` exists to escape. Re-root to the
-  // OUTERMOST enclosing repository's lease directory instead. The scan is
-  // lexical, never git's: a planted pointer would choose where the lock is
-  // written. The re-root is also the correct lock SCOPE — every nested
-  // layer shares the outermost repository's common git dir, so the branch
-  // the lease guards (`qwen-review/pr-<n>`) is one resource across all of
-  // them, and two layers reviewing the same PR genuinely collide on it.
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = (resolved + sep).indexOf(marker);
-  if (at < 0) return join(resolved, REVIEW_LEASE_DIR);
-  const outermostTmp = resolved.slice(0, at + marker.length - 1);
-  // `<host>/.qwen/tmp` → `<host>`: the lease directory beside the outermost
-  // review temp dir is outside every review temp dir on the path.
-  return join(resolve(outermostTmp, '..', '..'), REVIEW_LEASE_DIR);
+  return reviewTrustStateDir(repositoryRoot);
 }
 
 /**
@@ -531,7 +512,10 @@ export function createReviewWorktreeLease(params: {
     return `${JSON.stringify(lease, null, 2)}\n`;
   };
   let data = leaseFor(mintIdentity());
-  mkdirSync(leaseDirectory(repositoryRoot), { recursive: true });
+  mkdirSync(leaseDirectory(repositoryRoot), {
+    recursive: true,
+    mode: 0o700,
+  });
   // The pre-move path is deliberately NOT read for authority here. While the
   // move rolled out, an mtime-bounded read honored a legacy lease that
   // predated the move's landing date — but a pinned-to-the-past cutoff

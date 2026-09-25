@@ -21,6 +21,7 @@ import {
   ChevronRightIcon,
   GitBranchIcon,
   GitCommitIcon,
+  FolderGit2Icon,
   GlobeIcon,
   HistoryIcon,
   Loader2Icon,
@@ -187,6 +188,8 @@ interface BranchPickerPopoverProps {
   onStatusRefreshed?: (status: DaemonWorkspaceGitStatus) => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
+  /** Opens the worktree manager. */
+  onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
   children: React.ReactNode;
@@ -418,6 +421,7 @@ export function BranchPickerPopover({
   onStatusRefreshed,
   onOpenDiff,
   onOpenCommit,
+  onOpenWorktrees,
   onOpenLog,
   children,
 }: BranchPickerPopoverProps) {
@@ -1423,6 +1427,7 @@ export function BranchPickerPopover({
     t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
     t('branchPicker.action.viewChanges').toLowerCase().includes(q) ||
     t('branchPicker.action.manageRemotes').toLowerCase().includes(q) ||
+    t('branchPicker.action.worktrees').toLowerCase().includes(q) ||
     t('branchPicker.action.history').toLowerCase().includes(q);
 
   useEffect(() => {
@@ -1709,6 +1714,26 @@ export function BranchPickerPopover({
                           {t('branchPicker.action.manageRemotes')}
                         </span>
                       </button>
+                      {onOpenWorktrees && (
+                        <button
+                          type="button"
+                          className={styles.actionItem}
+                          disabled={!!busyAction}
+                          onClick={() => {
+                            onOpenWorktrees();
+                            onOpenChange(false);
+                          }}
+                          data-testid="branch-picker-worktrees"
+                        >
+                          <FolderGit2Icon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                          <span className={styles.actionLabel}>
+                            {t('branchPicker.action.worktrees')}
+                          </span>
+                        </button>
+                      )}
 
                       <div className={styles.separator} />
                     </>

@@ -46,6 +46,10 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
+  isManagedSessionTranscriptSync,
+  managedSessionResourceRoot,
+  readManagedSessionTitleInfoSync,
+  readManagedSessionSourceSync,
   readLastJsonStringFieldSync,
   readLastMatchingLineFieldSync,
   readSessionTitleInfoFromFileSync,
@@ -73,12 +77,14 @@ import {
   type SessionLiveRestoreProjection,
   type SessionRestoreProjection,
 } from './session-transcript-reader.js';
+import { SessionExecutionEngineError } from './session-execution-engine.js';
 import {
   SessionWriterError,
   SessionWriterLease,
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
   SessionWriterUnavailableError,
+  type SealedManagedMaintenanceLease,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
 import {
@@ -103,6 +109,16 @@ export {
 } from './session-resume-token-counts.js';
 
 const debugLogger = createDebugLogger('SESSION');
+
+function isManagedFirstRecord(record: ChatRecord): boolean {
+  // New Managed logs write the execution-engine marker before the header.
+  return (
+    record.subtype === 'managed_session_header_v1' ||
+    (record.subtype === 'session_execution_engine' &&
+      (record.systemPayload as { engine?: unknown } | undefined)?.engine ===
+        'managed')
+  );
+}
 
 export class BranchPointInvalidError extends Error {
   constructor(readonly recordId: string) {
@@ -903,6 +919,21 @@ export class SessionService {
     });
   }
 
+  async acquireSealedManagedMaintenanceLease(
+    sessionId: string,
+  ): Promise<SealedManagedMaintenanceLease | undefined> {
+    const location = await this.getSessionLocation(sessionId);
+    if (location !== 'active' && location !== 'archived') return undefined;
+    const transcriptPath = this.getSessionFilePath(sessionId, location);
+    if (!isManagedSessionTranscriptSync(transcriptPath)) return undefined;
+    return SessionWriterLease.acquireSealedManagedMaintenance({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      activeTranscriptPath: this.getSessionFilePath(sessionId, 'active'),
+      transcriptPath,
+    });
+  }
+
   private warn(message: string): void {
     debugLogger.warn(message);
     this.onWarning?.(message);
@@ -1026,6 +1057,17 @@ export class SessionService {
    */
   getSessionTranscriptPath(sessionId: string): string {
     return this.getSessionFilePath(sessionId, 'active');
+  }
+
+  assertLegacySessionExecution(sessionId: string): void {
+    if (
+      isManagedSessionTranscriptSync(this.getSessionTranscriptPath(sessionId))
+    ) {
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'belongs to managed, cannot execute with legacy',
+      );
+    }
   }
 
   getWorktreeSessionPathForArchiveState(
@@ -1998,11 +2040,20 @@ export class SessionService {
   private readSessionTitleInfoFromFile(
     filePath: string,
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     title?: string;
     source?: TitleSource;
   } {
-    return readSessionTitleInfoFromFileSync(filePath, tailBuffer);
+    const managed =
+      knownManaged === false
+        ? undefined
+        : readManagedSessionTitleInfoSync(
+            filePath,
+            this.storage.getRuntimeBaseDir(),
+            tailBuffer,
+          );
+    return managed ?? readSessionTitleInfoFromFileSync(filePath, tailBuffer);
   }
 
   /**
@@ -2058,6 +2109,7 @@ export class SessionService {
     filePath: string,
     records: ChatRecord[],
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     parentSessionId?: string;
     sourceType?: string;
@@ -2067,7 +2119,19 @@ export class SessionService {
     if (metadata.sourceType !== undefined) return metadata;
 
     const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
-    if (tailSource.sourceType === undefined) return metadata;
+    if (tailSource.sourceType === undefined) {
+      const managedSource =
+        knownManaged === false
+          ? undefined
+          : readManagedSessionSourceSync(
+              filePath,
+              this.storage.getRuntimeBaseDir(),
+              tailBuffer,
+            );
+      return managedSource?.sourceType === undefined
+        ? metadata
+        : { ...metadata, ...managedSource };
+    }
     return {
       ...metadata,
       ...tailSource,
@@ -2649,7 +2713,12 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const knownManaged = isManagedFirstRecord(firstRecord);
+      const titleInfo = this.readSessionTitleInfoFromFile(
+        filePath,
+        tailBuffer,
+        knownManaged,
+      );
       signal?.throwIfAborted();
       const goalObjective = this.resolveGoalObjective(
         prompt,
@@ -2663,6 +2732,7 @@ export class SessionService {
         filePath,
         records,
         tailBuffer,
+        knownManaged,
       );
       items.push({
         sessionId: firstRecord.sessionId,
@@ -2729,8 +2799,18 @@ export class SessionService {
     ) {
       return undefined;
     }
-    const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-    const source = this.extractCreationMetadataFromFile(filePath, records);
+    const knownManaged = isManagedFirstRecord(firstRecord);
+    const titleInfo = this.readSessionTitleInfoFromFile(
+      filePath,
+      undefined,
+      knownManaged,
+    );
+    const source = this.extractCreationMetadataFromFile(
+      filePath,
+      records,
+      undefined,
+      knownManaged,
+    );
     const prompt = this.extractFirstPromptFromRecords(records);
     return {
       sessionId: firstRecord.sessionId,
@@ -3432,6 +3512,11 @@ export class SessionService {
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
+    assertCleanupOwned?.();
+    fs.rmSync(
+      managedSessionResourceRoot(this.storage.getRuntimeBaseDir(), sessionId),
+      { recursive: true, force: true },
+    );
   }
 
   private async removeSessionFiles(sessionId: string): Promise<boolean> {
@@ -3824,6 +3909,13 @@ export class SessionService {
         return false;
       }
 
+      if (isManagedSessionTranscriptSync(filePath)) {
+        throw new SessionExecutionEngineError(
+          sessionId,
+          'belongs to managed, rename must go through its session authority',
+        );
+      }
+
       // Read the last record's UUID so the custom_title record is properly
       // chained into the parent history.  reconstructHistory() walks from the
       // tail record upward via parentUuid; a null parentUuid would sever the
@@ -3895,6 +3987,13 @@ export class SessionService {
     const chatsDir = this.getChatsDir();
     const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
     const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
+
+    if (isManagedSessionTranscriptSync(sourcePath)) {
+      throw new SessionExecutionEngineError(
+        sourceSessionId,
+        'belongs to managed, cannot fork with the legacy session service',
+      );
+    }
 
     // Read + parse the full source transcript.
     const records = await jsonl.read<ChatRecord>(sourcePath);

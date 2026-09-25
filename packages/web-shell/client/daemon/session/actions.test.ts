@@ -485,6 +485,37 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('standaloneSession');
     expect(getWorkspaceModelsAfterSessionClear(current)).toBeUndefined();
   });
+
+  it('drops the connection session context only when the clear asks for it', () => {
+    // Leaving Live has to be a real state change: `undefined` is the downstream
+    // sentinel for "inherit from the connection", so a cleared connection that
+    // still advertises { kind: 'live' } sends the next prompt straight back
+    // into Live, where createSession rejects a live context (#12620).
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'live-a',
+      sessionContext: { kind: 'live' },
+      commands: [commandInfo('old-command')],
+      skills: ['old-skill'],
+    };
+
+    const dropped = getConnectionAfterSessionClear(
+      current,
+      'live-a',
+      undefined,
+      true,
+    );
+
+    expect(dropped).not.toHaveProperty('sessionContext');
+    expect(dropped).not.toHaveProperty('sessionId');
+
+    // The drop stays opt-in: every other call site keeps the 3-arg shape, so a
+    // context nobody chose to leave must survive the clear, and the incoming
+    // state is never mutated in place.
+    const kept = getConnectionAfterSessionClear(current, 'live-a');
+    expect(kept.sessionContext).toEqual({ kind: 'live' });
+    expect(current.sessionContext).toEqual({ kind: 'live' });
+  });
 });
 
 /**
@@ -5809,6 +5840,40 @@ describe('createDaemonSessionActions', () => {
       }
     },
   );
+
+  it('drops the connection session context through the real clearSession action', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession({ dropSessionContext: true });
+
+    expect(getConnection().sessionContext).toBeUndefined();
+    expect(getConnection().sessionId).toBeUndefined();
+  });
+
+  it('keeps the connection session context when clearSession drops only the session', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().sessionContext).toEqual({ kind: 'live' });
+  });
 
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');

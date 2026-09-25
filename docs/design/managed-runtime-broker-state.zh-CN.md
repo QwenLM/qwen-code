@@ -49,9 +49,14 @@ Authority 日志，也不同于公共 Agent Event/Item/Snapshot 存储。持久�
 
     PROVISIONING -> READY -> DRAINING -> RELEASED
 
-**FAILED** 和 **RELEASED** 是终态。后续分配会创建新代次。变更使用乐观
-版本号和可过期的操作所有者，确保同一时刻只有一个服务实例执行调度动作。
-本基础层只枚举状态，状态转换策略由后续生命周期服务负责校验。
+恢复出的 **READY** 绑定在 Runtime 被证明不存在时进入 **LOST**，在恢复证据
+冲突时进入 **RECOVERY_BLOCKED**；两者都保持活跃，因此既有 Session 与
+execution 仍指向该代次。**LOST** 只在没有任何 Session 或 execution 引用它
+时才回收为 **RELEASED**，**RECOVERY_BLOCKED** 绝不自行迁移；见
+[Runtime 绑定对账](2026-09-24-runtime-binding-reconciliation.zh-CN.md)。
+**FAILED** 和 **RELEASED** 是唯一的终态。后续分配会创建新代次。变更使用
+乐观版本号和可过期的操作所有者，确保同一时刻只有一个服务实例执行调度
+动作。本基础层只枚举状态，状态转换策略由后续生命周期服务负责校验。
 
 ### Runtime Session
 

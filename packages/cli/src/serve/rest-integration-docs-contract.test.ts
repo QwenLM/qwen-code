@@ -7,7 +7,11 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_TRANSCRIPT_MAX_LIMIT } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  REASONING_EFFORT_TIERS,
+} from '@qwen-code/qwen-code-core';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -722,6 +726,54 @@ describe('REST integration documentation contract', () => {
     expect(GUIDE_OPERATIONS.filter((entry) => !headings.has(entry))).toEqual(
       [],
     );
+  });
+
+  it('publishes startup request and acknowledgment schemas without opening unknown properties', () => {
+    const api = JSON.parse(readFileSync(OPENAPI, 'utf8')) as OpenApiDocument;
+    const schemas = api.components?.schemas ?? {};
+    for (const name of [
+      'CreateSessionRequest',
+      'CreateStandaloneSessionRequest',
+    ]) {
+      expect(schemas[name]).toMatchObject({
+        additionalProperties: false,
+        properties: {
+          startupConfig: { $ref: '#/components/schemas/SessionStartupConfig' },
+        },
+      });
+    }
+    expect(schemas['SessionStartupConfig']).toMatchObject({
+      required: ['modelServiceId'],
+      additionalProperties: false,
+      properties: {
+        modelServiceId: { maxLength: 256 },
+        reasoningEffort: {
+          enum: ['none', 'default', ...REASONING_EFFORT_TIERS],
+        },
+      },
+    });
+    // The published enum must cover every approval mode the standalone
+    // route's parseApprovalMode accepts — a narrower list certifies a
+    // request set the daemon implements but generated clients refuse.
+    const standalone = schemas['CreateStandaloneSessionRequest'] as {
+      properties?: Record<string, { enum?: string[] }>;
+    };
+    expect(standalone.properties?.['approvalMode']?.enum).toEqual([
+      ...APPROVAL_MODES,
+    ]);
+    expect(schemas['Session']).toMatchObject({
+      properties: {
+        startupConfigApplied: {
+          $ref: '#/components/schemas/SessionStartupConfigApplied',
+        },
+      },
+    });
+    expect(api.paths?.['/session']?.post?.responses).toHaveProperty('422');
+    for (const filename of [PROTOCOL, REFERENCE, GUIDE]) {
+      expect(readFileSync(filename, 'utf8')).toContain(
+        'session_startup_config',
+      );
+    }
   });
 
   it('publishes the resume request schema without the load-only fields', () => {

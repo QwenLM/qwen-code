@@ -22,6 +22,8 @@ import {
   resolveSessionManagedGitCwdForRoute,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
   resolveTrustedRuntime,
+  resolveWorkspaceEntryBySelector,
+  resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
@@ -776,6 +778,146 @@ function makeResponse(): Response {
   response.json.mockReturnValue(response);
   return response as unknown as Response;
 }
+
+describe('resolveWorkspaceEntryBySelector', () => {
+  it('rejects relative selectors even when cwd is a registered workspace', () => {
+    const runtime = { ...makeRuntime(), workspaceCwd: process.cwd() };
+    const registry = createWorkspaceRegistry([runtime]);
+    for (const selector of ['.', 'sub/..', '']) {
+      expect(
+        resolveWorkspaceEntryBySelector(registry, selector),
+      ).toBeUndefined();
+    }
+    expect(resolveWorkspaceEntryBySelector(registry, runtime.workspaceId)).toBe(
+      registry.primaryEntry,
+    );
+  });
+
+  it('resolves a workspace id before another workspace with the same cwd selector', () => {
+    const primary = { ...makeRuntime(), workspaceId: '/work/secondary' };
+    const secondary = {
+      ...makeRuntime(),
+      workspaceId: 'ws-secondary',
+      workspaceCwd: '/work/secondary',
+      primary: false,
+    };
+    const registry = createWorkspaceRegistry([primary, secondary]);
+
+    expect(resolveWorkspaceEntryBySelector(registry, '/work/secondary')).toBe(
+      registry.primaryEntry,
+    );
+  });
+
+  it('resolves canonical and symlink aliases to the registered entry', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'selector-'));
+    try {
+      const workspace = path.join(directory, 'workspace');
+      const alias = path.join(directory, 'alias');
+      fs.mkdirSync(workspace);
+      fs.symlinkSync(workspace, alias, 'junction');
+      const registry = createSingleWorkspaceRegistry({
+        ...makeRuntime(),
+        workspaceCwd: fs.realpathSync(workspace),
+      });
+
+      expect(resolveWorkspaceEntryBySelector(registry, alias)).toBe(
+        registry.primaryEntry,
+      );
+      expect(resolveWorkspaceEntryBySelector(registry, `${workspace}/.`)).toBe(
+        registry.primaryEntry,
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['C:\\Work\\Repo', 'c:/work/repo'],
+    ['\\\\server\\share\\Repo', '\\\\SERVER\\share\\repo'],
+  ])(
+    'matches portable path %s without requiring it to exist',
+    (cwd, selector) => {
+      const registry = createSingleWorkspaceRegistry({
+        ...makeRuntime(),
+        workspaceCwd: cwd,
+      });
+
+      expect(resolveWorkspaceEntryBySelector(registry, selector)).toBe(
+        registry.primaryEntry,
+      );
+    },
+  );
+
+  it('retains registered unavailable entries and excludes removed entries', () => {
+    const secondary = {
+      ...makeRuntime(),
+      workspaceId: 'ws-secondary',
+      workspaceCwd: '/work/secondary',
+      primary: false,
+    };
+    const registry = createWorkspaceRegistry([makeRuntime(), secondary]);
+    const entry = registry.getEntryByWorkspaceId(secondary.workspaceId);
+    registry.beginDrain(secondary);
+
+    expect(
+      resolveWorkspaceEntryBySelector(registry, secondary.workspaceId),
+    ).toBe(entry);
+    expect(entry?.state).toBe('draining');
+    registry.commitDrain(secondary);
+    registry.completeDrain(secondary);
+
+    expect(
+      resolveWorkspaceEntryBySelector(registry, secondary.workspaceId),
+    ).toBeUndefined();
+    expect(
+      resolveWorkspaceEntryBySelector(registry, secondary.workspaceCwd),
+    ).toBeUndefined();
+  });
+
+  it('excludes internal, unknown, and nested workspace selectors', () => {
+    const registry = createWorkspaceRegistry([
+      makeRuntime(),
+      {
+        ...makeRuntime(),
+        workspaceId: 'ws-live',
+        workspaceCwd: '/work/conversations',
+        primary: false,
+        provenance: 'live-conversation',
+      },
+    ]);
+
+    for (const selector of [
+      'ws-live',
+      '/work/conversations',
+      'missing',
+      '/work/primary/nested',
+    ]) {
+      expect(
+        resolveWorkspaceEntryBySelector(registry, selector),
+      ).toBeUndefined();
+    }
+  });
+
+  it('preserves the route response for an unknown absolute selector', () => {
+    const registry = createSingleWorkspaceRegistry(makeRuntime());
+    const response = makeResponse();
+
+    expect(
+      resolveWorkspaceEntryFromParam(
+        registry,
+        { params: { workspace: '/work/missing' } } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith({
+      error:
+        'Workspace mismatch: the requested workspace is not registered with this daemon.',
+      code: 'workspace_mismatch',
+      workspaceCount: 1,
+    });
+  });
+});
 
 describe('resolveWorkspaceRuntimeFromParam', () => {
   it.each(['ws-live', '/work/conversations'])(

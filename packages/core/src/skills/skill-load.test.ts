@@ -277,6 +277,67 @@ Some content without frontmatter.
   describe('loadSkillsFromDir', () => {
     const testBaseDir = '/test/extension/skills';
 
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'reports directory %s without treating a missing directory as a scan failure',
+      async (code) => {
+        const error = Object.assign(new Error(code), { code });
+        vi.mocked(fs.readdir).mockRejectedValue(error);
+        const onError = vi.fn();
+        expect(await loadSkillsFromDir(testBaseDir, onError)).toEqual([]);
+        expect(onError).toHaveBeenCalledTimes(code === 'ENOENT' ? 0 : 1);
+        if (code !== 'ENOENT') expect(onError).toHaveBeenCalledWith(error);
+      },
+    );
+
+    it.each(['access', 'read', 'parse'] as const)(
+      'reports skill %s failures while preserving successful siblings',
+      async (failure) => {
+        vi.mocked(fs.readdir).mockResolvedValue(
+          ['bad', 'good'].map((name) => ({
+            name,
+            isDirectory: () => true,
+            isSymbolicLink: () => false,
+          })) as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+        vi.mocked(fs.access).mockResolvedValue(undefined);
+        vi.mocked(fs.readFile).mockResolvedValue(
+          '---\nname: test-skill\ndescription: A test skill\n---\nBody.',
+        );
+        const error = Object.assign(new Error('unreadable'), {
+          code: 'EACCES',
+        });
+        if (failure === 'access')
+          vi.mocked(fs.access).mockRejectedValueOnce(error);
+        if (failure === 'read')
+          vi.mocked(fs.readFile).mockRejectedValueOnce(error);
+        if (failure === 'parse')
+          vi.mocked(fs.readFile).mockResolvedValueOnce('invalid frontmatter');
+        const onError = vi.fn();
+        const skills = await loadSkillsFromDir(testBaseDir, onError);
+        expect(skills.map((skill) => skill.name)).toEqual(['test-skill']);
+        expect(onError).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['EACCES', 'ENOENT'] as const)(
+      'distinguishes an unreadable extension skill symlink from a removed target: %s',
+      async (code) => {
+        vi.mocked(fs.readdir).mockResolvedValue([
+          {
+            name: 'linked',
+            isDirectory: () => false,
+            isSymbolicLink: () => true,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        vi.mocked(fs.realpath).mockRejectedValue(
+          Object.assign(new Error(code), { code }),
+        );
+        const onError = vi.fn();
+        expect(await loadSkillsFromDir(testBaseDir, onError)).toEqual([]);
+        expect(onError).toHaveBeenCalledTimes(code === 'ENOENT' ? 0 : 1);
+      },
+    );
+
     it('should load skills from directory', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
         {

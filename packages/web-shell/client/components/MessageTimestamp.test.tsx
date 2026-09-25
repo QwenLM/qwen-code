@@ -127,6 +127,34 @@ describe('MessageTimestamp', () => {
     expect(onEdit).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the wrench action to open tool calls between copy and edit', () => {
+    const onOpenTurnCalls = vi.fn();
+    const container = render(
+      <MessageTimestamp
+        timestamp={1}
+        chatMode
+        copyText="hello"
+        copyTitle="Copy"
+        onOpenTurnCalls={onOpenTurnCalls}
+        onEdit={vi.fn()}
+        editTitle="Edit message"
+      >
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    expect(
+      [...container.querySelectorAll(`.${styles.chatActions} button`)].map(
+        (button) => button.getAttribute('aria-label'),
+      ),
+    ).toEqual(['Copy', 'View tool calls', 'Edit message']);
+    const toolCalls = container.querySelector<HTMLButtonElement>(
+      '[aria-label="View tool calls"]',
+    )!;
+    expect(toolCalls.querySelector('.lucide-wrench')).not.toBeNull();
+    act(() => toolCalls.click());
+    expect(onOpenTurnCalls).toHaveBeenCalledTimes(1);
+  });
+
   it('omits the edit action when no handler is given', () => {
     const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
     const container = render(

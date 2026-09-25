@@ -184,6 +184,7 @@ export default {
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.RecordSource': '記錄來源',
@@ -1979,6 +1980,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -2129,6 +2133,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':

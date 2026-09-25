@@ -19,8 +19,11 @@ The SDK checks the actual connection and protocol instead of reading Chrome's
 extension preferences.
 
 If the extension does not connect, ask the user to open Chrome and check the
-extension in the intended profile. There is no store listing yet: build the
-extension from `packages/chrome-extension` in the Qwen Code repository (its
+extension in the intended profile. It installs from the Chrome Web Store:
+https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph
+
+If the store reports it is not available in the user's region, they can build
+it from `packages/chrome-extension` in the Qwen Code repository (its
 README) and load `dist/extension` through `chrome://extensions` (Developer mode
 → Load unpacked). After installation or enabling it, retry the connection.
 
@@ -53,14 +56,12 @@ Browser Use MCP server. Screenshot metadata requires `@qwen-code/node-repl-mcp`
 0.1.6 or later, so keep this exact pin.
 
 Qwen reports the absolute `Base directory for this skill` when loading this
-file. Use that directory as `<skill-base>`. Confirm that
-`<skill-base>/runtime/index.js` and
-`<skill-base>/runtime/node_modules/playwright-core/package.json` exist. If
-either is missing, stop and report an incomplete Browser Use runtime instead
-of installing dependencies into the workspace. Before the first Node REPL
-cell, call `node_repl_add_node_module_dir` once with the absolute
-`<skill-base>/runtime/node_modules` path. Import the bundled SDK, replacing the
-example skill base below with that absolute path:
+file. Use that directory as `<skill-base>`. The bundled SDK ships with its
+dependencies: import it directly, without installing packages or registering
+module directories, replacing the example skill base below with that absolute
+path. If the import reports a missing file or an incomplete runtime, stop and
+report an incomplete Browser Use runtime instead of installing dependencies
+into the workspace:
 
 ```js
 globalThis.browserAgent ??= await (

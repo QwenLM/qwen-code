@@ -1408,10 +1408,21 @@ fn select_indexable_target<'v, 'a>(
     idx: usize,
     identity: Option<&AtspiIdentity>,
 ) -> Result<&'v Visited<'a>> {
+    select_indexable_target_in_frame(visited, idx, identity, None)
+}
+
+fn select_indexable_target_in_frame<'v, 'a>(
+    visited: &'v [Visited<'a>],
+    idx: usize,
+    identity: Option<&AtspiIdentity>,
+    only_frame: Option<usize>,
+) -> Result<&'v Visited<'a>> {
     if let Some(identity) = identity {
-        let mut matches = visited
-            .iter()
-            .filter(|node| is_indexable(node) && node.identity.as_ref() == Some(identity));
+        let mut matches = visited.iter().filter(|node| {
+            is_indexable(node)
+                && node.identity.as_ref() == Some(identity)
+                && only_frame.is_none_or(|frame| node.frame_ordinal == frame)
+        });
         let target = matches.next().ok_or_else(|| {
             anyhow!(
                 "stale AT-SPI identity {}{}: owner disappeared or object was removed",
@@ -2782,7 +2793,15 @@ pub(crate) fn get_element_bounds_in_window(
             let web_document_origin = web_document_origin_for_visited(&visited, pid)
                 .await
                 .unwrap_or((0, 0));
-            let target = select_indexable_target(&visited, idx, identity.as_ref())?;
+            if xid != 0 && only_frame.is_none() {
+                return Err(anyhow!(
+                    "window {xid} could not be correlated to an AT-SPI frame"
+                ));
+            }
+            // GTK exposes popup items under both the main frame and the popup.
+            // Resolve identities within the window that this operation named.
+            let target =
+                select_indexable_target_in_frame(&visited, idx, identity.as_ref(), only_frame)?;
             if xid != 0 && only_frame != Some(target.frame_ordinal) {
                 return Err(anyhow!("element {idx} does not belong to window {xid}"));
             }
@@ -3439,6 +3458,87 @@ mod coord_tests {
     };
     use atspi::{State, StateSet};
     use std::time::Duration;
+
+    #[test]
+    #[ignore = "requires isolated GTK popup fixture and CUA_ATSPI_POPUP_PID/XID"]
+    fn live_popup_identity_resolves_only_in_the_named_frame() {
+        let pid = std::env::var("CUA_ATSPI_POPUP_PID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let xid = std::env::var("CUA_ATSPI_POPUP_XID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let identity = super::bounded(
+            async {
+                let conn = super::shared_connection().await?;
+                let (mut visited, frame, _) =
+                    super::collect_visited_bounded(conn, pid, xid, None, None)
+                        .await?
+                        .expect("fixture application");
+                let frame = frame.expect("fixture window correlation");
+                let identity = visited
+                    .iter()
+                    .find(|node| node.name == "Beta" && node.frame_ordinal == frame)
+                    .and_then(|node| node.identity.clone())
+                    .expect("observed Beta identity");
+                let duplicates = visited
+                    .iter()
+                    .filter(|node| node.identity.as_ref() == Some(&identity))
+                    .count();
+                assert!(
+                    duplicates >= 2,
+                    "fixture must expose the duplicate popup object"
+                );
+                assert!(super::select_indexable_target(&visited, 0, Some(&identity)).is_err());
+                let target = super::select_indexable_target_in_frame(
+                    &visited,
+                    0,
+                    Some(&identity),
+                    Some(frame),
+                )?;
+                assert_eq!(target.frame_ordinal, frame);
+                assert_eq!(target.name, "Beta");
+                for (index, node) in visited
+                    .iter()
+                    .filter(|node| super::is_indexable(node))
+                    .enumerate()
+                {
+                    let legacy = super::select_indexable_target_in_frame(
+                        &visited,
+                        index,
+                        None,
+                        Some(frame),
+                    )?;
+                    assert!(
+                        std::ptr::eq(node, legacy),
+                        "legacy indices remain application-wide"
+                    );
+                }
+                // A second occurrence within the chosen frame must still fail closed.
+                for node in &mut visited {
+                    if node.identity.as_ref() == Some(&identity) {
+                        node.frame_ordinal = frame;
+                    }
+                }
+                assert!(super::select_indexable_target_in_frame(
+                    &visited,
+                    0,
+                    Some(&identity),
+                    Some(frame),
+                )
+                .is_err());
+                Ok(identity)
+            },
+            || Err(anyhow::anyhow!("fixture walk timed out")),
+        )
+        .unwrap();
+        let (_, _, width, height) =
+            super::get_element_bounds_in_window(pid, 0, xid, Some(identity.clone())).unwrap();
+        assert!(width > 0 && height > 0);
+        assert!(super::get_element_bounds_in_window(pid, 0, 1, Some(identity)).is_err());
+    }
 
     #[test]
     fn closed_native_menu_commands_wait_until_the_menu_is_open() {

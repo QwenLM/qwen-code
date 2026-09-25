@@ -277,7 +277,7 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
           cache: 'npm'
-          cache-dependency-path: 'packages/desktop-shell/package-lock.json'
+          cache-dependency-path: 'packages/desktop/package-lock.json'
 
       - name: 'Configure bundled Node.js cache'
         id: 'node-cache-path'
@@ -299,7 +299,7 @@ jobs:
 
       - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
         with:
-          workspaces: 'packages/desktop-shell/src-tauri -> target'
+          workspaces: 'packages/desktop/src-tauri -> target'
 
       - name: 'Install Linux dependencies'
         if: "runner.os == 'Linux'"
@@ -308,6 +308,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils xvfb
 
       - name: 'Install Qwen Code dependencies'
+        shell: 'bash'
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -319,11 +320,11 @@ jobs:
           fi
 
       - name: 'Install desktop dependencies'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm ci'
 
       - name: 'Set desktop version'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'node scripts/version.js "${{ needs.prepare.outputs.version }}"'
 
       - name: 'Require updater signing key for publishing'
@@ -443,7 +444,7 @@ jobs:
           }
 
       - name: 'Prepare bundled runtime'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run build:runtime'
 
       - uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
@@ -453,16 +454,16 @@ jobs:
           key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - name: 'Run desktop tests'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm test'
 
       - name: 'Run desktop release tests'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run test:release'
 
       - name: 'Sign bundled vendor binaries (macOS)'
         if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         env:
           APPLE_SIGNING_IDENTITY: '${{ env.APPLE_SIGNING_IDENTITY }}'
@@ -515,15 +516,15 @@ jobs:
 
       - name: 'Refresh bundled runtime checksums after signing (macOS)'
         if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'node scripts/prepare-runtime.js --refresh-checksums'
 
       - name: 'Verify bundled runtime'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run smoke:runtime'
 
       - name: 'Build desktop installers'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         env:
           DRY_RUN: "${{ github.event_name == 'release' && 'false' || inputs.dry_run }}"
@@ -545,7 +546,7 @@ jobs:
         shell: 'bash'
         run: |
           set -euo pipefail
-          app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          app="$(find packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
           entitlements="$(mktemp)"
@@ -559,7 +560,7 @@ jobs:
         env:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
-          $installer = Get-ChildItem packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
+          $installer = Get-ChildItem packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
           $signature = Get-AuthenticodeSignature $installer.FullName
           if ($signature.Status -eq 'Valid') {
             Write-Output "Windows installer is Authenticode-signed."
@@ -576,18 +577,18 @@ jobs:
           LEGACY_ARCH: '${{ matrix.legacy_arch }}'
         run: |
           set -euo pipefail
-          app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name 'Qwen Code Desktop.app' -print -quit)"
+          app="$(find packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name 'Qwen Code Desktop.app' -print -quit)"
           if [ -z "$app" ]; then
             echo '::error::The legacy-named macOS app bundle was not produced.'
             exit 1
           fi
-          destination="packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/electron-bridge"
+          destination="packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/electron-bridge"
           mkdir -p "$destination"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$destination/Qwen-Code-Desktop-$LEGACY_ARCH.zip"
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'macOS'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -598,7 +599,7 @@ jobs:
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'Windows'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'pwsh'
         run: |
           $executable = Get-ChildItem src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop.exe | Select-Object -First 1
@@ -606,7 +607,7 @@ jobs:
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'Linux'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -620,7 +621,7 @@ jobs:
           set -euo pipefail
           destination="$RUNNER_TEMP/desktop-artifacts"
           mkdir -p "$destination"
-          bundle_root="packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          bundle_root="packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
           while IFS= read -r -d '' artifact; do
             name="$(basename "$artifact")"
             if [ "$RUNNER_OS" = 'macOS' ]; then

@@ -72,8 +72,8 @@ export function resolveWorkspaceEntryFromParam(
   paramName = 'workspace',
 ): WorkspaceEntry | null {
   const selector = req.params[paramName] ?? '';
-  const byId = registry.getEntryByWorkspaceId(selector);
-  if (byId) return byId;
+  const entry = resolveWorkspaceEntryBySelector(registry, selector);
+  if (entry) return entry;
 
   if (!isPortableAbsolutePath(selector)) {
     res.status(400).json({
@@ -82,6 +82,17 @@ export function resolveWorkspaceEntryFromParam(
     });
     return null;
   }
+  sendWorkspaceMismatch(res, registry);
+  return null;
+}
+
+export function resolveWorkspaceEntryBySelector(
+  registry: WorkspaceRegistry,
+  selector: string,
+): WorkspaceEntry | undefined {
+  const byId = registry.getEntryByWorkspaceId(selector);
+  if (byId) return byId;
+  if (!isPortableAbsolutePath(selector)) return undefined;
 
   const exact = registry.getEntryByWorkspaceCwd(selector);
   if (exact) return exact;
@@ -102,18 +113,13 @@ export function resolveWorkspaceEntryFromParam(
     }
   }
   const normalizedSelector = normalizePortableAbsolutePath(selector);
-  const entry = registry
+  return registry
     .listEntries()
     .find(
       (candidate) =>
         normalizePortableAbsolutePath(candidate.workspaceCwd) ===
         normalizedSelector,
     );
-  if (!entry) {
-    sendWorkspaceMismatch(res, registry);
-    return null;
-  }
-  return entry;
 }
 
 export function isPortableAbsolutePath(value: string): boolean {

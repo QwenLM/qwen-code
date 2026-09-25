@@ -28,6 +28,8 @@ const {
   workspaceGitHubCreatePullRequest,
   updateSessionMetadata,
   btwSession,
+  workspaceGitWorktrees,
+  listWorkspaceSessions,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
@@ -42,6 +44,8 @@ const {
   const workspaceGitHubCreatePullRequest = vi.fn();
   const updateSessionMetadata = vi.fn();
   const btwSession = vi.fn();
+  const workspaceGitWorktrees = vi.fn();
+  const listWorkspaceSessions = vi.fn();
   const workspaceClient = {
     btwSession,
     workspaceByCwd: () => ({
@@ -57,6 +61,10 @@ const {
       workspaceGit,
       workspaceGitHubCreatePullRequest,
       updateSessionMetadata,
+      workspaceGitWorktrees,
+      workspaceGitWorktreeStatus: vi.fn(),
+      workspaceGitRemoveWorktree: vi.fn(),
+      listWorkspaceSessions,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -72,6 +80,8 @@ const {
     workspaceGitHubCreatePullRequest,
     updateSessionMetadata,
     btwSession,
+    workspaceGitWorktrees,
+    listWorkspaceSessions,
     workspaceClient,
     mockState,
   };
@@ -103,7 +113,7 @@ async function flush() {
 }
 
 function mount(
-  initialView: 'diff' | 'log' | 'prs' = 'diff',
+  initialView: 'diff' | 'log' | 'prs' | 'worktrees' = 'diff',
   gitCwd?: string,
   sessionId?: string,
 ) {
@@ -318,6 +328,61 @@ describe('GitDialog', () => {
     expect(prsTab?.getAttribute('aria-selected')).toBe('true');
     expect(workspaceGitHubPullRequests).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain('Fix the flaky test');
+  });
+
+  it('shows the Worktrees tab only when the daemon advertises the capability', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    mount('worktrees');
+    await flush();
+    expect(document.getElementById('git-dialog-tab-worktrees')).toBeNull();
+    // Without the capability the request clamps to the diff view.
+    expect(
+      document
+        .getElementById('git-dialog-tab-diff')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+    act(() => root.unmount());
+    container.remove();
+
+    mockState.capabilities = { features: ['workspace_git_worktrees'] };
+    workspaceGitWorktrees.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      worktrees: [
+        {
+          path: '/repo',
+          head: 'a'.repeat(40),
+          branch: 'main',
+          detached: false,
+          bare: false,
+          isMain: true,
+          isWorkspace: true,
+        },
+      ],
+    });
+    listWorkspaceSessions.mockResolvedValue([]);
+    mount('worktrees');
+    await flush();
+
+    const tab = document.getElementById('git-dialog-tab-worktrees');
+    expect(tab?.getAttribute('aria-selected')).toBe('true');
+    expect(workspaceGitWorktrees).toHaveBeenCalledTimes(1);
+    // A row, not a phrase: "this workspace" is also a substring of the
+    // "Git is not available for this workspace" placeholder, so asserting it
+    // passes even when the tab renders nothing.
+    expect(
+      document.body.querySelectorAll('[data-testid="git-worktree-row"]'),
+    ).toHaveLength(1);
   });
 
   it('falls back to the diff view when PRs are requested without the capability', async () => {
