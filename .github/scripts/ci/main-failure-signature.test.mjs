@@ -1575,4 +1575,181 @@ test('a per-test body keeps its shape under a per-commit merge', () => {
   assert.ok(merged.includes('windows-latest'));
   // R1-1: the per-test body must not gain the bridge from this merge.
   assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  const third = renderIssueBody({
+    analysis: testAnalysis,
+    occurrence: OCCURRENCE,
+    existingBody: merged,
+  });
+  assert.equal((third.match(/## Failing tests/g) ?? []).length, 1);
+  assert.equal((third.match(/qwen-main-ci-failure-sig:/g) ?? []).length, 1);
+});
+
+test('annotated stubs retain their bridge and promote unambiguous identity', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const bridge = `<!-- ${workflowBridgeMarker('E2E Tests')} -->`;
+  const stub =
+    'Triage: p0\n' +
+    renderIssueBody({ analysis: stubAnalysis, occurrence: OCCURRENCE }).replace(
+      '- Run ID: 301',
+      '- Maintainer note: preserve me\n- Run ID: 301',
+    );
+  const next = {
+    ...OCCURRENCE,
+    runId: '302',
+    runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+  };
+  const recorded = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: next,
+    existingBody: stub,
+  });
+  assert.ok(recorded.includes(bridge));
+  const adopted = renderIssueBody({
+    analysis: analyzeLogs('E2E Tests', [VITEST_LOG]),
+    occurrence: next,
+    existingBody: stub,
+  });
+  assert.ok(adopted.includes('[run 301]'));
+  assert.ok(adopted.includes('Triage: p0'));
+  assert.ok(adopted.includes('- Maintainer note: preserve me'));
+  assert.ok(!adopted.includes(bridge));
+  assert.ok(!adopted.includes('before any test result was'));
+  assert.ok(
+    adopted.indexOf(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`) <
+      adopted.indexOf('## Failing tests'),
+  );
+});
+
+test('ambiguous identity never fabricates a recurrence', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE }).replace(
+    '- Run ID: 301',
+    '- Run ID: 999\n- Run ID: 301',
+  );
+  for (const nextAnalysis of [
+    analysis,
+    analyzeLogs('E2E Tests', [VITEST_LOG]),
+  ]) {
+    const merged = renderIssueBody({
+      analysis: nextAnalysis,
+      occurrence: { ...OCCURRENCE, runId: '302' },
+      existingBody: stub,
+    });
+    assert.ok(!merged.includes('[run 999]'));
+    assert.ok(!merged.includes('[run 301]'));
+    assert.ok(merged.includes('[run 302]'));
+  }
+});
+
+test('backtick notes survive recurrence trimming and failed-job replacement', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  let body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  body = renderIssueBody({
+    analysis,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: body,
+  });
+  const notes = [
+    '- `npm ci` also fails locally',
+    '- `packages/core` is affected',
+  ];
+  body += '\n' + notes.join('\n');
+  body = body.replace(
+    '- Run ID: 302',
+    '- Maintainer note: context\n- Run ID: 302',
+  );
+  body = body.replace(
+    '## Recurrences',
+    '## Previous failed jobs\n\n  - also reproduces locally\n\n## Recurrences',
+  );
+  for (let id = 303; id < 320; id++) {
+    body = renderIssueBody({
+      analysis,
+      occurrence: { ...OCCURRENCE, runId: String(id) },
+      existingBody: body,
+    });
+    for (const note of notes) assert.ok(body.includes(note));
+    assert.ok(body.includes('  - also reproduces locally'));
+  }
+});
+
+test('tail bridges cannot leak into per-test bodies or multiply on stubs', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  let body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  body = renderIssueBody({
+    analysis,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody: body,
+  });
+  const bridge = `<!-- ${workflowBridgeMarker('E2E Tests')} -->`;
+  body += '\nHuman tail\n' + bridge;
+  for (const nextAnalysis of [
+    analysis,
+    analyzeLogs('E2E Tests', [VITEST_LOG]),
+  ]) {
+    const merged = renderIssueBody({
+      analysis: nextAnalysis,
+      occurrence: { ...OCCURRENCE, runId: '303' },
+      existingBody: body,
+    });
+    assert.equal(
+      merged.split(bridge).length - 1,
+      nextAnalysis.tests.length ? 0 : 1,
+    );
+    assert.ok(merged.includes('Human tail'));
+  }
+});
+
+test('alternating merge modes keep one normalized head and bounded history', () => {
+  const perTest = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const perCommit = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  let body = renderIssueBody({ analysis: perTest, occurrence: OCCURRENCE });
+  for (let id = 302; id < 342; id++) {
+    body = renderIssueBody({
+      analysis: id % 2 ? perTest : perCommit,
+      occurrence: { ...OCCURRENCE, runId: String(id), sha: `sha${id}` },
+      existingBody: body,
+    });
+    assert.equal((body.match(/## Failing tests/g) ?? []).length, 1);
+    assert.equal((body.match(/qwen-main-ci-failure-sig:/g) ?? []).length, 1);
+    assert.ok(!body.includes(WORKFLOW_MARKER_PREFIX));
+    assert.ok(body.length < 5000);
+  }
+});
+
+test('quoted SHA lines outside the first marker block are not harvested or capped', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const note =
+    '## Investigation\n' +
+    Array.from(
+      { length: 12 },
+      (_, id) => `<!-- ${LEGACY_MARKER_PREFIX}quoted${id} -->`,
+    ).join('\n');
+  const merged = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: stub + '\n' + note,
+  });
+  assert.ok(merged.includes(note));
+  assert.ok(
+    merged.startsWith(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`),
+  );
+  assert.ok(!merged.split('\n\n')[0].includes('quoted'));
 });
