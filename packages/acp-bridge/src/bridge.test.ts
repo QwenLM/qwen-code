@@ -35829,6 +35829,77 @@ describe('preheat', () => {
     }
   });
 
+  it('rejects a newSession that resolves after its channel was condemned to drain', async () => {
+    vi.useFakeTimers();
+    const secondNewSessionStarted = deferred<void>();
+    const releaseSecondNewSession = deferred<void>();
+    const stalledWorkspaceStatus = deferred<Record<string, unknown>>();
+    const closeCalls: Array<Record<string, unknown>> = [];
+    let newSessionCalls = 0;
+    const firstChannel = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return stalledWorkspaceStatus.promise;
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          closeCalls.push(params);
+          return { closed: true };
+        }
+        return {};
+      },
+      newSessionImpl: async () => {
+        newSessionCalls++;
+        if (newSessionCalls === 1) return { sessionId: 'sess-drain-a' };
+        secondNewSessionStarted.resolve();
+        await releaseSecondNewSession.promise;
+        return { sessionId: 'sess-drain-b' };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => firstChannel.channel,
+      initializeTimeoutMs: 20,
+      sessionScope: 'thread',
+    });
+
+    try {
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const workspaceStatus = bridge
+        .queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () => ({
+          discoveryState: 'not_started',
+          servers: [],
+        }))
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(19);
+      const spawningSecond = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await secondNewSessionStarted.promise;
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await workspaceStatus).toBeInstanceOf(BridgeTimeoutError);
+      expect(firstChannel.killed).toBe(false);
+
+      releaseSecondNewSession.resolve();
+      await expect(spawningSecond).rejects.toBeInstanceOf(
+        BridgeChannelClosedError,
+      );
+      expect(bridge.sessionCount).toBe(1);
+      expect(() => bridge.getSessionSummary('sess-drain-b')).toThrow(
+        SessionNotFoundError,
+      );
+      expect(closeCalls).toEqual([
+        { sessionId: 'sess-drain-b', drainTimeoutMs: 16 },
+      ]);
+      expect(bridge.getSessionSummary(first.sessionId).sessionId).toBe(
+        'sess-drain-a',
+      );
+      expect(firstChannel.killed).toBe(false);
+    } finally {
+      releaseSecondNewSession.resolve();
+      stalledWorkspaceStatus.resolve({});
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('transfers an outer reservation before an idle workspace call drains', async () => {
     const statusResult = deferred<Record<string, unknown>>();
     const initializeResult = deferred<Record<string, unknown>>();
