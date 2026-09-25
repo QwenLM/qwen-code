@@ -1597,7 +1597,26 @@ describe('matchesRule', () => {
         [dottedName],
       ),
     ).toBe(true);
-    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+    // The negative arm threads the alias channel too. Unthreaded it returns
+    // `false` for the same structural reason the positive arm does, so it would
+    // not be comparing two aliased tools at all and the `.`-versus-`/`
+    // invariant this test is named for would go unobserved: both raws sanitize
+    // to the identical body `mcp__zybio__literature_search` and differ only in
+    // the FNV hash, so admitting a reduced spelling to the comparison has to be
+    // caught here.
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        slashedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [slashedName],
+      ),
+    ).toBe(false);
   });
 
   it('MCP server-level match (2-part pattern)', async () => {

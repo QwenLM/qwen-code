@@ -3639,13 +3639,27 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // tests — only that the override flow doesn't crash on the missing methods — so the
     // stub registry just answers the API surface those helpers call.
     const registered = [...(opts.registeredTools ?? [])];
+    // The session registry — the only one production resolves deny aliases
+    // from (`workflow-orchestrator.ts:1253-1256`).
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
       getPermissionAliases: (name: string) => opts.permissionAliases?.[name],
     };
+    // The per-agent registry, deliberately a DIFFERENT object that vouches for
+    // no alias: it is not built until after narrowing runs
+    // (`createSchemaConfigOverride` → `rebuildToolRegistryOnOverride`, or
+    // `createAgentHeadless`), so at narrowing time it can answer nothing. One
+    // shared object for both roles left the alias tests unable to tell which
+    // registry the resolver consults — pointing the resolver at
+    // `createToolRegistry()` instead kept every test in this file green.
+    const perAgentFakeRegistry = {
+      copyDiscoveredToolsFrom: () => {},
+      registerTool: () => {},
+      getPermissionAliases: (_name: string) => undefined,
+    };
     const cfg = {
-      createToolRegistry: async () => fakeRegistry,
+      createToolRegistry: async () => perAgentFakeRegistry,
       getToolRegistry: () => fakeRegistry,
       waitForMcpReady: vi.fn(async () => {
         registered.push(...(opts.discoveredTools ?? []));
