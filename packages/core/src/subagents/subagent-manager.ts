@@ -85,7 +85,7 @@ import {
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
 import {
-  skillEagerHiddenFor,
+  skillRegistrationStatusFor,
   toolConfigAllowsSkill,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import type { SkillManager } from '../skills/skill-manager.js';
@@ -1198,11 +1198,11 @@ export class SubagentManager {
 
       const skillsAvailable = toolConfigAllowsSkill(toolConfig, {
         codeModeOnly: runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
-        // Probed on the session's permission state (depth-stable), gated on
-        // CodeModeOnly, and shared with the background resume path — see
-        // skillEagerHiddenFor for why neither the immediate registry nor a
-        // mode-agnostic probe is sound.
-        skillEagerHidden: await skillEagerHiddenFor(runtimeContext),
+        // Probed on the session's permission state (depth-stable) and shared
+        // with the background resume path — see skillRegistrationStatusFor
+        // for why neither the immediate registry nor a mode gate on the probe
+        // is sound.
+        skillRegistration: await skillRegistrationStatusFor(runtimeContext),
       });
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(

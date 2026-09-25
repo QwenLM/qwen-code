@@ -6,6 +6,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
+import type { Config } from '../../config/config.js';
+import type { ToolRegistrationStatus } from '../../permissions/permission-manager.js';
 import { runWithTeammateIdentity } from '../team/identity.js';
 import { runWithAgentContext } from './agent-context.js';
 import {
@@ -15,6 +18,7 @@ import {
   isPlanLifecycleToolUnavailableInSubagent,
   shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
+  skillRegistrationStatusFor,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
@@ -262,18 +266,23 @@ describe('subagent plan tool policy', () => {
       ['the exec route under CodeModeOnly', { tools: [ToolNames.EXEC] }],
       ['a wildcard', { tools: ['*'] }],
       ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
+      [
+        'an explicit list naming both bridge halves',
+        { tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL] },
+      ],
       ['no tool config', undefined],
     ])(
       'withholds skills when an eager allowlist hides the Skill tool: %s',
       (_label, toolConfig) => {
         // `settings.tools.eager` omitting `skill` demotes it to
         // permission-deferred, and prepareTools() then drops it from the
-        // declarations AND from exec's bindings — so no declaration shape
-        // leaves a route to a skill.
+        // declarations AND from exec's bindings. CodeModeOnly also hides the
+        // tool_search + tool_call bridge, so no declaration shape leaves a
+        // route to a skill.
         expect(
           toolConfigAllowsSkill(toolConfig, {
             codeModeOnly: true,
-            skillEagerHidden: true,
+            skillRegistration: 'deferred',
           }),
         ).toBe(false);
       },
@@ -284,10 +293,95 @@ describe('subagent plan tool policy', () => {
       expect(
         toolConfigAllowsSkill(
           { tools: [ToolNames.EXEC] },
-          { codeModeOnly: true, skillEagerHidden: false },
+          { codeModeOnly: true, skillRegistration: 'registered' },
         ),
       ).toBe(true);
     });
+
+    // #12424: outside CodeModeOnly the bridge stays declared for an agent
+    // that inherits the registry, so a deferred Skill tool is still
+    // reachable there — but ONLY there. An explicit list that named neither
+    // half declares no route, and the Agent tool's description would point
+    // at two tools prepareTools() never declared.
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an empty list', { tools: [] }],
+      ['no tool config', undefined],
+      [
+        'an explicit list naming both bridge halves',
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+      ],
+    ])(
+      'keeps skills for a Direct-mode agent whose declarations include the bridge: %s',
+      (_label, toolConfig) => {
+        expect(
+          toolConfigAllowsSkill(toolConfig, { skillRegistration: 'deferred' }),
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      [
+        'an explicit list naming skill',
+        { tools: [ToolNames.READ_FILE, ToolNames.SKILL] },
+      ],
+      ['an explicit list without skill', { tools: [ToolNames.READ_FILE] }],
+      [
+        'an explicit list naming only tool_search',
+        { tools: [ToolNames.TOOL_SEARCH] },
+      ],
+      [
+        'a wildcard that disallows tool_search',
+        { tools: ['*'], disallowedTools: [ToolNames.TOOL_SEARCH] },
+      ],
+      [
+        'a wildcard that disallows tool_call',
+        { tools: ['*'], disallowedTools: [ToolNames.TOOL_CALL] },
+      ],
+    ])(
+      'withholds skills from a Direct-mode agent whose declarations leave no bridge: %s',
+      (_label, toolConfig) => {
+        expect(
+          toolConfigAllowsSkill(toolConfig, { skillRegistration: 'deferred' }),
+        ).toBe(false);
+      },
+    );
+
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
+      [
+        'an explicit list naming both bridge halves',
+        { tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL] },
+      ],
+      ['the exec route under CodeModeOnly', { tools: [ToolNames.EXEC] }],
+      ['no tool config', undefined],
+    ])(
+      'withholds skills when a deny rule unregisters the Skill tool: %s',
+      (_label, toolConfig) => {
+        // `permissions.deny: ["skill"]` / `excludeTools` answer 'disabled':
+        // registerLazyTool registers nothing for it, so the name exists in no
+        // registry and no bridge can surface it — in either mode, and for
+        // every declaration shape.
+        expect(
+          toolConfigAllowsSkill(toolConfig, {
+            skillRegistration: 'disabled',
+          }),
+        ).toBe(false);
+        expect(
+          toolConfigAllowsSkill(toolConfig, {
+            codeModeOnly: true,
+            skillRegistration: 'disabled',
+          }),
+        ).toBe(false);
+      },
+    );
 
     it.each([
       ['a wildcard', { tools: ['*'] }],
@@ -330,6 +424,65 @@ describe('subagent plan tool policy', () => {
           executionAllowedTools: [ToolNames.READ_FILE],
         }),
       ).toBe(true);
+    });
+  });
+
+  describe('skillRegistrationStatusFor', () => {
+    const configWith = (
+      status: ToolRegistrationStatus | undefined,
+      visible: string[] = [],
+      toolMode: ToolMode = ToolMode.Direct,
+    ): Config =>
+      ({
+        getPermissionManager: () =>
+          status === undefined
+            ? undefined
+            : {
+                getToolRegistrationStatus: async (name: string) =>
+                  name === ToolNames.SKILL ? status : 'registered',
+              },
+        getVisibleTools: () => new Set(visible),
+        getToolMode: () => toolMode,
+      }) as unknown as Config;
+
+    it('reports a denied Skill tool in both modes', async () => {
+      // 'disabled' is answered before the tool mode and before tools.visible:
+      // a deny rule never registers the tool, so no mode and no visibility
+      // entry can bring a route back.
+      for (const toolMode of [ToolMode.Direct, ToolMode.CodeModeOnly]) {
+        await expect(
+          skillRegistrationStatusFor(
+            configWith('disabled', [ToolNames.SKILL], toolMode),
+          ),
+        ).resolves.toBe('disabled');
+      }
+    });
+
+    it('reports a deferred Skill tool in both modes', async () => {
+      // Whether a deferred tool is still reachable is the predicate's
+      // question, not this probe's: answering 'registered' for every
+      // Direct-mode session is what let an agent whose declarations named no
+      // bridge half keep its SkillManager and its lit listing (#12424).
+      for (const toolMode of [ToolMode.Direct, ToolMode.CodeModeOnly]) {
+        await expect(
+          skillRegistrationStatusFor(configWith('deferred', [], toolMode)),
+        ).resolves.toBe('deferred');
+      }
+    });
+
+    it('reads a tools.visible entry as re-exposing a deferred schema', async () => {
+      await expect(
+        skillRegistrationStatusFor(configWith('deferred', [ToolNames.SKILL])),
+      ).resolves.toBe('registered');
+    });
+
+    it('falls back to registered where it cannot tell', async () => {
+      await expect(
+        skillRegistrationStatusFor(configWith(undefined)),
+      ).resolves.toBe('registered');
+      await expect(
+        skillRegistrationStatusFor({} as unknown as Config),
+      ).resolves.toBe('registered');
     });
   });
 });

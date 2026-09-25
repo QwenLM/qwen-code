@@ -12,9 +12,10 @@ import {
 } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import type { ToolConfig } from './agent-types.js';
-import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
+import { getToolExposure } from '../../tools/code-mode.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
+import type { ToolRegistrationStatus } from '../../permissions/permission-manager.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
 import {
   getCurrentAgentId,
@@ -94,8 +95,8 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * The first answers for the currently running agent while this predicate is
  * also called from the parent's frame, so it checks the raw
  * `EXCLUDED_TOOLS_FOR_SUBAGENTS` set instead; the second cannot be read from
- * a `ToolConfig` at all, so it arrives as `options.skillEagerHidden` (below).
- * A filter added to `prepareTools()` propagates here only by hand.
+ * a `ToolConfig` at all, so it arrives as `options.skillRegistration`
+ * (below). A filter added to `prepareTools()` propagates here only by hand.
  *
  * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
  * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
@@ -119,11 +120,15 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  *   removes `exec`, and with it the only route to a code-mode-callable tool:
  *   `prepareTools()` declares nothing at all for such an agent, so naming
  *   `skill` there — or inheriting the registry — buys no way to load one.
- * - `options.skillEagerHidden` answers what the declarations cannot: whether
- *   the session's `settings.tools.eager` allowlist takes the Skill tool away
- *   from this agent entirely. Only a caller that can see the session's
- *   permission state knows this, so it arrives as an input — computed by
- *   {@link skillEagerHiddenFor}.
+ * - `options.skillRegistration` answers what the declarations cannot: how
+ *   the Skill tool participates in the session's registry. Only a caller
+ *   that can see the session's permission state knows this, so it arrives
+ *   as an input — computed by {@link skillRegistrationStatusFor}. A
+ *   `disabled` Skill tool is never registered, so nothing reaches it; a
+ *   `deferred` one keeps its registration but loses its declaration, so the
+ *   `tool_search` + `tool_call` bridge is the only route left — and that
+ *   route exists only where these declarations leave both halves standing
+ *   and the session is not under CodeModeOnly, which hides them.
  *
  * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
  * agent cannot follow, a wrong `false` takes skills away from an agent that
@@ -134,16 +139,31 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
-  options: { codeModeOnly?: boolean; skillEagerHidden?: boolean } = {},
+  options: {
+    codeModeOnly?: boolean;
+    skillRegistration?: ToolRegistrationStatus;
+  } = {},
 ): boolean {
   if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
   }
-  if (options.skillEagerHidden === true) {
+  // A `disabled` Skill tool — a `permissions.deny` rule or `excludeTools` —
+  // is registered nowhere: not in the session registry, not in a rebuilt
+  // subagent one. No declaration shape and no bridge can surface a name that
+  // was never registered, so the listing must go dark for every agent.
+  if (options.skillRegistration === 'disabled') {
     return false;
   }
+  // A `deferred` Skill tool stays registered but is kept out of the eager
+  // request, so `prepareTools()` declares neither it nor (under CodeModeOnly)
+  // the bridge that reaches it. Reachability then depends on the declaration
+  // shape, which only this predicate can see.
+  const deferred = options.skillRegistration === 'deferred';
+  const bridgeHidden = deferred && options.codeModeOnly === true;
   if (!toolConfig) {
-    return true;
+    // No per-agent config inherits the whole registry — the bridge included,
+    // unless CodeModeOnly hides it.
+    return !bridgeHidden;
   }
   const isDisallowed = (toolName: string): boolean =>
     toolConfig.disallowedTools?.some((pattern) =>
@@ -164,6 +184,23 @@ export function toolConfigAllowsSkill(
   const inheritsRegistry =
     names.includes('*') ||
     (names.length === 0 && inlineDeclarations.length === 0);
+  if (deferred) {
+    // Naming `skill` buys nothing here — the declaration is dropped by the
+    // eager allowlist — so the route lives or dies with the bridge, and
+    // `resolveBundledReferenceRoute` needs BOTH halves to call it a route:
+    // with `tool_search` alone the schema can be reviewed but never invoked.
+    // This mirrors what `prepareTools()` actually declares, so an explicit
+    // list that never named the bridge cannot be told to use it (#12424).
+    if (bridgeHidden) {
+      return false;
+    }
+    const declaresBridge = (toolName: string): boolean =>
+      (inheritsRegistry || names.includes(toolName)) && !isDisallowed(toolName);
+    return (
+      declaresBridge(ToolNames.TOOL_SEARCH) &&
+      declaresBridge(ToolNames.TOOL_CALL)
+    );
+  }
   const reachesSkillThroughExec =
     options.codeModeOnly === true &&
     names.includes(ToolNames.EXEC) &&
@@ -179,52 +216,58 @@ export function toolConfigAllowsSkill(
 }
 
 /**
- * Whether the session's `settings.tools.eager` allowlist takes the Skill
- * tool away from an agent entirely — the value every
- * `options.skillEagerHidden` input must carry. True only when the session
- * permission-defers `skill`, `tools.visible` does not re-expose it, AND the
- * session runs under CodeModeOnly.
+ * How the Skill tool participates in this session's registry — the value
+ * every `options.skillRegistration` input must carry: the session's
+ * `ToolRegistrationStatus` verdict for `skill`, with one adjustment.
  *
- * The CodeModeOnly gate is load-bearing. Outside it the `tool_search` +
- * `tool_call` bridge stays registered (both halves are exempt from the
- * allowlist) and still resolves a deferred tool, so the agent keeps a
- * followable route to every skill — withholding the SkillManager there
- * would strip a working capability, which is exactly the
- * deferred-NOT-disabled contract of
- * `PermissionManager.getToolRegistrationStatus` (#10075). Under
- * CodeModeOnly the bridge tools are hidden and `prepareTools()` drops an
- * eager-hidden name from `exec`'s bindings, so no route remains and the
- * manager must be withheld (#12424).
+ * A `tools.visible` entry re-exposes a deferred schema, which makes the tool
+ * declared again — the bridge is no longer the only route — so that reads as
+ * `registered` here. It cannot do the same for `disabled`: a denied tool is
+ * not registered at all, so there is nothing to expose. That is why the
+ * `disabled` verdict is returned before the visibility check.
  *
- * The deferral verdict comes from the session's PermissionManager, NOT from
- * `config`'s own registry: a manager-withholding agent's rebuilt registry
- * has no `skill` entry at all (config.ts registers the SkillTool factory
- * only when the override holds a manager), so a registry probe answers
- * structurally false at nesting depth ≥ 2 and hands the session manager
- * back one level down. `getPermissionManager()` resolves through the
- * prototype chain to the session's manager, whose answer does not depend on
- * which registry is asked.
+ * The verdict comes from the session's PermissionManager, NOT from `config`'s
+ * own registry: a manager-withholding agent's rebuilt registry has no
+ * `skill` entry at all (config.ts registers the SkillTool factory only when
+ * the override holds a manager), so a registry probe answers structurally
+ * false at nesting depth ≥ 2 and hands the session manager back one level
+ * down. `getPermissionManager()` resolves through the prototype chain to the
+ * session's manager, whose answer does not depend on which registry is
+ * asked.
+ *
+ * The tool mode is deliberately NOT consulted here. Whether a deferred Skill
+ * tool is reachable is a property of the agent's declarations, so that
+ * reasoning lives in {@link toolConfigAllowsSkill} — the only place that can
+ * see the `ToolConfig`. Gating this probe on CodeModeOnly instead answered
+ * `registered` for every Direct-mode agent, including one whose explicit
+ * list named neither bridge half: the nested Agent tool then pointed at
+ * `tool_search`/`tool_call` while `prepareTools()` declared neither, and the
+ * `<available_skills>` listing stayed lit — the #12424 disagreement this
+ * predicate exists to prevent.
  *
  * Where this cannot tell — no permission manager, no registration-status
- * probe — it answers false, matching the predicate's documented preference:
- * a wrong `true` costs an unfollowable pointer, a wrong `false` takes
- * skills away from an agent that could load them.
+ * probe — it answers `registered`, matching the predicate's documented
+ * preference: a wrong `true` costs an unfollowable pointer, a wrong `false`
+ * takes skills away from an agent that could load them.
  *
  * Shared by `SubagentManager.createAgentHeadless()` and the background
  * resume path (`subagentWillHaveSkillTool`) so the launch and the resume
- * cannot drift on what "eager hidden" means for the same session.
+ * cannot drift on what the session's permission state means for the same
+ * agent.
  */
-export async function skillEagerHiddenFor(config: Config): Promise<boolean> {
-  if (config.getToolMode?.() !== ToolMode.CodeModeOnly) {
-    return false;
-  }
-  if (config.getVisibleTools?.()?.has(ToolNames.SKILL)) {
-    return false;
-  }
+export async function skillRegistrationStatusFor(
+  config: Config,
+): Promise<ToolRegistrationStatus> {
   const status = await config
     .getPermissionManager?.()
     ?.getToolRegistrationStatus?.(ToolNames.SKILL);
-  return status === 'deferred';
+  if (status === 'disabled') {
+    return 'disabled';
+  }
+  if (config.getVisibleTools?.()?.has(ToolNames.SKILL)) {
+    return 'registered';
+  }
+  return status === 'deferred' ? 'deferred' : 'registered';
 }
 
 /**
