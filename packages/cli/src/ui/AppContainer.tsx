@@ -569,6 +569,11 @@ export function useQueuedSubmissionDrain({
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
+          // Route on the intent recorded at submit time, not the live
+          // shell-mode flag (#11626).
+          ...(submission.shellMode === undefined
+            ? {}
+            : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
             // path uses: admission failed because a turn is active,
@@ -579,6 +584,7 @@ export function useQueuedSubmissionDrain({
               [submission.modelText],
               submission.submittedPrompt,
               true,
+              submission.shellMode,
             );
             markAdmissionFailed();
           },
@@ -3161,8 +3167,14 @@ export const AppContainer = (props: AppContainerProps) => {
           );
         }
       }
+      // Shell-mode submissions go to bash, not the model: a leading
+      // `<system-reminder>` is a syntax error there, and consuming the
+      // one-shot notice here would drop it before any model turn ever sees
+      // it. Leave it armed for the next model-bound prompt (#11626).
       const recoveredAgentsNotice =
-        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
           ? config.consumePendingRecoveredAgentsNotice()
           : null;
       if (recoveredAgentsNotice) {
@@ -3173,10 +3185,16 @@ export const AppContainer = (props: AppContainerProps) => {
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
-      // commands — those go through different paths). Once consumed,
-      // clear the ref so subsequent prompts aren't repeatedly prefixed.
+      // commands, not shell-mode commands — those go through different
+      // paths). Once consumed, clear the ref so subsequent prompts aren't
+      // repeatedly prefixed; a skipped shell-mode submission leaves the
+      // ref armed for the next model-bound prompt (#11626).
       const worktreeNotice = pendingWorktreeNoticeRef.current;
-      if (worktreeNotice && !isSlashCommand(submittedValue)) {
+      if (
+        worktreeNotice &&
+        !shellModeActive &&
+        !isSlashCommand(submittedValue)
+      ) {
         pendingWorktreeNoticeRef.current = null;
         submittedValue =
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
@@ -3239,7 +3257,7 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true, submittedPrompt);
+        addMessage(submittedValue, true, submittedPrompt, shellModeActive);
         return;
       }
       if (
@@ -3259,7 +3277,12 @@ export const AppContainer = (props: AppContainerProps) => {
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             onAdmissionFailed: () => {
-              addMessage(submittedValue, true, submittedPrompt);
+              addMessage(
+                submittedValue,
+                true,
+                submittedPrompt,
+                shellModeActive,
+              );
             },
           }),
         ).catch((error) => {
@@ -3357,7 +3380,7 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue, false, submittedPrompt);
+            addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
@@ -3388,7 +3411,7 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      addMessage(submittedValue, false, submittedPrompt);
+      addMessage(submittedValue, false, submittedPrompt, shellModeActive);
     },
     [
       addMessage,

@@ -2213,6 +2213,7 @@ describe('AppContainer State Management', () => {
           kind: 'user' as const,
           modelText: 'persistent failure batch',
           turnKey: 'message-queue:persistent',
+          shellMode: true,
         };
       });
       const restoreMessages = vi.fn(() => {
@@ -2253,12 +2254,25 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+      // #11626: this spread is the only production hop carrying the recorded
+      // shell intent from the queue entry to the router, and an
+      // `objectContaining({ userAdmission })` assertion cannot fail on a
+      // missing `shellMode` key — so pin the key itself.
+      expect(submitQuery).toHaveBeenCalledWith(
+        'persistent failure batch',
+        SendMessageType.UserQuery,
+        undefined,
+        expect.objectContaining({ shellMode: true }),
+      );
       // Deferred: admission failed because a turn is active, and the
       // mid-turn steer drain must not pull the restored batch (a peer
-      // envelope would leak into the turn raw, projection lost).
+      // envelope would leak into the turn raw, projection lost). The restore
+      // carries the same recorded intent, so the retry routes the same way
+      // (#11626).
       expect(restoreMessages).toHaveBeenCalledWith(
         ['persistent failure batch'],
         undefined,
+        true,
         true,
       );
 
@@ -2786,6 +2800,68 @@ describe('AppContainer State Management', () => {
         '/btw next turn',
         true,
         '/btw next turn',
+        false,
+      );
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+    });
+
+    // #11626: Ctrl+Q is not shell-gated — `keyMatchers[Command.QUEUE_MESSAGE]`
+    // calls `handleSubmitAndClear(buffer.text, true)` (InputPrompt.tsx:1810)
+    // after the `if (!shellModeActive) {` block closes at :1808 — and
+    // handleFinalSubmit reaches the deferred leg with no shell-mode gate before
+    // it, so a shell-mode command can be deferred. That entry is also the one
+    // that sits in the queue longest, across exactly the flag flip the recorded
+    // intent exists to survive. The case above pins this leg's non-shell arm, so
+    // the 4th argument is asserted in both directions here: replacing
+    // `shellModeActive` with `false` at AppContainer.tsx:3253 turns this red.
+    it('records shell intent on a Ctrl+Q submission made in shell mode', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('gh workflow list', {
+        deferUntilIdle: true,
+        submittedPrompt: 'gh workflow list',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'gh workflow list',
+        true,
+        'gh workflow list',
+        true,
       );
       expect(mockSubmitQuery).not.toHaveBeenCalled();
     });
@@ -2888,6 +2964,7 @@ describe('AppContainer State Management', () => {
         '?btw wait for the tool',
         true,
         '?btw wait for the tool',
+        false,
       );
     });
 
@@ -2927,7 +3004,12 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '/settings',
       });
 
-      expect(addMessage).toHaveBeenCalledWith('/settings', true, '/settings');
+      expect(addMessage).toHaveBeenCalledWith(
+        '/settings',
+        true,
+        '/settings',
+        false,
+      );
       expect(handleSlashCommand).not.toHaveBeenCalled();
       expect(submitQuery).not.toHaveBeenCalled();
     });
@@ -2946,7 +3028,7 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '/model',
       });
 
-      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model');
+      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model', false);
       expect(handleSlashCommand).not.toHaveBeenCalled();
       expect(submitQuery).not.toHaveBeenCalled();
     });
@@ -3133,21 +3215,24 @@ describe('AppContainer State Management', () => {
           '</system-reminder>\n\ncontinue the review',
         false,
         'continue the review',
+        false,
       );
       expect(mockQueueMessage).toHaveBeenNthCalledWith(
         2,
         'one more check',
         false,
         'one more check',
+        false,
       );
     });
 
-    // The shell-mode gate is load-bearing only through this call site: a
-    // shell-mode submission goes to bash, where a leading `<system-reminder>`
-    // is a syntax error, and is recorded as the command the user ran. Both arms
-    // go through the real handleFinalSubmit and the real shellModeActive state,
-    // so dropping `shellMode: shellModeActive` from the call turns the shell
-    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    // The workflow reminder's shell-mode gate is load-bearing through this
+    // call site: a shell-mode submission goes to bash, where a leading
+    // `<system-reminder>` is a syntax error, and is recorded as the command
+    // the user ran. Both arms go through the real handleFinalSubmit and the
+    // real shellModeActive state, so dropping `shellMode: shellModeActive`
+    // from the call turns the shell arm red while the ordinary arm keeps the
+    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
@@ -3155,6 +3240,12 @@ describe('AppContainer State Management', () => {
       'adds the workflow keyword reminder only outside shell mode: %s',
       (_case, shellMode, expectReminder) => {
         const mockQueueMessage = vi.fn();
+        // The mount effect's un-awaited config.initialize() runs the real
+        // initialization against this partial registry mock and rejects
+        // after the test ends (toolRegistry.warmAll etc. missing); vitest
+        // flags the unhandled rejection, which is fatal on Linux. The test
+        // only exercises handleFinalSubmit, so cut the IIFE at the top.
+        vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
         vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
         vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
           getAllToolNames: () => ['workflow'],
@@ -3207,8 +3298,8 @@ describe('AppContainer State Management', () => {
         const submitted = mockQueueMessage.mock.calls[0][0] as string;
         expect(submitted).toContain('gh workflow list');
         // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler can prepend do not
-        // check shell mode yet (#11626).
+        // only that reminder. The other notices the handler prepends gate
+        // shell mode at their own call sites (see the #11626 cases below).
         const workflowReminder = 'includes the "workflow" keyword';
         if (expectReminder) {
           expect(submitted).toContain(workflowReminder);
@@ -3217,6 +3308,158 @@ describe('AppContainer State Management', () => {
         }
       },
     );
+
+    // #11626: a shell-mode submission goes to bash, where a leading
+    // `<system-reminder>` is a syntax error — and the one-shot notice would
+    // be consumed by a submission the model never sees. The reminder must
+    // stay armed until the next model-bound prompt.
+    it('does not prepend or consume the recovered-agents reminder in shell mode', () => {
+      const mockQueueMessage = vi.fn();
+      const consumeSpy = vi
+        .spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
+        .mockReturnValue('Use list_agents to inspect restored agents.');
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('gh workflow list', {
+        submittedPrompt: 'gh workflow list',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        'gh workflow list',
+        false,
+        'gh workflow list',
+        true,
+      );
+      expect(consumeSpy).not.toHaveBeenCalled();
+
+      // Still armed: the next model-bound prompt carries the notice.
+      act(() => {
+        capturedUIActions.setShellModeActive(false);
+      });
+      capturedUIActions.handleFinalSubmit('continue the review', {
+        submittedPrompt: 'continue the review',
+      });
+
+      expect(consumeSpy).toHaveBeenCalledTimes(1);
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
+        '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
+          '</system-reminder>\n\ncontinue the review',
+        false,
+        'continue the review',
+        false,
+      );
+    });
+
+    // #11626: the one-shot worktree restore reminder (armed during --resume)
+    // needs the same shell-mode guard as the recovered-agents notice.
+    it('does not prepend or consume the worktree restore reminder in shell mode', async () => {
+      const mockQueueMessage = vi.fn();
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue('The resumed session ran in worktree /tmp/wt-1.');
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // The startup effect arms pendingWorktreeNoticeRef from the consumed
+      // one-shot Config notice; wait for it before submitting.
+      await vi.waitFor(() => {
+        expect(startupNoticeSpy).toHaveBeenCalled();
+      });
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('git status', {
+        submittedPrompt: 'git status',
+      });
+
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        'git status',
+        false,
+        'git status',
+        true,
+      );
+
+      // Still armed: the next model-bound prompt carries the notice.
+      act(() => {
+        capturedUIActions.setShellModeActive(false);
+      });
+      capturedUIActions.handleFinalSubmit('continue', {
+        submittedPrompt: 'continue',
+      });
+
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
+        '<system-reminder>\nThe resumed session ran in worktree /tmp/wt-1.\n' +
+          '</system-reminder>\n\ncontinue',
+        false,
+        'continue',
+        false,
+      );
+    });
 
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
@@ -3265,6 +3508,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -3316,6 +3560,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3328,6 +3573,7 @@ describe('AppContainer State Management', () => {
         `${modelText} with edits`,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3340,6 +3586,7 @@ describe('AppContainer State Management', () => {
         `${modelText} `,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3357,6 +3604,7 @@ describe('AppContainer State Management', () => {
         'fresh prompt',
         false,
         'fresh prompt',
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3370,6 +3618,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
     });
 
@@ -3417,6 +3666,7 @@ describe('AppContainer State Management', () => {
         stashedText,
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenLastCalledWith('', {
         clearUndoHistory: true,
@@ -3485,6 +3735,7 @@ describe('AppContainer State Management', () => {
         'fresh prompt',
         false,
         'fresh prompt',
+        false,
       );
     });
 
@@ -3514,7 +3765,12 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '   ',
       });
 
-      expect(mockQueueMessage).toHaveBeenCalledWith('   ', false, undefined);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '   ',
+        false,
+        undefined,
+        false,
+      );
     });
 
     it('captures trimmed multiline Unicode input as provenance', () => {
@@ -3547,6 +3803,7 @@ describe('AppContainer State Management', () => {
         ' \n你好 🌏\nsecond line \n ',
         false,
         '你好 🌏\nsecond line',
+        false,
       );
     });
 
@@ -3581,6 +3838,7 @@ describe('AppContainer State Management', () => {
         '@.qwen/tmp/clipboard.png\n\ndescribe this image',
         false,
         'describe this image',
+        false,
       );
     });
 
@@ -3626,6 +3884,7 @@ describe('AppContainer State Management', () => {
         'configured initial prompt',
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenCalledTimes(1);
 
@@ -3636,6 +3895,7 @@ describe('AppContainer State Management', () => {
         stashedText,
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenCalledWith('', {
         clearUndoHistory: true,
@@ -3676,6 +3936,7 @@ describe('AppContainer State Management', () => {
         'vim prompt',
         false,
         undefined,
+        false,
       );
     });
 
@@ -3727,6 +3988,7 @@ describe('AppContainer State Management', () => {
         'register contents',
         false,
         undefined,
+        false,
       );
     });
 
@@ -4480,6 +4742,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -7401,6 +7664,7 @@ describe('AppContainer State Management', () => {
         'second prompt',
         false,
         undefined,
+        false,
       );
       expect(harness.setText).toHaveBeenLastCalledWith('', {
         clearUndoHistory: true,

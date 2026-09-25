@@ -81,6 +81,73 @@ const schema = JSON.parse(
   ),
 ) as Record<string, unknown>;
 
+interface ToolFixtureRoute {
+  readonly key: 'execute' | 'status' | 'cancel';
+  readonly method: string;
+  readonly path: string;
+  readonly protocolVersion: number;
+  readonly requestBodyLimitBytes: number;
+  readonly responseBodyLimitBytes: number;
+  readonly cacheControl: string;
+}
+
+interface ToolFixtureSuite {
+  readonly contractVersion: number;
+  readonly routes: readonly ToolFixtureRoute[];
+  readonly identity: {
+    readonly token: string;
+    readonly leaseId: string;
+    readonly epoch: number;
+  };
+  readonly suites: ReadonlyArray<{
+    readonly route: 'execute' | 'status' | 'cancel';
+    readonly canonicalRequest: {
+      readonly headers: Readonly<Record<string, string>>;
+      readonly body: Readonly<Record<string, unknown>>;
+    };
+    readonly cases: readonly FixtureCase[];
+  }>;
+}
+
+interface MutableToolFixtureSuite {
+  routes: Array<{
+    requestBodyLimitBytes: number;
+    responseBodyLimitBytes: number;
+  }>;
+  suites: Array<{
+    route: 'execute' | 'status' | 'cancel';
+    canonicalRequest: {
+      headers: Record<string, string>;
+      body: Record<string, unknown>;
+    };
+    cases: Array<{
+      id: string;
+      request?: {
+        headers?: Record<string, string>;
+        body?: Record<string, unknown>;
+      };
+      expected: {
+        classification: string;
+        code?: string;
+        body?: Record<string, unknown>;
+      };
+    }>;
+  }>;
+}
+
+const toolFixtures = JSON.parse(
+  fs.readFileSync(
+    path.join(contractDirectory, 'managed-runtime-tool-v2.fixtures.json'),
+    'utf8',
+  ),
+) as ToolFixtureSuite;
+const toolSchema = JSON.parse(
+  fs.readFileSync(
+    path.join(contractDirectory, 'managed-runtime-tool-v2.schema.json'),
+    'utf8',
+  ),
+) as Record<string, unknown>;
+
 const success = fixtures.cases.find((fixture) => fixture.id === 'success');
 if (
   !success?.request.headers ||
@@ -178,8 +245,11 @@ describe('Managed Runtime attestation contract', () => {
     expect(validate.errors).toBeNull();
   });
 
-  it('uses one manifest for route admission and registration', () => {
-    expect(OWNED_MANAGED_RUNTIME_ROUTES).toEqual([fixtures.route]);
+  it('uses one manifest for declared route contracts', () => {
+    expect(OWNED_MANAGED_RUNTIME_ROUTES).toEqual([
+      fixtures.route,
+      ...toolFixtures.routes,
+    ]);
     expect(Object.isFrozen(OWNED_MANAGED_RUNTIME_ROUTES)).toBe(true);
     expect(Object.isFrozen(OWNED_MANAGED_RUNTIME_ROUTES[0])).toBe(true);
     expect(MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES).toBe(16 * 1024);
@@ -326,5 +396,277 @@ describe('Managed Runtime attestation contract', () => {
     expect(definitions['requestBody']?.['unevaluatedProperties']).toBe(false);
     expect(definitions['responseBody']?.['unevaluatedProperties']).toBe(false);
     expect(definitions['route']?.['additionalProperties']).toBe(false);
+  });
+});
+
+describe('Managed Runtime tool contract', () => {
+  it('validates the shared tool fixtures against the shared schema', () => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+
+    expect(validate(toolFixtures)).toBe(true);
+    expect(validate.errors).toBeNull();
+  });
+
+  it.each([
+    [
+      'a route suite is duplicated',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[2] = structuredClone(clone.suites[0]);
+      },
+    ],
+    [
+      'an error code is misspelled',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[1].expected.code = 'managed_runtime_unauthorised';
+      },
+    ],
+    [
+      'canonical headers contain an undeclared header',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].canonicalRequest.headers['x-trace-id'] = 'trace-01';
+      },
+    ],
+    [
+      'case headers contain an undeclared header',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].request = {
+          headers: {
+            ...clone.suites[0].canonicalRequest.headers,
+            'x-trace-id': 'trace-01',
+          },
+        };
+      },
+    ],
+    [
+      'case headers have an invalid authorization value',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].request = {
+          headers: {
+            ...clone.suites[0].canonicalRequest.headers,
+            authorization: 'fixture-token',
+          },
+        };
+      },
+    ],
+    [
+      'status forbids a negative afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[1].canonicalRequest.body['afterSequence'] = -1;
+      },
+    ],
+    [
+      'execute requires toolName',
+      (clone: MutableToolFixtureSuite) => {
+        delete clone.suites[0].canonicalRequest.body['toolName'];
+      },
+    ],
+    [
+      'execute requires input',
+      (clone: MutableToolFixtureSuite) => {
+        delete clone.suites[0].canonicalRequest.body['input'];
+      },
+    ],
+    [
+      'execute forbids afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].canonicalRequest.body['afterSequence'] = 0;
+      },
+    ],
+    [
+      'status forbids toolName',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[1].canonicalRequest.body['toolName'] = 'read_file';
+      },
+    ],
+    [
+      'cancel forbids afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[2].canonicalRequest.body['afterSequence'] = 0;
+      },
+    ],
+    [
+      'execute case body overrides stay route-specific',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].request = {
+          body: {
+            protocolVersion: 2,
+            reference: clone.suites[0].canonicalRequest.body['reference'],
+            afterSequence: 0,
+          },
+        };
+      },
+    ],
+    [
+      'non-settled responses forbid result',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[1].cases[1].expected.body!['result'] = {
+          executionStatus: 'success',
+          responseParts: [],
+        };
+      },
+    ],
+    [
+      'ok cases require a response body',
+      (clone: MutableToolFixtureSuite) => {
+        delete clone.suites[0].cases[0].expected.body;
+      },
+    ],
+    [
+      'execute responses forbid lastSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[0].cases[0].expected.body!['lastSequence'] = 1;
+      },
+    ],
+    [
+      'cancel responses forbid lastSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[2].cases[0].expected.body!['lastSequence'] = 1;
+      },
+    ],
+  ])('rejects fixtures when %s', (_label, mutate) => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    const invalidFixtures = structuredClone(
+      toolFixtures,
+    ) as unknown as MutableToolFixtureSuite;
+    mutate(invalidFixtures);
+
+    expect(validate(invalidFixtures)).toBe(false);
+  });
+
+  it.each([0, 1, 2])('pins envelope limits for route %i', (routeIndex) => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    for (const field of [
+      'requestBodyLimitBytes',
+      'responseBodyLimitBytes',
+    ] as const) {
+      const invalidFixtures = structuredClone(
+        toolFixtures,
+      ) as unknown as MutableToolFixtureSuite;
+      invalidFixtures.routes[routeIndex][field]++;
+
+      expect(validate(invalidFixtures)).toBe(false);
+    }
+  });
+
+  it('requires results for every settled response', () => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    for (const [suiteIndex, suite] of toolFixtures.suites.entries()) {
+      for (const [caseIndex, fixture] of suite.cases.entries()) {
+        if (fixture.expected.body?.['state'] !== 'settled') continue;
+        const invalidFixtures = structuredClone(
+          toolFixtures,
+        ) as unknown as MutableToolFixtureSuite;
+        delete invalidFixtures.suites[suiteIndex].cases[caseIndex].expected
+          .body!['result'];
+
+        expect(validate(invalidFixtures), `${suite.route}/${fixture.id}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it.each([
+    ['missing message', { type: 'runtime' }],
+    ['unexpected field', { message: 'tool failed', errorCode: 'runtime' }],
+    ['string error', 'tool failed'],
+  ])('rejects a malformed result error: %s', (_label, error) => {
+    const validate = new Ajv2020({ strict: true }).compile(toolSchema);
+    const invalidFixtures = structuredClone(
+      toolFixtures,
+    ) as unknown as MutableToolFixtureSuite;
+    const fixture = invalidFixtures.suites[1].cases.find(
+      (entry) => entry.id === 'settled-with-error',
+    )!;
+    const result = fixture.expected.body!['result'] as Record<string, unknown>;
+    result['error'] = error;
+
+    expect(validate(invalidFixtures)).toBe(false);
+  });
+
+  it('keeps tool request and response objects closed in the schema', () => {
+    const definitions = toolSchema['$defs'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(definitions['executeRequestBody']?.['additionalProperties']).toBe(
+      false,
+    );
+    expect(definitions['statusRequestBody']?.['additionalProperties']).toBe(
+      false,
+    );
+    expect(definitions['cancelRequestBody']?.['additionalProperties']).toBe(
+      false,
+    );
+    expect(definitions['toolResponseBody']?.['additionalProperties']).toBe(
+      false,
+    );
+    expect(definitions['route']?.['additionalProperties']).toBe(false);
+  });
+
+  it('pins every tool fixture case to a classified outcome', () => {
+    const classifications = new Set<string>();
+    for (const suite of toolFixtures.suites) {
+      const route = toolFixtures.routes.find(
+        (entry) => entry.key === suite.route,
+      );
+      expect(route).toBeDefined();
+      const ids = new Set<string>();
+      for (const fixture of suite.cases) {
+        expect(ids.has(fixture.id)).toBe(false);
+        ids.add(fixture.id);
+        expect(classify(fixture.expected.status)).toBe(
+          fixture.expected.classification,
+        );
+        classifications.add(fixture.expected.classification);
+      }
+    }
+    expect(classifications).toEqual(
+      new Set(['ok', 'credentials', 'protocol', 'identity', 'incompatible']),
+    );
+  });
+
+  it('answers unknown rather than 404 for a missing execution record', () => {
+    for (const suite of toolFixtures.suites) {
+      if (suite.route === 'execute') continue;
+      const unknownCase = suite.cases.find(
+        (fixture) => fixture.id === 'unknown-is-ok',
+      );
+      expect(unknownCase?.expected.status).toBe(200);
+      expect(unknownCase?.expected.body).toEqual({
+        protocolVersion: 2,
+        state: 'unknown',
+      });
+    }
+  });
+
+  it('rejects declared tool routes until their handlers land', async () => {
+    const app = express();
+    for (const route of toolFixtures.routes) {
+      app.post(route.path, (_req, res) => {
+        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+      });
+    }
+    const server = createServer(ownedManagedRuntimeRouteGate(app));
+    openServers.add(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected a TCP test server address.');
+    }
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    for (const route of toolFixtures.routes) {
+      const response = await fetch(`${origin}${route.path}`, {
+        method: route.method,
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe('');
+    }
   });
 });
