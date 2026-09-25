@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -397,7 +398,21 @@ class HttpRuntimeTransportTest {
         assertEquals(statusSuite.required("canonicalRequest")
                 .required("body"), sent);
         assertEquals("unknown", answer.get("state"));
+        assertEquals(Set.of("state"), answer.keySet());
         assertNull(answer.get("result"));
+    }
+
+    @Test
+    void sessionVerbsFailClosed() {
+        assertTrue(transport instanceof RuntimeTransport);
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> transport.acquire(toolLease(1), toolSession())
+                        .toCompletableFuture().join());
+        RuntimeBrokerException failure =
+                (RuntimeBrokerException) thrown.getCause();
+        assertEquals(501, failure.getStatusCode());
+        assertEquals("runtime_session_verb_unsupported", failure.getCode());
+        assertFalse(failure.isRetryable());
     }
 
     @Test
@@ -714,7 +729,10 @@ class HttpRuntimeTransportTest {
                 toolLease(server.getAddress().getPort()), toolSession(),
                 toolReference(), 0).toCompletableFuture()
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(0, ((Number) status.get("lastSequence")).longValue());
+        assertFalse(status.containsKey("lastSequence"));
+        assertFalse(status.containsKey("protocolVersion"));
+        assertEquals("settled", status.get("state"));
+        assertTrue(status.containsKey("result"));
     }
 
     @Test
@@ -736,8 +754,8 @@ class HttpRuntimeTransportTest {
                     toolLease(server.getAddress().getPort()), toolSession(),
                     toolReference(), 0).toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
-            assertEquals(0, new BigDecimal(valid).compareTo(new BigDecimal(
-                    answer.get("lastSequence").toString())), valid);
+            assertEquals(Set.of("state"), answer.keySet(), valid);
+            assertEquals("unknown", answer.get("state"), valid);
         }
         reply.set(json(200, ("{\"protocolVersion\":2.000000000000000001,"
                 + "\"state\":\"unknown\"}").getBytes(StandardCharsets.UTF_8)));
