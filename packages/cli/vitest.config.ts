@@ -238,6 +238,15 @@ export default defineConfig({
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'
+      : process.env.CI
+        ? 2
+        : undefined,
+    poolOptions: process.env.CI
+      ? {
+          threads: {
+            maxThreads: 2,
+          },
+        }
       : undefined,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
