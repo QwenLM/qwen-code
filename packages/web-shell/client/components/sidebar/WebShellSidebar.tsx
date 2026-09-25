@@ -32,6 +32,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
+  BotIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -259,7 +260,8 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'scheduledTasks'
   | 'workflows'
-  | 'goals';
+  | 'goals'
+  | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
   /** Built-in primary nav entries to show. Defaults to all. */
@@ -300,6 +302,7 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'scheduledTasks',
   'workflows',
   'goals',
+  'managed',
 ];
 
 export type WebShellSidebarSessionActionItem =
@@ -403,6 +406,7 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
@@ -946,6 +950,7 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenPlugins,
   onOpenChannels,
+  onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenWorkflows,
@@ -1022,6 +1027,7 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
+    (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
@@ -5739,6 +5745,20 @@ export function WebShellSidebar({
                     <TargetIcon size={16} strokeWidth={1.2} />
                   </span>
                   {!collapsed && <span>{t('sidebar.goals')}</span>}
+                </button>
+              )}
+              {primaryNavItems.has('managed') && onOpenManagedSessions && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('managed.title')}
+                  aria-label={t('managed.title')}
+                  onClick={onOpenManagedSessions}
+                >
+                  <span className={styles.navIcon}>
+                    <BotIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('managed.title')}</span>}
                 </button>
               )}
               {primaryNavOptions?.render?.()}
