@@ -204,6 +204,26 @@ describe('settings presentation aliases', () => {
       }
     },
   );
+  it('accepts the retired Advisor ID without exposing another setting', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:advisor-model');
+      expect(
+        isSettingVisible('fastModel', {
+          includeItems: ['setting:advisor-model'],
+        }),
+      ).toBe(false);
+      expect(
+        isSettingVisible('fastModel', {
+          excludeItems: ['setting:advisor-model'],
+        }),
+      ).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('filters by every published setting alias in both directions', () => {
     // SETTING_KEYS is module-private, so this mirror pins the published
     // alias-to-key contract; the completeness assertion keeps it in sync.
@@ -234,7 +254,6 @@ describe('settings presentation aliases', () => {
       'setting:shell-output-limit': 'ui.shellOutputMaxLines',
       'setting:usage-statistics': 'privacy.usageStatisticsEnabled',
       'setting:fast-model': 'fastModel',
-      'setting:advisor-model': 'advisorModel',
       'setting:vision-model': 'visionModel',
       'setting:model-fallbacks': 'modelFallbacks',
       'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
@@ -267,8 +286,8 @@ describe('settings presentation aliases', () => {
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
     } satisfies Record<string, string>;
-    const settingIds = WEB_SHELL_SETTING_ITEM_IDS.filter((id) =>
-      id.startsWith('setting:'),
+    const settingIds = WEB_SHELL_SETTING_ITEM_IDS.filter(
+      (id) => id.startsWith('setting:') && id !== 'setting:advisor-model',
     );
     expect(Object.keys(aliasedKeys).sort()).toEqual([...settingIds].sort());
     for (const [id, key] of Object.entries(aliasedKeys)) {

@@ -26,7 +26,6 @@ const SETTING_KEYS = {
   'setting:shell-output-limit': 'ui.shellOutputMaxLines',
   'setting:usage-statistics': 'privacy.usageStatisticsEnabled',
   'setting:fast-model': 'fastModel',
-  'setting:advisor-model': 'advisorModel',
   'setting:vision-model': 'visionModel',
   'setting:model-fallbacks': 'modelFallbacks',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
@@ -69,13 +68,18 @@ const BUILTIN_IDS = [
   'builtin:model-management',
 ] as const;
 
+// Keep accepted IDs for removed controls so existing host options remain valid.
+const RETIRED_IDS = ['setting:advisor-model'] as const;
+
 export type WebShellSettingItemId =
   | keyof typeof SETTING_KEYS
-  | (typeof BUILTIN_IDS)[number];
+  | (typeof BUILTIN_IDS)[number]
+  | (typeof RETIRED_IDS)[number];
 
 export const WEB_SHELL_SETTING_ITEM_IDS: readonly WebShellSettingItemId[] = [
   ...(Object.keys(SETTING_KEYS) as Array<keyof typeof SETTING_KEYS>),
   ...BUILTIN_IDS,
+  ...RETIRED_IDS,
 ];
 
 export interface WebShellSettingsOptions {
