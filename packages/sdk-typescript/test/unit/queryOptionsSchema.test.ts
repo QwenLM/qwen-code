@@ -92,6 +92,8 @@ describe('QueryOptionsSchema', () => {
     '-e',
     '--managed-extensions',
     '--managedExtensions',
+    '--managed--extensions',
+    '-e/tmp/attached-value',
     '--allowedMcpServerNames',
     '--sandbox',
     '-s',
@@ -201,6 +203,7 @@ describe('QueryOptionsSchema', () => {
     '--proxy=http://localhost:8080',
     '--managed-extensions=/tmp/attacker',
     '--managedExtensions=/tmp/attacker',
+    '--managed--extensions=/tmp/attacker',
   ])('rejects extraArgs with --flag=value syntax: %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);

@@ -213,9 +213,13 @@ describe('managed extension activation migration', () => {
       artifactDirectory: name,
       artifactGeneration: userState.extensions[installed.id].artifactGeneration,
     });
+    // The hand-back fires on a proven withdrawal: the root stays visible
+    // and the managed package is gone from it. The inventory still proves
+    // the user-side operations below never rewrite what remains in the
+    // managed root (nothing, after the withdrawal).
+    fs.rmSync(managedPackage, { recursive: true });
     const managedBefore = inventory(managedExtensionsDir);
-
-    const user = manager(false);
+    const user = manager();
     await user.refreshCache();
     const restored = await user.getExtensionStoreSnapshot();
     expect(restored.extensions[installed.id]).toEqual(
@@ -599,6 +603,52 @@ describe('managed extension activation migration', () => {
     ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
   });
 
+  it('keeps the managed episode intact when a run cannot see the managed root', async () => {
+    // A user package and a managed package declare the same name; while the
+    // root is visible the deployment shadows the user copy.
+    writePackage(
+      path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
+      '1.0.0',
+    );
+    writePackage(path.join(managedExtensionsDir, 'deployed'), '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0]!.id;
+    await deployed.setExtensionDefaultActivation(managedId, 'disabled');
+
+    // A run without the launcher option cannot prove the package left the
+    // deployment root, so the retained policy must not be handed back: the
+    // managed-era disable and the pre-managed stash both survive, and the
+    // shadowed user copy answers with the managed-era activation.
+    const unflagged = manager(false);
+    await unflagged.refreshCache();
+    const userExtension = unflagged
+      .getLoadedExtensions()
+      .find((extension) => extension.name === name)!;
+    expect(userExtension.source).toBe('user');
+    expect(userExtension.isActive).toBe(false);
+    expect(
+      (await unflagged.getExtensionStoreSnapshot()).extensions[
+        userExtension.id
+      ],
+    ).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+
+    // The next flagged run resumes the episode exactly where it was left.
+    const flagged = manager();
+    await flagged.refreshCache();
+    expect(
+      (await flagged.getExtensionStoreSnapshot()).extensions[managedId],
+    ).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+  });
+
   it('rechecks managed ownership when committing a prepared user install', async () => {
     const managedPackage = path.join(managedExtensionsDir, 'deployed');
     writePackage(managedPackage, '2.0.0');
@@ -644,7 +694,13 @@ describe('managed extension activation migration', () => {
     expect(
       (await external.getExtensionStoreSnapshot()).extensions[managedId],
     ).toMatchObject({ managed: true });
-    const user = manager(false);
+    // Re-discovery hands the policy back only on a proven withdrawal: the
+    // root stays visible and the package is gone from it. A run that cannot
+    // see the root at all leaves the managed episode intact instead.
+    fs.rmSync(path.join(managedExtensionsDir, 'deployed'), {
+      recursive: true,
+    });
+    const user = manager();
     await user.refreshCache();
     const returned = await user.getExtensionStoreSnapshot();
     expect(returned.extensions[installed.id].artifactGeneration).toBe(

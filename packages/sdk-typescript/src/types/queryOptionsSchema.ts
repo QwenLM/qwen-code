@@ -64,21 +64,36 @@ const RESERVED_CLI_FLAGS = new Set([
   '--input-file',
 ]);
 
-// yargs' default camel-case-expansion accepts `--managedExtensions` for the
-// `--managed-extensions` option (and likewise for every hyphenated flag), so
-// an exact-string match never sees the spelling a caller actually sent.
-// Normalize before the lookup: decamelize, and fold the boolean-negation
-// prefix (`--no-x` guards the same surface as `--x`).
-const normalizeReservedFlag = (arg: string): string => {
+// yargs' grammar accepts far more spellings than the dashed canonical one,
+// and an exact-string match never sees the spelling a caller actually sent.
+// Canonicalize the way yargs binds a token before the lookup:
+// - `--flag=value` and `-f=value` carry the value in the same token.
+// - camel-case-expansion treats every hyphen as a word boundary, so
+//   `--managed--extensions` binds `managedExtensions` exactly like
+//   `--managed-extensions` and `--managedExtensions` do: collapse hyphen
+//   runs, then decamelize.
+// - `--no-x` boolean negation guards the same surface as `--x`.
+// - a single-dash group binds every character (`-dm value` binds `-m`), so
+//   any reserved short flag anywhere in the group is a match.
+const isReservedArg = (arg: string): boolean => {
   const flag = arg.split('=')[0] ?? '';
-  const decamelized = flag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
-  return decamelized.startsWith('--no-')
-    ? `--${decamelized.slice('--no-'.length)}`
-    : decamelized;
+  if (flag.startsWith('--')) {
+    const collapsed = `--${flag.slice(2).split('-').filter(Boolean).join('-')}`;
+    const decamelized = collapsed
+      .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+      .toLowerCase();
+    const folded = decamelized.startsWith('--no-')
+      ? `--${decamelized.slice('--no-'.length)}`
+      : decamelized;
+    return RESERVED_CLI_FLAGS.has(folded);
+  }
+  if (flag.startsWith('-') && flag.length > 1) {
+    return [...flag.slice(1)].some((char) =>
+      RESERVED_CLI_FLAGS.has(`-${char.toLowerCase()}`),
+    );
+  }
+  return false;
 };
-
-const isReservedArg = (arg: string): boolean =>
-  RESERVED_CLI_FLAGS.has(normalizeReservedFlag(arg));
 
 /**
  * OAuth configuration for MCP servers

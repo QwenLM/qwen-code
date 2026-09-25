@@ -153,8 +153,15 @@ describe('start_sandbox', () => {
 
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
     const args = spawnMock.mock.calls[1]?.[1] as string[];
-    // The root reaches the container read-only at its (translated) path...
-    expect(args).toContain(`${managedRoot}:${managedRoot}:ro`);
+    // The root reaches the container read-only at its (translated) path.
+    // Compare on the host side of the spec, which is never translated: a
+    // host:host literal only holds where getContainerPath is identity.
+    const volumes = args.filter((_, index) => args[index - 1] === '--volume');
+    expect(
+      volumes.some(
+        (spec) => spec.startsWith(`${managedRoot}:`) && spec.endsWith(':ro'),
+      ),
+    ).toBe(true);
     // ...and the forwarded flag still names that path, so the child's
     // parse-time validation sees a directory that exists.
     const entrypointCommand = args[args.length - 1];

@@ -1432,9 +1432,15 @@ export class ExtensionManager {
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
+        let managedListFailed = false;
         const discovered = await this.loadDiscoveredExtensions(
           this.workspaceDir,
-          { createDataDir: options?.createDataDir },
+          {
+            createDataDir: options?.createDataDir,
+            onManagedListFailure: () => {
+              managedListFailed = true;
+            },
+          },
         );
         const requested = new Set(
           requestedNames.map((name) => name.toLowerCase()),
@@ -1452,6 +1458,11 @@ export class ExtensionManager {
             name: extension.name,
             source: extension.source,
           })),
+          // The store may treat a missing managed identity as a withdrawal
+          // only when this process can see the root: an unconfigured or
+          // unlistable root makes the managed set unknown, not empty.
+          managedAbsenceProven:
+            this.managedExtensionsDir !== undefined && !managedListFailed,
         };
       });
     const nextCache = new Map<string, Extension>();
@@ -1497,9 +1508,15 @@ export class ExtensionManager {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
+        let managedListFailed = false;
         const loadedAll = await this.loadDiscoveredExtensions(
           this.workspaceDir,
-          { manifestOnly: true },
+          {
+            manifestOnly: true,
+            onManagedListFailure: () => {
+              managedListFailed = true;
+            },
+          },
         );
         const loaded =
           requestedNames.length > 0
@@ -1516,6 +1533,8 @@ export class ExtensionManager {
             name: extension.name,
             source: extension.source,
           })),
+          managedAbsenceProven:
+            this.managedExtensionsDir !== undefined && !managedListFailed,
         };
       });
     return { snapshot, extensions };
@@ -1754,8 +1773,13 @@ export class ExtensionManager {
 
   private async loadDiscoveredExtensions(
     workspaceDir: string,
-    options: { manifestOnly?: boolean; createDataDir?: boolean } = {},
+    options: {
+      manifestOnly?: boolean;
+      createDataDir?: boolean;
+      onManagedListFailure?: () => void;
+    } = {},
   ): Promise<Extension[]> {
+    const { onManagedListFailure, ...loadOptions } = options;
     const failedManaged: Array<{
       directory: string;
       error: unknown;
@@ -1764,12 +1788,13 @@ export class ExtensionManager {
     const manageds = await this.loadManagedExtensions(
       workspaceDir,
       {
-        ...options,
+        ...loadOptions,
         onListFailure: (directory, error) => {
           // A root that cannot be listed at all releases every reservation
           // at once: same-name user copies are then admitted because the
           // managed set is unknown, not because it is empty. Signal the
           // precedence loss the way the entry-level reservation below does.
+          onManagedListFailure?.();
           process.stderr.write(
             `Warning: Managed extensions root "${directory}" could not be listed; same-name user extensions are no longer shadowed. ${getErrorMessage(error)}\n`,
           );
@@ -3059,7 +3084,11 @@ export class ExtensionManager {
           stagingDirectory: stagingPath,
           destinationDirectory: destinationPath,
           ...(!isUpdate
-            ? { initialActivation, allowManagedPolicyAdoption: true }
+            ? {
+                initialActivation,
+                allowManagedPolicyAdoption: true,
+                adoptionProbeWorkspaceCwds: [this.workspaceDir],
+              }
             : {}),
           ...(expectedArtifactGeneration === undefined
             ? {}
@@ -3306,6 +3335,7 @@ export class ExtensionManager {
             ? {
                 initialActivation: prepared.initialActivation,
                 allowManagedPolicyAdoption: true,
+                adoptionProbeWorkspaceCwds: [this.workspaceDir],
               }
             : {
                 expectedArtifactGeneration:
@@ -3506,6 +3536,24 @@ export class ExtensionManager {
             extensionIdentifier.toLowerCase(),
       );
       if (!extension) {
+        // A managed package withdrawn from the deployment root loads
+        // nowhere, so the name lookup misses it while its retained policy
+        // still reserves the name — and no other product surface can exit
+        // that state. Release it through the by-id path, which keeps every
+        // fail-closed guard: a still-deployed package, or a root this
+        // process cannot see, is still refused.
+        if (!isUpdate) {
+          const managedId = getManagedExtensionId(extensionIdentifier);
+          const snapshot = await this.extensionStore.readSnapshot();
+          if (snapshot.extensions[managedId]) {
+            return await this.uninstallExtensionById(
+              managedId,
+              isUpdate,
+              cwd,
+              onCommitted,
+            );
+          }
+        }
         throw new Error(`Extension not found.`);
       }
       await this.assertUserManagedExtension(extension);
@@ -3548,7 +3596,13 @@ export class ExtensionManager {
         // declared name could not be recovered, can still be the retained
         // package. A still-deployed package that fails to load with a
         // recoverable name keeps its name reserved (discovery reserves the
-        // failing entry), so it rejects here exactly like a loaded one.
+        // failing entry), so it rejects here exactly like a loaded one. A
+        // process with no managed root at all cannot prove absence either:
+        // loadManagedExtensions returns [] without firing onListFailure, so
+        // an unconfigured root is indistinguishable from an empty one.
+        if (!this.managedExtensionsDir) {
+          throw new ManagedExtensionReadOnlyError(policy.name);
+        }
         const failedManaged: Array<{ directory: string; name?: string }> = [];
         let managedRootUnreadable = false;
         const manageds = await this.loadManagedExtensions(

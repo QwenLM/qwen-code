@@ -121,19 +121,19 @@ export async function handleInstall(args: InstallArgs) {
         );
       }
     }
-    // An install that adopted a retained managed policy commits the
-    // managed-era activation, which can be disabled — the message must
-    // report the committed state, not assume the install enabled anything.
-    // An explicit --scope re-bases activation, so it always lands enabled.
+    // An install that adopts a retained policy commits that policy's
+    // activation as-is (the adoption branch never reads the requested
+    // initial activation), which can be disabled — report the committed
+    // state, not the requested scope.
     writeStdoutLine(
-      scope === 'project'
+      extension.isActive === false
         ? t(
-            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            'Extension "{{name}}" installed successfully; it remains disabled by the retained activation preference.',
             { name: extension.name },
           )
-        : extension.isActive === false && !args.scope
+        : scope === 'project'
           ? t(
-              'Extension "{{name}}" installed successfully; it remains disabled by the retained activation preference.',
+              'Extension "{{name}}" installed successfully and enabled for the current workspace.',
               { name: extension.name },
             )
           : t('Extension "{{name}}" installed successfully and enabled.', {

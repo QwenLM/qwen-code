@@ -845,6 +845,50 @@ describe('managed extensions', () => {
     expect(await subject.getExtensionStoreSnapshot()).toEqual(after);
   });
 
+  it('releases a withdrawn managed policy by name when nothing is loaded', async () => {
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]?.managed).toBe(true);
+
+    // Still deployed: the name-based path must keep refusing. The fresh
+    // manager never refreshed, so nothing is loaded and the fallback into
+    // the guarded release branch is what answers.
+    await expect(
+      manager().uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+
+    // Withdrawn: the name-based path releases the retained policy through
+    // the same fail-closed guards as the by-id path instead of reporting
+    // "Extension not found." while the name stays reserved.
+    fs.rmSync(path.join(managed, 'portable'), { recursive: true });
+    const after = await manager().uninstallExtension('portable', false);
+    expect(after.extensions[managedId]).toBeUndefined();
+  });
+
+  it('refuses to release a retained managed policy when this process has no managed root', async () => {
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    // The package is still deployed; a process that cannot see the root at
+    // all reads the same empty listing as a genuine withdrawal would, so the
+    // destructive release must fail closed instead of assuming absence.
+    await expect(
+      manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
+        managedId,
+        false,
+      ),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
   it('refuses to release a retained managed policy whose package is still deployed but fails to load', async () => {
     const extensionPath = writeExtension(managed, 'portable');
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);

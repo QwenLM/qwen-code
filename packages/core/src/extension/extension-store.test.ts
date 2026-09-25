@@ -498,7 +498,11 @@ describe('ExtensionStore', () => {
     const destination = path.join(extensionsDir, user.name);
     await fsp.mkdir(destination);
     await fsp.writeFile(path.join(destination, 'qwen-extension.json'), '{}');
-    const discovered = await store.ensureInitialized([user]);
+    const discovered = await store.ensureInitialized([user], {
+      // Proven withdrawal: the caller sees the root and the managed package
+      // is gone, so the hand-back de-manages the claimed policy.
+      managedAbsenceProven: true,
+    });
     expect(discovered.extensions[user.id]).not.toHaveProperty(
       'artifactDirectory',
     );
@@ -3316,7 +3320,11 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation(identity, 'enabled', {
       clearLegacyPathRules: true,
     });
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
     expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
       'disabled',
@@ -3350,7 +3358,11 @@ describe('ExtensionStore', () => {
       0,
     );
 
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     const policy = handedBack.extensions[identity.id]!;
     expect(policy.managed).toBeUndefined();
     expect(policy.workspaceOverrides).toEqual({});
@@ -3380,7 +3392,11 @@ describe('ExtensionStore', () => {
     ).toEqual({ [workspacePath('a')]: 'enabled' });
 
     await store.clearWorkspaceActivation(identity, workspacePath('a'));
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
     expect(
       store.getActivation(
@@ -3417,7 +3433,11 @@ describe('ExtensionStore', () => {
     );
     // Retire the projection so the hand-back can only draw on the stash.
     await fsp.rm(enablementPath);
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([
       preManaged,
     ]);
@@ -3442,7 +3462,11 @@ describe('ExtensionStore', () => {
     await store.setDefaultActivation(identity, 'disabled', {
       clearLegacyPathRules: true,
     });
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
     expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
       'enabled',
@@ -3482,7 +3506,11 @@ describe('ExtensionStore', () => {
 
     // Retire the projection so the hand-back can only draw on the stash.
     await fsp.rm(enablementPath);
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
     expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([rule]);
     expect(
@@ -3532,7 +3560,11 @@ describe('ExtensionStore', () => {
     // re-enable a package the user explicitly disabled.
     await store.setActivationScope(identity, { scope: 'user' });
 
-    const handedBack = await store.ensureInitialized([identity]);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
     const policy = handedBack.extensions[identity.id]!;
     expect(policy.managed).toBeUndefined();
     expect(policy.legacyPathRules).toEqual([rule]);
@@ -3648,6 +3680,66 @@ describe('ExtensionStore', () => {
         stagingDirectory: staging,
         initialActivation: { scope: 'user' },
         allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
+
+  it('probes the named workspace cwds, not just the commit cwd, when adopting a secret-bearing managed policy', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'eb'.repeat(32),
+      name: 'elsewhere',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ec'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // The workspace-scope service name folds the *writing* process's cwd,
+    // and the committing process (e.g. a daemon route) is not necessarily
+    // it: write the secret from a different workspace than the commit runs
+    // under. A probe limited to the commit's own cwd would miss it.
+    const writingCwd = path.join(root, 'writing-workspace');
+    await fsp.mkdir(writingCwd);
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(writingCwd);
+    try {
+      await updateSetting(
+        {
+          name: managed.name,
+          settings: [
+            {
+              name: 'Token',
+              description: 'token',
+              envVar: 'API_TOKEN',
+              sensitive: true,
+            },
+          ],
+        } as unknown as ExtensionConfig,
+        managed.id,
+        'API_TOKEN',
+        async () => 'workspace-secret-value',
+        ExtensionSettingScope.WORKSPACE,
+      );
+    } finally {
+      cwdSpy.mockRestore();
+    }
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeWorkspaceCwds: [writingCwd],
       }),
     ).rejects.toBeInstanceOf(ExtensionConflictError);
     expect(await store.readSnapshot()).toEqual(before);

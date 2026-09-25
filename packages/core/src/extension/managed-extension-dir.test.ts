@@ -112,37 +112,49 @@ it('keeps genuinely different case-sensitive directories separate', (ctx) => {
   }
 });
 
-it('rejects a symlink alias whose target does not exist yet', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-'));
-  const managed = path.join(root, 'deployment', 'extensions');
-  const writable = path.join(root, 'home', '.qwen', 'extensions');
-  fs.mkdirSync(managed, { recursive: true });
-  fs.mkdirSync(path.dirname(writable), { recursive: true });
-  try {
-    // The link target stays absent: existsSync follows links and reports the
-    // link itself as missing, which must not hide the alias.
-    fs.symlinkSync(path.join(managed, 'user-state'), writable, 'dir');
-    expect(fs.existsSync(writable)).toBe(false);
-    expect(() =>
-      assertManagedExtensionStateSeparation(managed, [writable]),
-    ).toThrow('must not overlap');
-    // A link pointing away from the managed root stays admissible.
-    const elsewhere = path.join(root, 'elsewhere');
-    const outsideLink = path.join(root, 'home', '.qwen', 'themes');
-    fs.symlinkSync(elsewhere, outsideLink, 'dir');
-    expect(() =>
-      assertManagedExtensionStateSeparation(managed, [outsideLink]),
-    ).not.toThrow();
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+// Windows cannot create directory symlinks without extra privileges.
+it.skipIf(process.platform === 'win32')(
+  'rejects a symlink alias whose target does not exist yet',
+  () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-'));
+    const managed = path.join(root, 'deployment', 'extensions');
+    const writable = path.join(root, 'home', '.qwen', 'extensions');
+    fs.mkdirSync(managed, { recursive: true });
+    fs.mkdirSync(path.dirname(writable), { recursive: true });
+    try {
+      // The link target stays absent: existsSync follows links and reports the
+      // link itself as missing, which must not hide the alias.
+      fs.symlinkSync(path.join(managed, 'user-state'), writable, 'dir');
+      expect(fs.existsSync(writable)).toBe(false);
+      expect(() =>
+        assertManagedExtensionStateSeparation(managed, [writable]),
+      ).toThrow('must not overlap');
+      // A link pointing away from the managed root stays admissible.
+      const elsewhere = path.join(root, 'elsewhere');
+      const outsideLink = path.join(root, 'home', '.qwen', 'themes');
+      fs.symlinkSync(elsewhere, outsideLink, 'dir');
+      expect(() =>
+        assertManagedExtensionStateSeparation(managed, [outsideLink]),
+      ).not.toThrow();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 // Windows cannot create directory symlinks without extra privileges.
 it.skipIf(process.platform === 'win32')(
   'resolves a relative symlink target against the physical parent of the link',
   () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-'));
+    // realpath the base: os.tmpdir() sits behind a symlink on some platforms
+    // (macOS /var), and the assertions below compare a realpath result
+    // against joins off this root.
+    // realpath the base: os.tmpdir() sits behind a symlink on some platforms
+    // (macOS /var), and the assertions below compare a realpath result
+    // against joins off this root.
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-link-')),
+    );
     const home = path.join(root, 'home');
     // home/.qwen -> home/dotfiles/qwen, and inside the real directory a
     // relative link whose '..' legs only land correctly when resolved

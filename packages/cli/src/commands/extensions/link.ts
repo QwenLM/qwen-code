@@ -39,10 +39,17 @@ export async function handleLink(args: InstallArgs) {
       writeStdoutLine(t('Link extension failed to install.'));
       return;
     }
+    // A link that adopts a retained policy commits that policy's activation
+    // as-is, which can be disabled — report the committed state.
     writeStdoutLine(
-      t('Extension "{{name}}" linked successfully and enabled.', {
-        name: extension.name,
-      }),
+      extension.isActive === false
+        ? t(
+            'Extension "{{name}}" linked successfully; it remains disabled by the retained activation preference.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" linked successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     if (isExtensionCommittedWithWarningsError(error)) {

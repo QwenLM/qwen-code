@@ -153,6 +153,13 @@ export interface CommitExtensionArtifactInput {
   expectedArtifactGeneration?: number;
   /** The caller verified that no same-name managed source is currently available. */
   allowManagedPolicyAdoption?: boolean;
+  /**
+   * Workspace cwds the adoption gate must probe for stored workspace-scope
+   * secrets. The service name folds the writing process's cwd, and the
+   * committing process (e.g. a daemon) is not necessarily it — the probe
+   * must never cover a narrower cwd set than the release path's clear.
+   */
+  adoptionProbeWorkspaceCwds?: readonly string[];
 }
 
 interface ExtensionTransactionJournal {
@@ -489,9 +496,10 @@ export class ExtensionStore {
 
   async ensureInitialized(
     extensions: readonly ExtensionIdentity[],
+    options: { managedAbsenceProven?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
     return await this.withLock(
-      async () => await this.ensureInitializedUnlocked(extensions),
+      async () => await this.ensureInitializedUnlocked(extensions, options),
     );
   }
 
@@ -499,18 +507,27 @@ export class ExtensionStore {
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
+      managedAbsenceProven?: boolean;
     }>,
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions } = await readArtifacts();
-      const snapshot = await this.ensureInitializedUnlocked(extensions);
+      const { value, extensions, managedAbsenceProven } = await readArtifacts();
+      const snapshot = await this.ensureInitializedUnlocked(extensions, {
+        managedAbsenceProven,
+      });
       return { value, snapshot };
     });
   }
 
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
+    options: { managedAbsenceProven?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
+    // Fail closed: only a caller that can see the deployment root may treat
+    // an absent managed identity as a withdrawal. Handing back on an
+    // unknown root spends the pre-managed stash and irreversibly discards
+    // the managed episode's activation.
+    const managedAbsenceProven = options.managedAbsenceProven ?? false;
     const loadedNames = new Map<string, ExtensionIdentity>();
     for (const identity of extensions) {
       assertIdentity(identity);
@@ -740,11 +757,17 @@ export class ExtensionStore {
               ),
             );
           }
-        } else {
+          changed = true;
+        } else if (managedAbsenceProven) {
           delete policy.managed;
           restorePreservedActivationSurface(policy);
+          changed = true;
         }
-        changed = true;
+        // Absence unproven: the policy keeps its managed marker and stash so
+        // a later run that can see the root resumes the managed episode. The
+        // stale-entry migration above may already have re-keyed the policy
+        // onto the same-name user identity; that is in-place bookkeeping,
+        // not a hand-back.
       }
       let remainderSource = legacyProjectionIsNewer
         ? legacy
@@ -859,6 +882,7 @@ export class ExtensionStore {
           await hasStoredExtensionSecrets(
             retainedPolicy.name,
             retainedIdentityId,
+            input.adoptionProbeWorkspaceCwds,
           )
         ) {
           throw new ExtensionConflictError(

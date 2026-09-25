@@ -585,12 +585,15 @@ describe('AcpFileSystemService', () => {
     it('serves the local read fallback through an intact lexical root', async () => {
       await withTempRoot(async (tempRoot) => {
         const managedDir = path.join(tempRoot, 'managed');
-        const filePath = path.join(managedDir, 'notes.md');
         await fs.mkdir(managedDir, { recursive: true });
-        await fs.writeFile(filePath, 'managed file', 'utf8');
         // The boundary pins the canonical spelling, mirroring
-        // resolveManagedExtensionsDir.
+        // resolveManagedExtensionsDir — and the request path must be built
+        // from it: os.tmpdir() sits behind a symlink on some hosts (macOS
+        // /var), so a lexical join off tempRoot would escape the pinned
+        // root's containment check there.
         const managedRoot = await fs.realpath(managedDir);
+        const filePath = path.join(managedRoot, 'notes.md');
+        await fs.writeFile(filePath, 'managed file', 'utf8');
 
         const pathOutsideWorkspaceError =
           createLocalReadFallbackError(filePath);
