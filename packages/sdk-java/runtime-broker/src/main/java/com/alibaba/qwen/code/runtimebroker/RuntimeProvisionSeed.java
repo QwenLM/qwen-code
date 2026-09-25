@@ -35,12 +35,15 @@ public final class RuntimeProvisionSeed {
         this.token = BrokerValues.requireId(token, "token");
     }
 
+    /**
+     * Creates fresh credentials bound to one binding generation, so a retried
+     * provision for the same binding keeps a stable identity.
+     */
     public static RuntimeProvisionSeed create(String bindingId,
             long generation) {
         String id = BrokerValues.requireId(bindingId, "bindingId");
         if (generation <= 0) {
-            throw new IllegalArgumentException(
-                    "generation must be positive");
+            throw new IllegalArgumentException("generation must be positive");
         }
         byte[] tokenBytes = new byte[32];
         RANDOM.nextBytes(tokenBytes);
@@ -73,6 +76,13 @@ public final class RuntimeProvisionSeed {
 
     public String getToken() {
         return token;
+    }
+
+    boolean matches(RuntimeLease lease) {
+        return lease != null && leaseId.equals(lease.getLeaseId())
+                && epoch == lease.getEpoch()
+                && token.equals(lease.getToken())
+                && provisionalRuntimeId.equals(lease.getRuntimeInstanceId());
     }
 
     byte[] encode() {
@@ -117,19 +127,14 @@ public final class RuntimeProvisionSeed {
         }
     }
 
-    private static String required(Map<String, Object> value, String field) {
+    private static String required(Map<String, Object> value,
+            String field) {
         Object raw = value.get(field);
         if (!(raw instanceof String)) {
             throw new IllegalStateException(
                     "Runtime provision seed is invalid");
         }
         return (String) raw;
-    }
-
-    boolean matches(RuntimeLease lease) {
-        return lease != null && leaseId.equals(lease.getLeaseId())
-                && epoch == lease.getEpoch()
-                && token.equals(lease.getToken());
     }
 
     @Override

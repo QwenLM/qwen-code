@@ -278,6 +278,29 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
+    public boolean hasActiveByBinding(String bindingId,
+            long runtimeGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0) {
+            throw new IllegalArgumentException(
+                    "runtimeGeneration must be positive");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            String sql = "SELECT 1 FROM qwen_tool_execution "
+                    + "WHERE binding_id = ? AND runtime_generation = ? "
+                    + "AND execution_state <> 'SETTLED' LIMIT 1";
+            try (PreparedStatement statement = connection.prepareStatement(
+                    sql)) {
+                statement.setString(1, id);
+                statement.setLong(2, runtimeGeneration);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next();
+                }
+            }
+        });
+    }
+
+    @Override
     public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
         String id = BrokerValues.requireId(runtimeSessionId,
                 "runtimeSessionId");
@@ -297,30 +320,6 @@ public final class JdbcToolExecutionRepository
                         }
                     }
                     return false;
-                }
-            }
-        });
-    }
-
-    @Override
-    public boolean hasActiveByBinding(String bindingId,
-            long runtimeGeneration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
-        if (runtimeGeneration <= 0) {
-            throw new IllegalArgumentException(
-                    "runtimeGeneration must be positive");
-        }
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            String sql = "SELECT execution_call_id "
-                    + "FROM qwen_tool_execution WHERE binding_id = ? "
-                    + "AND runtime_generation = ? "
-                    + "AND execution_state <> 'SETTLED'";
-            try (PreparedStatement statement = connection.prepareStatement(
-                    sql)) {
-                statement.setString(1, id);
-                statement.setLong(2, runtimeGeneration);
-                try (ResultSet result = statement.executeQuery()) {
-                    return result.next();
                 }
             }
         });

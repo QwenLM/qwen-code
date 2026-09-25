@@ -14,6 +14,11 @@ wiring. Tool execution rows preserve idempotency identity, dispatch ownership,
 lease and cancellation state, ambiguous `UNKNOWN` recovery, and settled
 results. Their case-sensitive execution and idempotency identifiers are indexed
 by deterministic hashes and verified against the complete stored values.
+`JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
+(`AesGcmSecretProtector` is included): the provision seed of a durable binding
+and the lease token of a legacy binding are stored encrypted, so the key
+material must come from the embedding service's own durable secret store and
+stay stable across restarts and instances.
 
 The module provides:
 
@@ -56,6 +61,8 @@ mvn -Pmysql-integration \
 
 A restored endpoint is never trusted directly. The Broker reconciles the exact
 provider resource and completes private Runtime attestation before opening the
-local readiness gate. The local-process adapter supports same-host adoption;
-the Kubernetes adapter still requires the real-cluster fault matrix described
-in the P3 design before production rollout.
+local readiness gate; see
+[Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
+The local-process adapter supports same-host adoption; the Kubernetes adapter
+still requires the real-cluster fault matrix described in the P3 design before
+production rollout.

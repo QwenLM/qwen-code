@@ -279,6 +279,29 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
+    @Override
+    public RuntimeBindingRecord releaseOperation(String bindingId,
+            String owner, long operationGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            RuntimeBindingRecord current = selectById(connection, id, true);
+            if (current == null || !current.isActive()) {
+                return null;
+            }
+            if (!ownerId.equals(current.getOperationOwner())
+                    || operationGeneration
+                            != current.getOperationGeneration()) {
+                return null;
+            }
+            RuntimeBindingRecord released = current.withOperation(null,
+                    null, operationGeneration)
+                    .withVersion(current.getVersion() + 1);
+            updateBinding(connection, released);
+            return released;
+        });
+    }
+
     private static void ensureSlot(Connection connection, String requestKey,
             RuntimeProvisionRequest request) throws SQLException {
         RuntimeScope scope = request.getScope();
@@ -638,11 +661,13 @@ public final class JdbcRuntimeBindingRepository
     }
 
     private static String seedContext(String bindingId) {
-        return "runtime-provision-seed:" + bindingId;
+        return "runtime-provision-seed:"
+                + JdbcRepositorySupport.valueKey(bindingId);
     }
 
     private static String leaseTokenContext(String bindingId) {
-        return "runtime-lease-token:" + bindingId;
+        return "runtime-lease-token:"
+                + JdbcRepositorySupport.valueKey(bindingId);
     }
 
     private static void requireRequest(RuntimeProvisionRequest request) {

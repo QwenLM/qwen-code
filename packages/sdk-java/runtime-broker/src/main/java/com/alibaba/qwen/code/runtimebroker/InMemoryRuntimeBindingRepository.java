@@ -180,6 +180,24 @@ public final class InMemoryRuntimeBindingRepository
         return renewed;
     }
 
+    @Override
+    public synchronized RuntimeBindingRecord releaseOperation(
+            String bindingId, String owner, long operationGeneration) {
+        RuntimeBindingRecord current = requireRecord(bindingId);
+        if (current == null) {
+            return null;
+        }
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        if (!ownerId.equals(current.getOperationOwner())
+                || operationGeneration != current.getOperationGeneration()) {
+            return null;
+        }
+        RuntimeBindingRecord released = current.withOperation(null, null,
+                operationGeneration).withVersion(current.getVersion() + 1);
+        records.put(bindingId, released);
+        return released;
+    }
+
     private RuntimeBindingRecord requireRecord(String bindingId) {
         String id = BrokerValues.requireId(bindingId, "bindingId");
         RuntimeBindingRecord current = records.get(id);

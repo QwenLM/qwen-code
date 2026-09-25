@@ -907,6 +907,27 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationAcceptsUnknownRuntimeStatus() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        transport.cancelResponse = Map.of("state", "unknown");
+        RuntimeBrokerService service = readyService(transport);
+        service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                .toCompletableFuture().get(1, TimeUnit.SECONDS);
+        Map<String, Object> created = service.createExecution("key-1",
+                HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
+                "args-1", reference("args-1"));
+        String executionCallId = (String) created.get("executionCallId");
+
+        Map<String, Object> cancelling = service.cancelExecution(
+                HARNESS_SESSION, RUNTIME_SESSION, executionCallId)
+                .toCompletableFuture().get(1, TimeUnit.SECONDS);
+
+        assertEquals("cancel_requested", status(cancelling).get("state"));
+        assertEquals(true, status(cancelling).get("cancelRequested"));
+        assertEquals(1, transport.cancellations.get());
+    }
+
+    @Test
     void cancellationBeforeRuntimeReadinessPreventsPhysicalDispatch()
             throws Exception {
         CompletableFuture<RuntimeLease> delayed = new CompletableFuture<>();
@@ -1738,6 +1759,7 @@ class RuntimeBrokerServiceTest {
         private final AtomicInteger releases = new AtomicInteger();
         private final CompletableFuture<Map<String, Object>> execution =
                 new CompletableFuture<>();
+        private volatile Map<String, Object> cancelResponse;
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease,
@@ -1777,7 +1799,9 @@ class RuntimeBrokerServiceTest {
         public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference) {
             cancellations.incrementAndGet();
-            return CompletableFuture.completedFuture(cancellationStatus());
+            Map<String, Object> response = cancelResponse;
+            return CompletableFuture.completedFuture(response == null
+                    ? cancellationStatus() : response);
         }
 
         @Override
@@ -2254,6 +2278,12 @@ class RuntimeBrokerServiceTest {
         public RuntimeBindingRecord renewOperation(String bindingId,
                 String owner, long operationGeneration,
                 Duration leaseDuration) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
             throw new UnsupportedOperationException();
         }
     }

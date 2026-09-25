@@ -10,6 +10,7 @@ public final class RuntimeResourceHandle {
     private final String kind;
     private final int version;
     private final Map<String, Object> value;
+    private final String json;
 
     public RuntimeResourceHandle(String kind, int version,
             Map<String, Object> value) {
@@ -26,6 +27,7 @@ public final class RuntimeResourceHandle {
             throw new IllegalArgumentException(
                     "resource handle exceeds its size limit");
         }
+        this.json = new String(encoded, StandardCharsets.UTF_8);
         this.version = version;
     }
 
@@ -42,7 +44,7 @@ public final class RuntimeResourceHandle {
     }
 
     String toJson() {
-        return new String(JsonCodec.encode(value), StandardCharsets.UTF_8);
+        return json;
     }
 
     static RuntimeResourceHandle fromJson(String kind, int version,
@@ -65,11 +67,11 @@ public final class RuntimeResourceHandle {
         }
         RuntimeResourceHandle other = (RuntimeResourceHandle) candidate;
         return version == other.version && kind.equals(other.kind)
-                && value.equals(other.value);
+                && json.equals(other.json);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(kind, version, value);
+        return Objects.hash(kind, version, json);
     }
 }

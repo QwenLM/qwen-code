@@ -59,6 +59,11 @@ public final class RuntimeProvisionRequest {
         return runtimeTemplateDigest;
     }
 
+    /**
+     * Legacy and static placements keep no recoverable identity, so a READY
+     * binding for them is not required to carry seed, handle, and
+     * attestation facts.
+     */
     boolean requiresDurableIdentity() {
         return !"legacy".equals(provisionerKind)
                 && !"static".equals(provisionerKind);

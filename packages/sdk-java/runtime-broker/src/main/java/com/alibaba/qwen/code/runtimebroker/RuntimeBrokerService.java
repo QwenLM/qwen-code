@@ -27,10 +27,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
             "preflight");
     private static final Set<String> EXECUTION_STATES = Set.of(
             "not_started", "success", "error", "cancelled");
-    // A lookup may also report that the Runtime holds no record at all.
+    // A cancellation or a lookup may also report that the Runtime holds no
+    // record at all.
     private static final Set<String> RUNTIME_STATUS_STATES = Set.of(
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
+    // Only these attestation failures are evidence about who answers behind
+    // a restored endpoint. Other non-retryable transport codes - a throttle
+    // or an incompatible or malformed attestation route - say nothing about
+    // identity, and blocking on them would wedge the binding behind an
+    // operator long after the transient condition passed.
+    private static final Set<String> IDENTITY_FAILURES = Set.of(
+            "managed_runtime_identity_conflict",
+            "managed_runtime_unauthorized");
     private static final int MAX_CAS_ATTEMPTS = 16;
 
     private final HarnessSessionResolver sessionResolver;
@@ -536,6 +545,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId) {
+        if (settleAgainstLostBinding(harnessSessionId, runtimeSessionId)) {
+            return CompletableFuture.completedFuture(true);
+        }
         SessionBinding session = requireSessionForRelease(harnessSessionId,
                 runtimeSessionId);
         if (executionRepository.hasActiveByRuntimeSession(runtimeSessionId)) {
@@ -543,6 +555,59 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     "Runtime Session still owns an active execution.");
         }
         return session.release(runtimeSessionId);
+    }
+
+    /**
+     * Settles a Session that still pins a LOST generation. The Runtime is
+     * proven gone, so no transport call can ever confirm the release, and a
+     * Broker killed mid-acquire or mid-release leaves the Session ACQUIRING
+     * or RELEASING; without this the lost generation stays pinned forever.
+     * An active execution keeps both the Session and the generation pinned.
+     */
+    private boolean settleAgainstLostBinding(String harnessSessionId,
+            String runtimeSessionId) {
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        RuntimeSessionRecord current = runtimeSessionRepository.findById(
+                runtimeId);
+        if (current == null || !current.isActive()
+                || !current.getSession().getHarnessSessionId().equals(
+                        harnessId)) {
+            return false;
+        }
+        RuntimeBindingRecord binding = bindingRepository.findById(
+                current.getBindingId());
+        if (binding == null
+                || binding.getState() != RuntimeBindingRecord.State.LOST
+                || binding.getGeneration()
+                        != current.getRuntimeGeneration()) {
+            return false;
+        }
+        if (executionRepository.hasActiveByRuntimeSession(runtimeId)) {
+            throw conflict("runtime_broker_execution_active",
+                    "Runtime Session still owns an active execution.");
+        }
+        while (current != null && current.isActive()) {
+            RuntimeSessionRecord.State next = current.getState()
+                    == RuntimeSessionRecord.State.RELEASING
+                    ? RuntimeSessionRecord.State.RELEASED
+                    : RuntimeSessionRecord.State.RELEASING;
+            RuntimeSessionRecord updated = runtimeSessionRepository
+                    .compareAndSet(current, current.withState(next,
+                            Instant.now()));
+            current = updated != null ? updated
+                    : runtimeSessionRepository.findById(runtimeId);
+        }
+        if (current == null
+                || current.getState() != RuntimeSessionRecord.State.RELEASED) {
+            throw conflict("runtime_broker_session_conflict",
+                    "Runtime Session lifecycle changed.");
+        }
+        sessions.remove(runtimeId);
+        removeExecutions(runtimeId);
+        return true;
     }
 
     /** Drains the session-isolated Runtime owned by one Harness Session. */
@@ -786,6 +851,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         == execution.getRuntimeGeneration();
     }
 
+    private static boolean withoutIdentityEvidence(Throwable cause) {
+        return cause instanceof RuntimeBrokerException
+                && !((RuntimeBrokerException) cause).isRetryable()
+                && !IDENTITY_FAILURES.contains(
+                        ((RuntimeBrokerException) cause).getCode());
+    }
+
     private static boolean makesOutcomeUnknown(RuntimeBrokerException error) {
         return Set.of("runtime_broker_binding_unavailable",
                 "runtime_broker_session_not_found",
@@ -991,7 +1063,28 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (!started.compareAndSet(false, true)) {
                 return;
             }
-            driveProvisioning();
+            drive();
+        }
+
+        /**
+         * A repository failure thrown while driving must not leave a started
+         * binding that nothing drives any more; its waiters would hang, and
+         * every later caller would join them. The next call starts over.
+         */
+        private void drive() {
+            try {
+                driveProvisioning();
+            } catch (RuntimeException error) {
+                stopOperationRenewal();
+                provisioning.set(false);
+                resetDurableOperation();
+                synchronized (this) {
+                    abandoned = true;
+                    provisioningFailure = error;
+                }
+                bindings.remove(bindingId, this);
+                ready.completeExceptionally(error);
+            }
         }
 
         private void driveProvisioning() {
@@ -1365,6 +1458,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     observation.getRuntimeInstanceId(),
                     observation.getEndpoint(), seed.getToken(),
                     observation.getLeaseId(), observation.getEpoch());
+            boolean restored = current.getState()
+                    == RuntimeBindingRecord.State.READY;
             CompletionStage<RuntimeAttestation> attested;
             try {
                 attested = transport.attest(lease, request, seed);
@@ -1383,6 +1478,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         return;
                     }
                     if (error != null) {
+                        Throwable cause = unwrap(error);
+                        if (restored && withoutIdentityEvidence(cause)) {
+                            abandonDurableOperation(operationGeneration,
+                                    cause);
+                            return;
+                        }
                         retryOrFailDurable(error, operationGeneration,
                                 false);
                         return;
@@ -1517,6 +1618,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
 
         private void timeoutDurableRecovery(long operationGeneration) {
+            abandonDurableOperation(operationGeneration, unavailable(
+                    "runtime_broker_reconcile_timeout",
+                    "Managed Runtime reconciliation timed out."));
+        }
+
+        /**
+         * Gives up this operation without judging the Runtime: the claim is
+         * released so any Broker can try again, the binding keeps its state,
+         * and the next call starts over instead of replaying this failure.
+         */
+        private void abandonDurableOperation(long operationGeneration,
+                Throwable error) {
             synchronized (this) {
                 if (abandoned || durableOperationGeneration
                         != operationGeneration) {
@@ -1524,9 +1637,6 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
                 abandoned = true;
             }
-            RuntimeBrokerException timeout = unavailable(
-                    "runtime_broker_reconcile_timeout",
-                    "Managed Runtime reconciliation timed out.");
             stopOperationRenewal();
             provisioning.set(false);
             resetDurableOperation();
@@ -1535,13 +1645,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         ? record.withOperation(null, null,
                                 record.getOperationGeneration()) : record);
             } catch (RuntimeException persistenceFailure) {
-                timeout.addSuppressed(persistenceFailure);
+                error.addSuppressed(persistenceFailure);
             }
             synchronized (this) {
-                provisioningFailure = timeout;
+                provisioningFailure = error;
             }
             bindings.remove(bindingId, this);
-            ready.completeExceptionally(timeout);
+            ready.completeExceptionally(error);
         }
 
         private void retryOrFailDurable(Throwable error,
@@ -1626,6 +1736,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 synchronized (this) {
                     provisioningFailure = error;
                 }
+                // Settling the last reference makes the generation
+                // reclaimable, so the next call must look again instead of
+                // replaying this failure.
+                bindings.remove(bindingId, this);
                 ready.completeExceptionally(error);
                 return;
             }
@@ -1681,8 +1795,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 return;
             }
             try {
-                scheduler.schedule(this::driveProvisioning, 25,
-                        TimeUnit.MILLISECONDS);
+                scheduler.schedule(this::drive, 25, TimeUnit.MILLISECONDS);
             } catch (RuntimeException error) {
                 if (!closed.get()) {
                     failProvisioning(error);
@@ -1991,8 +2104,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         return;
                     }
                     if (error != null) {
-                        completeDurableRefreshFailure(result, unwrap(error),
-                                operationGeneration, null);
+                        Throwable cause = unwrap(error);
+                        completeDurableRefreshFailure(result, cause,
+                                operationGeneration, null,
+                                !withoutIdentityEvidence(cause));
                         return;
                     }
                     if (!validAttestation(attestation, refreshed, seed)) {
@@ -2040,13 +2155,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 CompletableFuture<RuntimeLease> result, Throwable error,
                 long operationGeneration,
                 RuntimeBindingRecord.State failureState) {
+            completeDurableRefreshFailure(result, error, operationGeneration,
+                    failureState, true);
+        }
+
+        private void completeDurableRefreshFailure(
+                CompletableFuture<RuntimeLease> result, Throwable error,
+                long operationGeneration,
+                RuntimeBindingRecord.State failureState,
+                boolean blockNonRetryable) {
             synchronized (result) {
                 if (result.isDone()) {
                     return;
                 }
                 Throwable cause = unwrap(error);
                 RuntimeBindingRecord.State terminalState = failureState;
-                if (terminalState == null
+                if (terminalState == null && blockNonRetryable
                         && cause instanceof RuntimeBrokerException
                         && !((RuntimeBrokerException) cause).isRetryable()) {
                     terminalState =
@@ -2934,10 +3058,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             Object runtimeState = status.get("state");
             if (!(runtimeState instanceof String)
-                    || !Set.of("prepared", "executing", "cancel_requested",
-                            "settled").contains(runtimeState)) {
+                    || !RUNTIME_STATUS_STATES.contains(runtimeState)) {
                 throw unavailable("runtime_broker_cancel_failed",
                         "Runtime cancellation returned an invalid status.");
+            }
+            if ("unknown".equals(runtimeState)) {
+                // The Runtime holds no record of the call. That is no
+                // evidence it did not run, so the recorded cancellation
+                // intent stands and reconciliation keeps looking.
+                return;
             }
             Map<String, Object> nextResult = null;
             if ("settled".equals(runtimeState)) {

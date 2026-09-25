@@ -10,11 +10,16 @@ import java.util.concurrent.CompletionStage;
  * <p>Acquire and release must be idempotent by Runtime Session identifier.
  * Attestation must bind the exact provision request, lease, Runtime identity,
  * and scope before a recovered endpoint is reused.
- * Status results contain {@code state} with one of {@code prepared},
- * {@code executing}, {@code cancel_requested}, {@code settled}, or
- * {@code unknown}.
+ * Cancel and status results contain {@code state} with one of
+ * {@code prepared}, {@code executing}, {@code cancel_requested},
+ * {@code settled}, or {@code unknown}; a settled response must also contain
+ * a valid execution result.
  */
 public interface RuntimeTransport {
+    /**
+     * Re-proves the identity behind a restored lease. The default fails
+     * closed: a transport that cannot attest can never adopt a binding.
+     */
     default CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         return CompletableFuture.failedFuture(
