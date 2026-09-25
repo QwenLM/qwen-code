@@ -1449,7 +1449,12 @@ export class AcpDispatcher {
       return this.bridge.getSessionSummary(sessionId).hasActivePrompt === true;
     } catch (err) {
       if (err instanceof SessionNotFoundError) return false;
-      throw err;
+      // A broken probe must not wedge the lifecycle: the close still runs on
+      // the bridge, which is the same failure posture the unguarded path had.
+      debugLogger.warn(
+        `live-session probe failed for ${sessionId}, proceeding unguarded: ${errMsg(err)}`,
+      );
+      return false;
     }
   }
 
