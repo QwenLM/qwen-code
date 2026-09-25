@@ -55,6 +55,7 @@ import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
+import { StructuredToolError, ToolErrorType } from '../tools/tool-error.js';
 
 const debugLogger = createDebugLogger('LSP');
 
@@ -543,6 +544,74 @@ export class NativeLspService {
         entry[1].connection !== undefined &&
         (!serverName || entry[0] === serverName),
     );
+  }
+
+  private getDiagnosticHandles(
+    serverName?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const handles = Array.from(this.serverManager.getHandles()).filter(
+      ([name]) => !serverName || name === serverName,
+    );
+    if (handles.length === 0) {
+      // A config skipped for workspace trust installs no handle, which is not
+      // the same state as no server being configured.
+      const base = serverName
+        ? `No LSP server named ${serverName} is configured.`
+        : 'No LSP servers are configured.';
+      throw new StructuredToolError(
+        this.config.isTrustedFolder()
+          ? base
+          : `${base} The workspace is not trusted, so LSP server startup was skipped.`,
+        ToolErrorType.LSP_DIAGNOSTICS_UNAVAILABLE,
+      );
+    }
+    const unavailable = handles.find(
+      ([, handle]) =>
+        (handle.status !== 'READY' && handle.status !== 'IN_PROGRESS') ||
+        (handle.status === 'READY' && !handle.connection),
+    );
+    if (unavailable) {
+      const [name, handle] = unavailable;
+      throw new StructuredToolError(
+        `LSP server ${name} is ${handle.status}${handle.status === 'READY' ? ' without a connection' : ''}${handle.error ? `: ${handle.error.message}` : ''}.`,
+        ToolErrorType.LSP_DIAGNOSTICS_UNAVAILABLE,
+      );
+    }
+    const pending = handles.find(
+      ([, handle]) => handle.status === 'IN_PROGRESS',
+    );
+    if (pending) {
+      throw new StructuredToolError(
+        `LSP server ${pending[0]} is starting. Retry after startup completes.`,
+        ToolErrorType.LSP_DIAGNOSTICS_PENDING,
+      );
+    }
+    return this.getReadyHandles(serverName);
+  }
+
+  private diagnosticItems(response: unknown, serverName: string): unknown[] {
+    // Name the condition that failed: the report shape is the only diagnostic a
+    // server defect leaves behind, and the LSP layer records no request payload.
+    const prefix = `Missing or invalid diagnostics from LSP server ${serverName}`;
+    if (!response || typeof response !== 'object') {
+      throw new Error(`${prefix}: expected a report object`);
+    }
+    if ('kind' in response && response.kind === 'unchanged') {
+      throw new Error(
+        `${prefix}: the server answered kind 'unchanged' and no cached baseline is available`,
+      );
+    }
+    if (!('items' in response)) {
+      throw new Error(
+        `${prefix}: the report has no 'items' array (keys: ${Object.keys(response).join(', ') || 'none'})`,
+      );
+    }
+    if (!Array.isArray(response.items)) {
+      throw new Error(
+        `${prefix}: 'items' is ${typeof response.items}, expected an array`,
+      );
+    }
+    return response.items;
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -1751,13 +1820,23 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const allDiagnostics: LspDiagnostic[] = [];
 
     for (const [name, handle] of handles) {
+      const connection = handle.connection;
       // A sync failure must reject, not report incomplete diagnostics as clean.
       await this.warmupAndTrack(name, handle);
       await this.ensureDocumentSynchronized(name, handle, uri);
+      // Querying a connection that never received the synchronized document can
+      // return empty diagnostics, which the tool would display as clean.
+      if (
+        handle.connection !== connection ||
+        handle.status !== 'READY' ||
+        this.serverManager.getHandles().get(name) !== handle
+      ) {
+        throw new Error(`LSP server ${name} connection is no longer active`);
+      }
 
       try {
         // Request pull diagnostics if the server supports it
@@ -1768,28 +1847,22 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            for (const item of items) {
-              const normalized = this.normalizer.normalizeDiagnostic(
-                item,
-                name,
-              );
-              if (normalized) {
-                allDiagnostics.push(normalized);
-              }
-            }
+        for (const item of this.diagnosticItems(response, name)) {
+          const normalized = this.normalizer.normalizeDiagnostic(item, name);
+          if (!normalized) {
+            throw new Error(
+              `Invalid diagnostic item from LSP server ${name}: missing a valid range or a string message`,
+            );
           }
+          allDiagnostics.push(normalized);
         }
       } catch (error) {
-        // Fall back to cached diagnostics from publishDiagnostics notifications
-        // This is handled by the notification handler if implemented
+        // A pull-request failure must reject, not report incomplete diagnostics as clean.
         debugLogger.warn(
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
+        throw error;
       }
     }
 
@@ -1803,7 +1876,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
 
     for (const [name, handle] of handles) {
@@ -1876,26 +1949,39 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            for (const item of items) {
-              if (results.length >= limit) {
-                break;
-              }
-              const normalized = this.normalizer.normalizeFileDiagnostics(
-                item,
-                name,
-              );
-              if (normalized && normalized.diagnostics.length > 0) {
-                results.push(normalized);
-              }
-            }
+        for (const item of this.diagnosticItems(response, name)) {
+          const items = this.diagnosticItems(item, name);
+          const normalized = this.normalizer.normalizeFileDiagnostics(
+            item,
+            name,
+          );
+          if (
+            !normalized ||
+            !URL.canParse(normalized.uri) ||
+            normalized.diagnostics.length !== items.length
+          ) {
+            const detail = !normalized
+              ? 'the report could not be normalized'
+              : !URL.canParse(normalized.uri)
+                ? `invalid report uri: ${normalized.uri}`
+                : `item/diagnostic count mismatch: ${items.length} vs ${normalized.diagnostics.length}`;
+            throw new Error(
+              `Invalid file diagnostics from LSP server ${name}: ${detail}`,
+            );
+          }
+          // Validate before the cap: a malformed report must fail the call
+          // wherever it sits, but a validated report past the cap is still dropped.
+          if (results.length >= limit) {
+            continue;
+          }
+          if (normalized.diagnostics.length > 0) {
+            results.push(normalized);
           }
         }
       } catch (error) {
+        // A pull-request failure must reject, not report incomplete diagnostics as clean.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        throw error;
       }
 
       if (results.length >= limit) {

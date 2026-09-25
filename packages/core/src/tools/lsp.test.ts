@@ -20,6 +20,7 @@ import type {
   LspSymbolInformation,
 } from '../lsp/types.js';
 import { LspTool, type LspToolParams, type LspOperation } from './lsp.js';
+import { ToolErrorType } from './tool-error.js';
 
 const abortSignal = new AbortController().signal;
 const workspaceRoot = '/test/workspace';
@@ -315,6 +316,25 @@ describe('LspTool', () => {
 
   describe('execute', () => {
     describe('LSP disabled or unavailable', () => {
+      it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+        'returns structured unavailable errors for %s',
+        async (operation) => {
+          for (const tool of [
+            createTool(createMockClient(), false),
+            createTool(undefined, true),
+          ]) {
+            const result = await tool
+              .build({ operation, filePath: 'main.ts' })
+              .execute(abortSignal);
+            expect(result.error).toEqual({
+              message: result.llmContent,
+              type: ToolErrorType.LSP_DIAGNOSTICS_UNAVAILABLE,
+            });
+            expect(result.llmContent).toContain('unavailable:');
+            expect(result.returnDisplay).toBe(result.llmContent);
+          }
+        },
+      );
       it('returns unavailable message when LSP is disabled', async () => {
         const tool = createTool(undefined, false);
         const invocation = tool.build({

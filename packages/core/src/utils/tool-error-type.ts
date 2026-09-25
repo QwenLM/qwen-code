@@ -20,6 +20,10 @@ export enum ToolErrorType {
   // Try to execute a tool that is excluded due to the approval mode
   EXECUTION_DENIED = 'execution_denied',
 
+  // LSP diagnostic availability
+  LSP_DIAGNOSTICS_UNAVAILABLE = 'lsp_diagnostics_unavailable',
+  LSP_DIAGNOSTICS_PENDING = 'lsp_diagnostics_pending',
+
   // File System Errors
   FILE_NOT_FOUND = 'file_not_found',
   FILE_WRITE_FAILURE = 'file_write_failure',

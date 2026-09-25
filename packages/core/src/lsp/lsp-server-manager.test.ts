@@ -660,6 +660,9 @@ describe('LspServerManager', () => {
     await manager.startAll();
 
     expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    expect(manager.getHandles().get('clangd')?.error).toEqual(
+      new Error('workspace trust check failed'),
+    );
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'Workspace trust check failed, not starting LSP server clangd',
     );
@@ -743,6 +746,10 @@ describe('LspServerManager', () => {
 
     manager.setServerConfigs([serverConfig]);
     await manager.startAll();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    expect(manager.getHandles().get('clangd')?.error).toEqual(
+      new Error(`command not found: ${serverConfig.command}`),
+    );
     const result = await manager.reconcileServerConfigs([serverConfig]);
 
     expect(result.restarted).toEqual(['clangd']);

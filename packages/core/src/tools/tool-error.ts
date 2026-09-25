@@ -9,8 +9,8 @@ import { ToolErrorType } from '../utils/tool-error-type.js';
 export { ToolErrorType };
 
 /**
- * Error thrown by `getConfirmationDetails()` when it needs to surface
- * a structured `ToolErrorType` to the scheduler instead of letting
+ * Error carrying a structured `ToolErrorType` through confirmation or an
+ * explicit ToolResult mapping (such as LSP diagnostics), instead of letting
  * the throw collapse into a generic `UNHANDLED_EXCEPTION`. Originally
  * introduced for prior-read enforcement
  * but now also carries other content-derived `calculateEdit` errors

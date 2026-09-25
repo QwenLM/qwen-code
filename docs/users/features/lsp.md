@@ -268,6 +268,7 @@ Get diagnostic messages (errors, warnings) for a file.
 Operation: diagnostics
 Parameters:
   - filePath: Path to the file
+  - serverName: Name of the LSP server to query (optional, defaults to all)
 ```
 
 #### Workspace Diagnostics
@@ -278,7 +279,28 @@ Get all diagnostic messages across the workspace.
 Operation: workspaceDiagnostics
 Parameters:
   - limit: Maximum results (optional)
+  - serverName: Name of the LSP server to query (optional, defaults to all)
 ```
+
+Both diagnostic operations accept an optional `serverName` to query one server.
+Otherwise, all configured servers must be ready before the query starts.
+
+- **Success:** a valid empty report displays “No diagnostics found”; a valid
+  nonempty report displays the diagnostics.
+- **Unavailable:** LSP is disabled, no client or matching server exists, or a
+  selected server is not started, failed, or has no connection. Check `/lsp status`
+  and the server configuration, or select a healthy server with `serverName`.
+- **Pending:** a selected server is starting. Retry after startup completes.
+  This does not indicate whether analysis has finished or results reflect the
+  latest file version.
+- **Failed:** synchronization, a diagnostic request, or response validation
+  failed. The output includes the cause; it must not be interpreted as clean code.
+
+Unavailable takes precedence over pending. All three non-success states are
+reported as tool errors, including in JSON output and tool failure counts.
+Existing result limits still apply. If an issued diagnostic request fails, the
+whole call fails without returning partial diagnostics from other servers.
+Diagnostics do not automatically retry or fall back to cached results.
 
 ### Code Actions
 

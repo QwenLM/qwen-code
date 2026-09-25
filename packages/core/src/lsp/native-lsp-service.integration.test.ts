@@ -658,10 +658,14 @@ describe('NativeLspService Integration Tests', () => {
       expect(results).toEqual([]);
     });
 
-    it('should return empty diagnostics when no server is ready', async () => {
+    it('should reject diagnostics when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
-      const results = await lspService.diagnostics(uri);
-      expect(results).toEqual([]);
+      await expect(lspService.diagnostics(uri)).rejects.toMatchObject({
+        errorType: 'lsp_diagnostics_unavailable',
+      });
+      await expect(lspService.workspaceDiagnostics()).rejects.toMatchObject({
+        errorType: 'lsp_diagnostics_unavailable',
+      });
     });
 
     it('should return empty code actions when no server is ready', async () => {

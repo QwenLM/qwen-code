@@ -118,10 +118,21 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. Existing request/pull catches and public
-  query catches other than hierarchy provenance handling are unchanged and can
-  return empty arrays or null; these are **not evidence of clean diagnostics**.
-  Broader error result design remains PR2.
+  diagnostics still display as clean. Diagnostic pull failures now also reject.
+  Both diagnostic operations check all selected servers before querying: absent,
+  not-started, failed, or disconnected servers are unavailable; servers starting
+  up are pending. Unavailable takes precedence over pending. An explicit
+  `serverName` limits this check to that server; otherwise it covers all configured
+  servers. Neither state is a successful empty result. Missing/invalid reports,
+  unnormalizable diagnostic items, and unchanged reports without a cached baseline
+  fail the call rather than silently disappearing. Existing result limits remain
+  in effect; any issued pull that fails rejects the whole call without partial results.
+  The tool returns `error` with `LSP_DIAGNOSTICS_UNAVAILABLE`,
+  `LSP_DIAGNOSTICS_PENDING`, or `EXECUTION_FAILED`, so unavailable, pending and
+  failed queries are recorded as failed tool calls. Pending means startup only;
+  it does not guarantee analysis completion or diagnose stale file versions.
+  No diagnostic cache, automatic retries, or success-result wrapper is added.
+  Other public query catches are unchanged.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 
@@ -159,7 +170,11 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
+earlier server returned results. Diagnostic tests distinguish valid empty/nonempty
+reports from unavailable/pending servers, rejected pulls and invalid reports,
+including multi-server failure and recovery. Controlled headless CLI tests verify
+`is_error` and success/failure accounting through the actual scheduler.
+Initialization tests exercise capability production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag
