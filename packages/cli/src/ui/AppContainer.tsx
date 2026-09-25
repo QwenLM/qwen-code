@@ -214,6 +214,7 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
   type QueuedUserSubmission,
@@ -2099,7 +2100,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getLlmClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
-          process.exit(0);
+          await exitCleanly(0);
         }, 100);
       },
       setDebugMessage,
