@@ -769,13 +769,13 @@ describe('extractShellOperationsAcrossCommand', () => {
     ).toEqual([
       {
         virtualTool: 'write_file',
-        filePath: '/repo/.qwen/settings.json',
+        filePath: '/repo/.qwen/x/settings.json',
         cwdUnknown: true,
         pathMayDependOnCwd: true,
       },
       {
         virtualTool: 'write_file',
-        filePath: '/repo/.qwen/x/settings.json',
+        filePath: '/repo/.qwen/settings.json',
         cwdUnknown: true,
         pathMayDependOnCwd: true,
       },
@@ -823,9 +823,9 @@ describe('extractShellOperationsAcrossCommand', () => {
   describe('candidate cwds after an undecided `cd`', () => {
     const undecidedCd = (dir: string) => `cd '${dir}\\'';echo ' & `;
     const paths = (command: string) =>
-      extractShellOperationsAcrossCommand(command, '/repo').map(
-        (op) => op.filePath,
-      );
+      extractShellOperationsAcrossCommand(command, '/repo')
+        .map((op) => op.filePath)
+        .sort();
 
     it('reports a wrapped write under every candidate', () => {
       expect(
@@ -835,10 +835,17 @@ describe('extractShellOperationsAcrossCommand', () => {
       ).toEqual(['/repo/.qwen/settings.json', '/repo/.qwen/x/settings.json']);
     });
 
+    it('keeps mixed outcomes, not only the two extremes', () => {
+      // bash moves into `a\` twice and backgrounds the last `cd`: neither the
+      // face-value cwd nor the undecided-skipped one is where the write lands.
+      expect(
+        paths(`cd 'a\\' ; cd 'a\\' ; ${undecidedCd('b')}echo {} > f`),
+      ).toContain('/repo/a/a/f');
+    });
+
     it('dedupes candidates and operations that coincide', () => {
       // Only every other unit splits undecided, and each undecided `cd x`
-      // re-reaches a directory an earlier one already did. Without collapsing
-      // those, four of them would overflow the cap and drop /r/f.
+      // re-reaches a directory an earlier one already did; those collapse.
       expect(paths(`cd /r ; ${undecidedCd('x').repeat(7)}echo {} > f`)).toEqual(
         ['/r/f', '/r/x/f', '/r/x/x/f', '/r/x/x/x/f', '/r/x/x/x/x/f'],
       );
@@ -847,14 +854,22 @@ describe('extractShellOperationsAcrossCommand', () => {
       ]);
     });
 
-    it('caps the candidates, keeping the latest ones cwd-unknown', () => {
-      const ops = extractShellOperationsAcrossCommand(
-        `cd /r ; ${[...'abcdefgh'].map(undecidedCd).join('')}echo {} > f`,
-        '/repo',
+    // Padding with undecided `cd`s overflows the cap; the cwd bash really
+    // ends up in must survive it. Either every padding `cd` ran in a subshell
+    // or the operators mean what they say.
+    it.each([
+      [
+        `cd .qwen ; ${[...'abcdefgh'].map(undecidedCd).join('')}echo {} > settings.json`,
+      ],
+      [
+        `${[...'0123456'].map((i) => `cd 'd${i}\\' & `).join('')}cd .qwen ; echo {} > settings.json`,
+      ],
+    ])('keeps the load-bearing cwd past the cap in %j', (command) => {
+      const ops = extractShellOperationsAcrossCommand(command, '/repo');
+      expect(ops.length).toBeLessThanOrEqual(8);
+      expect(ops.map((op) => op.filePath)).toContain(
+        '/repo/.qwen/settings.json',
       );
-      expect(ops).toHaveLength(8);
-      expect(ops.every((op) => op.cwdUnknown)).toBe(true);
-      expect(ops.map((op) => op.filePath)).toContain('/r/a/c/e/g/f');
     });
   });
 

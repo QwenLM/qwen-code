@@ -2556,6 +2556,15 @@ describe('PermissionManager', () => {
       // the write escalates rather than resolving to /repo/settings.json.
       [`echo 'a\\' ; bash -lc 'cd .qwen && echo {} > settings.json'`, 'ask'],
       [`bash -lc 'cd .qwen && echo {} > settings.json'`, 'deny'],
+      // Padding with undecided `cd`s past the candidate cap.
+      [
+        `cd .qwen ; ${[...'abcdefgh'].map((d) => `cd '${d}\\'';echo ' & `).join('')}echo {} > settings.json`,
+        'deny',
+      ],
+      [
+        `${[...'0123456'].map((i) => `cd 'd${i}\\' & `).join('')}cd .qwen ; echo {} > settings.json`,
+        'deny',
+      ],
     ])(
       'keeps the protected write covered across a one-reading boundary: %s',
       async (command, expected) => {
