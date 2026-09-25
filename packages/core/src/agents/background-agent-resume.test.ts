@@ -22,6 +22,7 @@ import {
   writeAgentMeta,
 } from './agent-transcript.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
@@ -1302,7 +1303,14 @@ describe('BackgroundAgentResumeService', () => {
 
   // #12424: the resumed agent is shown the skill listing exactly when
   // createAgentHeadless leaves its Config a SkillManager.
-  it.each([
+  it.each<
+    [
+      string,
+      { tools?: string[]; disallowedTools?: string[] },
+      boolean,
+      { eagerHideSkillUnderCodeMode?: boolean }?,
+    ]
+  >([
     ['inherits every tool', {}, true],
     [
       'disallows the Skill tool by display name',
@@ -1316,9 +1324,22 @@ describe('BackgroundAgentResumeService', () => {
     // rows above either resolve nothing on the tools side or resolve only the
     // blocklist).
     ['lists tools by display name', { tools: ['read_file', 'Skill'] }, true],
+    // Exercises the `skillEagerHidden` input: the session's
+    // settings.tools.eager omits `skill` under CodeModeOnly, so the launch
+    // side withholds the manager and the resume listing must go dark too —
+    // the reminder is rendered from a wrapper that always holds the session
+    // manager, so this flag is the only gate. Dropping the input from
+    // subagentWillHaveSkillTool turns this row red while every row above
+    // stays green.
+    [
+      'inherits every tool while CodeModeOnly eager-hides the Skill tool',
+      {},
+      false,
+      { eagerHideSkillUnderCodeMode: true },
+    ],
   ])(
     'matches the launch-time skill listing when the definition %s',
-    async (_label, toolFields, expectListing) => {
+    async (_label, toolFields, expectListing, session) => {
       const sessionId = 'session-skill-listing';
       const agentId = 'agent-skill-listing';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1372,19 +1393,31 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager } = createService({
-        skillManager: {
-          listSkills: vi.fn().mockResolvedValue([
-            {
-              name: 'auto-skill-demo',
-              description: 'Demo project skill',
-              level: 'project',
-              disableModelInvocation: false,
-            },
-          ]),
-          isSkillActive: vi.fn().mockReturnValue(true),
-        },
-      });
+      const { service, subagentManager, config, permissionManager } =
+        createService({
+          skillManager: {
+            listSkills: vi.fn().mockResolvedValue([
+              {
+                name: 'auto-skill-demo',
+                description: 'Demo project skill',
+                level: 'project',
+                disableModelInvocation: false,
+              },
+            ]),
+            isSkillActive: vi.fn().mockReturnValue(true),
+          },
+        });
+      if (session?.eagerHideSkillUnderCodeMode) {
+        (
+          config as unknown as { getToolMode: () => unknown }
+        ).getToolMode = () => ToolMode.CodeModeOnly;
+        (
+          permissionManager as unknown as {
+            getToolRegistrationStatus: (name: string) => Promise<string>;
+          }
+        ).getToolRegistrationStatus = async (name) =>
+          name === ToolNames.SKILL ? 'deferred' : 'registered';
+      }
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',

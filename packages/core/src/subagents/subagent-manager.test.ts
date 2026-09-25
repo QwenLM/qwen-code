@@ -4271,36 +4271,122 @@ bad`);
         );
       });
 
-      it('withholds the manager when an eager allowlist hides the Skill tool', async () => {
-        // `settings.tools.eager` without `skill` leaves it permission-deferred
-        // in the session registry, and prepareTools() then drops it from the
-        // declarations and from exec's bindings. The declarations alone still
-        // look permissive here, so the registry is what has to be consulted.
-        (
-          mockToolRegistry as unknown as {
-            isPermissionDeferred: (name: string) => boolean;
-          }
-        ).isPermissionDeferred = (name) => name === ToolNames.SKILL;
-        expect(mockConfig.getVisibleTools().has(ToolNames.SKILL)).toBe(false);
+      it('withholds the manager when an eager allowlist hides the Skill tool under CodeModeOnly', async () => {
+        // `settings.tools.eager` without `skill` leaves it permission-deferred,
+        // and under CodeModeOnly prepareTools() drops it from exec's bindings
+        // while the tool_search + tool_call bridge is hidden — no route to a
+        // skill remains, so the manager must be withheld. The deferral verdict
+        // is read from the session's PermissionManager (depth-stable), not the
+        // registry, so the stub sits on the Config.
+        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
+        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+          manager,
+        );
+        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+        (codeModeParent as unknown as Record<symbol, unknown>)[
+          TOOL_REGISTRY_REBUILT
+        ] = true;
+        vi.spyOn(codeModeParent, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+        expect(codeModeParent.getVisibleTools().has(ToolNames.SKILL)).toBe(
+          false,
+        );
 
-        const context = await launch({});
+        const context = await launch({}, codeModeParent);
         expect(context.getSkillManager()).toBeNull();
         expect(resolveAgentDelegationSurface(context)).toBe('inline');
       });
 
+      it('keeps the manager for an eager-hidden Skill tool outside CodeModeOnly', async () => {
+        // The mirror of the case above: outside CodeModeOnly the
+        // tool_search + tool_call bridge stays registered (both halves are
+        // exempt from the eager allowlist) and still resolves a deferred
+        // Skill tool, so the agent keeps a followable route and withholding
+        // would strip a working capability (#10075's deferred-NOT-disabled
+        // contract). Dropping the CodeModeOnly gate from skillEagerHiddenFor
+        // turns this red while the CodeModeOnly cases stay green.
+        vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+
+        const context = await launch({});
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(resolveAgentDelegationSurface(context)).not.toBe('inline');
+      });
+
+      it('keeps withholding an eager-hidden Skill tool from a nested agent under CodeModeOnly', async () => {
+        // The deferral verdict must come from the session's
+        // PermissionManager, not the immediate registry: a withheld parent's
+        // rebuilt registry has no `skill` entry at all (the forSubAgent
+        // registration guard in config.ts), so a registry probe answers
+        // structurally false one level down and hands the session manager
+        // back — the #12424 dead pointer recurring at depth 2. Reading
+        // `getToolRegistry().isPermissionDeferred(SKILL)` in place of the
+        // session probe turns this red.
+        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
+        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+          manager,
+        );
+        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+        (codeModeParent as unknown as Record<symbol, unknown>)[
+          TOOL_REGISTRY_REBUILT
+        ] = true;
+        vi.spyOn(codeModeParent, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+
+        const child = await launch(
+          { tools: [ToolNames.READ_FILE] },
+          codeModeParent,
+        );
+        expect(child.getSkillManager()).toBeNull();
+
+        const grandchild = await launch({}, child);
+        expect(grandchild.getSkillManager()).toBeNull();
+        expect(resolveAgentDelegationSurface(grandchild)).toBe('inline');
+      });
+
       it('keeps the manager when tools.visible re-exposes an eager-hidden Skill tool', async () => {
-        // The pointer is followable through a reveal, so the manager must not
-        // be withheld (tool-registry.ts `isDeferredAndHidden` semantics).
-        (
-          mockToolRegistry as unknown as {
-            isPermissionDeferred: (name: string) => boolean;
-          }
-        ).isPermissionDeferred = (name) => name === ToolNames.SKILL;
-        vi.spyOn(mockConfig, 'getVisibleTools').mockReturnValue(
+        // The pointer is followable through the visible listing, so the
+        // manager must not be withheld even under CodeModeOnly
+        // (tool-registry.ts `isDeferredAndHidden` semantics). Dropping the
+        // visibleTools conjunct from skillEagerHiddenFor turns this red.
+        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
+        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+          manager,
+        );
+        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+        (codeModeParent as unknown as Record<symbol, unknown>)[
+          TOOL_REGISTRY_REBUILT
+        ] = true;
+        vi.spyOn(codeModeParent, 'getPermissionManager').mockReturnValue({
+          getToolRegistrationStatus: async (name: string) =>
+            name === ToolNames.SKILL ? 'deferred' : 'registered',
+        } as unknown as ReturnType<Config['getPermissionManager']>);
+        vi.spyOn(codeModeParent, 'getVisibleTools').mockReturnValue(
           new Set([ToolNames.SKILL]),
         );
 
-        const context = await launch({});
+        const context = await launch({}, codeModeParent);
         expect(context.getSkillManager()).toBe(sessionManager);
       });
 
@@ -4334,6 +4420,43 @@ bad`);
         expect(grandchild.getToolRegistry()).not.toBe(child.getToolRegistry());
         const stop = vi
           .spyOn(grandchild.getToolRegistry(), 'stop')
+          .mockResolvedValue(undefined);
+
+        await dispose();
+
+        expect(stop).toHaveBeenCalledTimes(1);
+      });
+
+      it('stops the registry it rebuilt for an unstamped parent whose policy allows skills', async () => {
+        // The third cleanup trigger: a runtimeContext with no
+        // TOOL_REGISTRY_REBUILT stamp (any caller other than the Agent-tool
+        // per-launch wrapper). The policy allows skills, so nothing
+        // re-anchors — the rebuild happens only because the parent is
+        // unstamped, and that registry is still this launch's to stop (its
+        // per-subagent AgentTool subscribes to the shared session
+        // SubagentManager and releases only via ToolRegistry.stop()).
+        // Narrowing the cleanup condition to `reanchorSkillManager` turns
+        // this red while every case above stays green.
+        const unstampedParent = makeFakeConfig({});
+        vi.spyOn(unstampedParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(unstampedParent, 'getSubagentManager').mockReturnValue(
+          manager,
+        );
+        vi.spyOn(unstampedParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+
+        const { context, dispose } = await launchHandle({}, unstampedParent);
+        // hasRebuiltToolRegistry reads the stamp through the prototype
+        // chain: assert the rebuild actually happened BEFORE asserting the
+        // stop, or an inherited stamp silently degrades this into the
+        // no-rebuild control case.
+        expect(context.getToolRegistry()).not.toBe(mockToolRegistry);
+        expect(context.getSkillManager()).toBe(sessionManager);
+        const stop = vi
+          .spyOn(context.getToolRegistry(), 'stop')
           .mockResolvedValue(undefined);
 
         await dispose();

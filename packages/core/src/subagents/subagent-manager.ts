@@ -84,7 +84,10 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
-import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
+import {
+  skillEagerHiddenFor,
+  toolConfigAllowsSkill,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import { ToolMode } from '../tools/code-mode.js';
 
@@ -1195,20 +1198,11 @@ export class SubagentManager {
 
       const skillsAvailable = toolConfigAllowsSkill(toolConfig, {
         codeModeOnly: runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
-        // A `settings.tools.eager` allowlist that omits `skill` leaves it
-        // permission-deferred, and `prepareTools()` then drops it from the
-        // declarations and — under CodeModeOnly — from `exec`'s bindings, so
-        // the agent has no route to any skill. Probed the way
-        // `skills/bundled-reference.ts` probes deferral, NOT via
-        // `isDeferredAndHidden`: that answers false for a tool that is still
-        // only a lazy factory, which is the state the registry is in here.
-        // A `tools.visible` entry naming `skill` keeps the pointer followable,
-        // so it must not withhold the manager.
-        skillEagerHidden:
-          runtimeContext
-            .getToolRegistry()
-            ?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
-          !runtimeContext.getVisibleTools?.()?.has(ToolNames.SKILL),
+        // Probed on the session's permission state (depth-stable), gated on
+        // CodeModeOnly, and shared with the background resume path — see
+        // skillEagerHiddenFor for why neither the immediate registry nor a
+        // mode-agnostic probe is sound.
+        skillEagerHidden: await skillEagerHiddenFor(runtimeContext),
       });
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(

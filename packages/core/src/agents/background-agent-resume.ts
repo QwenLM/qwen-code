@@ -75,7 +75,10 @@ import {
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
 } from './runtime/agent-core.js';
-import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
+import {
+  skillEagerHiddenFor,
+  toolConfigAllowsSkill,
+} from './runtime/subagent-plan-tool-policy.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
 import type {
@@ -135,7 +138,16 @@ async function subagentWillHaveSkillTool(
       tools: (await resolve(subagentConfig?.tools)) ?? ['*'],
       disallowedTools: await resolve(subagentConfig?.disallowedTools),
     },
-    { codeModeOnly: config.getToolMode?.() === ToolMode.CodeModeOnly },
+    {
+      codeModeOnly: config.getToolMode?.() === ToolMode.CodeModeOnly,
+      // The listing is rendered from `activeAgentConfig` — the
+      // approval-override wrapper, which always resolves `getSkillManager()`
+      // to the session manager — so this flag is the only gate on it here.
+      // It must carry the launch side's answer (the shared probe), or a
+      // resumed agent is announced skills its own Config was just stripped
+      // of the means to load.
+      skillEagerHidden: await skillEagerHiddenFor(config),
+    },
   );
 }
 
