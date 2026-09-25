@@ -21,7 +21,10 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 vi.mock('node:child_process');
-vi.mock('node:fs');
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal();
+  return { ...fs, readFileSync: vi.fn(fs.readFileSync) };
+});
 
 describe('getVersion', () => {
   beforeEach(() => {
@@ -738,13 +741,7 @@ describe('assertVersionUnreleased', () => {
     `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
 
   it('pins the full published-package set', () => {
-    // The push-time guard and the release-version picker derive from this
-    // list; the publish allowlist in `.github/scripts/run-release-step.sh`
-    // enumerates the same packages separately, so adding or removing one must
-    // update both. They are pinned against each other by "keeps the publish
-    // allowlist and the guard package set in step" in release-workflow.test.js
-    // — release.yml itself no longer contains any publish step. Append rather
-    // than insert: the tests below read this array by index.
+    // Changing private flags must not accidentally expand the release surface.
     expect(PUBLISHED_PACKAGES).toEqual([
       '@qwen-code/qwen-code',
       '@qwen-code/external-context-mem0',
@@ -758,6 +755,7 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/channel-telegram',
       '@qwen-code/channel-wecom',
       '@qwen-code/channel-weixin',
+      '@qwen-code/web-shell',
     ]);
   });
 

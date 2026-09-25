@@ -22,6 +22,8 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   DaemonTranscriptStore,
   DaemonCapabilities,
   GoalControlRequest,
@@ -336,6 +338,7 @@ export function getConnectionAfterSessionClear(
   clearedSessionId: string | undefined,
   preserveWorkspaceMetadata = current.sessionContext === undefined ||
     current.sessionContext.kind === 'workspace',
+  dropSessionContext = false,
 ): DaemonConnectionState {
   const next = { ...current };
   if (!clearedSessionId || current.sessionId === clearedSessionId) {
@@ -359,6 +362,14 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    if (dropSessionContext) {
+      // Leaving a context (Live, in practice) has to be a real state change.
+      // An undefined pending session context means "inherit from the
+      // connection" downstream, so a cleared connection that still advertises
+      // the old context sends the next prompt straight back into it —
+      // `createSession` then rejects a live context (#12620).
+      delete next.sessionContext;
+    }
     if (preserveWorkspaceMetadata) {
       // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
       // MCP-prompt and workflow slash commands all live at the workspace/config
@@ -2362,7 +2373,7 @@ export function createDaemonSessionActions({
       return loadPromise;
     },
 
-    async clearSession() {
+    async clearSession(options?: { dropSessionContext?: boolean }) {
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
       if (pendingPersistedReasoningAction) {
@@ -2374,7 +2385,12 @@ export function createDaemonSessionActions({
         clearActiveSessionState();
         sessionRef.current = undefined;
         setConnection((current) =>
-          getConnectionAfterSessionClear(current, session?.sessionId),
+          getConnectionAfterSessionClear(
+            current,
+            session?.sessionId,
+            undefined,
+            options?.dropSessionContext === true,
+          ),
         );
         if (refreshStandaloneOptions) {
           setRestoreSessionNonce((nonce) => nonce + 1);
@@ -3283,6 +3299,17 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       return withActionTimeout(session.artifacts(), 'Load artifacts timed out');
+    },
+
+    async addArtifact(
+      artifact: DaemonSessionArtifactInput,
+    ): Promise<DaemonSessionArtifactMutationResult> {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.addArtifact(artifact),
+        'Add artifact timed out',
+      );
     },
 
     async respondToGlobalPermission(

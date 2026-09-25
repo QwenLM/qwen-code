@@ -31,6 +31,12 @@ export interface AppObservationOptions extends CallOptions {
   includeScreenshot?: boolean;
 }
 
+export interface ComputerUseApplication {
+  id: string;
+  displayName: string;
+  isRunning: boolean;
+}
+
 export interface AppObservation {
   app: string;
   window: string;
@@ -342,7 +348,7 @@ export class ComputerUse {
     connectionGeneration: number;
     operation?: ComputerUseOperationResult;
   }>;
-  listApps(options?: CallOptions): Promise<JsonObject[]>;
+  listApps(options?: CallOptions): Promise<ComputerUseApplication[]>;
   getApp(selector: string, options?: CallOptions): Promise<ComputerUseApp>;
   listWindows(
     options?: CallOptions & {
