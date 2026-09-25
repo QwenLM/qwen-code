@@ -59,6 +59,7 @@ export const ToolNames = {
   TOOL_CALL: 'tool_call',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
+  ADVISOR: 'advisor',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   WORKFLOW: 'workflow',
@@ -138,6 +139,7 @@ export const ToolDisplayNames = {
   TOOL_CALL: 'ToolCall',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
+  ADVISOR: 'Advisor',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
   WORKFLOW: 'Workflow',
@@ -188,6 +190,30 @@ export function canonicalToolName(toolName: string): string {
     return toolName;
   }
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+/**
+ * Resolve a model-supplied tool name against the registered names the way
+ * both halves of the deferred-tool bridge must agree on: an exact match wins,
+ * otherwise a single case-insensitive match. Returns the registered name,
+ * the candidate list when several registered names differ from the request
+ * only by case, or `undefined` when nothing matches.
+ *
+ * Returning the candidates instead of picking one keeps the answer
+ * independent of registration order, which `ensureTool` changes when it
+ * moves a lazily-built tool from the factory map into the tool map (#11321).
+ */
+export function resolveRegisteredToolName(
+  requested: string,
+  registered: readonly string[],
+): string | string[] | undefined {
+  if (registered.includes(requested)) return requested;
+  const lower = requested.toLowerCase();
+  const candidates = [
+    ...new Set(registered.filter((name) => name.toLowerCase() === lower)),
+  ].sort();
+  if (candidates.length === 1) return candidates[0];
+  return candidates.length > 1 ? candidates : undefined;
 }
 
 // Migration from old tool display names to new tool display names

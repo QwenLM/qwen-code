@@ -56,7 +56,13 @@ class LocalProcessRuntimeProvisionerTest {
                                 () -> transport.execute(lease,
                                         new RuntimeSession("harness",
                                                 "runtime", "bootstrap", scope),
-                                        java.util.Map.of("callId", "tool-1"))
+                                        java.util.Map.of(
+                                                "sessionId", "runtime",
+                                                "promptId", "prompt-1",
+                                                "callId", "tool-1",
+                                                "argsDigest", "digest-1",
+                                                "toolName", "read_file",
+                                                "input", java.util.Map.of()))
                                         .toCompletableFuture()
                                         .get(10, TimeUnit.SECONDS));
                 Throwable cause = failure.getCause();
@@ -397,6 +403,13 @@ class LocalProcessRuntimeProvisionerTest {
                 Duration leaseDuration) {
             return delegate.renewOperation(bindingId, owner,
                     operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord releaseOperation(String bindingId,
+                String owner, long operationGeneration) {
+            return delegate.releaseOperation(bindingId, owner,
+                    operationGeneration);
         }
     }
 
