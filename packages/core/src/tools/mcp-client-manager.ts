@@ -42,6 +42,7 @@ import {
 } from './mcp-errors.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import { mcpSessionMetadataKey } from './mcp-session-config.js';
+import { warnOnUnmatchedEagerToolEntries } from '../permissions/eager-allowlist-coverage.js';
 
 const debugLogger = createDebugLogger('MCP');
 export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
@@ -1223,6 +1224,9 @@ export class McpClientManager {
       this.bulkPassDepth--;
       this.emitRefusedBatchIfAny();
     }
+    // The registry is settled, so `tools.eager` entries that name no
+    // discovered tool can be reported without warning prematurely (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   /**
@@ -1764,6 +1768,8 @@ export class McpClientManager {
       setMCPDiscoveryState(MCPDiscoveryState.COMPLETED);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
+    // Same settled-registry report as the per-session bulk pass (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   private releaseAllPooledConnections(): void {
@@ -2379,6 +2385,10 @@ export class McpClientManager {
     // the state is still IN_PROGRESS, so the AppContainer batch-flush
     // subscriber never observes the terminal state.
     this.eventEmitter?.emit('mcp-client-update', this.clients);
+    // Default startup path (`Config.startMcpDiscoveryInBackground`) and the
+    // MCP hot-reload reconcile both land here, so this is where a misspelt
+    // `tools.eager` entry becomes visible (#12435).
+    warnOnUnmatchedEagerToolEntries(cliConfig);
   }
 
   /**

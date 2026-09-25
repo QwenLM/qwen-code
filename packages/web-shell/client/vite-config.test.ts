@@ -5,10 +5,15 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  MANAGED_AGENT_JAVA_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -22,6 +27,40 @@ function loadConfig(): UserConfig {
     isPreview: false,
   });
 }
+
+it('serves preview documents with CSP scoped to the selected daemon', async ({
+  onTestFinished,
+}) => {
+  const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
+  onTestFinished(() => rm(dist, { recursive: true, force: true }));
+  await writeFile(
+    join(dist, 'index.html'),
+    '<!doctype html><title>Preview</title>',
+  );
+  const server = await preview({
+    ...loadConfig(),
+    configFile: false,
+    build: { outDir: dist },
+    preview: { host: '127.0.0.1', port: 0 },
+  });
+  onTestFinished(() => server.close());
+  const baseUrl = server.resolvedUrls!.local[0];
+  for (const [query, expected] of [
+    [
+      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+    ],
+    ['//', "connect-src 'self'"],
+    ['', "connect-src 'self'"],
+  ]) {
+    const response = await fetch(`${baseUrl}${query}`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<title>Preview</title>');
+    expect(
+      response.headers.get('Content-Security-Policy')?.split('; '),
+    ).toContain(expected);
+  }
+});
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {
@@ -96,6 +135,18 @@ describe('Web Shell standalone session development proxy', () => {
   });
 });
 
+describe('Web Shell Java Managed Agent development proxy', () => {
+  it('proxies only the public Java WebShell API prefix', () => {
+    const proxy = loadConfig().server?.proxy;
+    const managed = proxy?.[MANAGED_AGENT_JAVA_ROUTE_PROXY];
+
+    expect(managed).not.toBeTypeOf('string');
+    expect(managed).toBeDefined();
+    expect((managed as ProxyOptions).target).toBe('http://127.0.0.1:8080');
+    expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
+  });
+});
+
 describe('Web Shell client source proxy bypass', () => {
   it('serves session catalog source modules instead of proxying them', () => {
     const sessionProxy = loadConfig().server?.proxy?.['/session'];
@@ -145,6 +196,34 @@ describe('Web Shell daemon API proxy coverage', () => {
     // API fetches must NOT bypass to the shell; undefined means "proxy it".
     expect(
       options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBeUndefined();
+  });
+});
+
+describe('Web Shell remote workspace development proxy', () => {
+  // Proxy keys are path-prefix matches, so the `/workspace` entry cannot reach
+  // `/remote-workspace*`. Without their own entries the SPA fallback answers
+  // the browse leg with index.html and the dialog fails JSON parsing in dev.
+  it.each([
+    {
+      key: '/remote-workspace-path-suggestions',
+      method: 'GET',
+      url: '/remote-workspace-path-suggestions?daemon=http%3A%2F%2Fb.test%3A4170&prefix=%2Fsrv%2F',
+    },
+    { key: '/remote-workspaces', method: 'POST', url: '/remote-workspaces' },
+  ])('proxies $key to the daemon', ({ key, method, url }) => {
+    const proxy = loadConfig().server?.proxy;
+    expect(proxy?.[key]).not.toBeTypeOf('string');
+    const options = proxy?.[key] as ProxyOptions | undefined;
+    expect(options).toBeDefined();
+    const request = {
+      method,
+      url,
+      headers: { accept: '*/*' },
+    } as unknown as IncomingMessage;
+
+    expect(
+      options?.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBeUndefined();
   });
 });

@@ -44,6 +44,7 @@ import {
 } from './extension-git-credentials.js';
 import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
+import { SkillManager } from '../skills/skill-manager.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -303,6 +304,318 @@ describe('extension tests', () => {
     });
   }
 
+  describe('extension workflows', () => {
+    const workflowSource = (name: string) =>
+      `export const meta = { name: '${name}', description: 'Runs ${name}' };\nreturn 1;\n`;
+
+    it('loads workflows from the default directory as <extension>:<meta.name>', async () => {
+      const directory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      fs.mkdirSync(path.join(directory, 'workflows'));
+      fs.writeFileSync(
+        path.join(directory, 'workflows', 'audit.js'),
+        workflowSource('audit'),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const [extension] = manager.getLoadedExtensions();
+
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'suite:audit',
+      ]);
+      expect(extension.workflows?.[0]?.scriptPath).toBe(
+        fs.realpathSync(path.join(directory, 'workflows', 'audit.js')),
+      );
+    });
+
+    it('reads only the paths the manifest declares in workflows', async () => {
+      const directory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      fs.writeFileSync(
+        path.join(directory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '1.0.0',
+          workflows: '${extensionPath}${/}flows',
+        }),
+      );
+      fs.mkdirSync(path.join(directory, 'workflows'));
+      fs.writeFileSync(
+        path.join(directory, 'workflows', 'default.js'),
+        workflowSource('default'),
+      );
+      fs.mkdirSync(path.join(directory, 'flows'));
+      fs.writeFileSync(
+        path.join(directory, 'flows', 'custom.js'),
+        workflowSource('custom'),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const [extension] = manager.getLoadedExtensions();
+
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'suite:custom',
+      ]);
+    });
+
+    it('offers the workflows it ships for consent on install', async () => {
+      const sourcePath = path.join(tempWorkspaceDir, 'workflow-source');
+      fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+      fs.writeFileSync(
+        path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(sourcePath, 'workflows', 'audit.js'),
+        workflowSource('audit'),
+      );
+
+      const requestConsent = vi.fn(async () => {});
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = await manager.installExtension(
+        { type: 'local', source: sourcePath },
+        requestConsent,
+      );
+
+      expect(requestConsent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workflows: [
+            expect.objectContaining({
+              name: 'wf-ext:audit',
+              description: 'Runs audit',
+              scriptPath: path.join(sourcePath, 'workflows', 'audit.js'),
+            }),
+          ],
+          previousWorkflows: [],
+        }),
+      );
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'wf-ext:audit',
+      ]);
+      // The installed copy, not the source, is what loads.
+      expect(extension.workflows?.[0]?.scriptPath).toBe(
+        fs.realpathSync(path.join(extension.path, 'workflows', 'audit.js')),
+      );
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'discloses a symlinked workflow that the install copies as a regular file',
+      async () => {
+        const sourcePath = path.join(tempWorkspaceDir, 'linked-source');
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+          }),
+        );
+        expect(
+          fs
+            .lstatSync(path.join(extension.path, 'workflows', 'audit.js'))
+            .isSymbolicLink(),
+        ).toBe(false);
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps runtime symlink rules for a linked extension, in consent and at load',
+      async () => {
+        const sourcePath = path.join(
+          tempWorkspaceDir,
+          'linked-workflow-source',
+        );
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'link', source: sourcePath },
+          requestConsent,
+        );
+
+        // A linked extension loads its source as-is, where links are refused,
+        // so consent must not list what will never load.
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({ workflows: [] }),
+        );
+        expect(extension.workflows).toEqual([]);
+      },
+    );
+
+    it.each([
+      'flows',
+      '${extensionPath}${/}flows',
+      '$QWEN_TEST_WORKFLOW_DIR',
+      '${QWEN_TEST_WORKFLOW_DIR}',
+    ])('discloses and loads the same workflows for %s', async (workflows) => {
+      const saved = process.env['QWEN_TEST_WORKFLOW_DIR'];
+      process.env['QWEN_TEST_WORKFLOW_DIR'] = 'flows';
+      try {
+        const sourcePath = path.join(tempWorkspaceDir, 'workflow-source');
+        fs.mkdirSync(path.join(sourcePath, 'flows'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0', workflows }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'flows', 'a.js'),
+          workflowSource('audit'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+            previousWorkflows: [],
+          }),
+        );
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      } finally {
+        if (saved === undefined) delete process.env['QWEN_TEST_WORKFLOW_DIR'];
+        else process.env['QWEN_TEST_WORKFLOW_DIR'] = saved;
+      }
+    });
+  });
+
+  it('retains extension skill discovery errors until the next successful load', async () => {
+    const extensionDirectory = createExtension({
+      extensionsDir: userExtensionsDir,
+      name: 'broken-skill',
+    });
+    const skillDirectory = path.join(extensionDirectory, 'skills', 'review');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    const manifestPath = path.join(skillDirectory, 'SKILL.md');
+    fs.writeFileSync(manifestPath, 'invalid frontmatter');
+    const manager = createExtensionManager();
+    await manager.refreshCache();
+    const [broken] = manager.getLoadedExtensions();
+    expect(broken).toBeDefined();
+    expect(broken.skills).toEqual([]);
+    expect(broken.skillsDiscoveryHasErrors).toBe(true);
+    fs.writeFileSync(
+      manifestPath,
+      '---\nname: review\ndescription: Review code\n---\nBody.',
+    );
+    await manager.refreshCache();
+    const [recovered] = manager.getLoadedExtensions();
+    expect(recovered.skills?.map((skill) => skill.name)).toEqual(['review']);
+    expect(recovered.skillsDiscoveryHasErrors).not.toBe(true);
+    fs.rmSync(skillDirectory, { recursive: true });
+    await manager.refreshCache();
+    expect(manager.getLoadedExtensions()[0].skillsDiscoveryHasErrors).not.toBe(
+      true,
+    );
+  });
+
+  it('propagates Agent Plugin root discovery failures through recovery and confirmed removal', async () => {
+    const pluginDirectory = path.join(userExtensionsDir, 'portable-plugin');
+    createAgentPlugin(pluginDirectory);
+    const skillsDirectory = path.join(pluginDirectory, 'skills');
+    const outsideDirectory = path.join(tempWorkspaceDir, 'outside-skills');
+    const manager = createExtensionManager();
+    const skillManager = new SkillManager({
+      isSafeMode: () => false,
+      getBareMode: () => false,
+      getProjectRoot: () => tempWorkspaceDir,
+      getDisabledSkillLevels: () => new Set(['project', 'user', 'bundled']),
+      getActiveExtensions: () =>
+        manager.getLoadedExtensions().filter((extension) => extension.isActive),
+    } as unknown as Config);
+    const refresh = async () => {
+      await manager.refreshCache();
+      await skillManager.refreshCache();
+      return manager.getLoadedExtensions()[0];
+    };
+
+    await refresh();
+    expect(skillManager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+      'portable-plugin:direct',
+    ]);
+    fs.renameSync(skillsDirectory, outsideDirectory);
+    fs.symlinkSync(
+      outsideDirectory,
+      skillsDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const broken = await refresh();
+    expect(broken.format).toBe('agent-plugins-v1');
+    expect(broken.skills).toEqual([]);
+    expect(broken.skillsDiscoveryHasErrors).toBe(true);
+    expect(skillManager.getCachedSkills()).toEqual([]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(true);
+
+    fs.unlinkSync(skillsDirectory);
+    fs.renameSync(outsideDirectory, skillsDirectory);
+    const recovered = await refresh();
+    expect(recovered.skills?.map((skill) => skill.name)).toEqual(['direct']);
+    expect(recovered.skillsDiscoveryHasErrors).not.toBe(true);
+    expect(skillManager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+      'portable-plugin:direct',
+    ]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(false);
+
+    fs.rmSync(skillsDirectory, { recursive: true });
+    const removed = await refresh();
+    expect(removed.skills).toEqual([]);
+    expect(removed.skillsDiscoveryHasErrors).not.toBe(true);
+    expect(skillManager.getCachedSkills()).toEqual([]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(false);
+  });
+
   describe('extension skill states', () => {
     let manager: ExtensionManager;
     let extensionDirectory: string;
@@ -548,6 +861,13 @@ describe('extension tests', () => {
         fs.writeFileSync(path.join(sourcePath, component, 'ignored.md'), 'no');
       }
       fs.writeFileSync(path.join(sourcePath, 'QWEN.md'), 'ignored context');
+      // The Agent Plugins v1 schema defines no workflows, so a shipped
+      // workflows/ directory must neither be disclosed nor loaded.
+      fs.mkdirSync(path.join(sourcePath, 'workflows'));
+      fs.writeFileSync(
+        path.join(sourcePath, 'workflows', 'audit.js'),
+        "export const meta = { name: 'audit', description: 'Audit' };\nreturn 1;\n",
+      );
       const sourceContents = new Map(
         [
           'plugin.json',
@@ -577,6 +897,7 @@ describe('extension tests', () => {
       expect(extension.skills?.[0]?.allowedTools).toBeUndefined();
       expect(extension.commands).toEqual([]);
       expect(extension.agents).toEqual([]);
+      expect(extension.workflows).toEqual([]);
       expect(extension.contextFiles).toEqual([]);
       expect(extension.hooks).toBeUndefined();
       expect(extension.settings).toBeUndefined();
@@ -592,9 +913,11 @@ describe('extension tests', () => {
           originSource: 'AgentPlugins',
           commands: [],
           subagents: [],
+          workflows: [],
           skills: [expect.objectContaining({ name: 'direct' })],
         }),
       );
+      expect(extension.workflows).toEqual([]);
 
       for (const [file, contents] of sourceContents) {
         expect(fs.readFileSync(path.join(extension.path, file))).toEqual(
@@ -2634,6 +2957,202 @@ describe('extension tests', () => {
           .map((e) => e.name)
           .sort(),
       ).toEqual(['ext-a', 'ext-b']);
+    });
+  });
+
+  describe('refreshCatalogSnapshot', () => {
+    it('loads manifest identity fields without subresources', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'qwen-ext',
+        version: '1.2.3',
+        installMetadata: {
+          type: 'git',
+          source: 'test-source',
+          credentialPersistence: 'stored',
+        },
+      });
+      createAgentPlugin(path.join(userExtensionsDir, 'plugin-ext'), {
+        name: 'plugin-ext',
+        version: '2.0.0',
+      });
+
+      const manager = createExtensionManager();
+      const { snapshot, extensions } = await manager.refreshCatalogSnapshot();
+
+      expect(snapshot.extensions).toEqual(
+        expect.objectContaining({
+          [extensions[0]!.id]: expect.objectContaining({
+            name: expect.any(String),
+          }),
+        }),
+      );
+      expect(extensions).toHaveLength(2);
+      const qwenExt = extensions.find((e) => e.name === 'qwen-ext');
+      const pluginExt = extensions.find((e) => e.name === 'plugin-ext');
+      expect(qwenExt?.version).toBe('1.2.3');
+      expect(qwenExt?.installMetadata?.credentialPersistence).toBe('stored');
+      expect(pluginExt?.version).toBe('2.0.0');
+      // Manifest-only: no subresource is populated on the returned entries.
+      for (const extension of extensions) {
+        expect(extension.skills).toBeUndefined();
+        expect(extension.commands).toBeUndefined();
+        expect(extension.agents).toBeUndefined();
+        expect(extension.hooks).toBeUndefined();
+        expect(extension.contextFiles).toEqual([]);
+      }
+    });
+
+    it('leaves the manager cache and fingerprint baseline untouched', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+      });
+      const manager = createExtensionManager();
+
+      await manager.refreshCatalogSnapshot();
+
+      // The catalog is stateless: nothing enters extensionCache, and the
+      // fingerprint baseline is not committed — a later refresh on this
+      // manager must not be masked by a manifest-only result.
+      expect(manager.getLoadedExtensions()).toEqual([]);
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+    });
+
+    it('does not re-read subresources between catalog refreshes but picks up manifest edits', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+        addContextFile: true,
+      });
+      const manager = createExtensionManager();
+
+      const first = await manager.refreshCatalogSnapshot();
+      expect(first.extensions[0]?.skills).toBeUndefined();
+      expect(first.extensions[0]?.contextFiles).toEqual([]);
+
+      // A skill-file-only edit does not change the catalog's inputs, so the
+      // second refresh reloads the same manifest head — the fingerprint never
+      // covers skill files.
+      const skillFile = path.join(
+        userExtensionsDir,
+        'ext-a',
+        'skills',
+        's',
+        'SKILL.md',
+      );
+      fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+      fs.writeFileSync(skillFile, '---\nname: s\ndescription: d\n---\nbody');
+      const second = await manager.refreshCatalogSnapshot();
+      expect(second.extensions).toHaveLength(1);
+      expect(second.extensions[0]?.skills).toBeUndefined();
+
+      const manifestPath = path.join(
+        userExtensionsDir,
+        'ext-a',
+        EXTENSIONS_CONFIG_FILENAME,
+      );
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({ name: 'ext-a', version: '9.9.9' }),
+      );
+      const third = await manager.refreshCatalogSnapshot();
+      expect(third.extensions.map((e) => e.version)).toEqual(['9.9.9']);
+    });
+
+    it('keeps the full-load fail semantics: corrupt manifest skipped, broken entry stat throws', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'good-ext',
+      });
+      const badExtDir = path.join(userExtensionsDir, 'bad-ext');
+      fs.mkdirSync(badExtDir);
+      fs.writeFileSync(
+        path.join(badExtDir, EXTENSIONS_CONFIG_FILENAME),
+        '{ "name": "bad-ext"',
+      );
+
+      const manager = createExtensionManager();
+      const first = await manager.refreshCatalogSnapshot();
+      expect(first.extensions.map((e) => e.name)).toEqual(['good-ext']);
+
+      // A dangling symlink at the extensions root must fail the whole load,
+      // mirroring `loadExtensionsFromExtensionsDir` fail-closed behavior.
+      fs.rmSync(badExtDir, { recursive: true });
+      fs.symlinkSync(path.join(userExtensionsDir, 'missing-target'), badExtDir);
+      await expect(manager.refreshCatalogSnapshot()).rejects.toThrow();
+    });
+
+    it('excludes an extension whose manifest head throws, matching the full load', async () => {
+      // The head's throws (manifest parse, extension id, the v1 MCP load)
+      // define the inclusion set the full load's catch rejects. Whatever
+      // throws there must be excluded from the catalog too — otherwise the
+      // catalog advertises an id that detail/enable/update routes reject as
+      // nonexistent. The subresource loaders and the MCP loader swallow
+      // their own errors today, so simulate the head throwing via the MCP
+      // dependency rather than a disk shape.
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'good-ext',
+      });
+      createAgentPlugin(path.join(userExtensionsDir, 'broken-plugin'), {
+        name: 'broken-plugin',
+      });
+      const mcpSpy = vi
+        .spyOn(
+          await import('./agent-plugins-v1/index.js'),
+          'loadAgentPluginMcpServers',
+        )
+        .mockRejectedValue(new Error('mcp unavailable'));
+
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const fullNames = manager.getLoadedExtensions().map((e) => e.name);
+        expect(fullNames).toEqual(['good-ext']);
+
+        const manager2 = createExtensionManager();
+        const catalog = await manager2.refreshCatalogSnapshot();
+        expect(catalog.extensions.map((e) => e.name)).toEqual(fullNames);
+      } finally {
+        mcpSpy.mockRestore();
+      }
+    });
+
+    it('does not create the agent plugin data root', async () => {
+      createAgentPlugin(path.join(userExtensionsDir, 'plugin-ext'), {
+        name: 'plugin-ext',
+      });
+      const storeDir = path.join(tempHomeDir, 'catalog-store');
+      const manager = createExtensionManager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: userExtensionsDir,
+          storeDir,
+        }),
+      });
+
+      await manager.refreshCatalogSnapshot();
+
+      expect(fs.existsSync(path.join(storeDir, 'plugin-data'))).toBe(false);
+    });
+
+    it('a name-filtered catalog only returns the requested extensions', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-b',
+      });
+      const manager = createExtensionManager();
+
+      const { extensions } = await manager.refreshCatalogSnapshot({
+        names: ['ext-a'],
+      });
+      expect(extensions.map((e) => e.name)).toEqual(['ext-a']);
+      expect(manager.getLoadedExtensions()).toEqual([]);
     });
   });
 

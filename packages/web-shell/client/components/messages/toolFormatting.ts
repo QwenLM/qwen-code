@@ -27,6 +27,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
+  advisor: 'Advisor',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
@@ -47,6 +48,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   monitor: 'Monitor',
   notebook_edit: 'NotebookEdit',
   tool_search: 'ToolSearch',
+  tool_call: 'ToolCall',
   read_mcp_resource: 'ReadMcpResource',
   enter_worktree: 'EnterWorktree',
   exit_worktree: 'ExitWorktree',
@@ -65,6 +67,21 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
+  omni_downsample_image: 'DownsampleImage',
+  omni_downscale_video: 'DownscaleVideo',
+  omni_downsample_audio: 'DownsampleAudio',
+  omni_extract_keyframes: 'ExtractKeyframes',
+  omni_extract_audio: 'ExtractAudio',
+  omni_clip_video: 'ClipVideo',
+  omni_convert_image: 'ConvertImage',
+  omni_transcribe_audio: 'TranscribeAudio',
+  omni_clip_image: 'ClipImage',
+  omni_clip_audio: 'ClipAudio',
+  omni_caption_image: 'CaptionImage',
+  omni_caption_audio: 'CaptionAudio',
+  omni_ocr_image: 'OcrImage',
+  omni_understand_video_segments: 'UnderstandVideoSegments',
+  omni_recall_media_memory: 'RecallMediaMemory',
   display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -142,6 +159,10 @@ export function localizeToolDisplayName(
 export function isAskUserQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}
+
+export function isAdvisorToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'advisor';
 }
 
 export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
@@ -239,6 +260,10 @@ export function extractText(tool: ACPToolCall): string | null {
   return extractRawOutputText(tool.rawOutput);
 }
 
+export function getAdvisorDisplayText(tool: ACPToolCall): string | null {
+  return extractRawOutputText(tool.rawOutput) ?? extractText(tool);
+}
+
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
@@ -248,6 +273,13 @@ export function getToolResultSummary(tool: ACPToolCall): string {
       (extractRawOutputText(tool.rawOutput) ?? '').trim(),
     );
     if (rawSummary) return rawSummary;
+  }
+
+  if (isAdvisorToolName(name)) {
+    const raw = getAdvisorReview(tool.rawOutput);
+    if (raw) return truncateText(raw.verdict.trim().replace(/\s+/g, ' '), 80);
+    const fallback = getAdvisorDisplayText(tool);
+    return fallback ? truncateText(fallback.split('\n')[0] ?? '', 80) : '';
   }
 
   const text = extractText(tool);
@@ -388,7 +420,8 @@ function getDescriptionFromArgs(
     return description;
   }
   if (args.file_path) {
-    if (args.description) return String(args.description);
+    const description = getStringArg(args, 'description');
+    if (description) return description;
     return pathForDisplay(String(args.file_path), workspaceCwd);
   }
   if (args.url) {
@@ -406,8 +439,7 @@ function getDescriptionFromArgs(
     const candidate = args.path || args.directory || '';
     return pathForDisplay(String(candidate), workspaceCwd);
   }
-  if (args.description) return String(args.description);
-  return '';
+  return getStringArg(args, 'description');
 }
 
 function getStringArg(
@@ -462,8 +494,10 @@ function formatDescriptionPaths(
     return pathForDisplay(trimmed, workspaceCwd);
   }
 
-  return trimmed.replace(/(?:[A-Za-z]:)?\/[^\s'")]+/g, (match) =>
-    pathForDisplay(match, workspaceCwd),
+  return trimmed.replace(
+    /(^|[\s'"(])((?:[A-Za-z]:)?\/[^\s'")]+)/g,
+    (_match, prefix: string, filePath: string) =>
+      prefix + pathForDisplay(filePath, workspaceCwd),
   );
 }
 
@@ -657,12 +691,44 @@ export function getAgentCurrentToolHint(
   return truncateText(hint, 50);
 }
 
-function extractRawOutputText(rawOutput: unknown): string | null {
+interface AdvisorReviewOutput {
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+function getAdvisorReview(rawOutput: unknown): AdvisorReviewOutput | undefined {
+  if (!rawOutput || typeof rawOutput !== 'object') return undefined;
+  const raw = rawOutput as Record<string, unknown>;
+  if (raw.type !== 'advisor_review') return undefined;
+  if (
+    typeof raw.verdict !== 'string' ||
+    typeof raw.risks !== 'string' ||
+    typeof raw.missingEvidence !== 'string' ||
+    typeof raw.recommendation !== 'string'
+  ) {
+    return undefined;
+  }
+  return raw as unknown as AdvisorReviewOutput;
+}
+
+export function extractRawOutputText(rawOutput: unknown): string | null {
   if (!rawOutput) return null;
   if (typeof rawOutput === 'string') return rawOutput;
   if (typeof rawOutput !== 'object') return null;
 
   const raw = rawOutput as Record<string, unknown>;
+  const advisorReview = getAdvisorReview(raw);
+  if (advisorReview) {
+    const fields = [
+      ['Verdict', advisorReview.verdict],
+      ['Risks', advisorReview.risks],
+      ['Missing evidence', advisorReview.missingEvidence],
+      ['Recommendation', advisorReview.recommendation],
+    ] as const;
+    return fields.map(([label, value]) => `## ${label}\n${value}`).join('\n\n');
+  }
   if (typeof raw.output === 'string') return raw.output;
   if (typeof raw.stdout === 'string') return raw.stdout;
   if (typeof raw.content === 'string') return raw.content;

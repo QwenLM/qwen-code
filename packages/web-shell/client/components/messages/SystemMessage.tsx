@@ -16,6 +16,10 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import {
+  formatCompressionTokens,
+  parseContextCompressionMeta,
+} from '../../utils/contextCompression';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import {
   ContextUsageMessage,
@@ -105,6 +109,46 @@ function formatVisionBridgeNotice(
   });
 }
 
+/**
+ * Localized replacement for the `/compress` sentences: the daemon formats its
+ * own English lines (kept for text-only ACP hosts), so every row of the
+ * compression flow is rendered here in this UI's language, with grouping that
+ * follows the UI language rather than the browser locale.
+ *
+ * The warning is the one exception — it is server-authored prose, so it is
+ * shown verbatim, on its own line (two trailing spaces = Markdown hard break,
+ * matching how the daemon itself joins it).
+ */
+function formatContextCompression(
+  data: unknown,
+  t: ReturnType<typeof useI18n>['t'],
+  language: string,
+): string | undefined {
+  const meta = parseContextCompressionMeta(data);
+  if (!meta) return undefined;
+  if (meta.phase === 'notice') {
+    return t('contextCompression.instructionsTruncated', {
+      max: formatCompressionTokens(meta.instructionsLimit, false, language),
+    });
+  }
+  if (meta.phase === 'progress') return t('contextUsage.compressing');
+  if (meta.phase === 'noop') return t('contextCompression.noop');
+  const { result } = meta;
+  const line = t('contextCompression.result', {
+    from: formatCompressionTokens(
+      result.originalTokenCount,
+      result.originalTokenCountIsEstimated,
+      language,
+    ),
+    to: formatCompressionTokens(
+      result.newTokenCount,
+      result.newTokenCountIsEstimated,
+      language,
+    ),
+  });
+  return result.warning ? `${line}  \n${result.warning}` : line;
+}
+
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
@@ -119,7 +163,7 @@ export const SystemMessage = memo(function SystemMessage({
   showRetryHint = false,
   onRetryClick,
 }: SystemMessageProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
@@ -172,7 +216,13 @@ export const SystemMessage = memo(function SystemMessage({
           <MarkerIcon aria-hidden="true" />
         </span>
         <span className="shrink-0 text-muted-foreground">
-          {t(turn?.kind === 'agent' ? 'background.agent' : 'background.task')}
+          {t(
+            turn?.kind === 'agent'
+              ? 'background.agent'
+              : turn?.kind === 'peer'
+                ? 'background.peer'
+                : 'background.task',
+          )}
         </span>
         <span aria-hidden="true" className="text-muted-foreground">
           ·
@@ -196,7 +246,8 @@ export const SystemMessage = memo(function SystemMessage({
               {t('background.source')}
             </Button>
           )}
-          {backgroundDetails && turn && (
+          {/* A peer turn has no task behind it to show the details of. */}
+          {backgroundDetails && turn && turn.kind !== 'peer' && (
             <Button
               type="button"
               variant="ghost"
@@ -353,7 +404,12 @@ export const SystemMessage = memo(function SystemMessage({
     source === 'vision_bridge_notice'
       ? formatVisionBridgeNotice(data, t)
       : undefined;
-  const displayContent = visionBridgeContent ?? content;
+  const contextCompressionContent =
+    source === 'context_compression'
+      ? formatContextCompression(data, t, language)
+      : undefined;
+  const displayContent =
+    contextCompressionContent ?? visionBridgeContent ?? content;
 
   const taskKind = stringField('kind');
   const taskCommandLabel = stringField('commandLabel');

@@ -36,7 +36,10 @@ import {
 } from './item-projection.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { HistoryItemWithoutId } from '../types.js';
+import type {
+  ContextCategoryBreakdown,
+  HistoryItemWithoutId,
+} from '../types.js';
 
 // R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
 // the real registry reports unknown servers as disconnected anyway, but the
@@ -171,9 +174,49 @@ describe('projectSummary', () => {
   });
 });
 
+/**
+ * Pins the producer's arithmetic on a fixture, so editing one row cannot leave
+ * behind a payload no producer can emit (#12235 R2-7). `ui/types.ts` documents
+ * both identities: the category rows — including the `unattributed` residual,
+ * excluding `cachedTokens`, which is an annotation spanning several categories
+ * — account for the request, and `freeSpace` is what is left of the window
+ * after that content and the autocompact buffer. With no provider total the
+ * estimated rows are themselves the content total, so the free-space identity
+ * keys on the rows instead of on `totalTokens`.
+ */
+function expectCoherentBreakdown(item: {
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: Partial<ContextCategoryBreakdown>;
+}): void {
+  const { breakdown } = item;
+  const rows =
+    (breakdown.systemPrompt ?? 0) +
+    (breakdown.builtinTools ?? 0) +
+    (breakdown.mcpTools ?? 0) +
+    (breakdown.memoryFiles ?? 0) +
+    (breakdown.skills ?? 0) +
+    (breakdown.startupContext ?? 0) +
+    (breakdown.messages ?? 0) +
+    (breakdown.unattributed ?? 0);
+  const hasProviderTotal = item.totalTokens > 0;
+  if (hasProviderTotal) {
+    expect(rows).toBe(item.totalTokens);
+  }
+  // The producer clamps at 0, so an over-full window reports no free space.
+  expect(breakdown.freeSpace).toBe(
+    Math.max(
+      0,
+      item.contextWindowSize -
+        (hasProviderTotal ? item.totalTokens : rows) -
+        (breakdown.autocompactBuffer ?? 0),
+    ),
+  );
+}
+
 describe('projectContextUsage', () => {
   it('prints the usage table with categories', () => {
-    const text = projectContextUsage({
+    const item = {
       modelName: 'qwen3-max',
       totalTokens: 5000,
       contextWindowSize: 100000,
@@ -189,7 +232,9 @@ describe('projectContextUsage', () => {
       },
       isEstimated: false,
       showDetails: false,
-    });
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
     expect(text).toContain('Context Usage');
     expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
     expect(text).toContain('█ Used 5.0k tokens (5.0%)');
@@ -197,6 +242,102 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
+    // Parity with views/ContextUsage (#12033): the three optional rows are
+    // absent from this breakdown, so none of them may render. `totalTokens` is
+    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
+    // so at 0 they cannot render with or without their own guard, and only the
+    // widened `startupContext` skip would be witnessed. This is also the shape
+    // of an older daemon payload; the pre-first-turn view is pinned below.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        // Rows sum to totalTokens, freeSpace is window − total − buffer, and
+        // the cached prefix is part of the total (ui/types.ts invariant).
+        messages: 900,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 3000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
+  });
+
+  it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
+    // The producer's shape before any request: no provider total, a nonzero
+    // startup prelude, and no conversation. `Startup context` is the one
+    // optional row that is not total-gated.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 300,
+        startupContext: 1200,
+        messages: 0,
+        freeSpace: 95500,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('No API response yet.');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Messages');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    // After `/model`, `/restore` or a resume the provider total is 0 while the
+    // history is intact; that estimate drives the tier, so it must be visible.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 40000,
+        freeSpace: 57000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('No API response yet.');
+    expect(text).not.toContain('pre-conversation');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
@@ -280,6 +421,32 @@ describe('projectContextUsage', () => {
     expect(unloadedIdx).toBeGreaterThan(loadedIdx);
     expect(text).toContain('+400 body');
     expect(text).not.toContain('Run /context detail');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = projectContextUsage({
+        modelName: 'm',
+        totalTokens: 5000,
+        contextWindowSize: 100000,
+        breakdown: {},
+        isEstimated: false,
+        showDetails: true,
+        skills,
+      });
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
   });
 });
 

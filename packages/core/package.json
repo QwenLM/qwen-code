@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.4",
+  "private": true,
+  "version": "0.24.5",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -12,6 +13,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./omni": {
+      "types": "./dist/src/omni/index.d.ts",
+      "import": "./dist/src/omni/index.js"
+    },
+    "./omniPolicyCollection": {
+      "types": "./dist/src/omni/policy/model-call-collection.d.ts",
+      "import": "./dist/src/omni/policy/model-call-collection.js"
     },
     "./subagentRuntime": {
       "types": "./dist/src/subagent-runtime.d.ts",
@@ -36,6 +45,10 @@
     "./subSessionConstants": {
       "types": "./dist/src/tools/sub-session-constants.d.ts",
       "import": "./dist/src/tools/sub-session-constants.js"
+    },
+    "./telemetryConstants": {
+      "types": "./dist/src/telemetry/constants.d.ts",
+      "import": "./dist/src/telemetry/constants.js"
     },
     "./toolWriteOrigin": {
       "types": "./dist/src/services/tool-write-origin.d.ts",
@@ -72,9 +85,14 @@
     "./package.json": "./package.json",
     "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
-    "./src/*": "./src/*"
+    "./src/*": "./src/*",
+    "./shellResult": {
+      "types": "./dist/src/utils/shell-result.d.ts",
+      "import": "./dist/src/utils/shell-result.js"
+    }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').accessSync('../browser-use/dist/index.js')\" || npm --prefix ../browser-use run build",
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
@@ -158,11 +176,13 @@
     "@lydell/node-pty": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
+    "@qwen-code/browser-use": "file:../browser-use",
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
@@ -175,6 +195,7 @@
     "@types/ws": "^8.5.10",
     "@types/yauzl": "^2.9.1",
     "msw": "^2.3.4",
+    "strip-json-comments": "^3.1.1",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"

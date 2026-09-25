@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseSessionStartupConfig } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   APPROVAL_MODES,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -110,6 +111,7 @@ function parseRestoreOptions(
   const body = requireExactBody(req, res, [
     'historyPageSize',
     'liveReplayMode',
+    'compactedReplayMode',
     'hideInheritedHistory',
     'approvalMode',
   ]);
@@ -138,6 +140,18 @@ function parseRestoreOptions(
     sendInvalidRequest(res, '`liveReplayMode` must be `full` or `summary`.');
     return undefined;
   }
+  const compactedReplayMode = body['compactedReplayMode'];
+  if (
+    compactedReplayMode !== undefined &&
+    compactedReplayMode !== 'full' &&
+    compactedReplayMode !== 'summary'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`compactedReplayMode` must be `full` or `summary`.',
+    );
+    return undefined;
+  }
   const hideInheritedHistory = body['hideInheritedHistory'];
   if (
     hideInheritedHistory !== undefined &&
@@ -157,6 +171,7 @@ function parseRestoreOptions(
       ? { historyPageSize: historyPageSize as number }
       : {}),
     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+    ...(compactedReplayMode !== undefined ? { compactedReplayMode } : {}),
     ...(hideInheritedHistory !== undefined ? { hideInheritedHistory } : {}),
     ...(approvalMode !== undefined ? { approvalMode } : {}),
   };
@@ -282,6 +297,7 @@ export function registerStandaloneSessionRoutes(
       const body = requireExactBody(req, res, [
         'sessionId',
         'modelServiceId',
+        'startupConfig',
         'approvalMode',
       ]);
       if (!body) return;
@@ -301,6 +317,10 @@ export function registerStandaloneSessionRoutes(
         );
         return;
       }
+      const startupConfig = parseSessionStartupConfig(
+        body['startupConfig'],
+        body,
+      );
       const approvalMode = parseApprovalMode(body['approvalMode']);
       if (approvalMode === null) {
         sendInvalidRequest(
@@ -311,6 +331,7 @@ export function registerStandaloneSessionRoutes(
       }
       const request: CreateStandaloneSessionRequest = {
         sessionId: body['sessionId'],
+        ...(startupConfig ? { startupConfig } : {}),
         ...(body['modelServiceId'] !== undefined
           ? { modelServiceId: body['modelServiceId'] as string }
           : {}),

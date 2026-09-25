@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',
@@ -184,6 +185,7 @@ export default {
   'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '审查模型',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
   'toolDisplayName.RecordSource': '记录来源',
@@ -216,11 +218,29 @@ export default {
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
   'toolDisplayName.ToolSearch': '工具搜索',
+  'toolDisplayName.ToolCall': '工具调用',
   'toolDisplayName.EnterWorktree': '进入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降采样视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ClipImage': '裁剪图像',
+  'toolDisplayName.ClipAudio': '剪辑音频',
+  'toolDisplayName.CaptionImage': '描述图像',
+  'toolDisplayName.CaptionAudio': '描述音频',
+  'toolDisplayName.OcrImage': '识别图像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
+  '[fixed-only: runs via media policies, not the model]':
+    '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -895,6 +915,10 @@ export default {
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流脚本与已安装版本相比有改动：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
@@ -966,6 +990,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
+  'Workflows:': '工作流：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1060,6 +1085,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -1076,6 +1107,20 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已开启，本会话不会运行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精简模式已开启，本会话不会运行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 设置禁用。',
+  'Timeout:': '超时：',
+  'Status message:': '状态消息：',
+  'Condition:': '条件：',
+  'Options:': '选项：',
+  'Skill:': '技能：',
+  'runs in background': '后台运行',
+  'runs once': '只运行一次',
+  sequential: '顺序执行',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -1330,6 +1375,11 @@ export default {
   'Clear Authentication': '清空认证',
   disabled: '已禁用',
   enabled: '已启用',
+  'disabled (bare mode)': '已禁用（精简模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (folder not trusted)': '已禁用（文件夹未受信任）',
+  'disabled (turned off for this session)': '已禁用（本会话中已关闭）',
   'Server:': '服务器：',
   'Error:': '错误：',
   tool: '工具',
@@ -2150,7 +2200,13 @@ export default {
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '启动上下文',
+  Unattributed: '未归因',
+  'Cached prefix': '缓存前缀',
   tokens: 'tokens',
+  'Estimated usage, including the conversation': '估算用量（含对话）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下为本地估算，包含对话。',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
@@ -2240,8 +2296,6 @@ export default {
     '选择用于塑造回答表达方式的输出风格（{{styles}}，或自定义风格名称）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已保存，但此工作区不受信任时不会生效。',
-  'Set a goal — keep working until the condition is met':
-    '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
@@ -2258,6 +2312,13 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
+  'Configure the Advisor model': '配置 Advisor 模型',
+  'Disable Advisor': '禁用 Advisor',
+  'Select Advisor Model': '选择 Advisor 模型',
+  'Advisor disabled': 'Advisor 已禁用',
+  'Advisor set to {{model}}': 'Advisor 已设置为 {{model}}',
+  'Selected Advisor model is unavailable.': '所选 Advisor 模型不可用。',
+  'Advisor configuration is unavailable.': 'Advisor 配置不可用。',
   'Consulting advisor...': '正在咨询审查模型...',
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
@@ -2337,6 +2398,11 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'Large workflow': '大型工作流',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流：已排定 {{agents}} 个 agent（告警阈值 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流：预计输出 ~{{tokens}} 个 token（告警阈值 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
@@ -2551,6 +2617,8 @@ export default {
   '{{count}} skills': '{{count}} 个技能',
   '{{count}} agent': '{{count}} 个代理',
   '{{count}} agents': '{{count}} 个代理',
+  '{{count}} workflow': '{{count}} 个工作流',
+  '{{count}} workflows': '{{count}} 个工作流',
   '{{count}} hook': '{{count}} 个钩子',
   '{{count}} hooks': '{{count}} 个钩子',
   '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',

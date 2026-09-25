@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -53,7 +54,7 @@ export interface ToolInvocation<
    * The coreToolScheduler uses this as the *default* permission which may be
    * overridden by PermissionManager rules at L4.
    */
-  getDefaultPermission(): Promise<PermissionDecision>;
+  getDefaultPermission(signal?: AbortSignal): Promise<PermissionDecision>;
 
   /**
    * Whether this invocation must be approved through an explicit host/user
@@ -61,6 +62,16 @@ export interface ToolInvocation<
    * this requirement.
    */
   requiresUserInteraction?(): boolean;
+
+  /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
 
   /**
    * Whether a host-level allow decision may be confirmed without forwarding
@@ -92,6 +103,9 @@ export interface ToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
+
+  /** Release prepared resources when the scheduler finalizes the call. */
+  release?(): Promise<void>;
 }
 
 /**
@@ -163,6 +177,62 @@ export abstract class BaseToolInvocation<
  */
 export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
 
+/** One declared output of a media-policy tool (see
+ * {@link MediaPolicyToolDescriptor}). */
+export interface MediaPolicyToolOutputSpec {
+  /** What the output is: a derived media artifact, a disclosure text, or
+   * a non-media file artifact (e.g. a `role: 'transcript'` UTF-8
+   * text/plain file — policy design §6.2). */
+  kind: 'media' | 'text' | 'file';
+  /** Role label for text/file outputs (e.g. 'disclosure', 'transcript'). */
+  role?: string;
+  /** MIME types the output may carry (media and file outputs). */
+  mimeTypes?: string[];
+  /** Whether a successful run MUST produce this output. */
+  required: boolean;
+  /** Whether the output is a lossy transformation of its input. A lossy
+   * media output obligates a disclosure text alongside it. */
+  lossy?: boolean;
+}
+
+/**
+ * Code-registration fact marking a tool as an omni media-policy tool —
+ * declared by the tool class itself, immutable at runtime, and never
+ * configurable. Its presence is what the scheduler's modelAccess gate,
+ * the declaration surfaces, and the fixed-policy orchestrator key off:
+ * config can never turn an ordinary tool into a policy tool (or the
+ * reverse).
+ */
+export interface MediaPolicyToolDescriptor {
+  kind: 'media_policy';
+  /** Media modalities the tool accepts as input. */
+  inputMediaTypes: Array<'image' | 'audio' | 'video'>;
+  /** Outputs a successful run may/must produce. */
+  outputs: MediaPolicyToolOutputSpec[];
+  /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
+  settingsSchema?: object;
+  /**
+   * Parameter names only the OPERATOR may set — via
+   * `policyTools.<name>.settings` or `modelAccess.defaultArguments` /
+   * `lockedArguments` — never the caller of a gated model/client call.
+   * For endpoint/credential selectors (e.g. a request base URL plus the
+   * NAME of the env var read for its bearer token): a model-controlled
+   * pair would let injected content exfiltrate arbitrary environment
+   * secrets to an attacker host. The modelAccess gate rejects gated calls
+   * that name these keys, and the declaration projection hides them from
+   * the model. Fixed-policy arguments (operator-authored settings.json)
+   * are unaffected.
+   */
+  operatorOnlyParams?: readonly string[];
+  /**
+   * Transform-semantics version, part of the degradation-cache
+   * fingerprint (decision D2). Bump it whenever the tool starts producing
+   * different bytes for the same input and arguments (encoder change,
+   * default pipeline change), so stale cached derivatives are not reused.
+   */
+  version?: string;
+}
+
 /**
  * Interface for a tool builder that validates parameters and creates invocations.
  */
@@ -233,9 +303,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -257,6 +327,16 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Present iff this tool is an omni media-policy tool. A code-level fact
+   * of the tool class (not configuration): the scheduler's modelAccess
+   * gate, the declaration surfaces, and the fixed-policy orchestrator all
+   * key off it. Default: not a media-policy tool.
+   */
+  get mediaPolicyDescriptor(): MediaPolicyToolDescriptor | undefined {
+    return undefined;
   }
 
   /**
@@ -814,7 +894,9 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | ShellResultDisplay
   | string
+  | AdvisorReviewDisplay
   | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
@@ -829,6 +911,47 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorReviewDisplay {
+  type: 'advisor_review';
+  model?: string;
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
+export function isAdvisorReviewDisplay(
+  display: unknown,
+): display is AdvisorReviewDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'advisor_review' &&
+    'verdict' in display &&
+    typeof display.verdict === 'string' &&
+    'risks' in display &&
+    typeof display.risks === 'string' &&
+    'missingEvidence' in display &&
+    typeof display.missingEvidence === 'string' &&
+    'recommendation' in display &&
+    typeof display.recommendation === 'string'
+  );
+}
 
 export interface TeamResultDisplay {
   type: 'team_result';

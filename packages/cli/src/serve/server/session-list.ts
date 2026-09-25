@@ -18,6 +18,10 @@ import {
   type SessionGroupPresetColor,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
+import {
+  GROUP_COLOR_OPTIONS,
+  type SessionGroupCatalog,
+} from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
@@ -60,7 +64,7 @@ export interface ListWorkspaceSessionsOptions {
    * (not the numeric storage cursor). Absent = no parent filter.
    */
   parentSessionId?: string;
-  /** Restrict results to sessions created by this source type. */
+  /** Filter by source; `default` includes legacy and `qwen-live` tasks. */
   sourceType?: string;
   /** Further restrict `sourceType` matches to this source identifier. */
   sourceId?: string;
@@ -70,6 +74,7 @@ export interface ListWorkspaceSessionsOptions {
 
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
+  groups?: SessionGroupCatalog;
   nextCursor?: string;
   liveMergeFailed?: boolean;
   truncated?: boolean;
@@ -98,6 +103,9 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Paginate the combined persisted/live catalog, including unfiltered reads. */
+  paginateMerged?: boolean;
+  includeGroups?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
@@ -106,6 +114,8 @@ export interface ListWorkspaceSessionsReadOptions {
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  paginateMerged?: boolean;
+  includeGroups?: boolean;
   runtimeBaseDir: string;
   signal?: AbortSignal;
 }
@@ -154,6 +164,8 @@ function parseSessionCursor(cursor: string): number | undefined {
 }
 
 interface OrganizedCursor {
+  catalogKind?: 'organized';
+  paginateMerged?: boolean;
   group: string;
   archiveState: SessionArchiveState;
   sourceType?: string;
@@ -194,6 +206,7 @@ function parseOrganizedCursor(
   expected: {
     group: string;
     archiveState: SessionArchiveState;
+    paginateMerged: boolean;
     sourceType?: string;
     sourceId?: string;
     conversationKind?: 'standalone-top-level';
@@ -216,6 +229,11 @@ function parseOrganizedCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as OrganizedCursor).catalogKind !== undefined &&
+        (parsed as OrganizedCursor).catalogKind !== 'organized') ||
+      ((parsed as OrganizedCursor).paginateMerged !== undefined &&
+        (parsed as OrganizedCursor).paginateMerged !==
+          expected.paginateMerged) ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
@@ -238,6 +256,7 @@ function encodeOrganizedCursor(
   last: OrganizedCursorKey,
   group: string,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   sourceType?: string,
   sourceId?: string,
   conversationKind?: 'standalone-top-level',
@@ -245,6 +264,8 @@ function encodeOrganizedCursor(
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'organized',
+      paginateMerged,
       group,
       archiveState,
       sourceType,
@@ -310,18 +331,22 @@ function matchesSessionMetadataSource(
   const sourceTypeMatches =
     filter.sourceType === undefined ||
     session.sourceType === filter.sourceType ||
-    // Legacy sessions without source metadata belong to the default catalog.
-    (filter.sourceType === 'default' && session.sourceType === undefined);
+    // Live-created tasks retain attribution while sharing the task catalog.
+    (filter.sourceType === 'default' &&
+      (session.sourceType === undefined || session.sourceType === 'qwen-live'));
   return (
     sourceTypeMatches &&
-    // sourceId remains exact; only the default source type has legacy fallback.
+    // Source identifiers remain exact within the selected catalog.
     (filter.sourceId === undefined || session.sourceId === filter.sourceId)
   );
 }
 
 function parseMetadataSessionCursor(
   cursor: string,
-  expected: SessionMetadataFilter & { archiveState: SessionArchiveState },
+  expected: SessionMetadataFilter & {
+    archiveState: SessionArchiveState;
+    paginateMerged: boolean;
+  },
 ): { last: LiveSessionCursorKey; emitted: readonly string[] } | undefined {
   if (cursor === '') return undefined;
   try {
@@ -340,6 +365,11 @@ function parseMetadataSessionCursor(
       !Number.isFinite(last.activityTime) ||
       typeof last.sessionId !== 'string' ||
       last.sessionId.length === 0 ||
+      ((parsed as { catalogKind?: unknown }).catalogKind !== undefined &&
+        (parsed as { catalogKind?: unknown }).catalogKind !== 'metadata') ||
+      ((parsed as { paginateMerged?: unknown }).paginateMerged !== undefined &&
+        (parsed as { paginateMerged?: unknown }).paginateMerged !==
+          expected.paginateMerged) ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
@@ -364,7 +394,7 @@ function parseMetadataSessionCursor(
   } catch {
     throw new InvalidCursorError(
       cursor,
-      expected.sourceType === undefined ? 'parent' : 'metadata',
+      expected.parentSessionId !== undefined ? 'parent' : 'metadata',
     );
   }
 }
@@ -373,10 +403,13 @@ function encodeMetadataSessionCursor(
   last: LiveSessionCursorKey,
   filter: SessionMetadataFilter,
   archiveState: SessionArchiveState,
+  paginateMerged: boolean,
   emitted: readonly string[] = [],
 ): string {
   return Buffer.from(
     JSON.stringify({
+      catalogKind: 'metadata',
+      paginateMerged,
       ...filter,
       archiveState,
       last,
@@ -956,6 +989,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const cursor =
     options.cursor !== undefined
       ? parseOrganizedCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           group,
           archiveState,
           sourceType: options.sourceType,
@@ -1016,9 +1050,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
             ),
           );
         } else if (
-          // A live-only row has no persisted key to page by, so it stays a
-          // first-page-only insertion as before.
-          isFirstPage &&
+          // Preserve legacy first-page-only insertion unless the caller
+          // requests pagination across the complete merged catalog.
+          (isFirstPage || readOptions.paginateMerged) &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -1122,6 +1156,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       boundary,
       group,
       archiveState,
+      readOptions.paginateMerged === true,
       options.sourceType,
       options.sourceId,
       options.conversationKind,
@@ -1130,6 +1165,14 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
   return {
     sessions: page,
+    ...(readOptions.includeGroups
+      ? {
+          groups: {
+            groups: snapshot.groups,
+            colorOptions: [...GROUP_COLOR_OPTIONS],
+          },
+        }
+      : {}),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
@@ -1261,6 +1304,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
           ...filter,
           archiveState,
         })
@@ -1302,6 +1346,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
       boundary,
       filter,
       archiveState,
+      readOptions.paginateMerged === true,
       emitted,
     );
   }
@@ -1330,6 +1375,12 @@ export async function listWorkspaceSessionsForResponse(
       listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
+          : {}),
+        ...(readOptions.paginateMerged !== undefined
+          ? { paginateMerged: readOptions.paginateMerged }
+          : {}),
+        ...(readOptions.includeGroups !== undefined
+          ? { includeGroups: readOptions.includeGroups }
           : {}),
         ...(readOptions.signal !== undefined
           ? { signal: readOptions.signal }
@@ -1366,6 +1417,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   if (
+    readOptions.paginateMerged ||
     options?.parentSessionId !== undefined ||
     options?.sourceType !== undefined ||
     options?.conversationKind !== undefined
@@ -1373,19 +1425,19 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return listWorkspaceSessionsByMetadataForResponse(
       bridge,
       workspaceCwd,
-      options,
+      options ?? {},
       pageSize,
       {
-        ...(options.parentSessionId !== undefined
+        ...(options?.parentSessionId !== undefined
           ? { parentSessionId: options.parentSessionId }
           : {}),
-        ...(options.sourceType !== undefined
+        ...(options?.sourceType !== undefined
           ? { sourceType: options.sourceType }
           : {}),
-        ...(options.sourceId !== undefined
+        ...(options?.sourceId !== undefined
           ? { sourceId: options.sourceId }
           : {}),
-        ...(options.conversationKind !== undefined
+        ...(options?.conversationKind !== undefined
           ? { conversationKind: options.conversationKind }
           : {}),
       },

@@ -1,14 +1,18 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
+import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
+import { StandaloneContext } from './config/standalone';
+import { isKnownDaemonTarget } from './config/daemon';
+import { isRemoteConnectionKnown } from './config/remote-connections';
+import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
-import {
-  DaemonWorkspaceProvider,
-  type DaemonProductSessionContext,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -22,17 +26,29 @@ import {
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
-import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
+import { inferStandaloneBasePath } from './utils/sessionPath';
+
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
+const REQUESTED_DAEMON_TARGET =
+  new URLSearchParams(window.location.search).get('daemon') || '';
+const INVALID_DAEMON_TARGET =
+  Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
+// A `?daemon=` link can name any origin; one this browser has never connected
+// to is shown for confirmation instead of being probed on load.
+const UNCONFIRMED_DAEMON_TARGET =
+  Boolean(DAEMON_BASE_URL) &&
+  !isKnownDaemonTarget(DAEMON_BASE_URL) &&
+  !isRemoteConnectionKnown(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
 const BRAND_STORAGE_KEY = 'qwen-code-web-shell-brand';
+const MACOS_TITLEBAR_CLASS = 'qwen-code-macos-titlebar';
 
 /**
  * Cached for index.html's pre-paint script so a renamed deployment does not
@@ -83,6 +99,13 @@ function applyBrandToDocument(brand: WebShellResolvedBrand): void {
   storeBrand(brand);
 }
 
+function hasMacOSOverlayTitlebar(): boolean {
+  return (
+    (window as Window & { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
+      .__QWEN_CODE_MACOS_TITLEBAR__ === true
+  );
+}
+
 function parseTheme(value: string | null): WebShellTheme | undefined {
   if (value === WebShellThemeId.Dark || value === WebShellThemeId.Light) {
     return value;
@@ -111,8 +134,14 @@ function storeTheme(theme: WebShellTheme): void {
   }
 }
 
-function getInitialTheme(): WebShellTheme {
-  return getThemeFromUrl() ?? readStoredTheme() ?? WebShellThemeId.Dark;
+/**
+ * The standalone entry's own opinion on the theme: an explicit `?theme=`
+ * param or a value the user previously chose in-app. `undefined` means "no
+ * opinion" — App then resolves the daemon's effective `ui.theme` setting
+ * instead of being shadowed by a built-in default (#11955).
+ */
+function getInitialTheme(): WebShellTheme | undefined {
+  return getThemeFromUrl() ?? readStoredTheme();
 }
 
 function readStoredLanguage(): WebShellLanguage | undefined {
@@ -132,78 +161,60 @@ function storeLanguage(language: WebShellLanguage): void {
   }
 }
 
-function getInitialLanguage(): WebShellLanguage {
+/**
+ * Same "no opinion" contract as getInitialTheme(): only an explicit
+ * `?language=`/`?lang=` param or a stored in-app choice counts. Without one,
+ * App falls through to the daemon's effective `general.language` setting.
+ */
+function getInitialLanguage(): WebShellLanguage | undefined {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get('language') ?? params.get('lang');
   if (raw) return normalizeLanguage(raw);
-  return normalizeLanguage(readStoredLanguage() ?? navigator.language);
+  return readStoredLanguage();
 }
 
-function getSessionIdFromUrl(): string | undefined {
-  return parseSessionId(window.location.pathname);
-}
-
-function getWorkspaceIdFromUrl(): string | undefined {
-  return (
-    new URLSearchParams(window.location.search).get('workspace') || undefined
-  );
-}
-
-function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
-  const context = new URLSearchParams(window.location.search).get('context');
-  return context === 'standalone' || context === 'live'
-    ? { kind: context }
-    : undefined;
-}
-
-function replaceStandaloneSessionUrl(
-  sessionId: string | undefined,
-  workspaceId?: string,
-  sessionContext?: DaemonProductSessionContext,
-): void {
-  const url = new URL(window.location.href);
-  url.pathname = buildSessionPathname(url.pathname, sessionId);
-  if (
-    sessionId &&
-    (sessionContext?.kind === 'standalone' || sessionContext?.kind === 'live')
-  ) {
-    url.searchParams.set('context', sessionContext.kind);
-    url.searchParams.delete('workspace');
-  } else if (sessionId && workspaceId) {
-    url.searchParams.set('workspace', workspaceId);
-    url.searchParams.delete('context');
-  } else {
-    url.searchParams.delete('workspace');
-    url.searchParams.delete('context');
-  }
-  // Strip one-shot query params so bookmarked / shared URLs do not
-  // permanently override stored preferences on every page load.
-  url.searchParams.delete('theme');
-  url.searchParams.delete('language');
-  url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too; dev
-  // keeps ?daemon= so a reload still targets the same local daemon.
-  url.searchParams.delete('token');
-  if (!import.meta.env.DEV) {
-    url.searchParams.delete('daemon');
-  }
-  window.history.replaceState(null, '', url);
+function getDevelopmentManagedAgentProvider():
+  | ManagedAgentProvider
+  | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('managedProvider') !== 'java') return undefined;
+  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
+  return createJavaManagedAgentProvider({
+    baseUrl: window.location.origin,
+    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
+    productScope: tenantId,
+  });
 }
 
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
-  const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
-  const [language, setLanguage] = useState<WebShellLanguage>(() =>
+  const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
+  // The entry's own opinion — an explicit URL param or a stored in-app
+  // choice. Passed down as the `theme`/`language` host props; `undefined`
+  // lets App resolve the daemon's effective settings instead (#11955).
+  const [theme, setTheme] = useState<WebShellTheme | undefined>(() =>
+    getInitialTheme(),
+  );
+  const [language, setLanguage] = useState<WebShellLanguage | undefined>(() =>
     getInitialLanguage(),
   );
-  const [sessionId, setSessionId] = useState<string | undefined>(() =>
-    getSessionIdFromUrl(),
+  // What document chrome (html class, theme-color, notifications, error
+  // copy) should render with: the entry's own opinion when it has one, else
+  // the value App resolved from settings and reports through
+  // onThemeResolved/onLanguageResolved. Kept out of the props so a
+  // settings-derived value never latches as a host override.
+  const [documentTheme, setDocumentTheme] = useState<WebShellTheme>(
+    () => theme ?? WebShellThemeId.Dark,
   );
-  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
-    getWorkspaceIdFromUrl(),
+  const [documentLanguage, setDocumentLanguage] = useState<WebShellLanguage>(
+    () => language ?? normalizeLanguage(navigator.language),
   );
-  const [sessionContext, setSessionContext] = useState<
-    DaemonProductSessionContext | undefined
-  >(() => getSessionContextFromUrl());
+  const [navigationBasePath] = useState(() =>
+    inferStandaloneBasePath(window.location.pathname),
+  );
+  const [managedAgentProvider] = useState(() =>
+    getDevelopmentManagedAgentProvider(),
+  );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
@@ -216,56 +227,53 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     url.searchParams.delete('language');
     url.searchParams.delete('lang');
     if (url.search !== before) {
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
     }
   }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
-  // the React theme so mobile status bars / overscroll backgrounds stay
-  // consistent when the user toggles or when ?theme= lands via URL.
+  // the effective theme so mobile status bars / overscroll backgrounds stay
+  // consistent when the user toggles or when ?theme= lands via URL. While
+  // settings have not resolved yet, retain index.html's pre-paint default.
   useEffect(() => {
     const root = document.documentElement;
     root.classList.remove('theme-dark', 'theme-light', 'dark');
-    root.classList.add(`theme-${theme}`);
-    root.classList.toggle('dark', theme === WebShellThemeId.Dark);
+    root.classList.add(`theme-${documentTheme}`);
+    root.classList.toggle('dark', documentTheme === WebShellThemeId.Dark);
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
-      meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d0d0d');
+      meta.setAttribute(
+        'content',
+        documentTheme === 'light' ? '#ffffff' : '#0d0d0d',
+      );
     }
-  }, [theme]);
+  }, [documentTheme]);
+  // A user's in-app choice becomes the entry's own opinion: it overrides
+  // settings on later loads and is persisted for the pre-paint script.
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
+    setDocumentTheme(nextTheme);
     storeTheme(nextTheme);
   }, []);
   const handleLanguageChange = useCallback((nextLanguage: WebShellLanguage) => {
     setLanguage(nextLanguage);
+    setDocumentLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
-  const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
-    applyBrandToDocument(brand);
+  // A settings-derived value only steers document chrome — it must not
+  // become the entry's opinion (no prop, no localStorage), or the next
+  // settings.json edit would be shadowed by the stale copy.
+  const handleThemeResolved = useCallback((nextTheme: WebShellTheme) => {
+    setDocumentTheme(nextTheme);
   }, []);
-  const handleSessionIdChange = useCallback(
-    (
-      nextSessionId?: string,
-      nextWorkspaceId?: string,
-      _nextWorkspaceCwd?: string,
-      nextSessionContext?: DaemonProductSessionContext,
-    ) => {
-      setSessionId(nextSessionId);
-      const nonWorkspaceContext =
-        nextSessionContext?.kind === 'standalone' ||
-        nextSessionContext?.kind === 'live'
-          ? nextSessionContext
-          : undefined;
-      setSessionContext(nonWorkspaceContext);
-      setWorkspaceId(nonWorkspaceContext ? undefined : nextWorkspaceId);
-      replaceStandaloneSessionUrl(
-        nextSessionId,
-        nextWorkspaceId,
-        nonWorkspaceContext,
-      );
+  const handleLanguageResolved = useCallback(
+    (nextLanguage: WebShellLanguage) => {
+      setDocumentLanguage(nextLanguage);
     },
     [],
   );
+  const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
+    applyBrandToDocument(brand);
+  }, []);
 
   return (
     <ErrorBoundary
@@ -290,73 +298,127 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               }
               // Session switches strip the one-shot theme/language params
               // from the URL; carry the live values so the reloaded page
-              // comes back as the user had it.
+              // comes back as the user had it. Only the entry's own opinion
+              // is carried — a settings-derived value is left out so the
+              // reloaded page keeps following settings.json.
               const url = new URL(window.location.href);
-              url.searchParams.set('theme', theme);
-              url.searchParams.set('language', language);
-              window.history.replaceState(null, '', url);
+              if (theme !== undefined) url.searchParams.set('theme', theme);
+              if (language !== undefined)
+                url.searchParams.set('language', language);
+              window.history.replaceState(window.history.state, '', url);
               window.location.reload();
             }}
             retryMode={canReload ? 'reload' : 'reset'}
-            language={language}
+            language={documentLanguage}
           />
         );
       }}
     >
+      {macosOverlayTitlebar && (
+        <div
+          className="qwen-code-macos-titlebar-drag-region"
+          data-tauri-drag-region=""
+          aria-hidden="true"
+        />
+      )}
       <BrowserTurnNotifications
-        language={language}
+        language={documentLanguage}
         options={{ defaultEnabled: true }}
       >
-        <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-          <WorkspaceSessionProvider
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            sessionContext={sessionContext}
-            webShellProps={{
-              theme,
-              onThemeChange: handleThemeChange,
-              language,
-              onLanguageChange: handleLanguageChange,
-              onBrandResolved: handleBrandResolved,
-              onSessionIdChange: handleSessionIdChange,
-              sidebar: { enabled: true, showLive: true },
-              header: {
-                items: [
-                  'title',
-                  'environment',
-                  'rightPanel',
-                  'tokenUsage',
-                  'contextUsage',
-                ],
-              },
-              rightPanel: {
-                items: ['review', 'sideTask', 'terminal', 'webPreview'],
-              },
-              environmentPanel: {
-                items: [
-                  'environment',
-                  'sources',
-                  'subagents',
-                  'backgroundTasks',
-                  'attachments',
-                  'artifacts',
-                ],
-              },
-              compactThinking: true,
-              markdownTableMode: 'advanced',
-              composerToolbarAdditionalActions:
-                STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-            }}
-          />
-        </DaemonWorkspaceProvider>
+        <StandaloneContext.Provider value={true}>
+          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+            <WorkspaceSessionProvider
+              urlNavigation={{ basePath: navigationBasePath }}
+              chromeTheme={documentTheme}
+              chromeLanguage={documentLanguage}
+              webShellProps={{
+                theme,
+                onThemeChange: handleThemeChange,
+                onThemeResolved: handleThemeResolved,
+                language,
+                onLanguageChange: handleLanguageChange,
+                onLanguageResolved: handleLanguageResolved,
+                onBrandResolved: handleBrandResolved,
+                managedAgentProvider,
+                sidebar: { enabled: true, showLive: true },
+                showToolCalls: true,
+                className: macosOverlayTitlebar
+                  ? MACOS_TITLEBAR_CLASS
+                  : undefined,
+                header: {
+                  showMobileAccess: true,
+                  items: [
+                    'title',
+                    'environment',
+                    'rightPanel',
+                    'tokenUsage',
+                    'contextUsage',
+                  ],
+                },
+                rightPanel: {
+                  items: [
+                    'review',
+                    'sideTask',
+                    'terminal',
+                    'webPreview',
+                    'trajectory',
+                  ],
+                },
+                environmentPanel: {
+                  items: [
+                    'environment',
+                    'sources',
+                    'subagents',
+                    'backgroundTasks',
+                    'attachments',
+                    'artifacts',
+                  ],
+                },
+                compactThinking: true,
+                markdownTableMode: 'advanced',
+                composerToolbarAdditionalActions:
+                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+              }}
+            />
+          </DaemonWorkspaceProvider>
+        </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
   );
 }
 
 async function main() {
-  const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
-  removeDaemonTokenFromUrl();
+  const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  const storedToken = INVALID_DAEMON_TARGET
+    ? undefined
+    : getDaemonToken(baseUrl);
+  if (INVALID_DAEMON_TARGET) {
+    // Keep a fragment token for recovery, but never leave a server-visible
+    // query token in the address bar or history.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('token')) {
+      url.searchParams.delete('token');
+      window.history.replaceState(window.history.state, '', url);
+    }
+  } else {
+    removeDaemonTokenFromUrl();
+  }
+  // The native bootstrap may declare the WebView unsupported. Scrub a URL
+  // token first, but leave its update message in place instead of mounting
+  // React or waiting for the daemon-token handshake.
+  if (
+    document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
+  )
+    return;
+  const pairing = await exchangePairingCode(
+    INVALID_DAEMON_TARGET ? '' : baseUrl,
+  );
+  const daemonToken =
+    pairing?.token ??
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -369,10 +431,17 @@ async function main() {
   ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneAuth
-        baseUrl={DAEMON_BASE_URL || window.location.origin}
+        baseUrl={baseUrl}
         initialToken={daemonToken}
-        language={getInitialLanguage()}
+        pairingFailed={Boolean(pairing?.failed)}
+        // The auth gate renders before settings are reachable, so it keeps
+        // the browser-locale default; the app itself now receives "no
+        // opinion" (undefined) and lets the daemon's settings win.
+        language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
+        initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
+        invalidTarget={INVALID_DAEMON_TARGET}
+        unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
         {(token) => <StandaloneApp daemonToken={token} />}
       </StandaloneAuth>
@@ -381,3 +450,7 @@ async function main() {
 }
 
 void main();
+
+// Deferred to `load` so registration does not compete with the initial module
+// graph. The helper also guards secure-context and service-worker support.
+scheduleServiceWorkerRegistration({ production: import.meta.env.PROD });
