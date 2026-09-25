@@ -345,7 +345,40 @@ export function isEmptyMcpToolTitle(
   if (trimmed === '{}') return true;
   const match = /^(.+) \((.+) MCP Server\): \{\}$/.exec(trimmed);
   // Preserve prose or aliased names when the prefix cannot be confirmed.
-  return match !== null && toolName === `mcp__${match[2]}__${match[1]}`;
+  if (match === null) return false;
+  const rawName = `mcp__${match[2]}__${match[1]}`;
+  return (
+    toolName === rawName || toolName === normalizeToolNameForProvider(rawName)
+  );
+}
+
+// The web-shell bundle cannot import core, so keep this provider-name mirror
+// aligned with packages/core/src/utils/tool-name-utils.ts.
+const MAX_TOOL_NAME_LENGTH = 63;
+const PROVIDER_SAFE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+function normalizeToolNameForProvider(name: string): string {
+  if (
+    name.length <= MAX_TOOL_NAME_LENGTH &&
+    PROVIDER_SAFE_TOOL_NAME.test(name)
+  ) {
+    return name;
+  }
+
+  const sanitized = name.replace(/[^A-Za-z0-9_-]/g, '_');
+  const normalized = /^[A-Za-z]/.test(sanitized)
+    ? sanitized
+    : `tool_${sanitized}`;
+  const suffix = `_${stableToolNameHash(name)}`;
+  return `${normalized.slice(0, MAX_TOOL_NAME_LENGTH - suffix.length)}${suffix}`;
+}
+
+function stableToolNameHash(name: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = Math.imul(hash ^ name.charCodeAt(index), 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(7, '0');
 }
 
 function getDescriptionFromTitle(

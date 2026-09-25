@@ -105,6 +105,20 @@ describe('toolFormatting', () => {
       expected: '',
     },
     {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      args: {},
+      expected: '',
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      toolName: 'mcp__sample__ping_other',
+      args: {},
+      expected: 'ping (sample MCP Server): {}',
+    },
+    {
       name: 'meaningful title',
       title: 'Check server health',
       args: {},

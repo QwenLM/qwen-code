@@ -482,6 +482,20 @@ describe('ToolApproval accessibility', () => {
       description: undefined,
     },
     {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      description: undefined,
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping_other',
+      description: 'ping (sample MCP Server): {}',
+    },
+    {
       name: 'meaningful title',
       title: 'Check server health',
       rawInput: {},

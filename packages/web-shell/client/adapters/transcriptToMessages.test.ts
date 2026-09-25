@@ -18,6 +18,7 @@ import {
   assistantBlockRendersAsSystemNotice,
   transcriptBlocksToDaemonMessages,
 } from './transcriptToMessages.js';
+import { getToolDescription } from '../components/messages/toolFormatting';
 
 function textBlock(
   id: string,
@@ -3115,6 +3116,30 @@ describe('transcriptBlocksToDaemonMessages', () => {
       },
       rawOutput: 'Diff completed',
     });
+  });
+
+  it('keeps confirmed-empty MCP args in safe projection', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('mcp-safe', 'mcp-call', 'completed', 1, {
+          toolName: 'mcp__sample__ping',
+          title: 'ping (sample MCP Server): {}',
+          preview: {
+            kind: 'mcp_invocation',
+            serverId: 'sample',
+            toolName: 'ping',
+          },
+          rawInput: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+    expect(tool).toBeDefined();
+    expect(tool?.args).toEqual({});
+    expect(getToolDescription(tool!)).toBe('');
   });
 
   it.each(['cancelled', 'canceled'])(
