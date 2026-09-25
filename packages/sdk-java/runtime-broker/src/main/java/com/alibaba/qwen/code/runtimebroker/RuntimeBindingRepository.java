@@ -22,4 +22,11 @@ public interface RuntimeBindingRepository {
 
     RuntimeBindingRecord renewOperation(String bindingId, String owner,
             long operationGeneration, Duration leaseDuration);
+
+    /** Clears the caller's operation claim so another Broker can take over
+     * without waiting for the lease to lapse. Returns the updated record,
+     * or null when the claim no longer matches. Releasing a lapsed claim is
+     * permitted cleanup. */
+    RuntimeBindingRecord releaseOperation(String bindingId, String owner,
+            long operationGeneration);
 }
