@@ -505,6 +505,16 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+      // The kill() the timeout path issues produces `close(null, 'SIGTERM')`,
+      // which the fixture now emits. The timeout line must be the *only*
+      // diagnosis recorded: `exited with code null` states an exit code the
+      // query never had, and the notify must not fire a second time.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringMatching(/^wl-paste --list-types timed out after \d+ms$/),
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
     }, 10000);
 
     it('notifies when spawning wl-paste itself throws', async () => {
@@ -553,6 +563,12 @@ describe('clipboardUtils', () => {
       const onUnavailable = vi.fn();
       await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
       expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringMatching(/^xclip timed out after \d+ms$/),
+      );
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        expect.stringContaining('exited with code'),
+      );
     }, 10000);
 
     it('notifies when spawning xclip itself throws on X11', async () => {
@@ -586,18 +602,12 @@ describe('clipboardUtils', () => {
     // ─── An empty clipboard exits non-zero too, and must stay quiet ───
     // Linux clipboard tools use one and the same exit code for "the display
     // server is dead" and for "nothing is on the clipboard", so the exit code
-    // alone cannot separate them — only stderr can. Verified against upstream
-    // sources: released xclip 0.13 has no `errconvsel()`; a `-t TARGETS -o`
-    // query on a selection nobody owns hits the `XCLIB_XCOUT_BAD_TARGET`
-    // branch with no fallback left and prints "Error: target TARGETS not
-    // available" before `return EXIT_FAILURE` (xclip.c:468). Unreleased xclip
-    // master instead routes it through `errconvsel()` (xcprint.c:136), which
-    // prints "xclip: Error: There is no owner for the <selection> selection".
-    // wl-paste's `bail()` macro (src/util/misc.h) is `fprintf(stderr, ...) +
-    // exit(1)` and is called with "Nothing is copied" (wl-clipboard >= 2) or
-    // "No selection" (1.x) when there is no offer. Pressing the image-paste
-    // binding with an empty clipboard is routine, so it must not claim the
-    // native module is broken.
+    // alone cannot separate them — only stderr can. Which wording each shipped
+    // tool version produces, and its upstream provenance, is documented once on
+    // EMPTY_CLIPBOARD_STDERR_MARKERS rather than restated here; each case below
+    // pins one of those wordings. Pressing the image-paste binding with an
+    // empty clipboard is routine, so it must not claim the native module is
+    // broken.
 
     it('stays quiet when wl-paste exits non-zero because nothing is copied', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
@@ -710,41 +720,6 @@ describe('clipboardUtils', () => {
         'wl-paste --list-types exited with code 1',
       );
     });
-
-    it('records the timeout when the xclip query never answers', async () => {
-      setupX11Env();
-      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
-      mockSpawn.mockReturnValue(createHangingChild());
-
-      const onUnavailable = vi.fn();
-      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
-      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
-        expect.stringMatching(/^xclip timed out after \d+ms$/),
-      );
-      // The kill() the timeout path issues produces `close(null, 'SIGTERM')`,
-      // which the fixture now emits. The timeout line must be the *only*
-      // diagnosis recorded: `exited with code null` states an exit code the
-      // query never had, and the notify must not fire a second time.
-      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
-        expect.stringContaining('exited with code'),
-      );
-      expect(onUnavailable).toHaveBeenCalledOnce();
-    }, 10000);
-
-    it('records the timeout when the wl-paste query never answers', async () => {
-      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
-      mockSpawn.mockReturnValue(createHangingChild());
-
-      const onUnavailable = vi.fn();
-      await expect(clipboardHasImage(onUnavailable)).resolves.toBe(false);
-      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
-        expect.stringMatching(/^wl-paste --list-types timed out after \d+ms$/),
-      );
-      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
-        expect.stringContaining('exited with code'),
-      );
-      expect(onUnavailable).toHaveBeenCalledOnce();
-    }, 10000);
   });
 
   // ─── xclip / X11 path tests ───────────────────────────────────
@@ -863,10 +838,13 @@ describe('clipboardUtils', () => {
       const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
 
-      // Witness that the run actually reached the BMP branch: it derived the
-      // .bmp path and unlinked it after the save failed. `toBe(null)` on its
-      // own also passed when this fixture lacked a stderr stream, because the
-      // resulting TypeError was swallowed by saveClipboardImage's catch-all.
+      // Witness that the run reached the BMP branch and derived the .bmp path —
+      // `toBe(null)` alone also passed when this fixture lacked a stderr
+      // stream, because the resulting TypeError was swallowed by
+      // saveClipboardImage's catch-all. Despite this test's name it does not
+      // reach the conversion catch: fs.open is unmocked while mkdir is a no-op,
+      // so saveFromCommand fails at its O_EXCL open before spawning, python3
+      // never runs, and the unlink counted here is the save-failure tail.
       const { unlink } = await import('node:fs/promises');
       const unlinked = vi.mocked(unlink).mock.calls.map((c) => String(c[0]));
       expect(unlinked.filter((p) => p.endsWith('.bmp'))).toHaveLength(1);

@@ -255,10 +255,11 @@ async function saveFromCommand(
  *   `xclip: Error: There is no owner for the CLIPBOARD selection`. Released
  *   0.13 has no `errconvsel()` at all, so this wording on its own classifies
  *   nothing on a shipped xclip — both markers are needed.
- * - wl-paste (wl-clipboard >= 2): `Nothing is copied` — `bail()` in
- *   src/util/misc.h is `fprintf(stderr, ...) + exit(1)`, called from
- *   `selection_callback()` when the offer is NULL.
- * - wl-paste (wl-clipboard 1.x): `No selection` — same `bail()` path.
+ * - wl-paste: `bail()` in src/util/misc.h is `fprintf(stderr, ...) + exit(1)`,
+ *   called with `Nothing is copied` from v2.2.0 on (src/wl-paste.c:252) and
+ *   `No selection` in v1.0.0–v2.1.0 (src/wl-paste.c:187) when there is no
+ *   offer. Both markers are needed — the wording split is at v2.2.0, not at
+ *   the 2.x boundary, so v2.0.0/v2.1.0 still print `No selection`.
  */
 const EMPTY_CLIPBOARD_STDERR_MARKERS = [
   'target TARGETS not available',
@@ -528,9 +529,9 @@ async function getWlPasteImageTypes(
         if (stderr) {
           debugLogger.debug(`wl-paste stderr: ${stderr.trim()}`);
         }
-        // `wl-paste --list-types` exits 1 with "Nothing is copied" (>= 2) or
-        // "No selection" (1.x) when the clipboard is empty. That is a correct
-        // answer, not an unreachable clipboard, so it stays quiet.
+        // `wl-paste --list-types` exits 1 with "Nothing is copied" (>= 2.2) or
+        // "No selection" (1.x–2.1) when the clipboard is empty. That is a
+        // correct answer, not an unreachable clipboard, so it stays quiet.
         if (!isEmptyClipboardError(stderr)) {
           onUnavailable?.();
         }
