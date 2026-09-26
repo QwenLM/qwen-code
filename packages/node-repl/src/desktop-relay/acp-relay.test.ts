@@ -240,16 +240,24 @@ describe('AcpRelay', () => {
     });
   });
 
-  it('ends on close instead of reconnecting', async () => {
-    const h = harness();
-    const ended = h.relay.run();
-    await connect(h);
-    h.handlers().close(1006, '');
-    await expect(ended).resolves.toEqual({
-      reason: 'closed',
-      detail: 'code 1006',
-    });
-  });
+  it.each([1000, 1001, 1006])(
+    'ends on close %s without reconnecting',
+    async (code) => {
+      const h = harness();
+      const ended = h.relay.run();
+      await connect(h);
+      h.handlers().close(code, '');
+      await expect(ended).resolves.toEqual(
+        code === 1006
+          ? {
+              reason: 'failed',
+              code: 'connection_failed',
+              message: 'code 1006',
+            }
+          : { reason: 'closed', detail: `code ${code}` },
+      );
+    },
+  );
 
   it('unregisters and closes on stop', async () => {
     const h = harness();

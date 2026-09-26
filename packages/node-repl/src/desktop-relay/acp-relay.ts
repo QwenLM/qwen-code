@@ -170,10 +170,15 @@ export class AcpRelay {
             open: () => this.sendInitialize(),
             message: (data) => void this.onMessage(data),
             close: (code, reason) =>
-              this.finish({
-                reason: 'closed',
-                detail: reason || `code ${code}`,
-              }),
+              this.finish(
+                this.phase !== 'connected' || (code !== 1000 && code !== 1001)
+                  ? {
+                      reason: 'failed',
+                      code: 'connection_failed',
+                      message: reason || `code ${code}`,
+                    }
+                  : { reason: 'closed', detail: reason || `code ${code}` },
+              ),
           },
         );
       } catch (error) {

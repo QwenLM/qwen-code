@@ -102,14 +102,30 @@ function rawToString(data: RawData): string {
 export const openWsSocket: OpenRelaySocket = (url, headers, handlers) => {
   // `ws` sends no Origin header unless asked, which keeps the daemon's
   // cross-site check out of the way for this non-browser client.
-  const ws = new WebSocket(url, { headers });
-  ws.on('open', () => handlers.open());
+  const ws = new WebSocket(url, { headers, handshakeTimeout: 15_000 });
+  let failure: string | undefined;
+  let heartbeat: ReturnType<typeof setTimeout> | undefined;
+  const refreshHeartbeat = () => {
+    clearTimeout(heartbeat);
+    // The daemon pings every 15 s; allow two intervals plus network latency.
+    heartbeat = setTimeout(() => {
+      failure = 'The daemon stopped sending heartbeat pings.';
+      ws.terminate();
+    }, 35_000);
+  };
+  ws.on('open', () => {
+    refreshHeartbeat();
+    handlers.open();
+  });
+  ws.on('ping', refreshHeartbeat);
   ws.on('message', (data) => handlers.message(rawToString(data)));
-  // 'close' always follows 'error' and carries the reason acted on.
-  ws.on('error', () => undefined);
-  ws.on('close', (code, reason) =>
-    handlers.close(code, reason.toString('utf8')),
-  );
+  ws.on('error', (error) => {
+    failure = error.message;
+  });
+  ws.on('close', (code, reason) => {
+    clearTimeout(heartbeat);
+    handlers.close(code, reason.toString('utf8') || failure || '');
+  });
   return {
     send: (data) => ws.send(data),
     close: () => ws.close(),
