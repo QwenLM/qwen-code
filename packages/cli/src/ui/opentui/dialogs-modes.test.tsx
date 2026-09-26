@@ -120,6 +120,7 @@ import {
 } from './dialogs-modes.js';
 import {
   buildSettingsListItems,
+  filterSettingsItems,
   OpenTuiSettingsDialog,
   SETTINGS_LIST_MAX_ITEMS,
 } from './dialogs-settings.js';
@@ -728,6 +729,23 @@ describe('OpenTuiApprovalModeDialog', () => {
 
     expect(screen.queryByText(/Workspace approval mode exists/)).toBeNull();
     expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
+  });
+
+  it('paints a one-row warning charge as a text row with its margin shed', () => {
+    // Region seven leaves the notices exactly one row after the mandatory
+    // chrome and the list floor, so the warning's charge caps at one. A box
+    // painted as margin row plus height zero would occupy that row yet show
+    // nothing — the advisory that stops a shadowed User-scope write gone
+    // while the budget still pays for it — so the box sheds its margin and
+    // paints the text row, the way the refusal box does.
+    renderModeDialog({ availableTerminalHeight: 7, workspaceModified: true });
+
+    const warning = screen.getByText(/Workspace approval mode exists/);
+    expect(layoutOf(warning.parentElement)).toMatchObject({
+      marginTop: 0,
+      height: 1,
+      overflow: 'hidden',
+    });
   });
 
   it('reads the footer hint from the step on screen, not the step it left', () => {
@@ -1807,6 +1825,193 @@ describe('OpenTuiSettingsDialog region budget', () => {
     expect(screen.getByText(items[0]!.label)).not.toBeNull();
     expect(screen.getByText(items[1]!.label)).not.toBeNull();
     expect(screen.queryByText(items[2]!.label)).toBeNull();
+  });
+
+  it('paints no scroll arrows when the region leaves the list no rows', () => {
+    // Region thirteen pays the chrome exactly, so the list window is zero
+    // rows. The re-follow rule has no anchor in a zero-row window —
+    // getSelectionScrollOffset(0, N, 0) returns 1 — and an offset walked off
+    // the top row leaves both arrows painted around an empty list: two rows
+    // asserting scrollback the dialog is not showing, in a region the budget
+    // just decided cannot pay for one row.
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={13}
+      />,
+    );
+
+    expect(screen.queryAllByText('\u25b2')).toHaveLength(0);
+    expect(screen.queryAllByText('\u25bc')).toHaveLength(0);
+  });
+
+  it('keeps the route to the tab bar when the region leaves the list no rows', () => {
+    // Up from the top row is the only route from the list to the search box,
+    // and from there to the tab bar. A zero-row guard that swallows it locks
+    // Status and Stats away for as long as the dialog stays open, while the
+    // tab bar keeps painting the hint that names the key.
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={13}
+      />,
+    );
+
+    press('up'); // list top row → search box
+    press('up'); // search box → tab bar
+
+    expect(
+      screen.getByText('(\u2190/\u2192 to switch, \u2193 to return)'),
+    ).not.toBeNull();
+    expect(screen.queryByText('(\u2191 to switch tabs)')).toBeNull();
+  });
+
+  it('keeps the restart key live when the restart prompt takes the last list row', () => {
+    // Region seventeen paints one list row until a restart-required toggle
+    // charges the prompt's row, leaving the window zero. The prompt is not
+    // row-budgeted, so it stays on screen naming the `r` key — a guard that
+    // swallows that key leaves the instruction live and the key dead, and
+    // the change the user just saved silently stuck.
+    const setValue = vi.fn();
+    const onRestartRequest = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        onRestartRequest={onRestartRequest}
+        availableTerminalHeight={17}
+      />,
+    );
+
+    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('return');
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.codeModeOnly',
+      true,
+    );
+    expect(
+      screen.getByText(/To see changes, Qwen Code must be restarted/),
+    ).not.toBeNull();
+
+    press('r');
+
+    expect(onRestartRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('still refuses the keys that would move the highlight to a row nothing paints', () => {
+    // The zero-row exemption opens up from the top row only — the route to
+    // the search box. With the highlight deeper in the list the move keys
+    // (the arrow and its k/j aliases alike) still move nothing: the move
+    // would be invisible, and the description painted under the list is the
+    // tell that it must not happen.
+    const items = buildSettingsListItems();
+    expect(items[1]!.key).toBe('tools.codeModeOnly');
+    expect(items[1]!.description).toBeTruthy();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={17}
+      />,
+    );
+    press('down'); // tools.codeModeOnly
+    press('return'); // the restart prompt takes the last row — window is zero
+    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
+
+    press('up');
+    press('j'); // the down alias: each move key gets its own assertion,
+    // because a j/k pair would move the highlight down and back
+    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
+    expect(screen.queryByText(items[0]!.description!)).toBeNull();
+    expect(screen.queryByText(items[2]!.description!)).toBeNull();
+
+    press('k');
+    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
+    expect(screen.queryByText(items[0]!.description!)).toBeNull();
+  });
+
+  it('keeps type-to-search live when the region leaves the list no rows', () => {
+    // A printable key addresses no row: it moves focus to the search box and
+    // starts the query. The zero-row guard must not swallow it — the search
+    // box is exactly how a list too tall for the region gets narrowed.
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={13}
+      />,
+    );
+
+    press('a');
+
+    expect(screen.queryByText(/Search settings/)).toBeNull();
+    expect(screen.getByText('a')).not.toBeNull();
+  });
+
+  it('still refuses a digit that would open a blind edit on a numeric row', () => {
+    // Type-to-search is live at a zero-row window, but on a numeric row a
+    // digit is row-addressing: it opens an inline edit on a row nothing
+    // paints, where Enter then commits a value the user never saw.
+    const numericFirst = filterSettingsItems(
+      buildSettingsListItems(),
+      'maxpersession',
+      () => undefined,
+    );
+    expect(numericFirst[0]?.key).toBe('tools.webSearch.maxPerSession');
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={13}
+      />,
+    );
+
+    for (const ch of 'maxpersession') press(ch);
+    press('return'); // search box → list, the numeric row under the cursor
+    press('1');
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
   });
 });
 

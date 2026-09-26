@@ -414,7 +414,9 @@ export function OpenTuiApprovalModeDialog(props: {
   // refusal is charged first: it is the actionable notice, and a rejected
   // Enter whose explanation paints nothing reads as a dead key, so it keeps
   // one painted text row whenever the region can pay it — even at the list
-  // floor's expense. The advisory warning takes only what the refusal leaves.
+  // floor's expense. The advisory warning takes only what the refusal
+  // leaves; a one-row charge paints its text row with the margin shed, like
+  // the refusal's.
   const rowsAfterChrome =
     regionHeight === undefined
       ? Number.POSITIVE_INFINITY
@@ -565,7 +567,11 @@ export function OpenTuiApprovalModeDialog(props: {
             showScrollArrows={budget.showScrollArrows}
           />
           {warningText && warningRows > 0 ? (
-            <box marginTop={1} height={warningRows - 1} overflow="hidden">
+            <box
+              marginTop={warningRows > 1 ? 1 : 0}
+              height={warningRows > 1 ? warningRows - 1 : 1}
+              overflow="hidden"
+            >
               <text fg={C.yellow}>{warningText}</text>
             </box>
           ) : null}

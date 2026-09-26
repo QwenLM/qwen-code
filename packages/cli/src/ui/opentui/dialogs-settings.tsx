@@ -376,8 +376,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   // Re-follow the highlight when the window's own size changes — a resize,
   // or the restart prompt taking a row — the way useDialogSelect's
   // scroll-follow effect does. A window left stale strands the highlight on
-  // a row nothing paints while Enter still commits it.
+  // a row nothing paints while Enter still commits it. A zero-row window has
+  // no anchor to follow to — the rule would walk the offset off the top row
+  // and back on every list change — so it is left alone until the budget
+  // paints rows again, the rule the shared hook keeps.
   useEffect(() => {
+    if (maxItemsToShow < 1) return;
     setScrollOffset((prev) =>
       followScrollOffset(
         activeSettingIndexRef.current,
@@ -389,8 +393,9 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   }, [activeSettingIndexRef, items.length, maxItemsToShow]);
 
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
-  const showScrollUp = scrollOffset > 0;
-  const showScrollDown = scrollOffset + maxItemsToShow < items.length;
+  const showScrollUp = maxItemsToShow > 0 && scrollOffset > 0;
+  const showScrollDown =
+    maxItemsToShow > 0 && scrollOffset + maxItemsToShow < items.length;
 
   const applySettingValue = (key: string, value: SettingsValue) => {
     setPendingSettings((prev) => setPendingSettingValueAny(key, value, prev));
@@ -648,9 +653,34 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       return;
     }
     // A zero-row budget paints no list row; the row under the cursor is one
-    // nothing paints, so the list keys must not move it or commit it. Tab and
-    // Escape still work — the scope step and the way out are not row-budgeted.
-    if (maxItemsToShow < 1 && name !== 'escape') return;
+    // nothing paints, so the keys that move or commit it stay refused. The
+    // keys that address no row keep working: Tab (handled above), Escape,
+    // the restart prompt's `r`, up from the top row into the search box
+    // (thence the tab bar), and type-to-search. Two printable shapes stay
+    // refused because the chain reads them as row keys first: the k/j
+    // highlight aliases, and a digit on a numeric row, which opens an edit
+    // on a row nothing paints.
+    const typeToSearchKey =
+      !ctrl &&
+      original.sequence.length === 1 &&
+      original.sequence >= ' ' &&
+      !keyMatchers[Command.SELECTION_UP](original) &&
+      !keyMatchers[Command.SELECTION_DOWN](original) &&
+      !(
+        /^[0-9]$/.test(original.sequence) &&
+        isNumericSettingType(items[activeSettingIndexRef.current]?.type)
+      );
+    if (
+      maxItemsToShow < 1 &&
+      name !== 'escape' &&
+      !(showRestartPrompt && name === 'r') &&
+      !(
+        keyMatchers[Command.SELECTION_UP](original) &&
+        activeSettingIndexRef.current === 0
+      ) &&
+      !typeToSearchKey
+    )
+      return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
       if (activeSettingIndexRef.current === 0) {
         setFocusZone('search');
