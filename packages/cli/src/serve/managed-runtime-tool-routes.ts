@@ -11,11 +11,12 @@ import {
   handleManagedRuntimeJsonError,
   managedRuntimeNoStore,
   OWNED_MANAGED_RUNTIME_ROUTES,
-  type ManagedRuntimeAttestationIdentity,
+  type ManagedRuntimeRequestIdentity,
 } from './managed-runtime-attestation-contract.js';
 import {
   ManagedToolConflictError,
   ManagedToolInvalidError,
+  ManagedToolUnavailableError,
   type ManagedToolExecutor,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
@@ -88,7 +89,7 @@ function invalid(res: express.Response): void {
 /** Mounts the v2 execute/status/cancel routes with the shared discipline. */
 export function registerManagedRuntimeToolRoutes(
   app: Application,
-  identity: ManagedRuntimeAttestationIdentity,
+  identity: ManagedRuntimeRequestIdentity,
   executor: ManagedToolExecutor,
 ): void {
   const routes = new Map(
@@ -147,11 +148,11 @@ export function registerManagedRuntimeToolRoutes(
           invalid(res);
           return;
         }
-        if (error instanceof ManagedToolConflictError) {
-          res.status(409).json({
-            code: 'managed_runtime_identity_conflict',
-            error: error.message,
-          });
+        if (
+          error instanceof ManagedToolConflictError ||
+          error instanceof ManagedToolUnavailableError
+        ) {
+          res.status(409).json({ code: error.code, error: error.message });
           return;
         }
         throw error;

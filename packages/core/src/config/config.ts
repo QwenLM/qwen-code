@@ -408,6 +408,10 @@ function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
 }
 
+export function isValidAdvisorMaxUses(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 function normalizeAdvisorModel(model: string | undefined): string | undefined {
   const trimmed = model?.trim();
   if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
@@ -1452,6 +1456,7 @@ export interface ConfigParameters {
    * and "off" disable Advisor and do not fall back to the primary model.
    */
   advisorModel?: string;
+  advisorMaxUses?: number;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -3042,6 +3047,8 @@ export class Config {
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
   private advisorModel?: string;
+  private readonly advisorMaxUses: number;
+  private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3641,6 +3648,13 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.advisorModel = normalizeAdvisorModel(params.advisorModel);
+    // Nothing validates settings.json on the load path, so a hand-edited
+    // -1, 1.5 or "5" reaches this constructor. Fall back to the default
+    // (unlimited) like the neighbouring numeric settings instead of refusing
+    // to start; the CLI surfaces a settings warning for the ignored value.
+    this.advisorMaxUses = isValidAdvisorMaxUses(params.advisorMaxUses)
+      ? params.advisorMaxUses
+      : 0;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -5570,6 +5584,10 @@ export class Config {
       this.permissionManager?.clearSessionAllowRules();
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
+      // So does the Advisor budget, reset in place for the same reason the
+      // counter is an object: a derived Config must mutate this one, not
+      // shadow it with an own property.
+      this.advisorUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -6156,6 +6174,24 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorMaxUses(): number {
+    return this.advisorMaxUses;
+  }
+
+  getAdvisorUseCount(): number {
+    return this.advisorUsage.calls;
+  }
+
+  tryConsumeAdvisorUse(): boolean {
+    if (
+      this.advisorMaxUses > 0 &&
+      this.advisorUsage.calls >= this.advisorMaxUses
+    )
+      return false;
+    this.advisorUsage.calls += 1;
+    return true;
   }
 
   getAdvisorModel(): string | undefined {
@@ -11286,14 +11322,8 @@ export class Config {
 
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
-    options?: { forSubAgent?: boolean },
   ): Promise<void> {
-    if (
-      !this.getAdvisorModel() ||
-      this.getBareMode() ||
-      this.isSafeMode() ||
-      options?.forSubAgent
-    ) {
+    if (!this.getAdvisorModel() || this.getBareMode() || this.isSafeMode()) {
       registry.unregisterTool(ToolNames.ADVISOR);
       return;
     }
@@ -11590,7 +11620,7 @@ export class Config {
     await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
-    await this.syncAdvisorToolRegistration(registry, options);
+    await this.syncAdvisorToolRegistration(registry);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);

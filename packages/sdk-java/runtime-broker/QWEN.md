@@ -53,4 +53,19 @@ keep producing the same bytes. The installation requests and receipts in
 `packages/cli/src/serve/contracts/managed-context-v1.fixtures.json` carry
 context digests computed with the same encoding, and
 `ManagedContextEnvelopeConformanceTest` recomputes them, so update them too.
-Compute new expected values with an implementation independent of both.
+Compute new expected values with an implementation independent of both. Both
+fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose; read
+them with a parser that keeps such escapes, as Jackson does. `jq` rejects the
+files, and Go's `encoding/json` replaces the surrogates with U+FFFD.
+
+## Tool result contract
+
+The `managed-tool-result/1` fixtures live beside the TypeScript module that
+replays them, in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`.
+A change to the manifest, the segment rules or the Tool v3 routes updates the
+fixtures, the schema, `packages/core/src/managed-runtime/managed-tool-result.ts`
+and `ManagedToolResultConformanceTest` in the same change, with expected
+values computed by an implementation independent of both languages. A Java
+Tool v3 client must refuse a Tool v2 answer on a v3 route and never retry a
+refused v3 call through v2.

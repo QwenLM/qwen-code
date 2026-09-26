@@ -702,6 +702,12 @@
         }
       }
     },
+    "advisorMaxUses": {
+      "description": "Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.",
+      "type": "integer",
+      "default": 0,
+      "minimum": 0
+    },
     "advisorModel": {
       "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",
       "type": "string",

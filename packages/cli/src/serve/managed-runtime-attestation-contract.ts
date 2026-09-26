@@ -83,6 +83,12 @@ export interface ManagedRuntimeAttestationIdentity {
   readonly isolationClass: 'session' | 'workspace';
 }
 
+/** The boot values that the request headers of every owned route carry. */
+export type ManagedRuntimeRequestIdentity = Pick<
+  ManagedRuntimeAttestationIdentity,
+  'token' | 'leaseId' | 'epoch'
+>;
+
 type ManagedRuntimeAttestationResponse = Omit<
   ManagedRuntimeAttestationIdentity,
   'token'
@@ -168,7 +174,7 @@ export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
 };
 
 export function authorizeManagedRuntime(
-  identity: ManagedRuntimeAttestationIdentity,
+  identity: ManagedRuntimeRequestIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
     const authorization = req.get('Authorization');
@@ -312,21 +318,27 @@ export function registerManagedRuntimeAttestationRoute(
   );
 }
 
+interface DeclaredManagedRuntimeRoute {
+  readonly method: string;
+  readonly path: string;
+}
+
 export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
+  routes: readonly DeclaredManagedRuntimeRoute[] = OWNED_MANAGED_RUNTIME_ROUTES,
 ): boolean {
-  return OWNED_MANAGED_RUNTIME_ROUTES.some(
-    (route) => method === route.method && url === route.path,
-  );
+  return routes.some((route) => method === route.method && url === route.path);
 }
 
+/** Admits exactly the declared routes, by default those of boot v1. */
 export function ownedManagedRuntimeRouteGate(
   next: RequestListener,
+  routes: readonly DeclaredManagedRuntimeRoute[] = OWNED_MANAGED_RUNTIME_ROUTES,
 ): RequestListener {
   return (req, res): void => {
     res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
-    if (!isOwnedManagedRuntimeRoute(req.method, req.url)) {
+    if (!isOwnedManagedRuntimeRoute(req.method, req.url, routes)) {
       res.writeHead(404);
       res.end();
       return;
