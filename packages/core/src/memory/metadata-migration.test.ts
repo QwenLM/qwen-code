@@ -30,6 +30,11 @@ import { runForkedAgent } from '../agents/forkedAgent.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual };
+});
+
 function legacyContent(body = 'BODY\nWITH TRAILING NEWLINE\n'): string {
   return [
     '---',
@@ -168,10 +173,6 @@ describe('memory metadata migration', () => {
   });
 
   it('reports not-ready when a memory subdirectory is unreadable', async () => {
-    // chmod 000 does not block root, where this scenario cannot run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      return;
-    }
     // The corpus holds only a fully-structured document, so it is 'ready'
     // today; the unreadable subdirectory can hide legacy files, and ready
     // must flip false or the one-way legacy -> structured switch commits
@@ -196,7 +197,17 @@ describe('memory metadata migration', () => {
     const locked = path.join(memoryRoot, 'reference');
     await fs.mkdir(locked, { recursive: true });
     await fs.writeFile(path.join(locked, 'hidden.md'), legacyContent());
-    await fs.chmod(locked, 0o000);
+    const readdir = fs.readdir.bind(fs);
+    const readDirectory = vi
+      .spyOn(fs, 'readdir')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === locked) {
+          throw Object.assign(new Error('Permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return readdir(...args);
+      });
     try {
       const status = await scanMemoryMetadataCorpusStatus({
         projectRoot,
@@ -206,7 +217,7 @@ describe('memory metadata migration', () => {
 
       expect(status.ready).toBe(false);
     } finally {
-      await fs.chmod(locked, 0o700);
+      readDirectory.mockRestore();
     }
   });
 
