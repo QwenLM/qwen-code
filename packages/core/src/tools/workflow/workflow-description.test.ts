@@ -66,6 +66,18 @@ function scriptDescription(tool: WorkflowTool): string {
 const POINTER_SENTENCE = `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`;
 const REFERENCE_H1 = '# Workflow authoring reference';
 const OPT_IN = '**Only on an explicit request**';
+const DETOUR =
+  'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.';
+const HINT = `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`;
+
+async function failingRunText(tool: WorkflowTool): Promise<string> {
+  const result = await tool
+    .build({ script: 'throw new Error("boom");' })
+    .execute(new AbortController().signal);
+  return (result.llmContent as Array<{ text: string }>)
+    .map((part) => part.text)
+    .join('\n');
+}
 
 describe('Workflow tool description shape', () => {
   it('points at the skill when the model can load it', () => {
@@ -73,8 +85,7 @@ describe('Workflow tool description shape', () => {
 
     expect(tool.authoringSurface).toBe('pointer');
     expect(tool.description).toContain(POINTER_SENTENCE);
-    // Pointing means NOT carrying: the reference's own headings must not
-    // appear, or the description would be paying for both.
+    // Pointing means NOT carrying: no reference headings, or it pays for both.
     expect(tool.description).not.toContain(REFERENCE_H1);
     expect(tool.description).not.toContain('## agent() options');
     expect(scriptDescription(tool)).toContain(
@@ -82,41 +93,33 @@ describe('Workflow tool description shape', () => {
     );
   });
 
-  // The pointer is only honest if the model can follow it. Under a
-  // `tools.eager` allowlist the Skill tool is one ToolSearch away, and the
-  // pointer has to say so.
+  // The pointer is only honest if followable: under a `tools.eager` allowlist
+  // the Skill tool is one ToolSearch away, and the pointer has to say so.
   it('names the ToolSearch detour when the Skill tool is deferred', () => {
     const tool = new WorkflowTool(configFor({ deferred: [ToolNames.SKILL] }));
 
     expect(tool.authoringSurface).toBe('pointer-via-tool-search');
     expect(tool.description).toContain(POINTER_SENTENCE);
-    // The detour sentence must name the invocation half: tool_search only
-    // reviews the schema (R27-1).
-    expect(tool.description).toContain(
-      'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
-    );
+    // Must name the invocation half: tool_search only reviews the schema (R27-1).
+    expect(tool.description).toContain(DETOUR);
   });
 
-  // Built while the Skill tool happens to be revealed, the description is
-  // still the one held after `/clear` drops that reveal, so it keeps the
-  // (conditional) detour.
+  // The description built while Skill is revealed is still held after `/clear`
+  // drops the reveal, so it keeps the (conditional) detour.
   it('keeps the ToolSearch detour when the Skill tool is revealed at build time', () => {
     const tool = new WorkflowTool(
       configFor({ deferred: [ToolNames.SKILL], revealed: [ToolNames.SKILL] }),
     );
 
     expect(tool.authoringSurface).toBe('pointer-via-tool-search');
-    expect(tool.description).toContain(
-      'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
-    );
+    expect(tool.description).toContain(DETOUR);
   });
 
   describe('inline', () => {
     const tool = () =>
       new WorkflowTool(configFor({ toolNames: [ToolNames.WORKFLOW] }));
 
-    // A build that denies the Skill tool would otherwise leave the model with
-    // a description telling it to load something it cannot reach, and no
+    // Without Skill, a pointer would name something unreachable and leave no
     // authoring contract anywhere.
     it('carries the reference in full, after the opt-in rule', () => {
       const { description, authoringSurface } = tool();
@@ -126,9 +129,8 @@ describe('Workflow tool description shape', () => {
       expect(description).toContain(REFERENCE_H1);
       expect(description).toContain('## agent() options');
       expect(description).not.toContain(POINTER_SENTENCE);
-      // The opt-in rule gates a run of up to a thousand agents; it must be
-      // read before 15 KB of reference, not after. Paired with the
-      // `toContain`s above so a missing needle cannot pass as -1 < n.
+      // The opt-in rule gates up to a thousand agents: read it before 15 KB of
+      // reference. The `toContain`s above stop a missing needle passing as -1.
       expect(description.indexOf(OPT_IN)).toBeLessThan(
         description.indexOf(REFERENCE_H1),
       );
@@ -137,8 +139,7 @@ describe('Workflow tool description shape', () => {
     // The reference states every runtime fact in full; a second copy from the
     // runtime paragraph is how the two would come to disagree in one string.
     it('does not repeat the runtime paragraph the reference already states', () => {
-      // Whitespace collapsed: the reference is hard-wrapped markdown, so a
-      // sentence can straddle a line break in the raw text.
+      // Whitespace collapsed: hard-wrapped markdown can split a sentence.
       const description = tool().description.replace(/\s+/g, ' ');
 
       expect(
@@ -146,15 +147,14 @@ describe('Workflow tool description shape', () => {
       ).toHaveLength(1);
       expect(description).not.toContain('**Runtime**');
       expect(description).not.toContain('journal holds one line per agent');
-      // Not repeating the runtime paragraph only works if the reference really
-      // states it: the inline shape reads these from SKILL.md alone.
+      // Only safe if the reference states it: inline reads SKILL.md alone.
       expect(description).toContain('Every run hands back its runId');
       expect(description).toContain('run_in_background');
     });
 
-    // The parameter the model is about to fill sits beside the description,
-    // so it must name the same place — and the inlined body's pointers at
-    // other skills must be qualified, since none are loadable here.
+    // The parameter sits beside the description, so it must name the same
+    // place; the inlined body's other-skill pointers must be qualified, since
+    // none are loadable here.
     it('keeps the script parameter and the other-skill pointers consistent', () => {
       const instance = tool();
 
@@ -198,23 +198,14 @@ describe('Workflow tool description shape', () => {
     );
   });
 
-  // The hint is delivered at the moment the model is about to retry, so it has
-  // to match each shape — including the two no other test executes.
+  // The hint arrives as the model retries, so it must match each shape,
+  // including the two no other test executes.
   describe('failure hint', () => {
-    async function failingRunText(tool: WorkflowTool): Promise<string> {
-      const result = await tool
-        .build({ script: 'throw new Error("boom");' })
-        .execute(new AbortController().signal);
-      return (result.llmContent as Array<{ text: string }>)
-        .map((part) => part.text)
-        .join('\n');
-    }
+    const runnable = (options: RouteOptions) =>
+      new WorkflowTool(configFor(options), { dispatch: async () => 'unused' });
 
     it('says nothing about the reference when it is withheld', async () => {
-      const tool = new WorkflowTool(
-        configFor({ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] }),
-        { dispatch: async () => 'unused' },
-      );
+      const tool = runnable({ disabledNames: [WORKFLOW_AUTHORING_SKILL_NAME] });
       const text = await failingRunText(tool);
 
       expect(tool.authoringSurface).toBe('withheld');
@@ -224,21 +215,12 @@ describe('Workflow tool description shape', () => {
     });
 
     it('repeats the ToolSearch detour when the Skill tool is deferred', async () => {
-      const tool = new WorkflowTool(
-        configFor({ deferred: [ToolNames.SKILL] }),
-        {
-          dispatch: async () => 'unused',
-        },
-      );
+      const tool = runnable({ deferred: [ToolNames.SKILL] });
       const text = await failingRunText(tool);
 
       expect(tool.authoringSurface).toBe('pointer-via-tool-search');
-      expect(text).toContain(
-        `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
-      );
-      expect(text).toContain(
-        'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
-      );
+      expect(text).toContain(HINT);
+      expect(text).toContain(DETOUR);
     });
   });
 
@@ -251,10 +233,9 @@ describe('Workflow tool description shape', () => {
   });
 });
 
-// Both halves failing at once: no route to the skill AND no file to inline.
-// The description falls back to the pointer, and the failure hint has to say
-// the same thing — not send the model to a description that holds no
-// reference. Real read failure, isolated in its own module graph because the
+// No route to the skill AND no file to inline: the description falls back to
+// the pointer, and the hint must agree, not send the model to a description
+// holding no reference. Real read failure, in its own module graph because the
 // reference is cached process-wide once read.
 describe('when the reference is unreachable and unreadable', () => {
   afterEach(() => {
@@ -286,24 +267,15 @@ describe('when the reference is unreachable and unreadable', () => {
     const { WorkflowTool: FreshWorkflowTool } = await import('./workflow.js');
     const tool = new FreshWorkflowTool(
       configFor({ toolNames: [ToolNames.WORKFLOW] }),
-      {
-        dispatch: async () => 'unused',
-      },
+      { dispatch: async () => 'unused' },
     );
 
     expect(tool.authoringSurface).toBe('pointer');
     expect(tool.description).toContain(POINTER_SENTENCE);
     expect(tool.description).not.toContain(REFERENCE_H1);
 
-    const result = await tool
-      .build({ script: 'throw new Error("boom");' })
-      .execute(new AbortController().signal);
-    const text = (result.llmContent as Array<{ text: string }>)
-      .map((part) => part.text)
-      .join('\n');
-    expect(text).toContain(
-      `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
-    );
+    const text = await failingRunText(tool);
+    expect(text).toContain(HINT);
     expect(text).not.toContain("this tool's description");
   });
 });
