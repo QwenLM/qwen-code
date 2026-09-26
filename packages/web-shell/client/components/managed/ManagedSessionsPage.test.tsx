@@ -205,6 +205,32 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
 
+  it('shows an existing empty bound Session without execution controls', async () => {
+    const bound = summary('bound', {
+      activeTurnId: undefined,
+      phase: 'created',
+      runtimeReady: false,
+      runtimeState: 'unknown',
+      workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      capabilities: { canSend: false, canCancel: false },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('bound');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('ws-a');
+    expect(
+      container.querySelector('[data-managed-workspace-binding]')?.textContent,
+    ).toContain('services/api');
+    expect(container.querySelector('[data-managed-progress]')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).not.toContain('Preparing environment');
+  });
+
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(
       (item) => item.textContent === label,

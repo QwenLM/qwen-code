@@ -495,6 +495,13 @@ class ManagedAgentMySqlIT {
                             + " (tenant_id, workspace_id,"
                             + " workspace_generation, storage_id,"
                             + " display_name, config_ref, policy_ref,"
+                            + " state) VALUES (?, 'Workspace-0', 1,"
+                            + " 'storage-hidden', 'Hidden', 'config-hidden',"
+                            + " 'policy-hidden', 'ACTIVE')", tenant);
+            jdbc.update("INSERT INTO managed_workspace_registry"
+                            + " (tenant_id, workspace_id,"
+                            + " workspace_generation, storage_id,"
+                            + " display_name, config_ref, policy_ref,"
                             + " state) VALUES (?, ?, 1, 'storage-a',"
                             + " 'Workspace A', 'config-a', 'policy-a',"
                             + " 'ACTIVE')", tenant, workspace);
@@ -503,6 +510,11 @@ class ManagedAgentMySqlIT {
                             + " can_read, can_create)"
                             + " VALUES (?, ?, ?, TRUE, TRUE)",
                     tenant, workspace, actor.getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access"
+                            + " (tenant_id, workspace_id, actor_id,"
+                            + " can_read, can_create)"
+                            + " VALUES (?, 'Workspace-0', ?, TRUE, TRUE)",
+                    tenant, "other".getBytes(StandardCharsets.UTF_8));
             Admission created = transactions.execute(status ->
                     store.insertWorkspaceSessionCommand(tenant, actor,
                             "Create-Workspace", digest, "qwen-code", null,
@@ -514,6 +526,15 @@ class ManagedAgentMySqlIT {
                     .isFalse();
             assertThat(registry.canRead(tenant, actor, "workspace-a"))
                     .isFalse();
+            assertThat(registry.listReadable(tenant, actor, null, 1))
+                    .extracting(ManagedWorkspaceRegistry.WorkspaceSummary::workspaceId)
+                    .containsExactly(workspace);
+            assertThat(registry.listReadable(tenant, "actor-a", null, 1))
+                    .isEmpty();
+            assertThat(registry.listReadable(tenant.toUpperCase(), actor,
+                    null, 1)).isEmpty();
+            assertThat(registry.findReadable(tenant, actor, "workspace-a"))
+                    .isNull();
             assertThat(registry.canRead(tenant.toUpperCase(), actor,
                     workspace)).isFalse();
             assertThat(store.listSessions(tenant, "actor-a", null, null,

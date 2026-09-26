@@ -20,6 +20,7 @@ export interface JavaManagedAgentProviderOptions
   agentId?: string;
   environmentId?: string;
   productScope?: string;
+  enableWorkspaceBinding?: boolean;
 }
 
 export function createJavaManagedAgentProvider(
@@ -27,11 +28,58 @@ export function createJavaManagedAgentProvider(
 ): ManagedAgentProvider {
   const client = new JavaManagedAgentClient(options);
   const agentId = options.agentId ?? 'qwen-code';
+  if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
+    throw new Error('Workspace binding requires an explicit productScope');
+  }
   return {
     kind: 'java',
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    ...(options.enableWorkspaceBinding
+      ? {
+          workspaceBinding: {
+            agentId,
+            async list(request) {
+              const page = await client.listWorkspaces(
+                { cursor: request.cursor, limit: request.limit },
+                request.signal,
+              );
+              return {
+                data: page.data,
+                defaultWorkspace: page.defaultWorkspace,
+                nextCursor: page.nextCursor,
+                supported: page.capabilities?.workspaceBinding === true,
+              };
+            },
+            async get(workspaceId, request) {
+              return client.getWorkspace(workspaceId, request.signal);
+            },
+            async createEmpty(request, command) {
+              const result = await client.createSession(
+                {
+                  requestId: command.idempotencyKey,
+                  idempotencyKey: command.idempotencyKey,
+                  agentId: request.agentId,
+                  input: [],
+                  metadata: { clientId: command.clientId },
+                  workspace: {
+                    workspaceId: request.workspaceId,
+                    cwdRelative: request.cwdRelative,
+                  },
+                },
+                command.signal,
+              );
+              if (!result.sessionId) {
+                throw new Error(
+                  'Managed Agent create response is missing sessionId',
+                );
+              }
+              return { sessionId: result.sessionId };
+            },
+          },
+        }
+      : {}),
     async listSessions(request) {
       const page = await client.listSessions(
         { cursor: request.cursor, limit: request.limit },
@@ -144,6 +192,7 @@ function toSessionSummary(
     sessionId: session.sessionId,
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
+    workspace: session.workspace,
     createdAt: toTimestamp(session.createdAt),
     admittedAt: toTimestamp(
       session.activeTurn?.submittedAt ?? session.createdAt,
@@ -153,8 +202,16 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
-      canSend: sessionActive && !active,
-      canCancel: sessionActive && active && turnStatus !== 'cancelling',
+      canSend:
+        sessionActive &&
+        turnStatus !== undefined &&
+        !active &&
+        !session.workspace,
+      canCancel:
+        sessionActive &&
+        active &&
+        turnStatus !== 'cancelling' &&
+        !session.workspace,
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
@@ -189,7 +246,7 @@ function toPhase(
   if (turnStatus === 'accepted' || turnStatus === 'queued') {
     return runtimeState === 'starting' ? 'runtime_starting' : 'admitted';
   }
-  return 'admitted';
+  return turnStatus === undefined ? 'created' : 'admitted';
 }
 
 function titleFor(text: string): string {
@@ -204,6 +261,15 @@ function storageKey(options: JavaManagedAgentProviderOptions): string {
   );
   base.search = '';
   base.hash = '';
+  const baseKey = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
   const scope = options.productScope ?? options.environmentId ?? 'default';
-  return `${base.origin}${base.pathname.replace(/\/+$/, '')}:managed:${scope}`;
+  const prefix = `${baseKey}:managed:${scope}`;
+  return options.enableWorkspaceBinding
+    ? JSON.stringify([
+        baseKey,
+        scope,
+        options.agentId ?? 'qwen-code',
+        'workspace-binding-v1',
+      ])
+    : prefix;
 }
