@@ -15,6 +15,7 @@ import type { Stats } from 'node:fs';
 import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
+import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
@@ -995,20 +996,23 @@ function detectTarget(): string {
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
-export async function performStandaloneUpdate(
-  standaloneDir: string,
-  newVersion: string,
-): Promise<'done' | 'deferred'> {
-  const versionPath = normalizeVersion(newVersion);
-  const baseUrl = resolveUpdateBaseUrl();
-
+function standaloneUpdateTarget(standaloneDir: string): {
+  target: string;
+  version?: string;
+  isFirstTimeMigration: boolean;
+} {
   let target: string;
+  let version: string | undefined;
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
     const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
-    const manifest = JSON.parse(manifestRaw) as { target?: string };
+    const manifest = JSON.parse(manifestRaw) as {
+      target?: string;
+      version?: string;
+    };
     target = manifest.target ?? detectTarget();
+    version = manifest.version;
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -1021,7 +1025,73 @@ export async function performStandaloneUpdate(
     isFirstTimeMigration = true;
   }
   validateTarget(target);
+  return { target, version, isFirstTimeMigration };
+}
 
+export async function prepareStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+): Promise<{
+  activate(): Promise<'done' | 'deferred'>;
+  cleanup(): void;
+}> {
+  const versionPath = normalizeVersion(newVersion);
+  const baseUrl = resolveUpdateBaseUrl();
+  const { target } = standaloneUpdateTarget(standaloneDir);
+  const filename = archiveFilename(target);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
+  const cleanup = () => {
+    process.off('exit', cleanup);
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // The process may exit with the archive stream still open on Windows.
+    }
+  };
+  process.on('exit', cleanup);
+  try {
+    const archiveHash = await downloadToFile(
+      versionPath,
+      filename,
+      path.join(directory, filename),
+      baseUrl,
+    );
+    await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+    return {
+      async activate() {
+        try {
+          return await applyStandaloneUpdate(standaloneDir, newVersion, {
+            directory,
+            target,
+          });
+        } finally {
+          cleanup();
+        }
+      },
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+export async function performStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+): Promise<'done' | 'deferred'> {
+  return applyStandaloneUpdate(standaloneDir, newVersion);
+}
+
+async function applyStandaloneUpdate(
+  standaloneDir: string,
+  newVersion: string,
+  preparedArchive?: { directory: string; target: string },
+): Promise<'done' | 'deferred'> {
+  const versionPath = normalizeVersion(newVersion);
+  const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
+  const { target, isFirstTimeMigration } =
+    standaloneUpdateTarget(standaloneDir);
   const filename = archiveFilename(target);
   const parentDir = path.dirname(standaloneDir);
 
@@ -1051,7 +1121,9 @@ export async function performStandaloneUpdate(
   // of standaloneDir to avoid EXDEV (cross-device rename).
   // extractDir uses mkdtempSync (random suffix) to prevent symlink
   // pre-creation attacks on predictable directory names.
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
+  const tempDir =
+    preparedArchive?.directory ??
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   let extractDir: string;
   let updateResult: 'done' | 'deferred' | undefined;
   let migrationArtifacts: BinWrapperArtifacts | undefined;
@@ -1064,20 +1136,35 @@ export async function performStandaloneUpdate(
   }
 
   try {
+    if (preparedArchive) {
+      const installed = standaloneUpdateTarget(standaloneDir);
+      if (installed.target !== preparedArchive.target) {
+        throw new Error('The standalone installation changed during download');
+      }
+      if (
+        installed.version &&
+        semver.valid(installed.version) &&
+        semver.gte(installed.version, newVersion)
+      ) {
+        return 'done';
+      }
+    }
     const archivePath = path.join(tempDir, filename);
-    debugLogger.info(`Downloading ${filename} (${versionPath})...`);
-    updateEventEmitter.emit('update-info', {
-      message: t('Downloading update...'),
-    });
-    const archiveHash = await downloadToFile(
-      versionPath,
-      filename,
-      archivePath,
-      baseUrl,
-    );
+    if (!preparedArchive) {
+      debugLogger.info(`Downloading ${filename} (${versionPath})...`);
+      updateEventEmitter.emit('update-info', {
+        message: t('Downloading update...'),
+      });
+      const archiveHash = await downloadToFile(
+        versionPath,
+        filename,
+        archivePath,
+        baseUrl,
+      );
 
-    debugLogger.info('Verifying checksum...');
-    await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+      debugLogger.info('Verifying checksum...');
+      await verifyChecksum(archiveHash, filename, versionPath, baseUrl);
+    }
 
     debugLogger.info('Extracting archive...');
     await extractArchive(archivePath, extractDir, target);

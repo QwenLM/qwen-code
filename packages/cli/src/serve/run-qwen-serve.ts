@@ -117,6 +117,7 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 import {
   printRemoteQuickstart,
   tokenQrNoEffectReason,
@@ -2090,6 +2091,8 @@ function buildProviderSetupInputs(
 }
 
 export interface RunQwenServeDeps {
+  /** Only CLI entrypoints opt into replacing their own daemon process. */
+  updateRestartArgv?: readonly string[];
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /** Test/embed override for the plain HTTP server constructor. */
@@ -4621,6 +4624,16 @@ async function runQwenServeImpl(
   // collapses to "did we resolve real assets".
   const webShellMounted = !!webShellDir;
   const serveAppLifecycle = new ServeAppLifecycleController();
+  const restartForUpdate = deps.updateRestartArgv
+    ? createDaemonUpdateRestarter({
+        argv: deps.updateRestartArgv,
+        env: daemonRuntimeBaseEnv,
+        token,
+        externalToolGuardToken: optsIn.externalToolGuard?.token,
+        getPort: () => actualPort,
+        close: () => serveAppLifecycle.close(),
+      })
+    : undefined;
   const liveDiscoveryStableBaseDir = path.resolve(
     deps.liveDiscoveryStableBaseDir ?? path.join(os.homedir(), '.qwen'),
   );
@@ -8145,6 +8158,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      restartForUpdate,
       maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
       liveDiscoveryStableBaseDir,
@@ -10115,6 +10129,11 @@ async function runQwenServeImpl(
                   daemonLog,
                 );
                 const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
+                await (
+                  appForCleanup?.locals?.['cleanupDaemonUpdate'] as
+                    | (() => Promise<void>)
+                    | undefined
+                )?.();
                 const workspaceManagementHandle = appForCleanup?.locals?.[
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;
