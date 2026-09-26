@@ -467,6 +467,17 @@ export function StandaloneRecents({
   const displayedSessions = sessionsLimited
     ? visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)
     : visibleSessions;
+  const deleteBusy =
+    !!deleteCandidate && busySessionId === deleteCandidate.sessionId;
+  const closeDeleteCandidate = () => {
+    if (
+      busySessionIdRef.current &&
+      busySessionIdRef.current === deleteCandidate?.sessionId
+    ) {
+      return;
+    }
+    setDeleteCandidate(undefined);
+  };
 
   return (
     <>
@@ -666,7 +677,8 @@ export function StandaloneRecents({
         <DialogShell
           title={t('sidebar.delete')}
           size="sm"
-          onClose={() => setDeleteCandidate(undefined)}
+          dismissible={!deleteBusy}
+          onClose={closeDeleteCandidate}
         >
           <div className="flex flex-col gap-4">
             <p className="text-sm text-muted-foreground">
@@ -676,14 +688,15 @@ export function StandaloneRecents({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setDeleteCandidate(undefined)}
+                disabled={deleteBusy}
+                onClick={closeDeleteCandidate}
               >
                 {t('common.cancel')}
               </Button>
               <Button
                 type="button"
                 variant="destructive"
-                disabled={busySessionId === deleteCandidate.sessionId}
+                disabled={!!busySessionId}
                 onClick={() => {
                   void deleteSession(deleteCandidate).then((succeeded) => {
                     if (succeeded) setDeleteCandidate(undefined);

@@ -35,7 +35,20 @@ vi.mock('../../i18n', () => ({
 }));
 
 vi.mock('../dialogs/DialogShell', () => ({
-  DialogShell: ({ children }: { children: ReactNode }) => children,
+  DialogShell: ({
+    children,
+    dismissible = true,
+    onClose,
+  }: {
+    children: ReactNode;
+    dismissible?: boolean;
+    onClose: () => void;
+  }) => (
+    <div data-testid="dialog-shell" data-dismissible={dismissible}>
+      <button onClick={onClose}>dialog.close</button>
+      {children}
+    </div>
+  ),
 }));
 
 import { StandaloneRecents } from './StandaloneRecents';
@@ -542,6 +555,16 @@ describe('StandaloneRecents', () => {
     expect(onLeaveCurrentSession).toHaveBeenCalledExactlyOnceWith('active');
     expect(mocks.deleteSession).not.toHaveBeenCalled();
     expect(dialogButton('sidebar.delete').disabled).toBe(true);
+    expect(dialogButton('common.cancel').disabled).toBe(true);
+    expect(
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dismissible'),
+    ).toBe('false');
+    await act(async () => dialogButton('common.cancel').click());
+    await act(async () => dialogButton('dialog.close').click());
+    expect(container.textContent).toContain('sidebar.standaloneDeleteConfirm');
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
     expect(container.textContent).toContain('Active chat');
 
     await act(async () => finishLeave(true));
@@ -589,6 +612,7 @@ describe('StandaloneRecents', () => {
     expect(mocks.deleteSession).toHaveBeenCalledExactlyOnceWith(['active']);
     expect(onMutated).not.toHaveBeenCalled();
     expect(container.textContent).toContain('Active chat');
+    expect(container.textContent).toContain('sidebar.standaloneDeleteConfirm');
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Still open' }),
       'sidebar.standaloneActionFailed',
@@ -630,6 +654,12 @@ describe('StandaloneRecents', () => {
       alreadyArchived: string[];
       errors: never[];
     }) => void;
+    mocks.list.mockResolvedValue({
+      sessions: [
+        summary('active', 'Active chat'),
+        summary('other', 'Other chat'),
+      ],
+    });
     mocks.archive.mockReturnValue(
       new Promise((resolve) => {
         finishArchive = resolve;
@@ -646,6 +676,8 @@ describe('StandaloneRecents', () => {
       await Promise.resolve();
     });
     expect(mocks.archive).toHaveBeenCalledOnce();
+    await act(async () => deleteRow('Other chat').click());
+    expect(dialogButton('sidebar.delete').disabled).toBe(true);
 
     await act(async () => {
       finishArchive({
@@ -655,6 +687,7 @@ describe('StandaloneRecents', () => {
       });
       await Promise.resolve();
     });
+    expect(dialogButton('sidebar.delete').disabled).toBe(false);
   });
 
   it('downloads an exported standalone conversation', async () => {
