@@ -599,6 +599,7 @@ const WORK_A = path.resolve(path.sep, 'work', 'a');
 const EXPECTED_STAGE1_FEATURES = [
   'health',
   'daemon_status',
+  'daemon_update',
   'capabilities',
   'session_create',
   'session_startup_config',
@@ -16364,7 +16365,7 @@ describe('createServeApp', () => {
       expect(bridge.loadCalls).toEqual([]);
     });
 
-    it('rejects an invalid live replay mode on resume', async () => {
+    it('ignores an invalid live replay mode on resume', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -16377,9 +16378,16 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ liveReplayMode: 'compact' });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('invalid_live_replay_mode');
-      expect(bridge.resumeCalls).toEqual([]);
+      // Resume restores the full journal, so the load-only field is neither
+      // validated nor forwarded — the OpenAPI resume schema does not declare
+      // it (#12146).
+      expect(res.status).toBe(200);
+      expect(bridge.resumeCalls).toEqual([
+        {
+          sessionId: 'persisted-invalid',
+          workspaceCwd: WS_BOUND,
+        },
+      ]);
     });
 
     it('does not forward a valid live replay mode to resume', async () => {
@@ -16397,7 +16405,7 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       // Resume always restores with the full journal; the load-only field
-      // is validated but never forwarded to the bridge.
+      // is ignored and never forwarded to the bridge.
       expect(bridge.resumeCalls).toEqual([
         {
           sessionId: 'persisted-summary-resume',
@@ -30688,6 +30696,32 @@ describe('createServeApp', () => {
       );
     }
 
+    async function appendTranscriptSystemRecord(
+      sessionId: string,
+      workspaceCwd: string,
+      subtype: string,
+      systemPayload: Record<string, string>,
+    ): Promise<void> {
+      await fsp.appendFile(
+        path.join(
+          new Storage(workspaceCwd).getProjectDir(),
+          'chats',
+          `${sessionId}.jsonl`,
+        ),
+        JSON.stringify({
+          uuid: `${sessionId}-${subtype}`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-05-28T12:00:01.000Z',
+          type: 'system',
+          subtype,
+          systemPayload,
+          cwd: workspaceCwd,
+          version: '1.0.0',
+        }) + '\n',
+      );
+    }
+
     it('returns a paged transcript and does not expose EventBus cursors', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
       const bridge = fakeBridge({
@@ -31332,6 +31366,316 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([
         { sessionId: sid },
       ]);
+    });
+
+    it('reads persisted transcript and turn index for an explicit standalone session', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababac';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(sid, 'active', internalWs);
+      await appendTranscriptSystemRecord(sid, internalWs, 'session_source', {
+        sourceType: 'standalone',
+      });
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(turnIndex.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: sid, direction: 'backward' },
+      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([
+        { sessionId: sid },
+      ]);
+    });
+
+    it('rejects transcript and turn index for a child of an explicit standalone session', async () => {
+      const parentSid = '55555555-bbbb-cccc-dddd-abababababad';
+      const childSid = '55555555-bbbb-cccc-dddd-abababababae';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(parentSid, 'active', internalWs);
+      await appendTranscriptSystemRecord(
+        parentSid,
+        internalWs,
+        'session_source',
+        { sourceType: 'standalone' },
+      );
+      await writeTranscriptSession(childSid, 'active', internalWs);
+      await appendTranscriptSystemRecord(
+        childSid,
+        internalWs,
+        'parent_session',
+        { parentSessionId: parentSid },
+      );
+      await appendTranscriptSystemRecord(
+        childSid,
+        internalWs,
+        'session_source',
+        { sourceType: 'standalone' },
+      );
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${childSid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${childSid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(404);
+      expect(turnIndex.status).toBe(404);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
+    });
+
+    it.each([
+      {
+        name: 'an explicit child of a legacy standalone parent',
+        parentExplicit: false,
+        childExplicit: true,
+        parentSid: '55555555-bbbb-cccc-dddd-abababababc2',
+        childSid: '55555555-bbbb-cccc-dddd-abababababc3',
+      },
+      {
+        name: 'a legacy child of an explicit standalone parent',
+        parentExplicit: true,
+        childExplicit: false,
+        parentSid: '55555555-bbbb-cccc-dddd-abababababc0',
+        childSid: '55555555-bbbb-cccc-dddd-abababababc1',
+      },
+    ])(
+      'rejects transcript and turn index for $name',
+      async ({ parentExplicit, childExplicit, parentSid, childSid }) => {
+        const internalDir = path.join(runtimeDir, 'internal-conversations');
+        await fsp.mkdir(internalDir, { recursive: true });
+        const internalWs = realpathSync(internalDir);
+        await writeTranscriptSession(parentSid, 'active', internalWs);
+        if (parentExplicit) {
+          await appendTranscriptSystemRecord(
+            parentSid,
+            internalWs,
+            'session_source',
+            { sourceType: 'standalone' },
+          );
+        }
+        await writeTranscriptSession(childSid, 'active', internalWs);
+        await appendTranscriptSystemRecord(
+          childSid,
+          internalWs,
+          'parent_session',
+          { parentSessionId: parentSid },
+        );
+        if (childExplicit) {
+          await appendTranscriptSystemRecord(
+            childSid,
+            internalWs,
+            'session_source',
+            { sourceType: 'standalone' },
+          );
+        }
+        const primaryBridge = fakeBridge();
+        const internalBridge = fakeBridge();
+        const registry = createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge: primaryBridge,
+          }),
+          {
+            ...makeWorkspaceRuntimeForTest({
+              workspaceId: 'internal-conversations',
+              workspaceCwd: internalWs,
+              primary: false,
+              bridge: internalBridge,
+            }),
+            provenance: 'live-conversation',
+            removable: false,
+          },
+        ]);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+
+        const transcript = await request(app)
+          .get(`/session/${childSid}/transcript?direction=backward`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const turnIndex = await request(app)
+          .get(`/session/${childSid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(transcript.status).toBe(404);
+        expect(turnIndex.status).toBe(404);
+        expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+        expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+        expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+        expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
+      },
+    );
+
+    it('reads persisted transcript and turn index for a legacy child of a legacy standalone session', async () => {
+      const parentSid = '55555555-bbbb-cccc-dddd-abababababb0';
+      const childSid = '55555555-bbbb-cccc-dddd-abababababb1';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(parentSid, 'active', internalWs);
+      await writeTranscriptSession(childSid, 'active', internalWs);
+      await appendTranscriptSystemRecord(
+        childSid,
+        internalWs,
+        'parent_session',
+        { parentSessionId: parentSid },
+      );
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${childSid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${childSid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(turnIndex.status).toBe(200);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([
+        { sessionId: childSid, direction: 'backward' },
+      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([
+        { sessionId: childSid },
+      ]);
+    });
+
+    it('skips the internal runtime for a transcript from a non-conversation source', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-abababababaf';
+      const internalDir = path.join(runtimeDir, 'internal-conversations');
+      await fsp.mkdir(internalDir, { recursive: true });
+      const internalWs = realpathSync(internalDir);
+      await writeTranscriptSession(sid, 'active', internalWs);
+      await appendTranscriptSystemRecord(sid, internalWs, 'session_source', {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      const primaryBridge = fakeBridge();
+      const internalBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        {
+          ...makeWorkspaceRuntimeForTest({
+            workspaceId: 'internal-conversations',
+            workspaceCwd: internalWs,
+            primary: false,
+            bridge: internalBridge,
+          }),
+          provenance: 'live-conversation',
+          removable: false,
+        },
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        workspaceRegistry: registry,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const turnIndex = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(404);
+      expect(turnIndex.status).toBe(404);
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
+      expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('rejects transcript requests with ambiguous live session ownership', async () => {

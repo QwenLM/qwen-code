@@ -117,17 +117,23 @@ branch and side-task requests, which still reject before mutating history.
 | Live requested ID                  | 409 `{ code: 'session_id_conflict', sessionId, conflict: 'live' }` | `-32602`, `{ httpStatus: 409, errorKind: 'session_id_conflict', sessionId, conflict: 'live' }` |
 | Managed branch or side task        | 409 `{ code: 'managed_session_branch_unsupported', sessionId }`    | `-32602`, `{ httpStatus: 409, errorKind: 'managed_session_branch_unsupported', sessionId }`    |
 | Owner unavailable (selector/child) | 409 `{ code: 'session_execution_engine_unavailable' }`             | `-32602`, `{ httpStatus: 409, errorKind: 'session_execution_engine_unavailable' }`             |
+| Unusable transcript snapshot       | 409 `{ code: 'transcript_snapshot_unavailable' }` (existing)       | `-32603`, `{ httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' }`                  |
 
 The conflict and invalid-ID shapes match the existing shared-admission
 responses. The SDK HTTP and WebSocket transports restore the HTTP status from
-`data.httpStatus`. Only these kinds are mapped; other SDK errors still map to
-internal errors.
+`data.httpStatus`. The selector's snapshot read and the ACP child can both
+report an unusable snapshot, which REST already answered with 409; the ACP
+transports now carry the same 409 classification instead of a generic internal
+error. Only these kinds are mapped; other SDK errors still map to internal
+errors.
 
 The direct creators keep their own vocabulary. `LocalManagedRuntimeProvider`
 maps a live-ID rejection to its non-retryable
 `managed_runtime_identity_conflict`. The standalone service maps an undispatched
 live-ID rejection to `standalone_session_conflict` instead of
-`standalone_creation_rolled_back`.
+`standalone_creation_rolled_back`. It does not check that nothing was persisted
+for that ID, because the live owner's own transcript is expected there; finding
+it must not quarantine the runtime.
 
 ## Files and consumers
 
