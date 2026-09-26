@@ -19,9 +19,20 @@ export async function updateBeforeRelaunch(
   projectRoot: string,
   relaunchOnFailure: boolean,
 ): Promise<boolean> {
+  // The identity fallback must still substitute params: it serves the catch
+  // below when one of the dynamic imports (including i18n itself) failed, and
+  // printing the raw `{{error}}` template would hide the very failure the
+  // message exists to surface.
   let translate: (key: string, params?: Record<string, string>) => string = (
     message,
-  ) => message;
+    params,
+  ) =>
+    params
+      ? message.replace(
+          /\{\{(\w+)\}\}/g,
+          (token, name: string) => params[name] ?? token,
+        )
+      : message;
   try {
     const [
       { checkForUpdatesDetailed, describeUpdateCheckFailure },
