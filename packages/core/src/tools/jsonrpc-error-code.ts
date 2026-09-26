@@ -9,14 +9,19 @@
  *
  * Probes in order:
  * 1. a structured numeric `error.code` (McpError / SDK code path);
- * 2. the JSON-RPC error body the legacy-era HTTP transport embeds —
- *    `error.data.text`, then `error.message`.
+ * 2. the JSON-RPC response body the legacy-era HTTP transport embeds —
+ *    `error.data.text` (SdkHttpError's `{status, statusText, text}` bag),
+ *    then `error.message`.
  *
- * The body probe matches `"code": <integer>` anywhere in the string, so
- * member order and nested objects before `code` do not matter, and it
- * never infers a code from prose: only a literal JSON numeric member
- * counts. A body cut mid-number yields a short code that simply will not
- * equal the caller's sentinel.
+ * The body is parsed with `JSON.parse`, not scanned with a regex: the
+ * first `{` through the last `}` is taken as the payload (the legacy-era
+ * wrapper prefixes prose such as `Error POSTing to endpoint: …`), then
+ * `.error.code` — the spec location — is read, falling back to a
+ * top-level `.code` for bare error objects. A payload that does not
+ * parse (truncated frame, prose containing braces, two objects) yields
+ * `undefined` rather than a guessed number; callers decide what an
+ * unknown code means for their context. No code is ever inferred from
+ * free text.
  *
  * This is the single extraction site for `isTransientNetworkError`,
  * `isMethodNotFound`, and the onerror tolerance guards, so a future
@@ -36,8 +41,34 @@ export function getJsonRpcErrorCode(error: unknown): number | undefined {
   ];
   for (const candidate of candidates) {
     if (typeof candidate !== 'string') continue;
-    const match = /"code"\s*:\s*(-?\d+)/.exec(candidate);
-    if (match) return Number(match[1]);
+    const code = parseJsonRpcBody(candidate);
+    if (code !== undefined) return code;
   }
+  return undefined;
+}
+
+/**
+ * Read a JSON-RPC error code out of a body that may carry a non-JSON
+ * prefix/suffix (the legacy-era transport embeds the response text in an
+ * error message). Strict parse — no regex over remote content.
+ */
+function parseJsonRpcBody(text: string): number | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return undefined;
+  }
+  const body = parsed as {
+    error?: { code?: unknown };
+    code?: unknown;
+  } | null;
+  const spec = body?.error?.code;
+  if (typeof spec === 'number' && Number.isInteger(spec)) return spec;
+  const top = body?.code;
+  if (typeof top === 'number' && Number.isInteger(top)) return top;
   return undefined;
 }

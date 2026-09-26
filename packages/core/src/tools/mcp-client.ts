@@ -1778,8 +1778,9 @@ function isMethodNotFound(error: unknown): boolean {
  * fallback that `isMethodNotFound` uses — the phrase alone must never
  * gate a session-liveness decision. Accepts only the numeric
  * `-32601` code, wherever the transport surfaces it: structured
- * `error.code`, or the JSON-RPC body embedded in `data.text` / `text` /
- * `message` (legacy-era HTTP wraps the body before `onerror` fires).
+ * `error.code`, or the JSON-RPC body embedded in `data.text` /
+ * `message` (legacy-era HTTP wraps the body before `onerror` fires),
+ * read via `JSON.parse` rather than a text scan.
  * Worded however the server phrases the message — a spec-legal
  * `-32601` with "Unknown method" still counts.
  */

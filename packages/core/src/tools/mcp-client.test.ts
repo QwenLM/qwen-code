@@ -103,11 +103,11 @@ function cfgWithResources(): Config {
   } as unknown as Config;
 }
 
-function mockAppOnlyMcpServer(): void {
+function mockAppOnlyMcpServer(): Record<string, unknown> {
   const methodNotFound = Object.assign(new Error('Method not found'), {
     code: -32601,
   });
-  vi.mocked(ClientLib.Client).mockReturnValue({
+  const mockedClient: Record<string, unknown> = {
     connect: vi.fn(),
     registerCapabilities: vi.fn(),
     setRequestHandler: vi.fn(),
@@ -123,7 +123,10 @@ function mockAppOnlyMcpServer(): void {
     }),
     getInstructions: vi.fn(),
     close: vi.fn(),
-  } as unknown as ClientLib.Client);
+  };
+  vi.mocked(ClientLib.Client).mockReturnValue(
+    mockedClient as unknown as ClientLib.Client,
+  );
   vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
     {} as SdkClientStdioLib.StdioClientTransport,
   );
@@ -133,6 +136,7 @@ function mockAppOnlyMcpServer(): void {
         functionDeclarations: [{ name: 'internal_refresh' }],
       }),
   } as unknown as GenAiLib.CallableTool);
+  return mockedClient;
 }
 
 describe('mcp-client', () => {
@@ -1644,6 +1648,16 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
           },
         }),
       ],
+      [
+        'real SdkHttpError {data:{status,statusText,text}} bag (R4-1)',
+        Object.assign(new Error('Error POSTing to endpoint'), {
+          data: {
+            status: 400,
+            statusText: 'Bad Request',
+            text: '{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          },
+        }),
+      ],
     ])('keeps CONNECTED on onerror %s (#12496)', async (label, error) => {
       const { client, onerror, serverName } = await setupConnectedClient(
         `mnf-${label.slice(0, 6).replace(/\W/g, '')}`,
@@ -1671,6 +1685,12 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
           'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request: Method not found in registry"},"id":1}',
         ),
       ],
+      [
+        'a proxy 502 with no JSON body',
+        new Error(
+          'upstream connect error or disconnect/reset before headers (R4-6)',
+        ),
+      ],
     ])('flips DISCONNECTED on onerror %s (#12496)', async (label, error) => {
       const { client, onerror, serverName } = await setupConnectedClient(
         `disc-${label.slice(0, 6).replace(/\W/g, '')}`,
@@ -1684,6 +1704,45 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(mockDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining(`MCP ERROR (${serverName})`),
       );
+    });
+
+    // R4-2 (#12496): connectAndDiscover installs its own second onerror
+    // handler — a -32601 there must keep the registry CONNECTED just like
+    // the connect() handler, while a real transport error still flips it.
+    it('tolerates -32601 on connectAndDiscover onerror, flips on transport error (#12496 R4-2)', async () => {
+      const mockedClient = mockAppOnlyMcpServer();
+      const serverName = `cad-mnf-${(onerrorTestSeq += 1)}`;
+
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      expect(typeof onerror).toBe('function');
+      onerror(
+        Object.assign(new Error('Error POSTing to endpoint'), {
+          data: {
+            status: 400,
+            statusText: 'Bad Request',
+            text: '{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          },
+        }),
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+
+      const transport = new Error('TypeError: fetch failed: ECONNREFUSED');
+      onerror(transport);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 
     it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
