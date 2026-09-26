@@ -36,7 +36,7 @@ Activation is immutable and idempotent per Runtime Session. Release closes the g
 
 Add a SQL ownership row keyed by tenant and storage ID, rather than cwd or Workspace generation. The holder names the Runtime binding/generation and Runtime Session. Acquisition is transactional and idempotent for the same holder; another holder receives retryable `workspace_busy`. Holding the entire Runtime Session serializes its tool turn, including reads that establish the write baseline. Independent storage proceeds concurrently.
 
-The row has no automatic takeover deadline. A Broker crash, failed installation, ambiguous execute, or unknown physical outcome leaves it held. Retrying the original Runtime Session can reconcile its evidence; a new Session cannot assume that a timer stopped the old process. Recovery/administrative cleanup requires physical stop evidence and belongs to W0e.
+The row has no automatic takeover deadline. Before claiming it, the server refuses a missing or noncanonical Session directory; this deterministic local refusal cannot block another Session on the same storage. The worker rechecks the directory after the claim. A Broker crash, failed installation after that check, ambiguous execute, or unknown physical outcome leaves the row held. Worker version skew or removal between the two directory checks can therefore still retain ownership. Retrying the original Runtime Session can reconcile its evidence; a new Session cannot assume that a timer stopped the old process. Recovery/administrative cleanup requires physical stop evidence and belongs to W0e.
 
 Release first asks the original worker to close the activation gate and report that no admitted invocation remains active, then conditionally clears the same SQL holder. Failed or stale release cannot clear another holder. The Broker's existing execution journal additionally prevents releasing unresolved calls. A lost release response is retried against the same closed gate. Full Hosted turns must extend ownership through their history commit before this path can be advertised for product use.
 
@@ -56,7 +56,7 @@ Affected components: the server's embedded Broker, configuration and Registry/st
 - Use actual W0b SQL creation receipts and persisted bindings. Change defaults and Registry configuration references after creation; execution must keep its original pair or reject it.
 - Exercise real Read/Write/Edit/Shell in two roots and nested directories; same-storage Sessions must serialize while different storage can progress.
 - Refuse unknown profiles, missing roots, symlinks, wrong storage/generation, revoked grants, deleted Sessions and foreign activation receipts before new execution.
-- Test two SQL clients contending for one storage row, stale release, retained ownership after ambiguous execution, release retry and original status/cancel after directory loss.
+- Test two SQL clients contending for one storage row, refusal of missing or linked Session directories before ownership, stale release, retained ownership after ambiguous execution, release retry and original status/cancel after directory loss.
 - Keep legacy tests green. Run build, typecheck, bundle, Java verification/Checkstyle, focused worker tests, independent E2E and two clean self-audit passes.
 
 ## Open boundaries

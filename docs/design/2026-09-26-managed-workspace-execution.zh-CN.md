@@ -36,7 +36,7 @@ worker 新增独立于封闭目录安装信封的有界、鉴权激活路由。�
 
 新增以租户和存储 ID 为键的 SQL 归属行，不按 cwd 或 Workspace generation 分割。持有者包含 Runtime binding/generation 和 Runtime Session。获取操作在事务中完成，同一持有者可幂等重试；其他持有者收到可重试的 `workspace_busy`。整个 Runtime Session 持有归属，使其工具轮次（包括建立写入基线的读取）串行化。独立存储可并发执行。
 
-归属行没有自动接管期限。Broker 崩溃、安装失败、execute 结果不明或物理状态未知时仍保留占用。原 Runtime Session 可重试并核对证据；新 Session 不能假定计时器已经停止旧进程。恢复/管理清理需要物理停止证据，属于 W0e。
+归属行没有自动接管期限。服务端在占用前拒绝缺失或非规范的 Session 目录；这种确定性的本地拒绝不会阻塞同一存储的其他 Session。worker 会在占用后重新检查目录。Broker 崩溃、该检查之后的安装失败、execute 结果不明或物理状态未知时仍保留占用。因此，worker 版本错配或两次目录检查之间发生删除，仍可能保留归属。原 Runtime Session 可重试并核对证据；新 Session 不能假定计时器已经停止旧进程。恢复/管理清理需要物理停止证据，属于 W0e。
 
 release 先请求原 worker 关闭激活门禁并报告没有已准入的活动调用，再按原持有者条件清除 SQL 归属。失败或过时 release 不能清除其他持有者。Broker 的已有执行日志也会阻止释放未解决调用。release 响应丢失时，对同一已关闭门禁重试。完整 Hosted Turn 还必须将归属延续到 history commit，之后才能为产品使用广播此能力。
 
@@ -56,7 +56,7 @@ release 先请求原 worker 关闭激活门禁并报告没有已准入的活动�
 - 使用真实 W0b SQL 创建回执与持久化绑定。创建后修改默认值和 Registry 配置引用；执行必须保留原引用对或拒绝。
 - 在两个根与嵌套目录运行真实 Read/Write/Edit/Shell；相同存储的 Session 必须串行，不同存储可并发。
 - 未知档案、缺失根、符号链接、错误存储/generation、撤权、已删除 Session 和外来激活回执必须在新执行之前拒绝。
-- 验证两个 SQL 客户端竞争同一存储行、过时 release、结果不明后保留归属、release 重试，以及目录丢失后原调用的 status/cancel。
+- 验证两个 SQL 客户端竞争同一存储行、缺失或链接的 Session 目录在占用前被拒绝、过时 release、结果不明后保留归属、release 重试，以及目录丢失后原调用的 status/cancel。
 - 保持 legacy 测试通过；执行 build、typecheck、bundle、Java verify/Checkstyle、相关 worker 测试、独立 E2E 和两轮无发现自审。
 
 ## 尚未覆盖的边界

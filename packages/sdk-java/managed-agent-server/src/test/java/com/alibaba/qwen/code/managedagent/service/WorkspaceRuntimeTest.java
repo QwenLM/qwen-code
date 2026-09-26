@@ -208,6 +208,20 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void refusesMissingOrLinkedSessionDirectoryBeforeClaimingStorage() throws Exception {
+        for (String cwd : List.of("missing", "link")) {
+            SessionRecord session = createSession("storage", cwd);
+            var fixture = transport(session);
+            if (cwd.equals("link")) {
+                Files.createSymbolicLink(temp.resolve("link"), Files.createDirectory(temp.resolve("outside")));
+            }
+            assertUnavailable(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+            verify(fixture.http(), never()).installContext(any(), any(), any(), any());
+            authority.claim(session.workspace(), holder(session, "rival"));
+        }
+    }
+
+    @Test
     void rechecksAuthorityBeforeNewDispatchButAllowsOriginalCleanupAfterRevocation() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
