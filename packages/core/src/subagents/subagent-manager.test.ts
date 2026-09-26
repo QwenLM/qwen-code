@@ -115,6 +115,27 @@ describe('SubagentManager', () => {
         { name: 'write_file', displayName: 'Write File' },
         { name: 'grep', displayName: 'Search Files' },
       ]),
+      // `resolveBundledReferenceRoute` reads tool presence through
+      // `getAllToolNames()` (it counts lazy factories) and bails out to
+      // 'skill' when the answer is not an array — so without this stub every
+      // surface assertion below resolves to 'pointer' for that reason alone,
+      // whatever the case stubbed. The list carries both bridge halves so a
+      // permission-deferred Skill tool can reach 'skill-via-tool-search'.
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue([
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.GREP,
+          ToolNames.SKILL,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ]),
+      // `isToolDeferredBehindToolSearch` asks the REGISTRY, not the
+      // PermissionManager, so the deferred cases have to stub both halves of
+      // their own verdict. Default false: nothing is eager-hidden unless a
+      // case says so.
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
       // `buildSubagentContextOverride` now rebuilds the tool registry on
       // its override and copies discovered tools from this parent
       // registry. The real implementation iterates `source.tools.values()`,
@@ -4316,10 +4337,19 @@ bad`);
           getToolRegistrationStatus: async (name: string) =>
             name === ToolNames.SKILL ? 'deferred' : 'registered',
         } as unknown as ReturnType<Config['getPermissionManager']>);
+        // The route resolver asks the REGISTRY whether the schema is
+        // withheld, so the deferral needs stubbing on both sides before the
+        // surface can be the bridge one. Without it this asserts 'pointer'
+        // — a session-manager surface the deferred launch never produces.
+        vi.mocked(mockToolRegistry.isPermissionDeferred).mockImplementation(
+          (name: string) => name === ToolNames.SKILL,
+        );
 
         const context = await launch({});
         expect(context.getSkillManager()).toBe(sessionManager);
-        expect(resolveAgentDelegationSurface(context)).toBe('pointer');
+        expect(resolveAgentDelegationSurface(context)).toBe(
+          'pointer-via-tool-search',
+        );
       });
 
       it('withholds the manager from a Direct-mode agent whose declarations name no bridge half', async () => {
@@ -4341,10 +4371,16 @@ bad`);
         expect(resolveAgentDelegationSurface(context)).toBe('inline');
       });
 
-      it('keeps the manager for a Direct-mode agent that declares both bridge halves', async () => {
-        // Control for the case above: the same session, but these
-        // declarations leave the bridge standing, so the deferred Skill tool
-        // stays reachable and the pointer is followable.
+      it('withholds the manager from a Direct-mode agent whose bridge halves cannot invoke skill', async () => {
+        // Both halves are declared, so the bridge RESOLVES `skill` — and the
+        // scheduler then refuses the resolved target, because a finite
+        // `tools` list doubles as the invocation allowlist
+        // (`getConfiguredToolExecutionAllowlist()` returns exactly the
+        // declared names) and this one omits `skill`. Keeping the manager
+        // here would hand out a pointer to a call that ends in
+        // EXECUTION_DENIED, so this list withholds exactly like one that
+        // named no bridge half. Naming `skill` alongside the halves is what
+        // makes the route followable — see the policy matrix.
         vi.spyOn(mockConfig, 'getPermissionManager').mockReturnValue({
           getToolRegistrationStatus: async (name: string) =>
             name === ToolNames.SKILL ? 'deferred' : 'registered',
@@ -4357,8 +4393,8 @@ bad`);
             ToolNames.TOOL_CALL,
           ],
         });
-        expect(context.getSkillManager()).toBe(sessionManager);
-        expect(resolveAgentDelegationSurface(context)).toBe('pointer');
+        expect(context.getSkillManager()).toBeNull();
+        expect(resolveAgentDelegationSurface(context)).toBe('inline');
       });
 
       it('withholds the manager when a deny rule unregisters the Skill tool', async () => {

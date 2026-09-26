@@ -302,19 +302,39 @@ describe('subagent plan tool policy', () => {
     // that inherits the registry, so a deferred Skill tool is still
     // reachable there — but ONLY there. An explicit list that named neither
     // half declares no route, and the Agent tool's description would point
-    // at two tools prepareTools() never declared.
+    // at two tools prepareTools() never declared. An explicit list is also
+    // the invocation allowlist, so both halves on their own are not enough:
+    // `skill` must survive that list too, or the scheduler re-gates the
+    // resolved bridge target and refuses it (withholds matrix below).
     it.each([
       ['a wildcard', { tools: ['*'] }],
       ['an empty list', { tools: [] }],
       ['no tool config', undefined],
       [
-        'an explicit list naming both bridge halves',
+        'an explicit list naming both bridge halves and skill',
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+            ToolNames.SKILL,
+          ],
+        },
+      ],
+      [
+        "a fork's declaration snapshot naming both bridge halves",
         {
           tools: [
             ToolNames.READ_FILE,
             ToolNames.TOOL_SEARCH,
             ToolNames.TOOL_CALL,
           ],
+          // A fork's `tools` is a declaration snapshot, not the invocation
+          // allowlist: `getConfiguredToolExecutionAllowlist()` returns
+          // undefined once `executionAllowedTools` is present, so the bridge
+          // target is gated by that list instead and the finite `tools` no
+          // longer has to name `skill`.
+          executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SKILL],
         },
       ],
     ])(
@@ -337,6 +357,16 @@ describe('subagent plan tool policy', () => {
         { tools: [ToolNames.TOOL_SEARCH] },
       ],
       [
+        'an explicit list naming both bridge halves but not skill',
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+      ],
+      [
         'a wildcard that disallows tool_search',
         { tools: ['*'], disallowedTools: [ToolNames.TOOL_SEARCH] },
       ],
@@ -345,7 +375,7 @@ describe('subagent plan tool policy', () => {
         { tools: ['*'], disallowedTools: [ToolNames.TOOL_CALL] },
       ],
     ])(
-      'withholds skills from a Direct-mode agent whose declarations leave no bridge: %s',
+      'withholds skills from a Direct-mode agent whose declarations leave no usable bridge: %s',
       (_label, toolConfig) => {
         expect(
           toolConfigAllowsSkill(toolConfig, { skillRegistration: 'deferred' }),

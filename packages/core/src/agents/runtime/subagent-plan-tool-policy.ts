@@ -96,7 +96,11 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * also called from the parent's frame, so it checks the raw
  * `EXCLUDED_TOOLS_FOR_SUBAGENTS` set instead; the second cannot be read from
  * a `ToolConfig` at all, so it arrives as `options.skillRegistration`
- * (below). A filter added to `prepareTools()` propagates here only by hand.
+ * (below). A third filter is not `prepareTools()`' at all: the
+ * invocation-level allowlist the `deferred` arm below has to respect lives in
+ * `AgentCore.isToolExecutionAllowed()`, and only its finite-list shape is
+ * mirrored here. A filter added to `prepareTools()` propagates here only by
+ * hand.
  *
  * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
  * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
@@ -127,15 +131,19 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  *   `disabled` Skill tool is never registered, so nothing reaches it; a
  *   `deferred` one keeps its registration but loses its declaration, so the
  *   `tool_search` + `tool_call` bridge is the only route left — and that
- *   route exists only where these declarations leave both halves standing
- *   and the session is not under CodeModeOnly, which hides them.
+ *   route exists only where these declarations leave both halves standing,
+ *   still admit `skill` at invocation level, and the session is not under
+ *   CodeModeOnly, which hides them.
  *
  * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
  * agent cannot follow, a wrong `false` takes skills away from an agent that
- * could load them. That is also why `executionAllowedTools` is not consulted:
- * the only agents that carry one are forks, which reuse the parent's
- * declarations for cache reasons and never rebuild the listing, and reading
- * it correctly under CodeModeOnly would need the same `exec` carve-out again.
+ * could load them. `executionAllowedTools` is read only as that escape hatch:
+ * its presence means a finite `tools` list is a fork's declaration snapshot
+ * rather than the invocation allowlist, so the bridge is credited without
+ * asking which names the fork may actually execute. Reading it correctly
+ * under CodeModeOnly would need the same `exec` carve-out again, and forks
+ * reuse the parent's declarations for cache reasons and never rebuild the
+ * listing.
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
@@ -185,12 +193,20 @@ export function toolConfigAllowsSkill(
     names.includes('*') ||
     (names.length === 0 && inlineDeclarations.length === 0);
   if (deferred) {
-    // Naming `skill` buys nothing here — the declaration is dropped by the
-    // eager allowlist — so the route lives or dies with the bridge, and
-    // `resolveBundledReferenceRoute` needs BOTH halves to call it a route:
-    // with `tool_search` alone the schema can be reviewed but never invoked.
-    // This mirrors what `prepareTools()` actually declares, so an explicit
-    // list that never named the bridge cannot be told to use it (#12424).
+    // The eager allowlist drops `skill` from the declarations, so the route
+    // lives or dies with the bridge, and `resolveBundledReferenceRoute` needs
+    // BOTH halves to call it a route: with `tool_search` alone the schema can
+    // be reviewed but never invoked. Leaving both halves standing is still
+    // not enough. A finite `tools` list doubles as the invocation allowlist —
+    // `AgentCore.getConfiguredToolExecutionAllowlist()` returns exactly the
+    // declared names — and the scheduler re-gates the bridge's RESOLVED
+    // target against it, so a list that omits `skill` resolves the call only
+    // to refuse it with EXECUTION_DENIED. That allowlist is `undefined`, and
+    // the invocation gate with it, exactly where the registry is inherited or
+    // where the config carries its own `executionAllowedTools`; those two
+    // shapes answer on the bridge alone. Only the declaration-level half of
+    // this arm is mirrored from `prepareTools()`, so an explicit list that
+    // never named the bridge cannot be told to use it (#12424).
     if (bridgeHidden) {
       return false;
     }
@@ -198,7 +214,10 @@ export function toolConfigAllowsSkill(
       (inheritsRegistry || names.includes(toolName)) && !isDisallowed(toolName);
     return (
       declaresBridge(ToolNames.TOOL_SEARCH) &&
-      declaresBridge(ToolNames.TOOL_CALL)
+      declaresBridge(ToolNames.TOOL_CALL) &&
+      (inheritsRegistry ||
+        names.includes(ToolNames.SKILL) ||
+        toolConfig.executionAllowedTools !== undefined)
     );
   }
   const reachesSkillThroughExec =
