@@ -27,6 +27,11 @@ import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
+  BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+  INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+} from './agent-view/entry-flags.js';
+import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
   handleCriticalError,
@@ -51,6 +56,9 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runAsAgentViewSupervisor: vi.fn(),
+  runAsAgentViewPtyHost: vi.fn(),
+  runBackgroundDispatch: vi.fn(),
 }));
 
 vi.mock('./llm.js', () => ({
@@ -81,6 +89,20 @@ vi.mock('./utils/version.js', () => ({
 vi.mock('./utils/managed-npm-update.js', () => ({
   installManagedNpmUpdate: mocks.installManagedNpmUpdate,
 }));
+
+vi.mock('./agent-view/background-entry.js', async (importOriginal) => {
+  // Keep the real readBackgroundPrompt: the entry tests pin how the raw
+  // argv scan is wired, and only the two side-effectful functions are
+  // mocked.
+  const actual =
+    await importOriginal<typeof import('./agent-view/background-entry.js')>();
+  return {
+    ...actual,
+    runAsAgentViewSupervisor: mocks.runAsAgentViewSupervisor,
+    runAsAgentViewPtyHost: mocks.runAsAgentViewPtyHost,
+    runBackgroundDispatch: mocks.runBackgroundDispatch,
+  };
+});
 
 vi.mock('./commands/mcp.js', () => ({
   mcpCommand: {
@@ -1047,6 +1069,163 @@ describe('runCliEntry', () => {
     expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 
+  describe('Agent View entry intercepts', () => {
+    it('runs a process spawned with the internal flag as the supervisor', async () => {
+      await runCliEntry([INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).toHaveBeenCalledTimes(1);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('scrubs the Guard token before either intercept can spawn a child', async () => {
+      // Both intercepts return before the full startup path, so the
+      // route-level scrub above them is the only thing keeping the
+      // serve-only credential out of the supervisor they spawn.
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+      mocks.runAsAgentViewSupervisor.mockImplementationOnce(async () => {
+        expect(
+          process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+        ).toBeUndefined();
+      });
+
+      await runCliEntry([INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).toHaveBeenCalledTimes(1);
+
+      mocks.runBackgroundDispatch.mockImplementationOnce(async () => {
+        expect(
+          process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+        ).toBeUndefined();
+        return 0;
+      });
+
+      await runCliEntry([BACKGROUND_FLAG, 'audit']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
+    });
+
+    it('does not treat a supervisor flag after `--` as a spawn', async () => {
+      await runCliEntry(['-p', 'x', '--', INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches a background session and reports its exit code', async () => {
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'audit the release']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'audit the release',
+      );
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('leaves a subcommand launch to the parser instead of dispatching it', async () => {
+      await runCliEntry(['sessions', 'ps', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets the version intercept win over --bg', async () => {
+      await runCliEntry(['--version', BACKGROUND_FLAG]);
+
+      expect(stdout.join('')).toContain('9.9.9');
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+    });
+
+    it('declines a --bg that is the user’s own data after `--`', async () => {
+      await runCliEntry(['-p', 'x', '--', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('names a flag --bg does not honor instead of dropping it', async () => {
+      await runCliEntry([BACKGROUND_FLAG, '--yolo', 'audit']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('--yolo');
+    });
+
+    it('runs a process spawned as a PTY host, with its two operands', async () => {
+      // The supervisor spawns every session's host as the CLI entry plus
+      // this internal flag; unparsed, the child died in the strict parser
+      // and no dispatched session ever got a worker.
+      await runCliEntry([
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/q/jobs/s/launch.json',
+        '/q/jobs/s/pty-host.sock',
+      ]);
+
+      expect(mocks.runAsAgentViewPtyHost).toHaveBeenCalledWith(
+        '/q/jobs/s/launch.json',
+        '/q/jobs/s/pty-host.sock',
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reports a PTY host spawn missing an operand instead of parsing it', async () => {
+      await runCliEntry([INTERNAL_AGENT_VIEW_PTY_HOST_ARG, '/q/launch.json']);
+
+      expect(mocks.runAsAgentViewPtyHost).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('does not hijack a query that only mentions --bg', async () => {
+      // A token sitting in the prompt is the user's data. Deciding on bare
+      // presence turned an ordinary question into a background dispatch.
+      await runCliEntry(['explain', 'what', BACKGROUND_FLAG, 'does']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches a prompt whose first word is a command name', async () => {
+      // A leading `--bg` is the whole intent. Gating on the first
+      // positional sent this to the parser, which accepted `--bg` as a
+      // registered option nothing reads and started an interactive
+      // session instead of a background one.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'review', 'the', 'release', 'notes']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'review the release notes',
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reads the prompt from the normalized argv, not the launch path', async () => {
+      // In the packaged launch shape the first raw token is the CLI entry
+      // path; read as a prompt word it dispatches the wrong task and
+      // reports it as started.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry(['/x/dist/qwen-cli/cli.js', BACKGROUND_FLAG, 'audit']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
+    });
+
+    it('declines a version token in an unquoted prompt instead of printing one', async () => {
+      // The version scan is position-independent, so it used to win over
+      // the launch: a version on stdout, exit code 0, nothing dispatched.
+      await runCliEntry([BACKGROUND_FLAG, 'explain', 'the', '-v', 'flag']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('-v');
+    });
+  });
+
   it('loads gemini on the default path', async () => {
     await runCliEntry([]);
 
@@ -1458,6 +1637,67 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(output).toBe(`${expectedVersion}\n`);
+  });
+
+  it('leaves a leading --bg prompt to cli.js instead of answering -v', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-entry-bg-'));
+    const entryPath = path.join(tempDir, 'cli-entry.mjs');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      // A stub cli.js rather than the built one: both wrapper version
+      // shortcuts fire before cli.js is imported, so "the stub was reached
+      // with argv intact" is the entire assertion and needs no build. The
+      // distinctive version tells shortcut #2 (package.json) apart from a
+      // real forward.
+      writeFileSync(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({ name: 'stub', version: '9.9.9-stub' }),
+      );
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        'process.stdout.write(JSON.stringify({ args: process.argv.slice(2) }));\n',
+      );
+      const childEnv = { ...process.env };
+      delete childEnv['CLI_VERSION'];
+      const runRaw = (args: string[], env: NodeJS.ProcessEnv) =>
+        execFileSync(process.execPath, [entryPath, ...args], {
+          encoding: 'utf8',
+          env,
+        });
+      const runForwarded = (args: string[]) =>
+        JSON.parse(runRaw(args, childEnv)) as { args: string[] };
+
+      // `--bg` owns every token after it, and cli.ts reads the prompt ahead
+      // of its own version route. A bare `-v` in an unquoted prompt is
+      // therefore prompt data: the wrapper must forward it so cli.js can
+      // decline the launch, not print a version and exit 0 with nothing
+      // dispatched. This is the docs' own `qwen --bg explain the -v flag`.
+      expect(runForwarded(['--bg', 'explain', 'the', '-v', 'flag'])).toEqual({
+        args: ['--bg', 'explain', 'the', '-v', 'flag'],
+      });
+      expect(
+        runForwarded(['--bg', 'explain', 'the', '--version', 'flag']),
+      ).toEqual({ args: ['--bg', 'explain', 'the', '--version', 'flag'] });
+      // Forwarded in both CLI_VERSION shapes: shortcut #1 is the one the
+      // official image ships with (Dockerfile sets CLI_VERSION).
+      expect(
+        JSON.parse(
+          runRaw(['--bg', 'explain', 'the', '-v', 'flag'], {
+            ...childEnv,
+            CLI_VERSION: '7.7.7-test',
+          }),
+        ),
+      ).toEqual({ args: ['--bg', 'explain', 'the', '-v', 'flag'] });
+
+      // The two shortcuts themselves are untouched.
+      expect(
+        runRaw(['--version'], { ...childEnv, CLI_VERSION: '7.7.7-test' }),
+      ).toBe('7.7.7-test\n');
+      expect(runRaw(['-v'], childEnv)).toBe('9.9.9-stub\n');
+      expect(runRaw(['--version'], childEnv)).toBe('9.9.9-stub\n');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('resolves and pins managed updates from the configured home', () => {

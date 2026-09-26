@@ -51,10 +51,12 @@ import {
   patchAgentViewSessionStateIf,
   readAgentViewLaunch,
   readAgentViewActivity,
+  readAgentViewRoster,
   readAgentViewRosterStrict,
   readAgentViewSessionState,
   readAgentViewWorker,
   redactAgentViewActivity,
+  redactAgentViewLaunch,
   redactAgentViewWorker,
   removeAgentViewRosterEntry,
   sanitizeSessionId,
@@ -1109,10 +1111,24 @@ class AgentViewSupervisorProcessHandler
     if (activity !== storedActivity) {
       this.notifyChanged();
     }
+    // The same join `listAgentViewSessionSnapshots` does for `sessions
+    // ps`: the title derives from the roster entry, the summary and the
+    // launch prompt in that order, so peek and ps cannot name the same
+    // session two different ways. The roster read is the soft-fail one —
+    // peek reports a session rather than making safety decisions on the
+    // entry, so an unreadable roster degrades to the untitled placeholder
+    // instead of failing the whole read.
+    const roster = await readAgentViewRoster(store);
     return {
       sessionId,
       state,
       activity: redactAgentViewActivity(activity),
+      rosterEntry: roster.sessions.find(
+        (entry) => sanitizeSessionId(entry.sessionId) === sessionId,
+      ),
+      launch: redactAgentViewLaunch(
+        await readAgentViewLaunch(sessionId, store),
+      ),
       worker: redactAgentViewWorker(
         await readAgentViewWorker(sessionId, store),
       ),

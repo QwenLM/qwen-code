@@ -51,7 +51,16 @@ function isInProcessFastPath() {
   return false;
 }
 
+// A leading `--bg` is exactly the argv cli.ts intercepts ahead of its own
+// version route (`entryToken === BACKGROUND_FLAG`), and `--bg` owns every
+// token after it: a bare `-v` in an unquoted prompt is prompt data, so it has
+// to reach cli.js. Answering it here printed a version and exited 0 with
+// nothing dispatched — which is what the docs' own `qwen --bg explain the -v
+// flag` example hit. The test is an exact-token match because that is the
+// match cli.ts uses; `--bg=…` is not a background launch, so it keeps the
+// wrapper's ordinary behaviour.
 const isTopLevelVersion =
+  cliArgs[0] !== '--bg' &&
   (cliArgs[0] === undefined || cliArgs[0].startsWith('-')) &&
   hasFlag('--version', '-v');
 

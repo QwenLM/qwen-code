@@ -121,6 +121,7 @@ import {
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
+import { registerBackgroundAgentRoutes } from './routes/background-agents.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -2453,6 +2454,19 @@ export function createServeApp(
       );
     });
   }
+  // Background agents are owned by the Agent View supervisor, not by this
+  // daemon, so they appear in none of the session routes above. The gate
+  // is wired with the same predicate every other primary-workspace route
+  // uses, so an untrusted workspace is refused here exactly as elsewhere.
+  // The supervisor's store is process-global, so the route is also handed
+  // the bound workspace to scope its rows by — otherwise the predicate
+  // would vouch for one workspace while the response described all of
+  // them.
+  registerBackgroundAgentRoutes(app, {
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    boundWorkspace: primaryBoundWorkspace,
+  });
+
   registerCapabilitiesRoutes(app, {
     hostedHarness,
     qwenCodeVersion: deps.qwenCodeVersion,

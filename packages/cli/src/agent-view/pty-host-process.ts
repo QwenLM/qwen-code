@@ -31,9 +31,12 @@ import {
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { INTERNAL_AGENT_VIEW_PTY_HOST_ARG } from './entry-flags.js';
 
-export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
-  '--internal-agent-view-pty-host';
+// The entry recognizes this flag before it parses anything, so it lives
+// in the module the entry can afford to import; re-exported here for the
+// spawn below and for this module's own tests.
+export { INTERNAL_AGENT_VIEW_PTY_HOST_ARG };
 
 // Wall budget ≈ 15 s once per-probe request timeouts are counted.
 const HOST_READY_RETRIES = 50;

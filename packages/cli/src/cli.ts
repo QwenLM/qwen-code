@@ -22,6 +22,11 @@ import {
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
+import {
+  BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+  INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+} from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
@@ -541,6 +546,71 @@ export async function runCliEntry(
     // serve route keeps it until either the fast path or full serve handler
     // has captured it into daemon-local options.
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+  }
+
+  // Agent View's entry intercepts, ahead of the version route and the
+  // parser, and after the guard-token scrub above so the serve-only
+  // credential never reaches a child they spawn. Each fires only when its
+  // token LEADS the argv: the same token anywhere else is prompt data, and
+  // a scan that matched one anywhere would hand `qwen explain what --bg
+  // does` to the dispatch path. Leading is also the only shape these
+  // tokens arrive in — `qwen --bg "<prompt>"`, and the two argv shapes the
+  // supervisor spawns (`--internal-agent-view-supervisor`, and
+  // `--internal-agent-view-pty-host <launch record> <socket>`). The dynamic
+  // import stays gated on that one-token test, so an ordinary launch pays
+  // nothing.
+  const entryToken = argv[0];
+
+  if (entryToken === INTERNAL_AGENT_VIEW_SUPERVISOR_ARG) {
+    const { runAsAgentViewSupervisor } = await import(
+      './agent-view/background-entry.js'
+    );
+    await runAsAgentViewSupervisor();
+    return;
+  }
+
+  // Neither internal flag is in any parser, and the strict parser below
+  // rejects an unknown argument — which is why the spawned supervisor
+  // never served, and why a dispatched session's PTY host never came up.
+  if (entryToken === INTERNAL_AGENT_VIEW_PTY_HOST_ARG) {
+    const launchPath = argv[1];
+    const socketPath = argv[2];
+    if (launchPath === undefined || socketPath === undefined) {
+      writeStderrLine(
+        `${INTERNAL_AGENT_VIEW_PTY_HOST_ARG} needs the launch record path and the socket path.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const { runAsAgentViewPtyHost } = await import(
+      './agent-view/background-entry.js'
+    );
+    await runAsAgentViewPtyHost(launchPath, socketPath);
+    return;
+  }
+
+  // `--bg` needs a prompt and a directory, nothing else the interactive
+  // startup path would load. It is read ahead of the version route because
+  // that route's scan is position-independent: a `-v` sitting in an
+  // unquoted prompt would otherwise print a version and exit 0 with
+  // nothing dispatched. An explicit `--help` still wins — asking for help
+  // is not a launch.
+  if (entryToken === BACKGROUND_FLAG && route !== 'help') {
+    const { readBackgroundPrompt, runBackgroundDispatch } = await import(
+      './agent-view/background-entry.js'
+    );
+    const read = readBackgroundPrompt(argv);
+    if (read !== undefined) {
+      if ('prompt' in read) {
+        process.exitCode = await runBackgroundDispatch(read.prompt);
+      } else {
+        writeStderrLine(
+          `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
+        );
+        process.exitCode = 1;
+      }
+      return;
+    }
   }
 
   if (route === 'version') {
