@@ -218,6 +218,67 @@ describe('cleanupStaleAgentWorktrees', () => {
     expect(removed).toBe(1);
   });
 
+  it('still reaps a stale worktree whose node_modules is a symlink (worktree.symlinkDirectories)', async () => {
+    const target = path.join(repoRoot, 'node_modules', 'x');
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, 'i.js'), '//\n');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    // The fixture's `node_modules/` ignore rule is directory-only, so git
+    // lists the link as `?? node_modules` — the shape the fix exempts.
+    await fs.symlink(
+      path.join(repoRoot, 'node_modules'),
+      path.join(wtPath, 'node_modules'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    // Reaping unlinks the symlink; the shared target must survive.
+    await expect(fs.access(path.join(target, 'i.js'))).resolves.toBeUndefined();
+  });
+
+  it('still reaps a stale worktree holding only a workspace package install', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    // The fixture's `node_modules/` rule matches at any depth, so git
+    // reports `!! packages/app/node_modules/` — a monorepo install.
+    await fs.mkdir(path.join(wtPath, 'packages', 'app', 'node_modules', 'x'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(wtPath, 'packages', 'app', 'node_modules', 'x', 'i.js'),
+      '//\n',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
+  });
+
+  it('preserves a stale worktree holding a nested ignored directory outside the disposable set', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    // `secret.env` matches at any depth; whether git collapses this to
+    // `!! packages/app/` or lists the file, it is not disposable output.
+    await fs.mkdir(path.join(wtPath, 'packages', 'app'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(wtPath, 'packages', 'app', 'secret.env'),
+      'AWS_KEY=x\n',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'packages', 'app', 'secret.env')),
+    ).resolves.toBeUndefined();
+  });
+
   it('reads a directory with no .git of its own as dirty, not as the enclosing repo', async () => {
     // A path inside a valid repo whose own .git is gone (a sweep's rm that
     // threw partway): without the guard, git's upward discovery answers
