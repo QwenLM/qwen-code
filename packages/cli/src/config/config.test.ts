@@ -2960,6 +2960,28 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([undefined, 'legacy'] as const)(
+    'passes the paired host engine %s to the session Config',
+    async (executionEngine) => {
+      await loadCliConfig(
+        {},
+        {} as CliArgs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        executionEngine ? { executionEngine } : undefined,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionExecutionEngine: executionEngine }),
+      );
+    },
+  );
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
