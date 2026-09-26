@@ -13,6 +13,7 @@ import {
   INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
   useLlmStream,
 } from './use-llm-stream.js';
+import type { CommandIdleState } from '../utils/command-idle-state.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -190,9 +191,11 @@ vi.mock('../utils/markdownUtilities.js', async (importOriginal) => {
   };
 });
 
+const mockLogMessage = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
 vi.mock('./useLogger.js', () => ({
   useLogger: vi.fn().mockReturnValue({
-    logMessage: vi.fn().mockResolvedValue(undefined),
+    logMessage: mockLogMessage,
   }),
 }));
 
@@ -333,6 +336,7 @@ describe('useLlmStream', () => {
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
+    mockLogMessage.mockReset().mockResolvedValue(undefined);
 
     // Mock return value for useReactToolScheduler
     mockScheduleToolCalls = vi.fn();
@@ -383,6 +387,14 @@ describe('useLlmStream', () => {
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
+    initialHistory: HistoryItem[] = [],
+    commandIdleStateRef: { current: CommandIdleState } = {
+      current: {
+        streamingState: StreamingState.Idle,
+        localCommandDispatchStartedIdle: false,
+        activeModelStreams: 0,
+      },
+    },
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -409,7 +421,7 @@ describe('useLlmStream', () => {
 
     const baseProps = {
       client,
-      history: [] as HistoryItem[],
+      history: initialHistory,
       addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
       config: mockConfig,
       onDebugMessage: mockOnDebugMessage,
@@ -465,6 +477,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          commandIdleStateRef,
         );
       },
       {
@@ -491,6 +504,9 @@ describe('useLlmStream', () => {
       },
       rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
         rerender({ ...baseProps, toolCalls }),
+      rerenderWithHistory: (history: HistoryItem[]) =>
+        rerender({ ...baseProps, history }),
+      commandIdleStateRef,
     };
   };
 
@@ -13364,6 +13380,259 @@ describe('useLlmStream', () => {
       });
     });
 
+    it('keeps slash command dispatch idle without hiding the responding state', async () => {
+      let releaseLog!: () => void;
+      mockLogMessage.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLog = resolve;
+          }),
+      );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const onCancelSubmit = vi.fn();
+      const hook = renderTestHook([], undefined, undefined, onCancelSubmit, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+
+      let submitPromise!: Promise<void>;
+      await act(async () => {
+        submitPromise = hook.result.current.submitQuery('/cd D:/Games');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalled());
+      expect(hook.result.current.streamingState).toBe(
+        StreamingState.Responding,
+      );
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+      act(() => {
+        hook.result.current.cancelOngoingRequest();
+      });
+      expect(onCancelSubmit).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        releaseLog();
+        await submitPromise;
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
+
+      let releaseStream!: () => void;
+      mockSendMessageStream.mockImplementationOnce(() =>
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Content,
+            value: 'Follow-up response',
+          };
+          await new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+        })(),
+      );
+      let followUpPromise!: Promise<void>;
+      await act(async () => {
+        followUpPromise = hook.result.current.submitQuery('follow-up request');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      expect(hook.result.current.streamingState).toBe(
+        StreamingState.Responding,
+      );
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
+      await act(async () => {
+        releaseStream();
+        await followUpPromise;
+      });
+      expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('does not let an older cancelled slash dispatch clear a newer dispatch', async () => {
+      let releaseFirstLog!: () => void;
+      let releaseSecondLog!: () => void;
+      mockLogMessage
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseFirstLog = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseSecondLog = resolve;
+            }),
+        );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const onCancelSubmit = vi.fn();
+      const hook = renderTestHook([], undefined, undefined, onCancelSubmit, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+
+      let firstSubmission!: Promise<void>;
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        firstSubmission = hook.result.current.submitQuery('/cmd-a');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        hook.result.current.cancelOngoingRequest();
+      });
+      expect(onCancelSubmit).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(hook.result.current.streamingState).toBe(StreamingState.Idle),
+      );
+
+      await act(async () => {
+        secondSubmission = hook.result.current.submitQuery('/cmd-b');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(2));
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+      await act(async () => {
+        releaseFirstLog();
+        await firstSubmission;
+      });
+      expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+
+      await act(async () => {
+        releaseSecondLog();
+        await secondSubmission;
+      });
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
+    });
+
+    it('does not expose command-idle while a detached continuation streams', async () => {
+      let releaseLog!: () => void;
+      let releaseToolStream!: () => void;
+      const commandIdleStateRef = {
+        current: {
+          streamingState: StreamingState.Idle,
+          localCommandDispatchStartedIdle: false,
+          activeModelStreams: 0,
+        },
+      };
+      mockLogMessage.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLog = resolve;
+          }),
+      );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+
+      const hook = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        {
+          logMessage: mockLogMessage,
+        } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>,
+        undefined,
+        false,
+        [],
+        commandIdleStateRef,
+      );
+      let slashRequest!: Promise<void>;
+      let toolResultRequest!: Promise<void>;
+      const detachedAbortController = new AbortController();
+
+      try {
+        await act(async () => {
+          slashRequest = hook.result.current.submitQuery('/cd D:/Games');
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(mockLogMessage).toHaveBeenCalledTimes(1));
+        expect(hook.result.current.localCommandDispatchIsIdle).toBe(true);
+        expect(
+          commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(true);
+        expect(commandIdleStateRef.current.activeModelStreams).toBe(0);
+
+        mockSendMessageStream.mockImplementationOnce(() =>
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Content,
+              value: 'Detached continuation response',
+            };
+            await new Promise<void>((resolve) => {
+              releaseToolStream = resolve;
+            });
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            };
+          })(),
+        );
+        await act(async () => {
+          toolResultRequest = hook.result.current.submitQuery(
+            'detached tool result',
+            SendMessageType.ToolResult,
+            'detached-prompt',
+            {
+              toolContinuationOwner: {
+                promptId: 'detached-prompt',
+                signal: detachedAbortController.signal,
+                survivesGenerationChange: true,
+                detachedAbortController,
+              },
+            },
+          );
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(releaseToolStream).toBeDefined());
+
+        expect(hook.result.current.streamingState).toBe(
+          StreamingState.Responding,
+        );
+        expect(hook.result.current.localCommandDispatchIsIdle).toBe(false);
+        expect(commandIdleStateRef.current.activeModelStreams).toBe(1);
+
+        await act(async () => {
+          releaseToolStream();
+          await toolResultRequest;
+          releaseLog();
+          await slashRequest;
+        });
+      } finally {
+        await act(async () => {
+          releaseToolStream?.();
+          releaseLog?.();
+          await Promise.allSettled([slashRequest, toolResultRequest]);
+        });
+      }
+    });
+
+    it('resets command-idle state when slash preparation throws', async () => {
+      mockHandleSlashCommand.mockRejectedValueOnce(
+        new Error('command preparation failed'),
+      );
+      const hook = renderTestHook();
+
+      await act(async () => {
+        await expect(
+          hook.result.current.submitQuery('/failing-command'),
+        ).rejects.toThrow('command preparation failed');
+      });
+
+      expect(
+        hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+      ).toBe(false);
+    });
+
     it('should call Gemini with prompt content when slash command returns a `submit_prompt` action', async () => {
       const customCommandResult: SlashCommandProcessorResult = {
         type: 'submit_prompt',
@@ -18353,6 +18622,7 @@ describe('useLlmStream', () => {
   describe('Concurrent Execution Prevention', () => {
     it('should handle /btw as a UI-only command while a main response is in progress', async () => {
       const btwQuery = '/btw quick side question';
+      let releaseLog!: () => void;
       let resolveFirstCall!: () => void;
 
       const firstCallPromise = new Promise<void>((resolve) => {
@@ -18375,9 +18645,13 @@ describe('useLlmStream', () => {
         return false;
       });
 
-      const { result } = renderTestHook();
+      const hook = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      const { result } = hook;
 
       let mainRequest!: Promise<void>;
+      let btwRequest: Promise<void> | undefined;
       await act(async () => {
         mainRequest = result.current.submitQuery('First query');
       });
@@ -18388,15 +18662,61 @@ describe('useLlmStream', () => {
           expect(result.current.streamingState).toBe(StreamingState.Responding);
         });
 
+        const logCallsBeforeBtw = mockLogMessage.mock.calls.length;
+        mockLogMessage.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseLog = resolve;
+            }),
+        );
         await act(async () => {
-          await result.current.submitQuery(btwQuery);
+          btwRequest = result.current.submitQuery(btwQuery);
+          await Promise.resolve();
+        });
+        await waitFor(() =>
+          expect(mockLogMessage).toHaveBeenNthCalledWith(
+            logCallsBeforeBtw + 1,
+            MessageSenderType.USER,
+            btwQuery,
+          ),
+        );
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
+
+        await act(async () => {
+          resolveFirstCall();
+          await mainRequest;
+          hook.rerenderWithHistory([
+            { id: 1, type: MessageType.INFO, text: 'force ref projection' },
+          ]);
+        });
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
+
+        await act(async () => {
+          releaseLog();
+          await btwRequest;
         });
 
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        expect(
+          hook.commandIdleStateRef.current.localCommandDispatchStartedIdle,
+        ).toBe(false);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
-        resolveFirstCall();
-        await mainRequest;
+        await act(async () => {
+          releaseLog?.();
+          resolveFirstCall();
+          await Promise.allSettled([
+            mainRequest,
+            ...(btwRequest ? [btwRequest] : []),
+          ]);
+        });
       }
     });
 
@@ -20676,6 +20996,77 @@ describe('useLlmStream', () => {
         expect(call[0]).not.toHaveProperty('timestamp');
       }
     });
+  });
+
+  it('logs YOLO completion telemetry once after a local slash command settles', async () => {
+    mockConfig.getApprovalMode = () => ApprovalMode.YOLO;
+    let releaseLog!: () => void;
+    mockLogMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLog = resolve;
+        }),
+    );
+
+    const initialHistory: HistoryItem[] = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'reply' },
+    ];
+    const hook = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      { logMessage: mockLogMessage } as unknown as NonNullable<
+        Parameters<typeof useLlmStream>[20]
+      >,
+      undefined,
+      false,
+      initialHistory,
+    );
+
+    await waitFor(() => {
+      expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
+    });
+    mockLogConversationFinishedEvent.mockClear();
+
+    const firstCommandItem: HistoryItem = {
+      id: 3,
+      type: MessageType.INFO,
+      text: 'command started',
+    };
+    const secondCommandItem: HistoryItem = {
+      id: 4,
+      type: MessageType.INFO,
+      text: 'command completed',
+    };
+    mockHandleSlashCommand.mockImplementationOnce(async () => {
+      mockAddItem(firstCommandItem);
+      hook.rerenderWithHistory([...initialHistory, firstCommandItem]);
+      mockAddItem(secondCommandItem);
+      hook.rerenderWithHistory([
+        ...initialHistory,
+        firstCommandItem,
+        secondCommandItem,
+      ]);
+      return { type: 'handled' };
+    });
+
+    let submitPromise!: Promise<void>;
+    await act(async () => {
+      submitPromise = hook.result.current.submitQuery('/local-command');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(mockLogMessage).toHaveBeenCalledOnce());
+    expect(mockLogConversationFinishedEvent).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseLog();
+      await submitPromise;
+    });
+
+    expect(mockHandleSlashCommand).toHaveBeenCalledWith('/local-command');
+    expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
   });
 
   it('excludes sentToModel-false steer items from YOLO turn-count telemetry', async () => {

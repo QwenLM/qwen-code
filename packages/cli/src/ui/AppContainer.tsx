@@ -181,6 +181,10 @@ import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLlmStream, type CancelSubmitInfo } from './hooks/use-llm-stream.js';
+import {
+  isCommandIdle,
+  type CommandIdleState,
+} from './utils/command-idle-state.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
@@ -1465,6 +1469,21 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useLlmStream).
   const isIdleRef = useRef(true);
+  // Slash-command guards need the idle state of the dispatching command,
+  // without making app-wide consumers treat that dispatch as idle.
+  const commandIdleStateRef = useRef<CommandIdleState>({
+    streamingState: StreamingState.Idle as StreamingState,
+    localCommandDispatchStartedIdle: false,
+    activeModelStreams: 0,
+  });
+  const commandIdleRef = useMemo(
+    () => ({
+      get current() {
+        return isCommandIdle(commandIdleStateRef.current);
+      },
+    }),
+    [],
+  );
   // Live content-area height, kept in a ref so useLlmStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -2179,7 +2198,7 @@ export const AppContainer = (props: AppContainerProps) => {
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
-    isIdleRef,
+    commandIdleRef,
     setMemoryFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
@@ -2486,12 +2505,13 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    commandIdleStateRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
 
-  // Now that streamingState is available, keep isIdleRef in sync and
-  // flush any deferred update notifications when the model finishes responding.
+  // Keep the app-wide idle ref narrow for deferred update notifications. The
+  // command-facing ref reads the shared live state synchronously instead.
   isIdleRef.current = streamingState === StreamingState.Idle;
 
   useEffect(() => {
@@ -3390,6 +3410,7 @@ export const AppContainer = (props: AppContainerProps) => {
       if (
         streamingState === StreamingState.Idle &&
         !isProcessing &&
+        !submissionInFlightRef.current &&
         isSlashCommand(submittedValue)
       ) {
         void Promise.resolve(

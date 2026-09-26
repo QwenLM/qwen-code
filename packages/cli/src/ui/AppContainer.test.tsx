@@ -139,6 +139,7 @@ import {
 } from './utils/commandUtils.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './utils/findings-coalescing.js';
 import { ICON } from './constants.js';
+import { setUpdateHandler } from './handleAutoUpdate.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
@@ -388,6 +389,7 @@ describe('AppContainer State Management', () => {
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
   const mockedUseLlmStream = useLlmStream as Mock;
+  const mockedSetUpdateHandler = setUpdateHandler as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
   const mockedUseIdeTrustListener = useIdeTrustListener as Mock;
@@ -3080,6 +3082,131 @@ describe('AppContainer State Management', () => {
       );
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
+
+    it('queues a second slash command while a submission lease is held', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const goalQueueRef = mockedUseLlmStream.mock.lastCall?.at(-2) as
+        | {
+            current: {
+              submissionInFlightRef: { current: boolean };
+            };
+          }
+        | undefined;
+      expect(goalQueueRef?.current.submissionInFlightRef).toBeDefined();
+      goalQueueRef!.current.submissionInFlightRef.current = true;
+
+      capturedUIActions.handleFinalSubmit('/help', {
+        submittedPrompt: '/help',
+      });
+
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '/help',
+        false,
+        '/help',
+        false,
+      );
+    });
+
+    it.each<[StreamingState, boolean, number, boolean]>([
+      [StreamingState.Responding, true, 0, true],
+      [StreamingState.Responding, false, 0, false],
+      [StreamingState.Idle, false, 0, true],
+      [StreamingState.Responding, true, 1, false],
+    ])(
+      'passes command idle state to slash processing (%s, local dispatch idle: %s, active streams: %s)',
+      (
+        streamingState,
+        localCommandDispatchIsIdle,
+        activeModelStreams,
+        expectedCommandIdle,
+      ) => {
+        mockedSetUpdateHandler.mockClear();
+        mockedUseLlmStream.mockImplementation((...args) => {
+          const commandIdleStateRef = args[25] as
+            | {
+                current: {
+                  streamingState: StreamingState;
+                  localCommandDispatchStartedIdle: boolean;
+                  activeModelStreams: number;
+                };
+              }
+            | undefined;
+          if (commandIdleStateRef) {
+            commandIdleStateRef.current.streamingState = streamingState;
+            commandIdleStateRef.current.localCommandDispatchStartedIdle =
+              localCommandDispatchIsIdle;
+            commandIdleStateRef.current.activeModelStreams = activeModelStreams;
+          }
+          return {
+            streamingState,
+            localCommandDispatchIsIdle,
+            submitQuery: vi.fn(),
+            initError: null,
+            pendingHistoryItems: [],
+            thought: null,
+            cancelOngoingRequest: vi.fn(),
+            retryLastPrompt: vi.fn(),
+            streamingResponseLengthRef: { current: 0 },
+            isReceivingContent: false,
+          };
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const commandIdleRef = mockedUseSlashCommandProcessor.mock.calls
+          .map((call) => call[10] as { current: boolean } | undefined)
+          .findLast((ref) => ref !== undefined);
+        expect(commandIdleRef?.current).toBe(expectedCommandIdle);
+
+        const appWideIdleRef = mockedSetUpdateHandler.mock.calls.at(-1)?.[2] as
+          | { current: boolean }
+          | undefined;
+        expect(appWideIdleRef?.current).toBe(
+          streamingState === StreamingState.Idle,
+        );
+      },
+    );
 
     it('injects a recovered-agent reminder into the next ordinary prompt once', () => {
       const mockQueueMessage = vi.fn();
