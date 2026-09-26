@@ -159,6 +159,18 @@ describe('Config session execution engine', () => {
     },
   );
 
+  it('writes no owner when chat recording is off', async () => {
+    const config = createConfig({
+      chatRecording: false,
+      sessionExecutionEngine: 'legacy',
+    });
+
+    await expect(initializeUntilSideEffects(config)).resolves.toEqual({
+      reached: true,
+      transcript: undefined,
+    });
+  });
+
   it('does not record an owner for a Config no paired host selected', async () => {
     const config = createConfig({});
 

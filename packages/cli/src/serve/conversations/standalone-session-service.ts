@@ -2847,23 +2847,19 @@ export class StandaloneSessionService {
           this.beginTerminalQuarantine(runtime);
         }
         // A paired Bridge refuses an ID a direct creator registered after
-        // shared admission; nothing was dispatched for this request.
-        const outcome =
+        // shared admission; nothing was dispatched, so nothing is rolled back.
+        const conflict =
           error.cause instanceof RequestedSessionIdRejectedError &&
-          error.cause.errorKind === 'session_id_conflict'
-            ? serviceError(
-                'standalone_session_conflict',
-                sessionId,
-                false,
-                error,
-              )
-            : serviceError(
-                'standalone_creation_rolled_back',
-                sessionId,
-                true,
-                error,
-              );
-        attempt.diagnostic.cleanupOutcome = 'rolled_back';
+          error.cause.errorKind === 'session_id_conflict';
+        const outcome = conflict
+          ? serviceError('standalone_session_conflict', sessionId, false, error)
+          : serviceError(
+              'standalone_creation_rolled_back',
+              sessionId,
+              true,
+              error,
+            );
+        if (!conflict) attempt.diagnostic.cleanupOutcome = 'rolled_back';
         if (error.cause instanceof AcpChildCapacityExceededError) {
           throw new StandaloneSessionServiceError(
             outcome.code,

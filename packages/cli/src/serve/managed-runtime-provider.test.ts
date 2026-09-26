@@ -1650,6 +1650,30 @@ describe('Managed Runtime providers', () => {
     local.dispose();
   });
 
+  it('reports a continuation whose fallback create finds the ID live as an identity conflict', async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.bridge.resumeSession).mockRejectedValueOnce(
+      Object.assign(new Error('missing'), { code: 'session_not_found' }),
+    );
+    vi.mocked(runtime.bridge.spawnOrAttach).mockRejectedValueOnce(
+      new RequestedSessionIdRejectedError(
+        'session_id_conflict',
+        prepareRequest.sessionId,
+      ),
+    );
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    await expect(
+      local.prepare({ ...prepareRequest, turnKind: 'continuation' }).ready,
+    ).rejects.toMatchObject({
+      name: 'ManagedRuntimeProviderError',
+      code: 'managed_runtime_identity_conflict',
+      retryable: false,
+    });
+    expect(runtime.bridge.resumeSession).toHaveBeenCalledTimes(1);
+    expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    local.dispose();
+  });
+
   it('retains a failed cleanup of a colliding warmup attachment for retry', async () => {
     const runtime = fakeRuntime();
     vi.mocked(runtime.bridge.spawnOrAttach).mockResolvedValueOnce({

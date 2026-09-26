@@ -21,6 +21,7 @@ import {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
@@ -153,6 +154,30 @@ describe('paired Bridge rejections', () => {
         httpStatus: 409,
         errorKind: 'session_execution_engine_unavailable',
       },
+    });
+  });
+});
+
+describe('transcript snapshot rejections', () => {
+  it.each([
+    [
+      'the daemon',
+      new SessionTranscriptSnapshotUnavailableError('id'),
+      'Transcript snapshot is unavailable for session id',
+    ],
+    [
+      'the ACP child',
+      new RequestError(-32010, 'Transcript snapshot is unavailable', {
+        errorKind: 'transcript_snapshot_unavailable',
+        sessionId: 'id',
+      }),
+      'Transcript snapshot is unavailable',
+    ],
+  ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message,
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     });
   });
 });
