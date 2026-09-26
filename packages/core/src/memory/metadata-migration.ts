@@ -15,14 +15,11 @@ import { runForkedAgent } from '../agents/forkedAgent.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
-  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
-  rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
-  getAutoMemoryRoot,
   getProjectAutoMemoryRoots,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
@@ -551,26 +548,25 @@ export async function runMemoryMetadataMigration(params: {
     params.scope !== 'user' && (params.config.isTrustedFolder?.() ?? true);
   const canCommit = () =>
     !trustMustRemain || (params.config.isTrustedFolder?.() ?? true);
-  const rebuildCommittedIndexes = async (): Promise<void> => {
-    if (params.scope === 'project') {
+  const rebuildIndexes = async (
+    indexRoots: readonly string[],
+  ): Promise<void> => {
+    if (!canCommit() || indexRoots.length === 0) return;
+    if (params.scope === 'team') {
+      await rebuildTeamAutoMemoryIndex(params.projectRoot);
+    } else {
       await Promise.all(
-        [...committedRoots].map((root) =>
-          root === getAutoMemoryRoot(params.projectRoot)
-            ? rebuildManagedAutoMemoryIndex(params.projectRoot)
-            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        indexRoots.map((root) =>
+          rebuildAutoMemoryIndexAtRoot(root, params.scope),
         ),
       );
-    } else if (params.scope === 'user' && committedRoots.size > 0) {
-      await rebuildUserAutoMemoryIndex();
-    } else if (params.scope === 'team' && committedRoots.size > 0) {
-      await rebuildTeamAutoMemoryIndex(params.projectRoot);
     }
   };
 
   for (const candidate of candidates) {
     if (result.attempted >= MAX_FILES_PER_RUN) break;
     if (params.abortSignal?.aborted) {
-      await rebuildCommittedIndexes();
+      await rebuildIndexes([...committedRoots]);
       throw new DOMException('Metadata migration aborted.', 'AbortError');
     }
     if (
@@ -660,13 +656,14 @@ export async function runMemoryMetadataMigration(params: {
       }
     } catch (error) {
       if (params.abortSignal?.aborted) {
-        await rebuildCommittedIndexes();
+        await rebuildIndexes([...committedRoots]);
         throw error;
       }
       result.failed += 1;
     }
   }
-  await rebuildCommittedIndexes();
+  // A previous run may have committed metadata before its index write failed.
+  await rebuildIndexes(roots);
   result.remainingLegacyFiles = (
     await Promise.all(
       roots.map((root) =>
