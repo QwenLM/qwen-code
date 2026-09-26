@@ -48,6 +48,29 @@ export class ManagedToolConflictError extends Error {
 
 export class ManagedToolInvalidError extends Error {}
 
+/** The call's Session has no verified directory to run in. */
+export class ManagedToolUnavailableError extends Error {
+  readonly code = 'managed_context_unavailable';
+}
+
+/** The admitted tools, keyed by name, over one configuration. */
+export type ManagedToolSet = ReadonlyMap<string, AnyDeclarativeTool>;
+
+/**
+ * The tools a new invocation runs with, or undefined when its Session has no
+ * verified directory. It is asked once per invocation, before it is journaled.
+ */
+export type ManagedToolSetResolver = (
+  reference: ManagedToolReference,
+) => Promise<ManagedToolSet | undefined>;
+
+const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ReadFileTool.Name,
+  WriteFileTool.Name,
+  EditTool.Name,
+  ShellTool.Name,
+]);
+
 interface JournalEntry {
   readonly reference: ManagedToolReference;
   readonly toolName: string;
@@ -63,45 +86,24 @@ interface JournalEntry {
 /**
  * Executes the admitted ordinary tools for one Managed Runtime worker and
  * journals every invocation so `status` and `cancel` can answer by the
- * original reference. The journal is in-memory by construction: the worker
+ * original reference. Each new invocation runs with the tools that the
+ * resolver answers for it. The journal is in-memory by construction: the worker
  * process is the Runtime generation, so a restart is a new generation, never
  * a continuation of this state.
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
-  private readonly tools = new Map<string, AnyDeclarativeTool>();
 
-  constructor(config: Config) {
-    const admitted: AnyDeclarativeTool[] = [
-      new ReadFileTool(config),
-      new WriteFileTool(config),
-      new EditTool(config),
-      new ShellTool(config),
-    ];
-    for (const tool of admitted) {
-      this.tools.set(tool.name, tool);
-    }
-  }
+  constructor(private readonly toolsFor: ManagedToolSetResolver) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
-    return new ManagedToolExecutor(
-      new Config({
-        sessionId: runtimeInstanceId,
-        targetDir: workspaceCwd,
-        cwd: workspaceCwd,
-        model: 'managed-runtime-worker',
-        debugMode: false,
-        usageStatisticsEnabled: false,
-        approvalMode: ApprovalMode.YOLO,
-        fileCheckpointingEnabled: false,
-        // The worker has no conversation history to justify cached read elision.
-        fileReadCacheDisabled: true,
-      }),
-    );
+    // Boot v1 configures its one directory at startup, as it always has.
+    const tools = createManagedToolSet(workspaceCwd, runtimeInstanceId);
+    return new ManagedToolExecutor(async () => tools);
   }
 
   hasTool(toolName: string): boolean {
-    return this.tools.has(toolName);
+    return ADMITTED_TOOL_NAMES.has(toolName);
   }
 
   async execute(
@@ -119,15 +121,20 @@ export class ManagedToolExecutor {
     }
     const existing = this.entries.get(reference.callId);
     if (existing) {
-      if (!sameInvocation(existing, reference, toolName, inputJson)) {
-        throw new ManagedToolConflictError(
-          'Managed Runtime invocation identity conflicts.',
-        );
-      }
-      await existing.promise;
-      return existing.result!;
+      return join(existing, reference, toolName, inputJson);
     }
-    const tool = this.tools.get(toolName);
+    const tools = await this.toolsFor(reference);
+    // A concurrent execute of the same call may have journaled it meanwhile.
+    const joined = this.entries.get(reference.callId);
+    if (joined) {
+      return join(joined, reference, toolName, inputJson);
+    }
+    if (tools === undefined) {
+      throw new ManagedToolUnavailableError(
+        'Managed context directory is unavailable.',
+      );
+    }
+    const tool = tools.get(toolName);
     if (!tool) {
       throw new ManagedToolConflictError(
         `Managed Runtime does not admit tool ${toolName}.`,
@@ -252,6 +259,51 @@ export class ManagedToolExecutor {
       };
     }
   }
+}
+
+/**
+ * The admitted tools over a configuration whose working directory and
+ * workspace are `directory`, as they are when it is built.
+ */
+export function createManagedToolSet(
+  directory: string,
+  runtimeInstanceId: string,
+): ManagedToolSet {
+  const config = new Config({
+    sessionId: runtimeInstanceId,
+    targetDir: directory,
+    cwd: directory,
+    model: 'managed-runtime-worker',
+    debugMode: false,
+    usageStatisticsEnabled: false,
+    approvalMode: ApprovalMode.YOLO,
+    fileCheckpointingEnabled: false,
+    // The worker has no conversation history to justify cached read elision.
+    fileReadCacheDisabled: true,
+  });
+  return new Map(
+    [
+      new ReadFileTool(config),
+      new WriteFileTool(config),
+      new EditTool(config),
+      new ShellTool(config),
+    ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
+  );
+}
+
+async function join(
+  entry: JournalEntry,
+  reference: ManagedToolReference,
+  toolName: string,
+  inputJson: string,
+): Promise<ManagedToolResultPayload> {
+  if (!sameInvocation(entry, reference, toolName, inputJson)) {
+    throw new ManagedToolConflictError(
+      'Managed Runtime invocation identity conflicts.',
+    );
+  }
+  await entry.promise;
+  return entry.result!;
 }
 
 function view(entry: JournalEntry): ManagedToolInvocationView {

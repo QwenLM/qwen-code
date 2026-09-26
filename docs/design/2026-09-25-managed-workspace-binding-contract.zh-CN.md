@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-状态：已作为独立的包实现，尚未接线。更新：2026-09-25。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。对 [W0a 问题](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)的[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)确定了代码位置和启动信封的时机。下文的“参考契约”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)，以及其公开 OpenAPI 中的 [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453)；“参考 schema”指它的 [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql)。三者都取自 #12380 所链接的提交。
+状态：已作为独立的包实现。自 W0c-1 起，worker 通过 `managed-context/1` envelope 使用它的 TypeScript 实现（[Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)）；Broker 尚未使用它。更新：2026-09-26。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。对 [W0a 问题](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)的[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)确定了代码位置和启动信封的时机。下文的“参考契约”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)，以及其公开 OpenAPI 中的 [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453)；“参考 schema”指它的 [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql)。三者都取自 #12380 所链接的提交。
 
 ## 问题
 
@@ -259,7 +259,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
   - 对应测试包中的测试，包括 fixtures 的消费方。
 - `packages/sdk-java/runtime-broker/README.md` 与 `QWEN.md`：新增一节介绍这个包。
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 与 `.schema.json`（新增）。
-- `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现，暂不接入 worker。
+- `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现。自 W0c-1 起 worker 使用它。
 - 本设计文档的中英文两个版本。
 
 现有的 Broker 类、Broker schema、daemon 的 `WorkspaceRegistry`、worker 的 boot 文档、attestation 契约和所有 CI workflow 都不变。SDK Java workflow 本来就会运行 `runtime-broker` 的测试和 Checkstyle，它的路径过滤也同时覆盖了 `packages/sdk-java/**` 和 `packages/cli/src/serve/**`。
