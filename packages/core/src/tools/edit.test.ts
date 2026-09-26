@@ -939,6 +939,48 @@ describe('EditTool', () => {
       });
     });
 
+    // Edit normalises CRLF to LF so matching and the confirmation diff
+    // are line-ending agnostic. It must not let that normalisation reach
+    // disk: a file that mixes endings keeps every line the edit did not
+    // touch byte-identical, otherwise a single stray CRLF rewrites the
+    // whole file and buries the real change in the user's git diff.
+    it('keeps untouched line endings when the file mixes CRLF and LF', async () => {
+      fs.writeFileSync(filePath, 'one\ntwo\nthree\r\nfour\n', 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'two',
+        new_string: 'TWO',
+      };
+
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'one\nTWO\nthree\r\nfour\n',
+      );
+    });
+
+    // The inserted text is the one thing the edit did ask for, so it
+    // takes the line ending of the text it replaced. Without that a
+    // uniform CRLF file would gain LF lines the caller never wrote.
+    it('gives an inserted line the line ending of the replaced text', async () => {
+      fs.writeFileSync(filePath, 'one\r\ntwo\r\nthree\r\n', 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'two',
+        new_string: 'TWO\nTWO_POINT_FIVE',
+      };
+
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'one\r\nTWO\r\nTWO_POINT_FIVE\r\nthree\r\n',
+      );
+    });
+
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
       fs.writeFileSync(filePath, 'Existing content', 'utf8');
       seedPriorRead(filePath);
