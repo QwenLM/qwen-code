@@ -104,9 +104,12 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * - `prepareTools()` additionally admits every `code-mode-callable` registry
  *   tool when the configured names include `exec` (`inheritsCodeModeBindings`,
  *   `agent-core.ts`), and `getToolExposure(SKILL)` is `code-mode-callable`
- *   because SKILL is in neither `HIDDEN_TOOLS` nor `DIRECT_ONLY_TOOLS`. So a
- *   finite list naming `exec` but not `skill` still reaches the Skill tool
- *   through that gateway, while this predicate answers `false` for it.
+ *   because SKILL is in neither `HIDDEN_TOOLS` nor `DIRECT_ONLY_TOOLS`. On
+ *   `main` an agent whose finite list names `exec` but not `skill` therefore
+ *   still reaches the Skill tool through that gateway; here this predicate
+ *   answers `false` for it, which withholds the manager and — through the
+ *   `config.ts` registration guard — the Skill tool itself, so the agent
+ *   loses that route.
  * - A `tools.eager` allowlist omitting `skill` defers the schema, but the
  *   resolver's CodeModeOnly branch short-circuits
  *   `isToolDeferredBehindToolSearch` to `false` and still answers `pointer`,
