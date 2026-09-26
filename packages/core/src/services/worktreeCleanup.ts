@@ -179,6 +179,17 @@ export async function cleanupStaleAgentWorktrees(
 
 async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
   try {
+    // Require the path to be its own worktree before trusting any read.
+    // `simpleGit(worktreePath)` pins no repository, so when this `.git` is
+    // absent — an earlier sweep's `fs.rm` that threw partway, a restore that
+    // dropped the link file — git discovers the ENCLOSING repo, which the
+    // product gitignores for itself, and `status` succeeds with an answer
+    // about the wrong tree. That answer is clean, and clean is what
+    // authorises `git worktree remove --force`. A linked worktree's `.git`
+    // is a file and a main checkout's a directory, so `fs.access` accepts
+    // both and throws only for a path that is neither, leaving the catch
+    // below to supply the dirty answer.
+    await fs.access(path.join(worktreePath, '.git'));
     const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);
     // `git status --porcelain --untracked-files=normal` lists every
@@ -212,7 +223,12 @@ async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
     // and the implementation before it manually enumerated
     // `status.staged/modified/...` which silently missed
     // `conflicted[]` (mutually exclusive with the others in
-    // simple-git), so a worktree mid-merge looked "clean" too.
+    // simple-git), so a worktree mid-merge looked "clean" too. Those two
+    // drifts are why this probe names its siblings: a dirty-policy change
+    // made only here leaves `GitWorktreeService.hasWorktreeChanges` and
+    // `countWorktreeChanges` (`--untracked-files=all`, argv transport)
+    // behind, and one made only there leaves this unattended sweep — the
+    // path that runs `git worktree remove --force` at every CLI boot.
     const out = await wtGit.raw([
       '--no-optional-locks',
       'status',

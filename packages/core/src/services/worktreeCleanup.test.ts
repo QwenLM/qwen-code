@@ -62,38 +62,38 @@ describe('isEphemeralSlug', () => {
 // Real-git integration: the sweep's guards only mean anything when they run
 // against an actual worktree on disk. Mirrors the sibling
 // gitWorktreeService.*.integ.test.ts setup (30s ceilings for slow runners).
-describe('cleanupStaleAgentWorktrees (real git)', () => {
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  const tmpDirs: string[] = [];
+const tmpDirs: string[] = [];
 
-  afterEach(() => {
-    for (const dir of tmpDirs.splice(0)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  function initRepo(): string {
-    const repo = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cleanup-')),
-    );
-    tmpDirs.push(repo);
-    // git < 2.28 has no `init -b`; point HEAD at main via symbolic-ref.
-    execFileSync('git', ['init', '-q'], { cwd: repo });
-    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], {
-      cwd: repo,
-    });
-    execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
-    execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
-    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
-    fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
-    execFileSync('git', ['add', '.'], { cwd: repo });
-    execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-      cwd: repo,
-    });
-    return repo;
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
+});
 
+function initRepo(): string {
+  const repo = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cleanup-')),
+  );
+  tmpDirs.push(repo);
+  // git < 2.28 has no `init -b`; point HEAD at main via symbolic-ref.
+  execFileSync('git', ['init', '-q'], { cwd: repo });
+  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], {
+    cwd: repo,
+  });
+  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+  execFileSync('git', ['add', '.'], { cwd: repo });
+  execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+    cwd: repo,
+  });
+  return repo;
+}
+
+describe('cleanupStaleAgentWorktrees (real git)', () => {
   /** Age the worktree root dir past the 30-day sweep cutoff. */
   function ageBeyondCutoff(worktreePath: string): void {
     const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
@@ -184,5 +184,36 @@ describe('hasUncommittedChanges', () => {
     } finally {
       fs.rmSync(notARepo, { recursive: true, force: true });
     }
+  });
+
+  it('reads a directory with no .git of its own as dirty, not as the enclosing repo', async () => {
+    // `simpleGit(worktreePath)` pins nothing, so without the `.git` check the
+    // probe discovers the enclosing repository — which is exactly where the
+    // sweep lives, under a path the product gitignores for itself — and gets a
+    // clean answer about the wrong tree. Clean is what authorises
+    // `git worktree remove --force`, so this is the one wrong answer in this
+    // file that destroys data instead of mislabelling it.
+    const repo = initRepo();
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'agent-aabbccd/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'ignore', '--no-verify'], {
+      cwd: repo,
+    });
+    const orphan = path.join(repo, 'agent-aabbccd');
+    fs.mkdirSync(orphan, { recursive: true });
+    fs.writeFileSync(path.join(orphan, 'sentinel.txt'), 'not a worktree\n');
+
+    // Sanity: discovery really does read clean from inside it, so the
+    // assertion below is about the guard and not about git happening to find
+    // something. Without this the case would pass with the guard removed on
+    // any machine where the enclosing tree is dirty.
+    const discovered = execFileSync(
+      'git',
+      ['status', '--porcelain', '--untracked-files=normal'],
+      { cwd: orphan, encoding: 'utf8' },
+    );
+    expect(discovered.trim()).toBe('');
+
+    await expect(__test__.hasUncommittedChanges(orphan)).resolves.toBe(true);
   });
 });
