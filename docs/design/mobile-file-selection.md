@@ -24,6 +24,15 @@ A small native picker controller handles intent/result validation and outstandin
 
 ## Acceptance and limits
 
+The committed device suite uses a provider in the separate test APK, protected
+by a test-only read permission. It verifies actual per-URI grants, accepted
+single/multiple callbacks and the selected synthetic bytes, including the
+inclusive 100-file limit. Stale-document rejection uses an otherwise accepted
+result. Fixture files and grants are cleaned up after each test; no production
+provider or permission is introduced. Rotate alone does not recreate this
+Activity because it handles configuration changes; use explicit Activity
+recreation when validating restored in-flight picker ownership.
+
 1. Existing single/multiple HTML file inputs open a system document chooser and receive only explicitly selected readable documents.
 2. Cancel, missing picker, malformed result, unsafe URI and unsupported mode produce one cancellation, without a crash or stuck callback.
 3. Profile/document changes discard old results; a second request cannot take over an outstanding picker's callback. Recreation never sends an old file to a new page.
