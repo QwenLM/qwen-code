@@ -8961,10 +8961,11 @@ exit 1
     // discoverable after the variable strip — lock them so a check cannot
     // plant environment into the later PAT-bearing steps. The
     // GITHUB_OUTPUT backing file is the exception: the gate writes it, and
-    // forges against it lose to the every-exit re-append plus the finalize
-    // conclusion gate. The directory stays writable: the runner creates
-    // the next step's backing files there, and a lock would stall every
-    // later step (the rename-over residual is documented, not bought).
+    // forges against it lose to the every-exit re-append plus the raw
+    // step-outcome check in Finalize verification. The directory stays
+    // writable: the runner creates the next step's backing files there,
+    // and a lock would stall every later step (the rename-over residual
+    // is documented, not bought).
     expect(reviewVerificationRunner).toContain(
       'if [[ -n "${GITHUB_OUTPUT:-}" && -d "${RUNNER_TEMP}/_runner_file_commands" ]]; then',
     );
