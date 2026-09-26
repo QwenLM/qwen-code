@@ -125,7 +125,12 @@ async function buildCleanMemorySystemPrompt(
   }
   const [projectIndex, projectDocs, userDocs] = await Promise.all([
     readAutoMemoryIndex(projectRoot),
-    scanAutoMemoryTopicDocuments(projectRoot),
+    // The vocabulary is advisory prompt context on the project side too:
+    // an unreadable project memory root must not fail the run either.
+    scanAutoMemoryTopicDocuments(projectRoot).catch((error) => {
+      debugLogger.error('Project memory vocabulary scan failed:', error);
+      return [];
+    }),
     scope === 'project'
       ? Promise.resolve([])
       : scanUserAutoMemoryTopicDocuments().catch((error) => {

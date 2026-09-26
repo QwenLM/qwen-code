@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
+  AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getMemoryRootTrustedAnchor,
@@ -260,7 +261,7 @@ export async function rebuildAutoMemoryIndexAtRoot(
   await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
   const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(path.join(root, 'MEMORY.md'), content, {
+  await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
     encoding: 'utf-8',
     noFollow: true,
   });
