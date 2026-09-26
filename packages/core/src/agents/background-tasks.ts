@@ -29,7 +29,11 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
-import { escapeXml } from '../utils/xml.js';
+import {
+  escapeXml,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import {
@@ -1743,7 +1747,7 @@ export class BackgroundTaskRegistry {
     remaining += this.getOutstandingBackgroundLaunchCount(ownerId);
 
     const xmlParts: string[] = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       `<task-id>${escapeXml(entry.agentId)}</task-id>`,
     ];
     if (entry.toolUseId) {
@@ -1775,7 +1779,7 @@ export class BackgroundTaskRegistry {
         '</usage>',
       );
     }
-    xmlParts.push('</task-notification>');
+    xmlParts.push(TASK_NOTIFICATION_CLOSE);
 
     const meta: NotificationMeta = {
       agentId: entry.agentId,
