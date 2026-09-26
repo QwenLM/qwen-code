@@ -17,7 +17,11 @@ import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
 } from '../utils/modelConfigUtils.js';
-import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+} from '../utils/stdioHelpers.js';
 import { resolveProxy } from './channel/proxy.js';
 import {
   runPlan,
@@ -414,13 +418,17 @@ const cancelWorkflowCommand: CommandModule = {
     }),
 };
 
-const listWorkflowCommand: CommandModule = {
+export const listWorkflowCommand: CommandModule = {
   command: 'list',
   describe: 'List all recorded workflow tasks with their project',
   builder: (yargs) => yargs,
   // Local only: no endpoint or credentials needed.
   handler: () =>
     run(async () => {
+      // stdout is the result, and an unreadable record now writes to stderr
+      // too, so a reader that leaves (`batch list | head -1`) must not turn a
+      // completed listing into a crash-class exit.
+      ignoreBrokenPipe();
       await listTasks({
         env: process.env,
         out: writeStdoutLine,
