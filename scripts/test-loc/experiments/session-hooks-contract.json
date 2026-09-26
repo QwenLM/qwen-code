@@ -1,0 +1,134 @@
+{
+  "baselineCommit": "10a29740ae",
+  "hypothesis": "Four public lifecycle contracts can replace repeated registration and state-query setup while retaining concrete registration, query, removal and session-isolation assertions. The 16 matcher cases and command, HTTP and skillRoot boundaries remain independent. This intentionally merges case identities; assertion counts alone cannot establish equivalence, so capability comparisons and semantic review are required.",
+  "mappings": [
+    {
+      "before": "SessionHooksManager addFunctionHook should add a function hook and return hook ID",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "Registration with no options must return a defined generated hook ID, and hasSessionHooks is true immediately afterward; the lifecycle subsequently removes that hook."
+    },
+    {
+      "before": "SessionHooksManager addFunctionHook should use provided hook ID",
+      "after": "SessionHooksManager session lifecycle queries custom hooks across events in fresh arrays and removes them by ID",
+      "reason": "Registration must return custom-hook-id; event and all-session queries must expose that exact ID before removal."
+    },
+    {
+      "before": "SessionHooksManager addFunctionHook should add hook with options",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "After the first hook is removed, registration with options but no custom ID must produce a one-element event array containing My Hook, timeout 30000, description Test hook, error message Test error message, function type and the returned ID."
+    },
+    {
+      "before": "SessionHooksManager removeFunctionHook should remove hook by ID",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "Removing the only registered hook by session, event and returned ID must return true, after which hasSessionHooks is false."
+    },
+    {
+      "before": "SessionHooksManager removeFunctionHook should return false for non-existent hook",
+      "after": "SessionHooksManager session lifecycle reports empty queries and failed removal before registration",
+      "reason": "Before any registration, removing non-existent from session-1 and PreToolUse still returns false."
+    },
+    {
+      "before": "SessionHooksManager removeHook should remove hook by ID across all events",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "ID-only removal receives the generated configured hook ID and must return true; the session then has no hooks. The cross-event contract additionally checks ID-only removal of concrete IDs from PostToolUse, Stop and PreToolUse."
+    },
+    {
+      "before": "SessionHooksManager getHooksForEvent should return hooks for specific event",
+      "after": "SessionHooksManager session lifecycle queries custom hooks across events in fresh arrays and removes them by ID",
+      "reason": "PreToolUse and PostToolUse each return exactly their concrete hook ID while both events coexist."
+    },
+    {
+      "before": "SessionHooksManager getHooksForEvent should return empty array for non-existent session",
+      "after": "SessionHooksManager session lifecycle reports empty queries and failed removal before registration",
+      "reason": "Querying PreToolUse before session-1 exists still returns an empty array."
+    },
+    {
+      "before": "SessionHooksManager hasSessionHooks should return true when session has hooks",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "hasSessionHooks is explicitly true immediately after registering the generated hook."
+    },
+    {
+      "before": "SessionHooksManager hasSessionHooks should return false when session has no hooks",
+      "after": "SessionHooksManager session lifecycle reports empty queries and failed removal before registration",
+      "reason": "hasSessionHooks is explicitly false before any hook is registered."
+    },
+    {
+      "before": "SessionHooksManager hasSessionHooks should return false after all hooks removed",
+      "after": "SessionHooksManager session lifecycle registers generated hooks, removes by event and preserves options",
+      "reason": "After ID-only removal of the only remaining generated hook, hasSessionHooks must be false; the cross-event contract also checks the empty result after three removals."
+    },
+    {
+      "before": "SessionHooksManager clearSessionHooks should clear all hooks for a session",
+      "after": "SessionHooksManager session lifecycle enumerates sessions and clears every event in only the selected session",
+      "reason": "PreToolUse and PostToolUse are populated before clearSessionHooks; afterward hasSessionHooks is false and getAllSessionHooks returns an empty array."
+    },
+    {
+      "before": "SessionHooksManager clearSessionHooks should not affect other sessions",
+      "after": "SessionHooksManager session lifecycle enumerates sessions and clears every event in only the selected session",
+      "reason": "Clearing session-1 leaves session-2 present with exactly other-hook-id, while session-1 has no hooks."
+    },
+    {
+      "before": "SessionHooksManager getActiveSessions should return all session IDs with hooks",
+      "after": "SessionHooksManager session lifecycle enumerates sessions and clears every event in only the selected session",
+      "reason": "Before clearing, the sorted active-session list is exactly session-1 and session-2; afterward only session-2 remains."
+    },
+    {
+      "before": "SessionHooksManager getHookCount should return correct hook count",
+      "after": "SessionHooksManager session lifecycle queries custom hooks across events in fresh arrays and removes them by ID",
+      "reason": "With one PreToolUse and one PostToolUse hook the count is explicitly 2; after adding Stop and removing PostToolUse it is again explicitly 2."
+    },
+    {
+      "before": "SessionHooksManager getHookCount should return 0 for non-existent session",
+      "after": "SessionHooksManager session lifecycle reports empty queries and failed removal before registration",
+      "reason": "The hook count for session-1 before registration is explicitly 0."
+    },
+    {
+      "before": "SessionHooksManager getAllSessionHooks should return empty array for non-existent session",
+      "after": "SessionHooksManager session lifecycle reports empty queries and failed removal before registration",
+      "reason": "The all-session query before session-1 exists still returns an empty array."
+    },
+    {
+      "before": "SessionHooksManager getAllSessionHooks should return all hooks across all events",
+      "after": "SessionHooksManager session lifecycle queries custom hooks across events in fresh arrays and removes them by ID",
+      "reason": "The all-session query must contain exactly the three concrete hook-ID/event pairs for PreToolUse, PostToolUse and Stop."
+    },
+    {
+      "before": "SessionHooksManager getAllSessionHooks should return copy of hooks array",
+      "after": "SessionHooksManager session lifecycle queries custom hooks across events in fresh arrays and removes them by ID",
+      "reason": "With only the first hook and its event registered, two all-session queries retain distinct array references and equal contents; the first array must contain exactly custom-hook-id. Keeping the single-event fixture guards against a single-event optimization returning the internal array."
+    }
+  ],
+  "removed": [],
+  "validation": {
+    "status": "retained-with-recorded-limits",
+    "historicalFaults": {
+      "detectedBefore": 2,
+      "detectedAfter": 2,
+      "eligible": 2,
+      "frozenExclusions": 1,
+      "lost": 0
+    },
+    "unitBuildTypecheckFormatLint": "passed on the exact test file bytes recorded by the gates",
+    "evidence": "../evidence/round5/manifest.json",
+    "mutation": {
+      "mutants": 164,
+      "killedBefore": 138,
+      "killedAfter": 138,
+      "lostKills": 0,
+      "gainedKills": 0,
+      "unchangedTimeouts": 0,
+      "strictOk": true
+    },
+    "coverage": {
+      "strictOk": false,
+      "coveredLines": 182,
+      "lostLines": 0,
+      "lostMappedBranches": 0,
+      "explainedBranchShapeChanges": 5
+    },
+    "limits": [
+      "The raw file gate remains false for five V8 branch-shape differences caused by the added multi-event traversal.",
+      "A lifecycle assertion can stop later assertions in its scenario. The two targeted historical faults do not establish unchanged localization granularity for all consolidated lifecycle methods."
+    ]
+  }
+}

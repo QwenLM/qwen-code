@@ -54,32 +54,113 @@ describe('SessionHooksManager', () => {
     }
   };
 
-  describe('addFunctionHook', () => {
-    it('should add a function hook and return hook ID', () => {
-      const hookId = addHook('Bash', { error: 'Test error message' });
+  describe('session lifecycle', () => {
+    it('reports empty queries and failed removal before registration', () => {
+      expect(manager.hasSessionHooks('session-1')).toBe(false);
+      expect(manager.getHookCount('session-1')).toBe(0);
+      expect(hooksFor(HookEventName.PreToolUse)).toEqual([]);
+      expect(manager.getAllSessionHooks('session-1')).toEqual([]);
+      expect(
+        manager.removeFunctionHook(
+          'session-1',
+          HookEventName.PreToolUse,
+          'non-existent',
+        ),
+      ).toBe(false);
+    });
 
+    it('registers generated hooks, removes by event and preserves options', () => {
+      const hookId = addHook('Bash', { error: 'Test error message' });
       expect(hookId).toBeDefined();
       expect(manager.hasSessionHooks('session-1')).toBe(true);
-    });
-
-    it('should use provided hook ID', () => {
-      const returnedHookId = addHook('Bash', {
-        error: 'Test error message',
-        options: { id: 'custom-hook-id' },
-      });
-
-      expect(returnedHookId).toBe('custom-hook-id');
-    });
-
-    it('should add hook with options', () => {
-      addHook('Bash', {
+      expect(
+        manager.removeFunctionHook(
+          'session-1',
+          HookEventName.PreToolUse,
+          hookId,
+        ),
+      ).toBe(true);
+      expect(manager.hasSessionHooks('session-1')).toBe(false);
+      const configuredId = addHook('Bash', {
         error: 'Test error message',
         options: { timeout: 30000, name: 'My Hook', description: 'Test hook' },
       });
+      expect(hooksFor(HookEventName.PreToolUse)).toMatchObject([
+        {
+          hookId: configuredId,
+          matcher: 'Bash',
+          config: {
+            type: HookType.Function,
+            name: 'My Hook',
+            description: 'Test hook',
+            timeout: 30000,
+            errorMessage: 'Test error message',
+          },
+        },
+      ]);
+      expect(manager.removeHook('session-1', configuredId)).toBe(true);
+      expect(manager.hasSessionHooks('session-1')).toBe(false);
+    });
 
-      const hooks = hooksFor(HookEventName.PreToolUse);
-      expect(hooks.length).toBe(1);
-      expect(hooks[0].config.name).toBe('My Hook');
+    it('queries custom hooks across events in fresh arrays and removes them by ID', () => {
+      expect(addHook('Bash', { options: { id: 'custom-hook-id' } })).toBe(
+        'custom-hook-id',
+      );
+      const hooks = manager.getAllSessionHooks('session-1');
+      expect(hooks.map((hook) => hook.hookId)).toEqual(['custom-hook-id']);
+      const copy = manager.getAllSessionHooks('session-1');
+      expect(copy).not.toBe(hooks); // Different array references
+      expect(copy).toEqual(hooks); // Same content
+      addHook('Write', {
+        event: HookEventName.PostToolUse,
+        options: { id: 'post-hook-id' },
+      });
+      expect(manager.getHookCount('session-1')).toBe(2);
+      expect(
+        hooksFor(HookEventName.PreToolUse).map((hook) => hook.hookId),
+      ).toEqual(['custom-hook-id']);
+      expect(
+        hooksFor(HookEventName.PostToolUse).map((hook) => hook.hookId),
+      ).toEqual(['post-hook-id']);
+      addHook('', {
+        event: HookEventName.Stop,
+        options: { id: 'stop-hook-id' },
+      });
+      const allHooks = manager.getAllSessionHooks('session-1');
+      expect(
+        allHooks.map((hook) => [hook.hookId, hook.eventName]).sort(),
+      ).toEqual([
+        ['custom-hook-id', HookEventName.PreToolUse],
+        ['post-hook-id', HookEventName.PostToolUse],
+        ['stop-hook-id', HookEventName.Stop],
+      ]);
+      expect(manager.removeHook('session-1', 'post-hook-id')).toBe(true);
+      expect(hooksFor(HookEventName.PostToolUse)).toEqual([]);
+      expect(manager.getHookCount('session-1')).toBe(2);
+      expect(manager.removeHook('session-1', 'stop-hook-id')).toBe(true);
+      expect(manager.removeHook('session-1', 'custom-hook-id')).toBe(true);
+      expect(manager.hasSessionHooks('session-1')).toBe(false);
+    });
+
+    it('enumerates sessions and clears every event in only the selected session', () => {
+      addHook('Bash');
+      addHook('*', { event: HookEventName.PostToolUse });
+      addHook('Bash', {
+        session: 'session-2',
+        options: { id: 'other-hook-id' },
+      });
+      expect(manager.getActiveSessions().sort()).toEqual([
+        'session-1',
+        'session-2',
+      ]);
+      manager.clearSessionHooks('session-1');
+      expect(manager.hasSessionHooks('session-1')).toBe(false);
+      expect(manager.hasSessionHooks('session-2')).toBe(true);
+      expect(manager.getActiveSessions()).toEqual(['session-2']);
+      expect(manager.getAllSessionHooks('session-1')).toEqual([]);
+      expect(
+        manager.getAllSessionHooks('session-2').map((hook) => hook.hookId),
+      ).toEqual(['other-hook-id']);
     });
   });
 
@@ -115,58 +196,6 @@ describe('SessionHooksManager', () => {
         url: 'https://api.example.com/hook',
         name: 'Test HTTP',
       });
-    });
-  });
-
-  describe('removeFunctionHook', () => {
-    it('should remove hook by ID', () => {
-      const hookId = addHook('Bash');
-
-      const removed = manager.removeFunctionHook(
-        'session-1',
-        HookEventName.PreToolUse,
-        hookId,
-      );
-
-      expect(removed).toBe(true);
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-    });
-
-    it('should return false for non-existent hook', () => {
-      const removed = manager.removeFunctionHook(
-        'session-1',
-        HookEventName.PreToolUse,
-        'non-existent',
-      );
-
-      expect(removed).toBe(false);
-    });
-  });
-
-  describe('removeHook', () => {
-    it('should remove hook by ID across all events', () => {
-      const removed = manager.removeHook('session-1', addHook('Bash'));
-
-      expect(removed).toBe(true);
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-    });
-  });
-
-  describe('getHooksForEvent', () => {
-    it('should return hooks for specific event', () => {
-      addHook('Bash');
-      addHook('*', { event: HookEventName.PostToolUse });
-
-      expect(hooksFor(HookEventName.PreToolUse).length).toBe(1);
-      expect(hooksFor(HookEventName.PostToolUse).length).toBe(1);
-    });
-
-    it('should return empty array for non-existent session', () => {
-      const hooks = manager.getHooksForEvent(
-        'non-existent',
-        HookEventName.PreToolUse,
-      );
-      expect(hooks).toEqual([]);
     });
   });
 
@@ -206,69 +235,6 @@ describe('SessionHooksManager', () => {
       ],
       ['should not match different tool name', 'Bash', { Write: 0 }],
     ])('%s', (_title, matcher, counts) => expectMatches(matcher, counts));
-  });
-
-  describe('hasSessionHooks', () => {
-    it('should return true when session has hooks', () => {
-      addHook('Bash');
-
-      expect(manager.hasSessionHooks('session-1')).toBe(true);
-    });
-
-    it('should return false when session has no hooks', () => {
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-    });
-
-    it('should return false after all hooks removed', () => {
-      manager.removeHook('session-1', addHook('Bash'));
-
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-    });
-  });
-
-  describe('clearSessionHooks', () => {
-    it('should clear all hooks for a session', () => {
-      addHook('Bash');
-      addHook('*', { event: HookEventName.PostToolUse });
-
-      manager.clearSessionHooks('session-1');
-
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-    });
-
-    it('should not affect other sessions', () => {
-      addHook('Bash');
-      addHook('Bash', { session: 'session-2' });
-
-      manager.clearSessionHooks('session-1');
-
-      expect(manager.hasSessionHooks('session-1')).toBe(false);
-      expect(manager.hasSessionHooks('session-2')).toBe(true);
-    });
-  });
-
-  describe('getActiveSessions', () => {
-    it('should return all session IDs with hooks', () => {
-      addHook('Bash');
-      addHook('Bash', { session: 'session-2' });
-
-      const sessions = manager.getActiveSessions();
-      expect(sessions).toContain('session-1');
-      expect(sessions).toContain('session-2');
-    });
-  });
-
-  describe('getHookCount', () => {
-    it('should return correct hook count', () => {
-      addHook('Bash');
-      addHook('*', { event: HookEventName.PostToolUse });
-
-      expect(manager.getHookCount('session-1')).toBe(2);
-    });
-
-    it('should return 0 for non-existent session', () => {
-      expect(manager.getHookCount('non-existent')).toBe(0);
-    });
   });
 
   describe('regex matcher support', () => {
@@ -342,26 +308,6 @@ describe('SessionHooksManager', () => {
   });
 
   describe('getAllSessionHooks', () => {
-    it('should return empty array for non-existent session', () => {
-      const hooks = manager.getAllSessionHooks('non-existent-session');
-      expect(hooks).toEqual([]);
-    });
-
-    it('should return all hooks across all events', () => {
-      addHook('Bash', { error: 'Error' });
-      addHook('Write', { event: HookEventName.PostToolUse, error: 'Error' });
-      addHook('', { event: HookEventName.Stop, error: 'Error' });
-
-      const hooks = manager.getAllSessionHooks('session-1');
-
-      expect(hooks).toHaveLength(3);
-      expect(hooks.map((h) => h.eventName).sort()).toEqual([
-        HookEventName.PostToolUse,
-        HookEventName.PreToolUse,
-        HookEventName.Stop,
-      ]);
-    });
-
     it('should include session hooks with skillRoot', () => {
       addHook('Bash', { error: 'Error', options: { skillRoot: '/my-skill' } });
 
@@ -369,16 +315,6 @@ describe('SessionHooksManager', () => {
 
       expect(hooks).toHaveLength(1);
       expect(hooks[0].skillRoot).toBe('/my-skill');
-    });
-
-    it('should return copy of hooks array', () => {
-      addHook('Bash', { error: 'Error' });
-
-      const hooks1 = manager.getAllSessionHooks('session-1');
-      const hooks2 = manager.getAllSessionHooks('session-1');
-
-      expect(hooks1).not.toBe(hooks2); // Different array references
-      expect(hooks1).toEqual(hooks2); // Same content
     });
   });
 });
