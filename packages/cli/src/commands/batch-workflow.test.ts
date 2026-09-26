@@ -1304,6 +1304,23 @@ describe('listTasks', () => {
     await listTasks(h.deps);
     expect(h.out.join('\n')).toMatch(/no batch tasks/);
   });
+
+  it('names a task record it cannot read instead of listing around it', async () => {
+    const h = (harness = setup());
+    const dir = path.join(h.home, 'tasks', 'paid-but-unreadable');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'task.json'), '{ truncated');
+
+    await listTasks(h.deps);
+
+    expect(h.err.join('\n')).toContain(
+      '[batch] skipping unreadable task record paid-but-unreadable',
+    );
+    // A record that is there but unreadable must not be reported as no tasks.
+    expect(h.out.join('\n')).toMatch(
+      /no readable batch tasks under .* \(1 unreadable\)/,
+    );
+  });
 });
 
 describe('review fixes', () => {
