@@ -3631,6 +3631,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy: this.proxy,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;

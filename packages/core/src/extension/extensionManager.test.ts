@@ -4212,6 +4212,80 @@ describe('extension tests', () => {
     });
   });
 
+  describe('telemetry config for lifecycle events', () => {
+    function getLoggedTelemetryConfig(mock: {
+      mock: { calls: unknown[][] };
+    }): Config {
+      expect(mock.mock.calls.length).toBeGreaterThan(0);
+      return mock.mock.calls[0]![0] as Config;
+    }
+
+    it('honors usageStatisticsEnabled=false so the RUM logger gate stays closed', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ usageStatisticsEnabled: false });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      // QwenLogger.getInstance(config) is the only opt-out gate; it closes
+      // only when config.getUsageStatisticsEnabled() is false.
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(false);
+    });
+
+    it('honors usageStatisticsEnabled=true explicitly', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ usageStatisticsEnabled: true });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(true);
+    });
+
+    it('forwards the resolved proxy so RUM uploads use it', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({
+        proxy: 'http://127.0.0.1:7890',
+      });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getProxy()).toBe('http://127.0.0.1:7890');
+    });
+
+    it('keeps usage statistics enabled by default when the option is omitted', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(true);
+      expect(config.getProxy()).toBeUndefined();
+    });
+  });
+
   describe('preference-only operations', () => {
     it('should not emit mutation lifecycle events for preference changes', () => {
       const manager = createExtensionManager();

@@ -26,6 +26,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     setExtensionScope: mockSetExtensionScope,
   })),
   parseInstallSource: mockParseInstallSource,
+  resolveUsageStatisticsEnabled: (settingsValue?: boolean) =>
+    settingsValue ?? true,
   isExtensionCommittedWithWarningsError: (error: unknown) =>
     error instanceof Error &&
     (error as Error & { code?: string; committed?: boolean }).code ===

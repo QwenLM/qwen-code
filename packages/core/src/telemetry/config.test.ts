@@ -9,6 +9,7 @@ import {
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
   resolveTelemetrySettings,
+  resolveUsageStatisticsEnabled,
 } from './config.js';
 import {
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -32,6 +33,35 @@ describe('telemetry/config helpers', () => {
       expect(parseBooleanEnvFlag('TRUE')).toBe(false);
       expect(parseBooleanEnvFlag('random')).toBe(false);
       expect(parseBooleanEnvFlag('')).toBe(false);
+    });
+  });
+
+  describe('resolveUsageStatisticsEnabled', () => {
+    it('defaults to true when neither env nor settings are set', () => {
+      expect(resolveUsageStatisticsEnabled(undefined, {})).toBe(true);
+    });
+
+    it('honors the settings value', () => {
+      expect(resolveUsageStatisticsEnabled(false, {})).toBe(false);
+      expect(resolveUsageStatisticsEnabled(true, {})).toBe(true);
+    });
+
+    it('prefers QWEN_USAGE_STATISTICS_ENABLED over settings', () => {
+      const env = { QWEN_USAGE_STATISTICS_ENABLED: '0' };
+      expect(resolveUsageStatisticsEnabled(true, env)).toBe(false);
+      expect(
+        resolveUsageStatisticsEnabled(false, {
+          QWEN_USAGE_STATISTICS_ENABLED: '1',
+        }),
+      ).toBe(true);
+    });
+
+    it('treats unrecognized env values as false (parseBooleanEnvFlag semantics)', () => {
+      expect(
+        resolveUsageStatisticsEnabled(true, {
+          QWEN_USAGE_STATISTICS_ENABLED: 'random',
+        }),
+      ).toBe(false);
     });
   });
 

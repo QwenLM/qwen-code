@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
   redactUrlCredentials,
+  resolveUsageStatisticsEnabled,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
   type ExtensionSetting,
@@ -312,13 +313,23 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    const settings = loadSettings(workspaceDir).merged;
     return new ExtensionManager({
       workspaceDir,
       locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
         workspaceTrusted ??
-        getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
-          .effective.state === 'trusted',
+        getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
+          'trusted',
+      usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+        settings.privacy?.usageStatisticsEnabled,
+      ),
+      proxy:
+        settings.proxy ||
+        process.env['HTTPS_PROXY'] ||
+        process.env['https_proxy'] ||
+        process.env['HTTP_PROXY'] ||
+        process.env['http_proxy'],
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??

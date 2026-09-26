@@ -29,6 +29,7 @@ export {
   resolveTelemetrySettings,
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
+  resolveUsageStatisticsEnabled,
 } from './config.js';
 export {
   logStartSession,
