@@ -352,6 +352,7 @@ unsafe fn click_field(element: AXUIElementRef, pid: i32, window_id: u32) -> anyh
         1,
         &[],
         crate::input::mouse::DragButton::Left,
+        false,
     )
 }
 

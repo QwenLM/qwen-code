@@ -12,7 +12,7 @@ const document = { window_id: 7, title: "Document", z_index: 2, is_on_screen: tr
 const dialog = { window_id: 9, title: "Save", z_index: 10, is_on_screen: true, is_app_target: false };
 const compactState = '[37] TextField "Name" value="draft"\n[38] StaticText "Keep frame=1,2 and <AXButton> verbatim"';
 
-function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ ...document }], observe, action, launch } = {}) {
+function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ ...document }], visibleWindows, observe, action, launch } = {}) {
   const calls = [];
   let revision = 0;
   const driver = {
@@ -21,7 +21,7 @@ function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ .
     },
     async listApps(input) { calls.push({ method: "listApps", input }); return result({ apps }); },
     async launchApp(input) { calls.push({ method: "launchApp", input }); await launch?.(input); return result({}); },
-    async listWindows(input) { calls.push({ method: "listWindows", input }); return result({ windows }); },
+    async listWindows(input) { calls.push({ method: "listWindows", input }); return result({ windows: input.onScreenOnly && visibleWindows ? visibleWindows : windows }); },
     async getWindowState(input) {
       calls.push({ method: "getWindowState", input });
       revision += 1;
@@ -38,7 +38,7 @@ function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ .
       });
     },
   };
-  for (const method of ["windowClick", "doubleClick", "rightClick", "windowPressKey", "windowTypeText", "windowHotkey", "windowDrag", "windowScroll", "setValue", "performSecondaryAction"]) {
+  for (const method of ["windowClick", "doubleClick", "rightClick", "windowPressKey", "windowTypeText", "windowHotkey", "windowDrag", "windowScroll", "paste", "setValue", "performSecondaryAction"]) {
     driver[method] = async (input) => {
       calls.push({ method, input });
       return action ? action(method, input) : result({ effect: "confirmed" });
@@ -173,6 +173,96 @@ test("missing or multiple native app targets cannot silently pick a window", asy
 test("native target selection ignores z order and on-screen ordering", async () => {
   const { computer } = fixture({ windows: [dialog, { ...document, z_index: null, is_on_screen: false }] });
   assert.equal((await (await computer.getApp("Fixture")).getState()).window, "Document");
+});
+
+test("App follows an untitled foreground palette inside its native window", async () => {
+  const main = { ...document, pid: 42, layer: 0, bounds: { x: 100, y: 100, width: 800, height: 600 } };
+  const palette = { window_id: 11, pid: 42, title: "", layer: 0, z_index: 3,
+    is_on_screen: true, is_app_target: false, bounds: { x: 500, y: 300, width: 270, height: 300 } };
+  const { computer, calls, windows } = fixture({ windows: [main] });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  windows.push(palette);
+  await assert.rejects(app.click(37), { code: "app_observation_required" });
+  assert.equal((await app.getState()).window, "");
+  assert.equal(calls.at(-1).input.windowId, 11n);
+  await app.click({ x: 50, y: 50 });
+  assert.equal(calls.at(-1).input.windowId, 11n);
+  assert.equal(calls.at(-1).input.deliveryMode, "background");
+  await app.pressKey("Escape");
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.hotkey(["super", "w"]);
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.typeText("text");
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  await app.paste("text");
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  windows.pop();
+  assert.equal((await app.getState()).window, "Document");
+});
+
+test("App uses visible window order for a palette above an offscreen-ranked main window", async () => {
+  const main = { ...document, pid: 42, layer: 0, z_index: 87,
+    bounds: { x: 460, y: 95, width: 1057, height: 700 } };
+  const palette = { window_id: 793, pid: 42, title: "", layer: 0, z_index: 3,
+    is_on_screen: true, is_app_target: false,
+    bounds: { x: 1013, y: 451, width: 270, height: 300 } };
+  const visibleWindows = [{ ...main, z_index: 11 }, { ...palette, z_index: 12 }];
+  const { computer, calls } = fixture({ windows: [main, palette], visibleWindows });
+  const state = await (await computer.getApp("Fixture")).getState({ includeScreenshot: true });
+  assert.equal(state.window, "");
+  assert.equal(calls.find((call) => call.method === "getWindowState").input.windowId, 793n);
+  assert.equal(calls.filter((call) => call.method === "listWindows").length, 2);
+});
+
+test("App ignores an untitled palette covered by another app window", async () => {
+  const main = { ...document, pid: 42, layer: 0,
+    bounds: { x: 100, y: 100, width: 800, height: 600 } };
+  const palette = { window_id: 11, pid: 42, title: "", layer: 0, z_index: 3,
+    is_on_screen: true, is_app_target: false,
+    bounds: { x: 500, y: 300, width: 270, height: 300 } };
+  const covering = { ...document, window_id: 12, pid: 42, title: "Inspector",
+    is_app_target: false, z_index: 4 };
+  const { computer } = fixture({ windows: [main, palette, covering] });
+  assert.equal((await (await computer.getApp("Fixture")).getState()).window, "Document");
+});
+
+for (const platform of ["windows", "unknown"]) test(`${platform} keeps its native app target when a titleless overlay is visible`, async () => {
+  const main = { ...document, pid: 42, layer: 0,
+    bounds: { x: 100, y: 100, width: 800, height: 600 } };
+  const overlay = { window_id: 11, pid: 42, title: "", layer: 0, z_index: 3,
+    is_on_screen: true, is_app_target: false,
+    bounds: { x: 500, y: 300, width: 270, height: 300 } };
+  const { computer, calls } = fixture({ platform, windows: [main, overlay] });
+  assert.equal((await (await computer.getApp("Fixture")).getState()).window, "Document");
+  assert.equal(calls.find((call) => call.method === "getWindowState").input.windowId, 7n);
+  assert.equal(calls.filter((call) => call.method === "listWindows").length, 1);
+});
+
+test("App clicks a framed button without AX actions through background pointer delivery", async () => {
+  const { computer, calls } = fixture({ observe: (_input, state) => ({
+    ...state,
+    tree_markdown: '[37] Button "Choose a color" value="black"',
+    elements: [{ element_index: 3, element_id: 37, element_token: "button-token", role: "AXButton" }],
+  }) });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await app.click(37);
+  assert.equal(calls.at(-1).input.elementToken, "button-token");
+  assert.equal(calls.at(-1).input.deliveryMode, "background");
+});
+
+for (const platform of ["windows", "unknown"]) test(`${platform} keeps foreground delivery for an actionless AXButton`, async () => {
+  const { computer, calls } = fixture({ platform, observe: (_input, state) => ({
+    ...state,
+    elements: [{ element_index: 3, element_id: 37, element_token: "button-token", role: "AXButton" }],
+  }) });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await app.click(37);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
 });
 
 test("app input activates the exact target once without exposing a mode choice", async () => {

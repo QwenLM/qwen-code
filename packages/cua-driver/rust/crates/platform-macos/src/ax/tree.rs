@@ -213,6 +213,18 @@ fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<b
     (actions_present || value_settable) && enabled != Some(false)
 }
 
+fn is_pointer_button(
+    mode: WalkMode,
+    role: &str,
+    enabled: Option<bool>,
+    frame: Option<[f64; 4]>,
+) -> bool {
+    mode == WalkMode::AppWindow
+        && role == "AXButton"
+        && enabled != Some(false)
+        && frame.is_some_and(|[_, _, width, height]| width > 0.0 && height > 0.0)
+}
+
 pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
@@ -825,7 +837,7 @@ unsafe fn walk_element_contents(
     } else {
         selectable
     };
-    let is_actionable = is_addressable(
+    let mut is_actionable = is_addressable(
         has_actionable_action,
         value_settable || focusable_or_selectable,
         enabled,
@@ -866,6 +878,7 @@ unsafe fn walk_element_contents(
     let frame_read = element_screen_rect_with_status(element);
     *complete &= frame_read.complete;
     let frame = frame_read.value;
+    is_actionable |= is_pointer_button(mode, &role, enabled, frame);
     // App projection also needs state on descriptive, disabled display nodes.
     let control_state =
         read_control_state_if_actionable(is_actionable || mode != WalkMode::Legacy, || {
@@ -1318,6 +1331,47 @@ mod tests {
         for role in ["AXStaticText", "AXImage", "AXWindow", "AXGroup"] {
             assert!(!role_supports_value_addressing(role), "{role}");
         }
+    }
+
+    #[test]
+    fn app_buttons_with_frames_are_pointer_addressable() {
+        let frame = Some([10.0, 20.0, 30.0, 40.0]);
+        assert!(is_pointer_button(
+            WalkMode::AppWindow,
+            "AXButton",
+            Some(true),
+            frame
+        ));
+        assert!(!is_pointer_button(
+            WalkMode::AppMenu,
+            "AXButton",
+            None,
+            frame
+        ));
+        assert!(!is_pointer_button(
+            WalkMode::Legacy,
+            "AXButton",
+            Some(true),
+            frame
+        ));
+        assert!(!is_pointer_button(
+            WalkMode::AppWindow,
+            "AXButton",
+            Some(false),
+            frame
+        ));
+        assert!(!is_pointer_button(
+            WalkMode::AppWindow,
+            "AXButton",
+            Some(true),
+            None
+        ));
+        assert!(!is_pointer_button(
+            WalkMode::AppWindow,
+            "AXStaticText",
+            Some(true),
+            frame
+        ));
     }
 
     #[test]

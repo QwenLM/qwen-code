@@ -81,15 +81,70 @@ fn app_click_record(accessibility: bool, foreground: bool) -> ActionExecutionRec
         } else {
             ActionTransport::MacosCgEventPid
         },
-        RequestedDelivery::Foreground,
+        if foreground {
+            RequestedDelivery::Foreground
+        } else {
+            RequestedDelivery::Background
+        },
     )
-    .actual_delivery(ActualDelivery::Foreground)
+    .actual_delivery(if foreground {
+        ActualDelivery::Foreground
+    } else {
+        ActualDelivery::Background
+    })
     .evidence(ActionEvidence {
         kind: EvidenceKind::NativeApiResult,
         detail: "the app-bound click actuator completed".into(),
     })
     .build()
     .expect("app click record is valid")
+}
+
+fn app_popup_pointer_target(pid: i32, window_id: u32) -> bool {
+    let Some(main_id) = crate::ax::bindings::app_window_id_of_pid(pid) else {
+        return false;
+    };
+    if main_id == window_id {
+        return false;
+    }
+    let windows = crate::windows::visible_windows();
+    let Some(main) = windows
+        .iter()
+        .find(|window| window.pid == pid && window.window_id == main_id)
+    else {
+        return false;
+    };
+    let Some(popup) = windows
+        .iter()
+        .find(|window| window.pid == pid && window.window_id == window_id)
+    else {
+        return false;
+    };
+    is_app_popup_window(main, popup, &windows)
+}
+
+fn is_app_popup_window(
+    main: &crate::windows::WindowInfo,
+    popup: &crate::windows::WindowInfo,
+    windows: &[crate::windows::WindowInfo],
+) -> bool {
+    popup.pid == main.pid
+        && popup.window_id != main.window_id
+        && popup.title.is_empty()
+        && popup.layer == 0
+        && popup.is_on_screen
+        && popup.on_current_space != Some(false)
+        && popup.z_index > main.z_index
+        && windows
+            .iter()
+            .filter(|window| window.pid == main.pid)
+            .all(|window| window.z_index <= popup.z_index)
+        && popup.bounds.width < main.bounds.width
+        && popup.bounds.height < main.bounds.height
+        && popup.bounds.x >= main.bounds.x
+        && popup.bounds.y >= main.bounds.y
+        && popup.bounds.x + popup.bounds.width <= main.bounds.x + main.bounds.width
+        && popup.bounds.y + popup.bounds.height <= main.bounds.y + main.bounds.height
 }
 
 fn app_element_click_point(rect: [f64; 4], window: [f64; 4]) -> Option<(f64, f64)> {
@@ -1416,8 +1471,11 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     } else {
         BackgroundAction::WindowPointer
     };
+    let popup_pointer = !foreground && index.is_none() && app_popup_pointer_target(pid, window_id);
     let lease = if foreground {
         None
+    } else if popup_pointer {
+        Some(super::acquire_background_mutation(pid).await)
     } else {
         match super::gate_background_window_action(pid, window_id, element_ptr, route).await {
             Ok(lease) => Some(lease),
@@ -1487,9 +1545,14 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
             cursor_overlay::OverlayCommand::ClickPulse { x, y },
         );
     }
+    if popup_pointer && !app_popup_pointer_target(pid, window_id) {
+        return ToolResult::error("app popup target is no longer the frontmost owned window");
+    }
     if let Some(lease) = &lease {
-        if let Err(error) = lease.gate_again(window_id, element_ptr, route).await {
-            return error;
+        if !popup_pointer {
+            if let Err(error) = lease.gate_again(window_id, element_ptr, route).await {
+                return error;
+            }
         }
     }
     let prior_front = apps::frontmost_pid();
@@ -1537,6 +1600,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
                             count,
                             &modifiers,
                             native_button,
+                            popup_pointer,
                         )
                     }
                 };
@@ -1936,6 +2000,83 @@ fn map_action(action: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_click_record_uses_the_executed_delivery_mode() {
+        let background = app_click_record(false, false);
+        assert_eq!(background.requested_delivery, RequestedDelivery::Background);
+        assert_eq!(background.actual_delivery, Some(ActualDelivery::Background));
+        let foreground = app_click_record(false, true);
+        assert_eq!(foreground.requested_delivery, RequestedDelivery::Foreground);
+        assert_eq!(foreground.actual_delivery, Some(ActualDelivery::Foreground));
+    }
+
+    #[test]
+    fn app_popup_pointer_requires_a_topmost_owned_window_inside_the_main_window() {
+        let main = crate::windows::WindowInfo {
+            window_id: 648,
+            pid: 57105,
+            app_name: "Freeform".into(),
+            title: "Untitled".into(),
+            bounds: crate::windows::WindowBounds {
+                x: 460.0,
+                y: 95.0,
+                width: 1057.0,
+                height: 700.0,
+            },
+            layer: 0,
+            z_index: 11,
+            is_on_screen: true,
+            current_space_id: None,
+            on_current_space: Some(true),
+            space_ids: None,
+        };
+        let popup = crate::windows::WindowInfo {
+            window_id: 775,
+            title: String::new(),
+            bounds: crate::windows::WindowBounds {
+                x: 1013.0,
+                y: 451.0,
+                width: 270.0,
+                height: 300.0,
+            },
+            z_index: 12,
+            ..main.clone()
+        };
+        assert!(is_app_popup_window(
+            &main,
+            &popup,
+            &[main.clone(), popup.clone()]
+        ));
+        assert!(!is_app_popup_window(
+            &main,
+            &crate::windows::WindowInfo {
+                pid: 1,
+                ..popup.clone()
+            },
+            &[main.clone(), popup.clone()]
+        ));
+        assert!(!is_app_popup_window(
+            &main,
+            &popup,
+            &[
+                main.clone(),
+                popup.clone(),
+                crate::windows::WindowInfo {
+                    z_index: 13,
+                    ..main.clone()
+                }
+            ]
+        ));
+        assert!(!is_app_popup_window(
+            &main,
+            &crate::windows::WindowInfo {
+                layer: 1,
+                ..popup.clone()
+            },
+            &[main.clone(), popup.clone()]
+        ));
+    }
 
     #[test]
     fn app_element_click_uses_the_part_inside_its_window() {

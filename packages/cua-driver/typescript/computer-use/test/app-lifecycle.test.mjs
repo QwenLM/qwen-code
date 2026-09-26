@@ -8,7 +8,7 @@ function result(structured, extra = {}) {
 
 const appRecord = { name: "Fixture", bundle_id: "org.example.fixture", launch_path: "/Owned/A/Fixture.app", pid: 42, running: true };
 
-function session(name, { apps = [{ ...appRecord }], expireWindows = () => false, click, launch } = {}) {
+function session(name, { apps = [{ ...appRecord }], windows, expireWindows = () => false, click, launch } = {}) {
   const mutations = [];
   const observations = [];
   const launches = [];
@@ -26,16 +26,19 @@ function session(name, { apps = [{ ...appRecord }], expireWindows = () => false,
     },
     async listWindows(input) {
       observations.push({ method: "listWindows", input });
-      if (expireWindows()) {
+      if (expireWindows(input)) {
         return result({ code: "authorization_context_expired" }, { isError: true });
       }
-      return result({ windows: [{ window_id: input.pid + 100, title: `Document ${input.pid}`, z_index: 3, is_on_screen: true, is_app_target: true }] });
+      return result({ windows: windows ?? [{ window_id: input.pid + 100, title: `Document ${input.pid}`, z_index: 3, is_on_screen: true, is_app_target: true }] });
     },
     async getWindowState(input) {
       observations.push({ method: "getWindowState", input });
       return result({
         tree_markdown: '[37] Button "Save"',
         elements: [{ element_index: 2, element_id: 37, element_token: `rv1:${name}:91`, role: "AXButton" }],
+        ...(input.includeScreenshot ? { screenshot_width: 270, screenshot_height: 300, screenshot_frame_valid: true } : {}),
+      }, {
+        images: input.includeScreenshot ? [{ mimeType: "image/png", dataBase64: "fixture" }] : [],
       });
     },
     async windowClick(input) {
@@ -153,6 +156,39 @@ test("a session replacement during window revalidation must not dispatch an old 
   expire = true;
   await assert.rejects(app.click(37), { code: "app_observation_required" });
   assert.equal(second.mutations.length, 0);
+});
+
+for (const point of [37, { x: 50, y: 50 }]) test(`a session replacement during popup revalidation invalidates ${typeof point === "number" ? "element bindings" : "screenshot coordinates"}`, async () => {
+  const windows = [
+    { window_id: 7, pid: 42, title: "Document", layer: 0, z_index: 2,
+      is_on_screen: true, is_app_target: true,
+      bounds: { x: 100, y: 100, width: 800, height: 600 } },
+    { window_id: 11, pid: 42, title: "", layer: 0, z_index: 3,
+      is_on_screen: true, is_app_target: false,
+      bounds: { x: 500, y: 300, width: 270, height: 300 } },
+  ];
+  let expire = false;
+  const first = session("first", { windows, expireWindows: (input) => expire && input.onScreenOnly });
+  const second = session("second", { windows });
+  const computer = new ComputerUse(first, { ownsSession: true, sessionFactory: async () => second });
+  const app = await computer.getApp("Fixture");
+  assert.equal((await app.getState({ includeScreenshot: true })).window, "");
+  expire = true;
+  await assert.rejects(app.click(point), { code: "app_observation_required" });
+  assert.equal(computer.connectionGeneration, 2);
+  assert.equal(second.mutations.length, 0);
+  assert.equal(second.observations.filter((call) => call.method === "getWindowState").length, 0);
+  await app.getState({ includeScreenshot: true });
+  await app.click(point);
+  assert.equal(second.mutations.length, 1);
+  assert.equal(second.mutations[0].windowId, 11n);
+  if (typeof point === "number") {
+    assert.equal(second.mutations[0].elementToken, "rv1:second:91");
+  } else {
+    assert.equal(second.mutations[0].x, point.x);
+    assert.equal(second.mutations[0].y, point.y);
+  }
+  await computer.close();
 });
 
 test("cancelling a dispatched app mutation waits for the native result and never replays", async () => {

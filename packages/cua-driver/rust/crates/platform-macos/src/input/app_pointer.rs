@@ -134,6 +134,7 @@ pub(crate) fn click_button(
     count: usize,
     modifiers: &[&str],
     button: DragButton,
+    app_popup: bool,
 ) -> anyhow::Result<()> {
     let (down, up, button) = match button {
         DragButton::Left => (1, 2, 0),
@@ -165,7 +166,9 @@ pub(crate) fn click_button(
             flags,
         )?);
     }
-    super::skylight::prepare_background_pointer(pid, window_id)?;
+    if !app_popup {
+        super::skylight::prepare_background_pointer(pid, window_id)?;
+    }
     for event in &events {
         post(pid, event);
         std::thread::sleep(Duration::from_millis(20));

@@ -77,6 +77,32 @@ function currentWindow(windows, { allowNone = false } = {}) {
   return selected[0];
 }
 
+async function isMacOS(computer, signal) {
+  try {
+    return await computer.getPlatform({ signal }) === "macos";
+  } catch (error) {
+    if (error.code === "driver_platform_unavailable") return false;
+    throw error;
+  }
+}
+
+function currentPopup(windows, target) {
+  const targetBounds = target.bounds;
+  return windows.filter((window) =>
+    window.pid === target.pid && window.is_app_target === false &&
+    Number.isSafeInteger(window.window_id ?? window.windowId) &&
+    window.title === "" && window.layer === 0 && window.is_on_screen === true &&
+    window.on_current_space !== false &&
+    Number.isSafeInteger(target.z_index) && Number.isSafeInteger(window.z_index) &&
+    window.z_index > target.z_index &&
+    windows.every((candidate) => candidate.pid !== target.pid || candidate.z_index <= window.z_index) &&
+    targetBounds && window.bounds &&
+    window.bounds.width < targetBounds.width && window.bounds.height < targetBounds.height &&
+    window.bounds.x >= targetBounds.x && window.bounds.y >= targetBounds.y &&
+    window.bounds.x + window.bounds.width <= targetBounds.x + targetBounds.width &&
+    window.bounds.y + window.bounds.height <= targetBounds.y + targetBounds.height)[0];
+}
+
 export class ComputerUseApp {
   #computer;
   #listApps;
@@ -127,13 +153,25 @@ export class ComputerUseApp {
       this.#generation = this.#computer.connectionGeneration;
     }
     const windows = await this.#computer.listWindows({ pid: this.#pid, onScreenOnly: false, appContext: true, signal });
+    const nativeWindow = currentWindow(windows, { allowNone: allowNoWindow });
+    let window = nativeWindow;
+    if (window && windows.some((candidate) => candidate.pid === window.pid &&
+      candidate.window_id !== window.window_id && candidate.title === "" &&
+      candidate.layer === 0 && candidate.is_on_screen === true) &&
+      await isMacOS(this.#computer, signal)) {
+      const visible = await this.#computer.listWindows({ pid: this.#pid, onScreenOnly: true, appContext: true, signal });
+      const visibleTarget = visible.find((candidate) => candidate.is_app_target === true &&
+        (candidate.window_id ?? candidate.windowId) === (window.window_id ?? window.windowId));
+      window = currentPopup(visible, visibleTarget ?? window) ?? window;
+    }
     if (this.#generation !== this.#computer.connectionGeneration) {
       this.#invalidate();
       this.#generation = this.#computer.connectionGeneration;
     }
-    const window = currentWindow(windows, { allowNone: allowNoWindow });
     if (!window) return { pid: this.#pid };
-    return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId, key: `${window.pid ?? this.#pid}:${window.window_id ?? window.windowId}` };
+    return { window, pid: window.pid ?? this.#pid, windowId: window.window_id ?? window.windowId,
+      nativeWindowId: nativeWindow.window_id ?? nativeWindow.windowId,
+      key: `${window.pid ?? this.#pid}:${window.window_id ?? window.windowId}` };
   }
 
   async #observe(options = {}, resolved) {
@@ -250,8 +288,9 @@ export class ComputerUseApp {
         if (elementRequired && !Number.isSafeInteger(point)) {
           throw new ComputerUseError("This action requires a short element ID", { code: "app_element_required" });
         }
+        const keyboard = ["pressKey", "hotkey", "typeText", "paste"].includes(method);
         let address = point === undefined
-          ? { pid: target.pid, windowId: target.windowId }
+          ? { pid: target.pid, windowId: keyboard ? target.nativeWindowId : target.windowId }
           : this.#address(point, target);
         if (method === "drag") {
           if (![options.fromX, options.fromY, options.toX, options.toY].every(Number.isFinite)) {
@@ -263,7 +302,13 @@ export class ComputerUseApp {
           this.#address({ x: options.toX, y: options.toY }, target);
         }
         const semantic = ["setValue", "performSecondaryAction", "paste", "selectText"].includes(method);
-        address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: "foreground" }) };
+        const popupClick = target.window.is_app_target === false &&
+          ["click", "doubleClick", "rightClick"].includes(method);
+        const pointerButton = method === "click" && Number.isSafeInteger(point) &&
+          this.#elements.get(point)?.role === "AXButton" &&
+          !this.#elements.get(point)?.actions?.length &&
+          await isMacOS(this.#computer, options.signal);
+        address = { ...options, ...address, ...(semantic ? {} : { deliveryMode: popupClick || pointerButton ? "background" : "foreground" }) };
         if (["click", "doubleClick", "rightClick", "drag", "scroll", "typeText", "paste"].includes(method)) address.appContext = true;
         const result = await this.#computer[method](address);
         const nativeEffects = ["confirmed", "partial", "unverifiable", "suspected_noop", "refused"];
