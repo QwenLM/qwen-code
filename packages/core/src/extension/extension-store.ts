@@ -388,14 +388,49 @@ export class ExtensionStore {
     );
   }
 
+  /**
+   * When `readArtifacts` rejects, `onArtifactsRejected` runs before the lock
+   * is released and receives a snapshot reader that does not re-acquire it.
+   * A caller folding the failed attempt's records into shared state (e.g. the
+   * extension manager's refusal merge) stays atomic with every other store
+   * mutation that way; reading the snapshot after the release would leave a
+   * window a concurrent commit can interleave into.
+   */
   async readConsistent<T>(
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
     }>,
+    onArtifactsRejected?: (
+      readSnapshot: () => Promise<ExtensionStoreSnapshot>,
+    ) => Promise<void>,
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions } = await readArtifacts();
+      let artifacts: {
+        value: T;
+        extensions: readonly ExtensionIdentity[];
+      };
+      try {
+        artifacts = await readArtifacts();
+      } catch (error) {
+        // The callback folds the failed attempt's records into shared state;
+        // it must never replace the primary rejection. A throw from it (its
+        // own snapshot read, or anything its callees rethrow) is logged and
+        // the original error still surfaces (R9-2).
+        try {
+          await onArtifactsRejected?.(
+            async () =>
+              (await this.readSnapshotUnlocked()) ?? this.emptySnapshot(),
+          );
+        } catch (callbackError) {
+          debugLogger.warn(
+            'extension store rejection callback failed; surfacing the primary error:',
+            callbackError,
+          );
+        }
+        throw error;
+      }
+      const { value, extensions } = artifacts;
       const snapshot = await this.ensureInitializedUnlocked(extensions);
       return { value, snapshot };
     });

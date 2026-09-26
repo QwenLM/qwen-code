@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { MCPServerConfig } from '../../config/config.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isResourceExhaustion } from '../../skills/skill-load.js';
 import {
   isPathWithin,
   resolveContainedExistingPath,
@@ -56,6 +57,9 @@ export async function loadAgentPluginMcpServers(
     contents = await fs.promises.readFile(resolvedMcpPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    // Resource exhaustion fails the load closed — laundering it into `{}`
+    // would commit the plugin as active with zero MCP servers (R1-3).
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `Disabling Agent Plugins MCP: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -83,6 +87,9 @@ export async function loadAgentPluginMcpServers(
         writable: true,
       });
     } catch (error) {
+      // Resource exhaustion fails the load closed — skipping only this
+      // server would commit the plugin with a truncated server set (R9-1).
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `Skipping Agent Plugins MCP server "${name}": ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -106,6 +113,9 @@ export async function loadAgentPluginMcpServers(
         }
       }
     } catch (error) {
+      // Resource exhaustion fails the load closed — deleting the stdio
+      // servers would commit the plugin with a truncated server set (R9-1).
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `Failed to create Agent Plugins data directory; disabling stdio MCP servers: ${error instanceof Error ? error.message : String(error)}`,
       );

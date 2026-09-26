@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -50,6 +50,83 @@ describe('loadExtensionWorkflows', () => {
 
   it('returns nothing when the extension ships no workflows directory', async () => {
     expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
+  });
+
+  it('fails closed when a workflow read hits resource exhaustion', async () => {
+    // A swallowed EMFILE would silently drop the extension's workflows from
+    // the committed load; the refresh must reject so a later one retries.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'readFile').mockRejectedValue(
+      Object.assign(new Error('EMFILE: too many open files'), {
+        code: 'EMFILE',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('EMFILE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails closed when the workflows directory listing hits resource exhaustion', async () => {
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'readdir').mockRejectedValue(
+      Object.assign(new Error('EMFILE: too many open files'), {
+        code: 'EMFILE',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('EMFILE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails closed when the workflows path stat hits resource exhaustion', async () => {
+    // The candidate stat's blanket catch would read an ENOMEM as "not found"
+    // and commit the extension with its workflows silently dropped.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const spy = vi.spyOn(fs, 'lstat').mockRejectedValue(
+      Object.assign(new Error('ENOMEM: not enough memory'), {
+        code: 'ENOMEM',
+      }),
+    );
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('ENOMEM');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails closed when a workflow file stat hits resource exhaustion', async () => {
+    // collectFile's `.catch(() => null)` would read an ENOMEM as "not a
+    // regular file" and skip the script in a load reported as successful.
+    await write('workflows/audit.js', workflowSource('audit'));
+    const realLstat = fs.lstat;
+    const spy = vi.spyOn(fs, 'lstat').mockImplementation(((
+      target: string,
+      ...rest: unknown[]
+    ) =>
+      String(target).endsWith(`${path.sep}audit.js`)
+        ? Promise.reject(
+            Object.assign(new Error('ENOMEM: not enough memory'), {
+              code: 'ENOMEM',
+            }),
+          )
+        : realLstat(target, ...(rest as []))) as typeof fs.lstat);
+    try {
+      await expect(
+        loadExtensionWorkflows(root, owner, undefined),
+      ).rejects.toThrow('ENOMEM');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reads the default directory, qualified and sorted by name', async () => {

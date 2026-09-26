@@ -24,6 +24,7 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { isPathWithin } from '../../extension/agent-plugins-v1/paths.js';
+import { isResourceExhaustion } from '../../skills/skill-load.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { extractAndStripMeta } from './workflow-sandbox.js';
 import {
@@ -140,6 +141,9 @@ export async function loadExtensionWorkflows(
       ? path.resolve(extensionRoot)
       : await fs.realpath(extensionRoot);
   } catch (error) {
+    // Resource exhaustion fails the whole load closed so a later refresh
+    // retries, instead of silently dropping this extension's workflows.
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(
       `failed to load workflows of extension "${owner.name}": ${error}`,
     );
@@ -157,6 +161,9 @@ export async function loadExtensionWorkflows(
     try {
       await collectCandidate(candidate, context);
     } catch (error) {
+      // Resource exhaustion fails the whole load closed; one unreadable
+      // declared path otherwise stays isolated from the rest.
+      if (isResourceExhaustion(error)) throw error;
       debugLogger.warn(
         `skipping workflows path of extension "${owner.name}" that could not be read: ${candidate.candidate}: ${error}`,
       );
@@ -222,7 +229,10 @@ async function collectCandidate(
     stat = followSymlinks
       ? await fs.stat(candidate)
       : await fs.lstat(candidate);
-  } catch {
+  } catch (error) {
+    // Same fail-closed carve-out as the readFile legs: an ENOMEM here must
+    // not read as "not found" (R1-3).
+    if (isResourceExhaustion(error)) throw error;
     if (explicit) {
       debugLogger.warn(
         `declared workflows path of extension "${owner.name}" not found: ${candidate}`,
@@ -280,7 +290,10 @@ async function collectFile(
   }
   const stat = await (
     followSymlinks ? fs.stat(filePath) : fs.lstat(filePath)
-  ).catch(() => null);
+  ).catch((error) => {
+    if (isResourceExhaustion(error)) throw error;
+    return null;
+  });
   if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
     debugLogger.warn(
       `skipping workflow of extension "${owner.name}" that is not a regular file: ${filePath}`,
@@ -297,6 +310,7 @@ async function collectFile(
   try {
     source = await fs.readFile(filePath, 'utf8');
   } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
     debugLogger.warn(`failed to read workflow ${filePath}: ${error}`);
     return;
   }

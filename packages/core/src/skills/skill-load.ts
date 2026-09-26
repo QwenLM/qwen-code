@@ -19,6 +19,197 @@ const debugLogger = createDebugLogger('SKILL_LOAD');
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+/**
+ * Resource-exhaustion errnos that must never be swallowed by the per-entry
+ * skips in the extension/skill/agent loaders. Every queued
+ * `fs.promises.readFile` opens its descriptor as soon as the libuv pool
+ * dequeues it, so under a low `RLIMIT_NOFILE` (long-running daemons holding
+ * pipes/sockets, containers with a low LimitNOFILE, system-wide ENFILE) these
+ * reads fail mid-scan. Treating them like parse failures would silently commit
+ * a truncated extension set — and, because the cache fingerprint is captured
+ * from pre-load disk state, that truncation would stick until restart. They
+ * must instead fail the whole refresh closed so a later refresh retries.
+ */
+const RESOURCE_EXHAUSTION_CODES = new Set([
+  'EMFILE',
+  'ENFILE',
+  'EAGAIN',
+  'ENOMEM',
+]);
+
+/**
+ * Rethrow when `error` is resource exhaustion (see RESOURCE_EXHAUSTION_CODES);
+ * everything else — parse/validation failures, ENOENT-class skips — is the
+ * caller's business and stays swallowed.
+ */
+export function isResourceExhaustion(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && RESOURCE_EXHAUSTION_CODES.has(code);
+}
+
+/**
+ * Upper bound on the number of per-entry manifest reads in flight at once,
+ * shared by the gated loaders (extension skills, extension agents and plugin
+ * skills — the three `mapWithConcurrency` callers). Loading nests
+ * (extensions fan out to per-extension skill/agent scans, which fan out to
+ * per-file reads), so a per-level cap cannot express a shared budget.
+ *
+ * The gate bounds admissions to those manifest callbacks, not every open
+ * descriptor in the process: the commands `readdir` enumeration
+ * (`loadCommandsFromDir` in extensionManager.ts), the extensions-root
+ * readdir, the per-extension sync config/hooks reads, `loadExtensionWorkflows`
+ * and the managed `SkillManager.loadSkillsFromDir` (skill-manager.ts, an
+ * unbounded `Promise.all` this module does not cover) all sit outside it.
+ *
+ * 8 measured no wall-clock loss versus 64 (the default 4-thread libuv pool
+ * is the real bottleneck either way) while keeping peak descriptors far
+ * below even a container's low LimitNOFILE — see the EMFILE rethrow below
+ * for why headroom here matters.
+ */
+export const SKILL_LOAD_CONCURRENCY = 8;
+
+/**
+ * How many extensions the top-level directory scan allows into their
+ * per-extension phase simultaneously. The per-extension work itself draws
+ * from the shared semaphore, so this only bounds scheduling fan-out, not
+ * descriptors; keeping it modest avoids queueing tens of thousands of
+ * closures at once.
+ */
+export const EXTENSION_SCAN_CONCURRENCY = 8;
+
+/**
+ * Module-wide semaphore shared by the gated manifest readers (extension
+ * skills, extension agents and plugin skills — the `mapWithConcurrency`
+ * callers), so their in-flight read budget is shared, not per-loader.
+ * Intentionally tiny; avoids pulling in a dependency for what is ~30 lines.
+ */
+class CountdownGate {
+  private readonly queue: Array<() => void> = [];
+  private active = 0;
+  private peakActive = 0;
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      this.peakActive = Math.max(this.peakActive, this.active);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.queue.push(() => {
+        this.active += 1;
+        this.peakActive = Math.max(this.peakActive, this.active);
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    this.active -= 1;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+
+  /** Peak simultaneous holders since process start; exported for tests. */
+  peak(): number {
+    return this.peakActive;
+  }
+}
+
+const descriptorGate = new CountdownGate(SKILL_LOAD_CONCURRENCY);
+
+/**
+ * Test-only observation: the peak number of simultaneous manifest-read
+ * admissions since process start. Lets a test pin the global descriptor
+ * ceiling without mocking `fs.promises`.
+ */
+export function peakDescriptorGateInFlight(): number {
+  return descriptorGate.peak();
+}
+
+/**
+ * Order-preserving map whose per-item work is admitted through the shared
+ * descriptor gate. Every gated item must complete (or fail) while holding its
+ * permit without making further gated acquisitions: a level that holds a
+ * permit across nested gated work stacks orphans when a sibling fails and can
+ * deadlock the module-wide pool — schedule such levels with
+ * `scheduleWithConcurrency` instead (the loaders below do exactly that). The
+ * batch always settles before rejecting (allSettled, then rethrow the first
+ * original rejection reason) so a failing item never abandons siblings
+ * mid-flight. The rethrow carries the original error object because the
+ * loader entrances classify resource exhaustion by `error.code` (see
+ * `isResourceExhaustion`), not by message. The `limit` parameter only bounds
+ * batch scheduling, not descriptors.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const effective = Math.max(1, limit);
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i += effective) {
+    const slice = items.slice(i, i + effective);
+    const settled = await Promise.allSettled(
+      slice.map(async (item, j) => {
+        await descriptorGate.acquire();
+        try {
+          results[i + j] = await fn(item);
+        } finally {
+          descriptorGate.release();
+        }
+      }),
+    );
+    const firstRejection = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (firstRejection) {
+      // Preserve the original error object: the refresh boundary surfaces it
+      // verbatim to fail-closed consumers, and the per-entry errno
+      // classification above keys off `error.code`.
+      throw firstRejection.reason;
+    }
+  }
+  return results;
+}
+
+/**
+ * Scheduling-only variant for fan-out levels that open no descriptors
+ * themselves (e.g. the top-level extensions scan, which merely starts the
+ * per-extension loaders). Items here must NOT hold gate permits while their
+ * nested gated work runs: a level that holds a permit across nested gated
+ * acquisitions stacks orphans when a sibling fails, draining the shared pool
+ * one failed scan at a time. Per-item rejections do not abort the remaining
+ * items in flight — the whole pass settles, then the first original rejection
+ * reason is rethrown (same contract as `mapWithConcurrency`).
+ */
+export async function scheduleWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const effective = Math.max(1, limit);
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i += effective) {
+    const slice = items.slice(i, i + effective);
+    const settled = await Promise.allSettled(
+      slice.map(async (item, j) => {
+        results[i + j] = await fn(item);
+      }),
+    );
+    const firstRejection = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (firstRejection) {
+      throw firstRejection.reason;
+    }
+  }
+  return results;
+}
+
 export async function loadSkillsFromDir(
   baseDir: string,
   onError?: (error: unknown) => void,
@@ -26,85 +217,106 @@ export async function loadSkillsFromDir(
   debugLogger.debug(`Loading skills from directory (skill-load): ${baseDir}`);
   try {
     const entries = await fs.readdir(baseDir, { withFileTypes: true });
-    const skills: SkillConfig[] = [];
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-    for (const entry of entries) {
-      // Skip transient install artifacts (backup / staging dirs left behind
-      // by a crashed reinstall). Without this filter a stale `.backup-*`
-      // sibling with a valid SKILL.md would be loaded as a duplicate skill,
-      // and a "deleted" skill could reappear from its backup sibling.
-      // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
-      // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
-      // name) so that legitimate skill dirs whose names merely contain
-      // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
-      if (
-        /\.backup-\d+-\d+$/.test(entry.name) ||
-        /\.installing-\d+-\d+$/.test(entry.name)
-      ) {
-        debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
-        continue;
-      }
-
-      // Process directories and symlinks that resolve to directories.
-      // Plain files are silently skipped (each skill must be a directory).
-      const isDirectory = entry.isDirectory();
-      const isSymlink = entry.isSymbolicLink();
-
-      if (!isDirectory && !isSymlink) {
-        debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
-        continue;
-      }
-
-      const skillDir = path.join(baseDir, entry.name);
-
-      // For symlinks, verify the target (a) resolves and (b) is a
-      // directory. Shared with `skill-manager.ts` so the two parsers
-      // stay in sync. Targets pointing outside `baseDir` are allowed
-      // — see `symlinkScope.ts` for the rationale.
-      if (isSymlink) {
-        const check = await validateSymlinkTarget(skillDir);
-        if (!check.ok) {
-          if (
-            check.reason === 'invalid' &&
-            !(isNodeError(check.error) && check.error.code === 'ENOENT')
-          ) {
-            onError?.(check.error);
-          }
-          if (check.reason === 'not-directory') {
-            debugLogger.warn(
-              `Skipping symlink ${entry.name} that does not point to a directory`,
-            );
-          } else {
-            debugLogger.warn(
-              `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
-            );
-          }
-          continue;
+    const loaded = await mapWithConcurrency(
+      entries,
+      SKILL_LOAD_CONCURRENCY,
+      async (entry): Promise<SkillConfig | null> => {
+        // Skip transient install artifacts (backup / staging dirs left behind
+        // by a crashed reinstall). Without this filter a stale `.backup-*`
+        // sibling with a valid SKILL.md would be loaded as a duplicate skill,
+        // and a "deleted" skill could reappear from its backup sibling.
+        // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
+        // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
+        // name) so that legitimate skill dirs whose names merely contain
+        // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
+        if (
+          /\.backup-\d+-\d+$/.test(entry.name) ||
+          /\.installing-\d+-\d+$/.test(entry.name)
+        ) {
+          debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+          return null;
         }
-      }
-      const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
-      try {
-        // Check if SKILL.md exists
-        await fs.access(skillManifest);
+        // Process directories and symlinks that resolve to directories.
+        // Plain files are silently skipped (each skill must be a directory).
+        const isDirectory = entry.isDirectory();
+        const isSymlink = entry.isSymbolicLink();
 
-        const content = await fs.readFile(skillManifest, 'utf8');
-        const config = parseSkillContent(content, skillManifest);
-        skills.push(config);
-      } catch (error) {
-        if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        debugLogger.error(
-          `Failed to parse skill at ${skillDir}: ${errorMessage}`,
-        );
-        continue;
-      }
-    }
+        if (!isDirectory && !isSymlink) {
+          debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
+          return null;
+        }
 
-    return skills;
+        const skillDir = path.join(baseDir, entry.name);
+
+        // For symlinks, verify the target (a) resolves and (b) is a
+        // directory. Shared with `skill-manager.ts` so the two parsers
+        // stay in sync. Targets pointing outside `baseDir` are allowed
+        // — see `symlinkScope.ts` for the rationale.
+        if (isSymlink) {
+          const check = await validateSymlinkTarget(skillDir);
+          if (!check.ok) {
+            if (check.reason === 'not-directory') {
+              debugLogger.warn(
+                `Skipping symlink ${entry.name} that does not point to a directory`,
+              );
+            } else {
+              // validateSymlinkTarget folds every realpath/stat failure into
+              // this per-entry skip, but a resource-exhaustion errno (ENOMEM
+              // is the reachable member — those syscalls allocate no
+              // descriptor) must fail the load closed like the readFile and
+              // readdir legs, not resolve a truncated skill set.
+              if (isResourceExhaustion(check.error)) {
+                throw check.error;
+              }
+              if (
+                !(isNodeError(check.error) && check.error.code === 'ENOENT')
+              ) {
+                onError?.(check.error);
+              }
+              debugLogger.warn(
+                `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+              );
+            }
+            return null;
+          }
+        }
+        const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
+
+        try {
+          // Check if SKILL.md exists
+          await fs.access(skillManifest);
+
+          const content = await fs.readFile(skillManifest, 'utf8');
+          return parseSkillContent(content, skillManifest);
+        } catch (error) {
+          if (isResourceExhaustion(error)) {
+            // Fail the whole refresh closed so a later refresh retries,
+            // instead of committing a truncated set as a successful load.
+            throw error;
+          }
+          if (!(isNodeError(error) && error.code === 'ENOENT')) {
+            onError?.(error);
+          }
+          const errorMessage =
+            error instanceof Error ? error.message : 'Unknown error';
+          debugLogger.error(
+            `Failed to parse skill at ${skillDir}: ${errorMessage}`,
+          );
+          return null;
+        }
+      },
+    );
+
+    return loaded.filter((skill) => skill != null);
   } catch (error) {
+    // Resource exhaustion at the directory level (e.g. readdir EMFILE) fails
+    // the whole refresh; a missing or unreadable directory stays an empty set.
+    if (isResourceExhaustion(error)) {
+      throw error;
+    }
     if (!(isNodeError(error) && error.code === 'ENOENT')) onError?.(error);
     // Directory doesn't exist or can't be read
     const errorMessage =
