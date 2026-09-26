@@ -26,13 +26,16 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
   createReviewWorktreeLease,
+  recordReviewWorktreeLeaseMergeBase,
+  restoreReviewWorktreeLeaseMergeBase,
   readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
 } from '../../services/review-worktree-lease.js';
@@ -41,10 +44,14 @@ import {
   untrustedGitfile,
   untrustedRepositoryFrom,
 } from './lib/worktree.js';
-import { setGhHost } from './lib/gh.js';
+import { resolveGhHost, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
+import {
+  deadlineOption,
+  EFFORT_OPTION,
+  type ReviewEffort,
+} from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -63,7 +70,7 @@ import { widenScope } from './lib/incremental-scope.js';
 import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
-  REVIEW_TMP_DIR,
+  ensureReviewTmpDir,
   reviewBranch,
   tmpFile,
   worktreePath,
@@ -88,6 +95,7 @@ import {
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { SHA_RE } from './lib/ledger.js';
+import { blobPairs } from './lib/file-verdicts.js';
 import {
   appendRunSession,
   ledgerResumeCount,
@@ -95,6 +103,7 @@ import {
   recordResume,
   recordRestart,
   RESUME_MAX,
+  currentSessionEntry,
 } from './lib/run-ledger.js';
 import {
   assessResume,
@@ -102,7 +111,13 @@ import {
   type ResumeRefusal,
 } from './lib/resume.js';
 import {
-  hasReviewDeadline,
+  captureDeadline,
+  describeResumedWall,
+  envDeadlineInForce,
+  minutesText,
+  parseDeadlineOption,
+  recordedPlanDeadline,
+  validateDeadlineFlag,
   readBudgetStop,
   clearBudgetStop,
   clearRoundStamps,
@@ -116,6 +131,12 @@ import {
   prebuildWorktree,
   type WorktreeDependencies,
 } from './lib/prebuild.js';
+import {
+  resolveCriticalPosture,
+  type CriticalPostureCause,
+} from './lib/posture.js';
+import { recordedSeverityFloor } from './lib/authorization.js';
+import { parseRemoteUrl } from './lib/remote-match.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -138,6 +159,8 @@ interface FetchPrArgs {
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
+  /** `--deadline`: minutes, or `none`; omitted for the tier's default wall. */
+  deadline?: string;
   /**
    * The incremental anchor — the head the last clean round reviewed. Typed
    * as possibly-repeated because yargs collapses a repeated flag into an
@@ -281,6 +304,24 @@ type FetchPrResult = PlanReport & {
    */
   reviewModelId?: string;
   /**
+   * Where this round's content-verdict candidate landed — the per-file
+   * `(base, head)` blob pairs of everything the plan covers, plus the commit
+   * anchor. Step 8 promotes it into the review cache on a clean high-effort
+   * end (via `cache-commit`). Absent when the capture had no diff to
+   * describe, when the blob listing failed, or when the write was refused —
+   * each said on stderr.
+   *
+   * PRODUCER SIDE ONLY at this commit, and the distinction matters because
+   * the docs used to read as though the feature had shipped. Nothing reads
+   * `fileVerdicts` back yet: the transfer was to be `rescope --cache`, and
+   * `rescope` is gone — its scoping moved into `fetch-pr --since`. So a
+   * rebase still degrades to a full review today; what the pairs buy is that
+   * the record exists and is sound (mode-aware, `.gitattributes`-aware,
+   * refusing an added-file pair) when the consumer lands on the `--since`
+   * path. Until then this field is groundwork, not rebase survival.
+   */
+  cacheCandidatePath?: string;
+  /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
    * an anchor. `effective: true` without `upToDate` means the diff and plan
@@ -362,6 +403,17 @@ export interface IncrementalDecision {
    * at the seam rather than order a from-scratch re-review.
    */
   scope?: IncrementalScope;
+  /**
+   * The round's posting posture, when the capture resolved it to
+   * critical-only (#10104) — present exactly beside an effective scope. It
+   * is what flips the round to the fix-audit shape: the territory fan-out
+   * regardless of the narrowed delta's size (`isFixAuditRound` in
+   * budget.ts) and the posture-narrowed reverse-audit schedule.
+   */
+  posture?: 'critical';
+  /** Which arm resolved it: the operator's recorded floor, the round
+   *  schedule, or the latched flat-trend streak. */
+  postureCause?: CriticalPostureCause;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -753,6 +805,7 @@ function tryResume(
     liveHeadSha,
     resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
+    runningModelId: roundModelIdFrom(process.env),
   });
   if (!ruling.ok) {
     return {
@@ -765,14 +818,19 @@ function tryResume(
     };
   }
 
-  // Budget hygiene: the continuation runs under a fresh deadline, so a
-  // time-budget stop is the dead attempt's, not this run's, and is cleared.
+  // Budget hygiene: the continuation runs under a fresh deadline (CI
+  // recomputes its epoch per attempt; a plan-recorded wall restarts from the
+  // new session's ledger entry), so a time-budget stop is the dead attempt's,
+  // not this run's, and is cleared.
   // A round-cap stop is about rounds, not time — it is the trusted CLI's own
   // record that the audit reached its round cap, so it stands, and the round
-  // stamps stay with it. Any other stop is cleared with the stamps: the span
-  // from the dead attempt's last stamp to the continuation's first admission
-  // spans the death gap and would price a round at hours; without the stamps
-  // the gate falls back to its conservative constant.
+  // stamps stay with it (the pricers read only this attempt's stamps, so a
+  // new session never prices the death gap from them). Any other stop is
+  // cleared with the stamps: a SAME-session resume continues the attempt,
+  // and there the span from the dead attempt's last stamp to the
+  // continuation's first admission would still cross the death gap and
+  // price a round at hours; without the stamps the gate falls back to its
+  // conservative constant.
   const stop = readBudgetStop(out);
   const roundCapStands = stop !== null && stop.cause === 'round-cap';
   if (stop !== null && !roundCapStands) {
@@ -783,6 +841,56 @@ function tryResume(
   }
   appendRunSession(out);
   recordResume(out);
+  // The wall a continuation runs under dates from THIS session's ledger
+  // entry; `appendRunSession` is bookkeeping that never throws, so say when
+  // it did not land — the wall then dates from the first attempt, and the
+  // note below says how much of it is left, or that it has run out, before
+  // the fan-out is spent on a round the builder will refuse. (A session id
+  // is always set here: the lease identity check above refuses to run
+  // without one, so a missing entry is a ledger that did not take, never
+  // a shell that keeps none.) Only where a plan wall would date from the
+  // entry: a plan without one, or a run the environment's epoch bounds,
+  // has no wall to date, and the note would contradict the one after it.
+  if (
+    recordedPlanDeadline(out) !== null &&
+    !envDeadlineInForce(process.env) &&
+    currentSessionEntry(out, process.env) === null
+  ) {
+    writeStderrLine(
+      'fetch-pr: the run-session ledger did not record this attempt, so ' +
+        "the plan's wall dates from the first attempt, not from now.",
+    );
+  }
+  const inherited = describeResumedWall(process.env, out);
+  if (inherited !== null) writeStderrLine(`fetch-pr: ${inherited}`);
+  // The plan is not rewritten on resume, so a `--deadline` passed now cannot
+  // land in it; say so — and say what the plan actually holds, read from the
+  // plan alone, rather than assert a wall it may never have recorded.
+  if (parseDeadlineOption(args.deadline) !== 'default') {
+    const recorded = recordedPlanDeadline(out);
+    const minutes = recorded === null ? '' : minutesText(recorded.seconds);
+    // "In force" the way the gates decide it — a finite, positive epoch —
+    // not the presence of a string: a malformed value is no clock at all.
+    const epochInForce = envDeadlineInForce(process.env);
+    writeStderrLine(
+      'fetch-pr: --deadline is ignored on a resumed run — ' +
+        (recorded === null
+          ? epochInForce
+            ? "the plan recorded no wall; the environment's epoch bounds " +
+              'this continuation.'
+            : 'the plan recorded no wall, so this continuation is bounded ' +
+              'by the round cap alone.'
+          : (recorded.source === 'flag'
+              ? `the plan keeps the ${minutes}-minute wall its own ` +
+                '--deadline recorded at capture.'
+              : `the plan keeps the ${minutes}-minute default wall it ` +
+                'recorded at capture.') +
+            (epochInForce
+              ? ' The environment exports an epoch, which takes precedence ' +
+                'while it stands.'
+              : '')),
+    );
+  }
   // Read the marker back: `recordResume` deduplicates by session, so a
   // second `--resume` in the SAME session is the same resume, and deriving
   // the number from the pre-write count would announce attempt 2 for it.
@@ -835,6 +943,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
+  // A malformed or too-short --deadline is a usage error, and it must fail
+  // here with the other argument checks — before detection, auth, and the
+  // worktree lease — not at the plan write after all of that: both bars,
+  // the env-free floor and this shell's pricing. The same validation runs
+  // again inside `captureDeadline`; it is pure given the environment. A
+  // `--resume` skips the shell bar here: the flag is ignored on a resumed
+  // plan, and a resume that falls through to a fresh capture meets that bar
+  // right after the fallthrough is ruled, before anything is destroyed.
+  validateDeadlineFlag(process.env, args.deadline, {
+    shellPriced: !args.resume,
+  });
   // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
   // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
   // the caller's label. `[1-9]` also rejects `0` (no PR zero — the message
@@ -890,6 +1009,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Run the review from a checkout outside the review temp dir.`,
     );
   }
+
+  // The scratch directory, refused outright when the workspace redirected
+  // it — before the worktree, the diff and the plan land there (see
+  // `ensureReviewTmpDir`). AFTER the launch-directory gate, not ahead of it:
+  // the guard lists the index (`gitRaw`) and creates `.qwen/tmp`, and the gate
+  // above promises that no git call and no state change precedes it. The
+  // wrapper would refuse the listing on its own, but the guard's `catch`
+  // rewords that refusal as a listing failure, and outside a repository it
+  // goes on to create the directory. BEFORE the lease gate: the lease no
+  // longer lives under `.qwen/tmp`, but a round that cannot write its side
+  // files must not take the lock either.
+  ensureReviewTmpDir('fetch-pr');
 
   // The lease is also a lock. The worktree path is fixed per PR number, so
   // the stale-clean below would remove a worktree ANOTHER session is actively
@@ -976,7 +1107,33 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let priorFetchedSha: string | null = null;
     if (args.resume) {
       const outcome = tryResume(args, wt, platform);
-      if (outcome.resumed) return;
+      if (outcome.resumed) {
+        // A continuation returns before the resolution that records the
+        // host-side merge base, and the lease acquisition above has already
+        // dropped the anchor (on purpose — see `createReviewWorktreeLease`).
+        // Without putting it back, every resumed review had no anchor and
+        // `base-tree` refused for the rest of it. The value restored is the
+        // lease's own prior, never the report or the plan.
+        restoreReviewWorktreeLeaseMergeBase(
+          process.cwd(),
+          leaseTarget,
+          sessionId,
+        );
+        return;
+      }
+      // The fresh review that follows WILL record the flag, so the shell bar
+      // the resume check skipped is owed now — before the stale worktree is
+      // destroyed and the head fetched, not at the plan write after them —
+      // and before the two lines below, which promise a fresh review (the
+      // stdout one is a machine contract: "the report at --out is new").
+      try {
+        validateDeadlineFlag(process.env, args.deadline);
+      } catch (err) {
+        throw new TypeError(
+          `Cannot resume PR #${prNumber} (${outcome.reason}); the fresh ` +
+            `review it falls through to refuses --deadline: ${(err as Error).message}`,
+        );
+      }
       resumeRefusal = outcome.reason;
       priorFetchedSha = outcome.priorFetchedSha;
       writeStdoutLine(
@@ -1122,8 +1279,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
-    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-
     // 5. Capture the diff to a file and partition it. The capture is decoded
     //    to UTF-8 text and written back as text, so a byte sequence that is
     //    not valid UTF-8 becomes U+FFFD — this file is READ, never applied:
@@ -1158,6 +1313,47 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `WARNING: could not fetch ${remote}/${meta.baseRefName}. The merge-base ` +
           `is resolved from a possibly stale local ref, so the diff may not be ` +
           `the one under review.`,
+      );
+    }
+    // Record the resolved merge base in the host-side lease, beside the
+    // review-lease directory nothing mounts.
+    //
+    // `base-tree` builds and certifies the A/B's BASE side at this sha, and
+    // the plan it reads is written into `.qwen/tmp` — the directory the
+    // sandbox hands the reviewed code read-write, minutes before the first
+    // `base-tree` ask exists. Without a host-side copy, the value the fence
+    // pins is whatever the plan says at that first ask, and the pin then
+    // authenticates the mount's choice against itself. With one, `base-tree`
+    // refuses a plan that disagrees with what this capture actually
+    // resolved. Not recorded when there is no merge base: `base-tree`
+    // reports the A/B unavailable for that case on its own.
+    //
+    // Never fatal HERE — but not harmless either, and this comment used to
+    // claim it was: `base-tree` now REFUSES when the lease carries no merge
+    // base, because the alternative is the mount-writable plan being the sole
+    // authority again. So a capture that cannot record it costs this review
+    // its A/B lane, and the note `base-tree` prints says how to get it back
+    // (re-run this command). Debug-logged rather than thrown, because the
+    // fetch itself succeeded and failing the capture over this write would be
+    // the worse trade.
+    //
+    // UNCONDITIONALLY when a merge base was resolved at all — the
+    // `baseFetchFailed` half used to skip it, and that skip is what let a
+    // PREVIOUS round's value survive in the lease and then AUTHENTICATE a
+    // plan rewritten back to it. The anchor has to belong to the capture
+    // that owns the plan, so a capture that resolved a (possibly stale)
+    // merge base records it — together with the capture's own ruling that it
+    // may be stale, which is what `base-tree` refuses the stale-base round
+    // on. That ruling used to be read from `plan.baseFetchFailed` alone,
+    // inside the mount, where the reviewed code could flip it to "fresh" and
+    // have the anchor authenticate a stale base; see `mergeBaseStale`.
+    if (mergeBaseSha !== null) {
+      recordReviewWorktreeLeaseMergeBase(
+        process.cwd(),
+        leaseTarget,
+        mergeBaseSha,
+        sessionId,
+        { stale: baseFetchFailed },
       );
     }
     const diffRel = tmpFile(`pr-${prNumber}`, 'diff.txt');
@@ -1387,6 +1583,62 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           `agents will have to fall back to running \`git diff\` themselves.`,
       );
     }
+    // The round's posture, read at capture time (#10104). Only a round that
+    // is about to scope to an anchor asks: the fix-audit shape exists for
+    // the critical-only re-review of the commits since the last round, and
+    // without a usable anchor there is no "since". The floor is the CLI's
+    // own recorded invocation (never the orchestrator's account of it), and
+    // the side file is the same one compose's recovery reads next to this
+    // plan, so the prediction and the resolution share their facts.
+    let postureCause: CriticalPostureCause | null = null;
+    if (anchor?.diffBase) {
+      let sideLedger: unknown = null;
+      try {
+        sideLedger = JSON.parse(
+          readFileSync(
+            join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+            'utf8',
+          ),
+        );
+      } catch {
+        sideLedger = null;
+      }
+      postureCause = resolveCriticalPosture({
+        recordedFloor: recordedSeverityFloor({
+          callerPr: Number(prNumber),
+          callerRepo: ownerRepo,
+          // The host axis, bound to the evidence THIS command has (#10136):
+          // the explicit flag, else the host of the remote under review
+          // (the cwd origin submit's own chain reads — the one already
+          // selected this fetch's platform above), else the gh fallback
+          // (GH_HOST, else github.com). `resolveGhHost` alone never yields
+          // a recorded Aone or GHE host, so a flagless capture of a
+          // URL-shaped record missed the operator's explicit `suggestion`
+          // — the one miss that spends the narrowed shape against an
+          // instruction to keep the full one.
+          //
+          // Submit's chain has a fourth term this one deliberately omits
+          // (#10136 round 23): the RECORDED binding. There it is the host
+          // the write routes at, read from state the record does not
+          // supply; here the record IS what is being read, so binding the
+          // axis to the record's own host would make `recordedSeverityFloor`
+          // compare a value against itself and the axis would stop ruling
+          // at all. The two-names shape that term exists for — an Aone web
+          // host beside its git host — is absorbed downstream instead, by
+          // `hostsEquivalent`, and a bare-number record compares no host.
+          callerHost:
+            (typeof args.host === 'string' && args.host.trim()) ||
+            (remoteUrl ? parseRemoteUrl(remoteUrl)?.host : undefined) ||
+            resolveGhHost(undefined),
+          defaultSeverityFloor: operatorReviewSettings().severityFloor,
+          // No `skillArgs` seam here, deliberately: the caller-supplied
+          // record path is honoured only with no session id present, and
+          // this command refuses to run without one (the lease needs it) —
+          // the seam would be dead code wearing a flag.
+        })?.floor,
+        sideLedger,
+      });
+    }
     /** True when the FINAL published diff is the incremental delta. */
     let scopedDelta = false;
     /** The PR's own hunks, narrowed to what changed since the anchor. */
@@ -1495,6 +1747,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         if (publish(narrowed)) {
           scopedDelta = true;
           anchor.incremental.scope = widened.scope;
+          if (postureCause !== null) {
+            anchor.incremental.posture = 'critical';
+            anchor.incremental.postureCause = postureCause;
+            writeStderrLine(
+              `Critical posture (${postureCause}): fix-audit round shape — ` +
+                `territory fan-out over the delta and its import-seam ` +
+                `interaction files, with the reverse-audit waves narrowed ` +
+                `to the delta territories plus the non-delta territories ` +
+                `the previous waves could not certify dry.`,
+            );
+          }
           // The published hunks are byte-identical hunks of
           // `mergeBaseSha..head`, so that range is what downstream consumers
           // recomputing their own diffs must probe (Agent 7's test-efficacy
@@ -1566,6 +1829,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // A write failure here is degradation, not a tiling failure: the
           // inner catch must not swallow it into "both ranges refuse to tile"
           // and ship plan chunks beside a null `diffPath`.
+          // `publish` is the sole writer of `diffText` as well as of the
+          // path, so publishing BEFORE the swap is also what keeps the plan's
+          // recorded selection identity (`buildPlanReport` below digests
+          // `diffText`) over the text `rescued` was chunked from and the
+          // bytes now on disk — not over the delta this branch abandoned.
           if (publish(fullBytes)) {
             plan = rescued;
             scopedDelta = false;
@@ -1726,6 +1994,95 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
+    // The content-verdict candidate: what a clean end of THIS round would let a
+    // post-rebase round transfer. Computed here because this is the moment the
+    // reviewed pairs are defined — plan files at `mergeBaseSha..fetchedSha` —
+    // and written beside the plan unconditionally: promotion into the cache is
+    // Step 8's clean-high-effort decision, not the capture's.
+    let cacheCandidatePath: string | undefined;
+    if (diffPath !== null && mergeBaseSha && roundModelId === '') {
+      // An anchor certified by nobody: the gate reads an empty identity as
+      // a mismatch, so the candidate has nothing to certify. Withheld here —
+      // unlike the local capture, which omits the key and lets `cache-commit`
+      // promote the ledger alone — because a posting PR round's ledger
+      // rides its marker, and for every PR round the absent field routes
+      // Step 8 to the hand-written fallback, which persists the ledger and
+      // omits `lastModelId`.
+      writeStderrLine(
+        'WARNING: the runtime published no model identity; the cache ' +
+          'candidate is withheld (an anchor certified by nobody is refused ' +
+          'at promotion), and Step 8 falls back to the template. The review ' +
+          'itself is unaffected.',
+      );
+    } else if (diffPath !== null && mergeBaseSha) {
+      // Pinned to the repo root: the pathspec-scoped ls-tree inside resolves
+      // paths against git's cwd, and a fetch started from a subdirectory would
+      // otherwise record every pair as (absent, absent) — a candidate that
+      // later transfers clean verdicts over anything.
+      const pairs = blobPairs(
+        gitOpt('rev-parse', '--show-toplevel') ?? '.',
+        mergeBaseSha,
+        fetchedSha,
+        plan.files.map((f) => f.path),
+      );
+      if (pairs !== null) {
+        // Guarded for the reason the plan-partition step above is: this runs
+        // after the worktree exists and before the report is written, and a
+        // convenience artifact must never take the whole fetch with it.
+        try {
+          cacheCandidatePath = tmpFile(
+            `pr-${prNumber}`,
+            'cache-candidate.json',
+          );
+          // `noFollow` guards the final element: a planted symlink at this
+          // deterministic path would redirect the write onto its target. The
+          // directory above it is the entry guard's — a redirected
+          // `.qwen/tmp` refused the round before anything was written.
+          atomicWriteFileSync(
+            cacheCandidatePath,
+            JSON.stringify(
+              {
+                v: 1,
+                target: `pr-${prNumber}`,
+                lastCommitSha: fetchedSha,
+                mergeBaseSha,
+                fileVerdicts: pairs,
+                // WHO certified this anchor, recorded HERE rather than merged
+                // in by Step 8 from `{{model}}`. That interpolates the BARE
+                // model id, while every identity this CLI compares is
+                // provider-qualified — two provider configurations exposing
+                // one model name wrote the same token and passed each other's
+                // same-model gate, which is the contract the anchor rests on.
+                // Never empty here: the branch above withholds the whole
+                // candidate when the runtime published nothing, because
+                // `cache-commit` refuses an anchor certified by nobody.
+                lastModelId: roundModelId,
+              },
+              null,
+              2,
+            ),
+            { noFollow: true },
+          );
+        } catch (err) {
+          cacheCandidatePath = undefined;
+          writeStderrLine(
+            `WARNING: could not write the cache candidate ` +
+              `(${(err as Error).message}); this round cannot anchor the next ` +
+              `one's rebase survival, but the review itself is unaffected.`,
+          );
+        }
+      } else {
+        // Out loud, like the write failure above: a listing that failed —
+        // an `ls-tree` error, or a filename the decode could not name
+        // faithfully — otherwise reads exactly like a PR with no diff.
+        writeStderrLine(
+          'WARNING: could not list the blob pairs for the cache candidate; ' +
+            "this round cannot anchor the next one's rebase survival, but " +
+            'the review itself is unaffected.',
+        );
+      }
+    }
+
     // Ruled once, up front: the report's `emptyDiff` flag below and the
     // prebuild gate after the write read the same answer (the rationale for
     // its two guards sits with the flag).
@@ -1734,6 +2091,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       baseFetchFailed,
       diffText: fullText ?? '',
     });
+    const wall = captureDeadline(process.env, args.deadline, plan);
     const result: FetchPrResult = {
       prNumber,
       ownerRepo,
@@ -1819,11 +2177,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
       ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
+      ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
-      ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
-        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-        hasDeadline: hasReviewDeadline(process.env),
-      }),
+      ...buildPlanReport(
+        plan,
+        (path) => fileLineCount(fetchedSha, path),
+        {
+          operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+          hasDeadline: wall.explicit,
+          ...(anchor ? { incremental: anchor.incremental } : {}),
+        },
+        diffText,
+      ),
+      ...wall.fields,
       ...planEffortField(args.effort),
       ...(automaticReviewRequested() &&
       !args.resume &&
@@ -2110,9 +2476,10 @@ export const fetchPrCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved, same model identity): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
+      .option('deadline', deadlineOption({ resumes: true }))
       .option('since', {
         type: 'string',
         describe:

@@ -60,7 +60,14 @@ export class FetchError extends Error {
 // where falling back from an opportunistic https upgrade to the originally
 // requested http URL is reasonable (e.g. an intranet FQDN that resolves to
 // a private address and only serves plain http).
-const CONNECTION_LEVEL_ERROR_CODES = new Set([
+//
+// Every member is an https→http downgrade trigger (tools/web-fetch.ts), so
+// fetch.test.ts pins this set's exact membership in both directions. Note the
+// ...TLS_ERROR_CODES spread is a shared-source coupling: TLS_ERROR_CODES also
+// drives the user-facing TLS hint in shouldShowTlsHint, so adding a code there
+// for hint purposes alone would silently widen the downgrade trigger.
+/** @internal Exported for the membership pin in fetch.test.ts only. */
+export const CONNECTION_LEVEL_ERROR_CODES: ReadonlySet<string> = new Set([
   ...TLS_ERROR_CODES,
   'ECONNREFUSED',
   'EPROTO',
@@ -75,6 +82,10 @@ const CONNECTION_LEVEL_ERROR_CODES = new Set([
   // a healthy https server, and a fallback there would double a worst-case
   // 60s wait for an ambiguous gain.
   'UND_ERR_CONNECT_TIMEOUT',
+  // Port 443 unreachable at the network layer (ICMP host/net unreachable) —
+  // the routing-level sibling of ECONNREFUSED, same fallback rationale.
+  'EHOSTUNREACH',
+  'ENETUNREACH',
 ]);
 
 export function isConnectionLevelError(error: unknown): boolean {
@@ -101,13 +112,25 @@ function mappedIpv4(hostname: string): string | undefined {
   return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
+/**
+ * Classify a bare IP address (not a URL) against the private ranges.
+ *
+ * Hostname *text* only — a public-looking name whose A record points at a
+ * private address is not caught here. Callers that hand fetched bytes to a
+ * third party must resolve and pin the connection instead; see
+ * `resolveNetworkTarget` in extension/network-policy.ts.
+ */
+function isPrivateAddress(address: string): boolean {
+  // The URL API brackets IPv6 hostnames ([::1]); strip them so the IPv6
+  // ranges above can actually match.
+  const bare = address.replace(/^\[|\]$/g, '');
+  const target = mappedIpv4(bare) ?? bare;
+  return PRIVATE_IP_RANGES.some((range) => range.test(target));
+}
+
 export function isPrivateIp(url: string): boolean {
   try {
-    // The URL API brackets IPv6 hostnames ([::1]); strip them so the IPv6
-    // ranges above can actually match.
-    const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    const target = mappedIpv4(hostname) ?? hostname;
-    return PRIVATE_IP_RANGES.some((range) => range.test(target));
+    return isPrivateAddress(new URL(url).hostname);
   } catch (_e) {
     return false;
   }

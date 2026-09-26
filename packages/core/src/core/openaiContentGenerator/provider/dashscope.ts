@@ -6,7 +6,7 @@ import { AuthType } from '../../contentGenerator.js';
 import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
-  DASHSCOPE_PROXY_BASE_URL,
+  getDashscopeProxyBaseUrl,
   resolveRequestTimeout,
 } from '../constants.js';
 import type {
@@ -22,10 +22,8 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import {
-  clampReasoningEffort,
-  parseModelReasoningCapabilities,
-} from '../../reasoning-effort.js';
+import { getEffectiveReasoning } from '../../reasoning-overrides.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
@@ -244,9 +242,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname !== null && hostname.endsWith('.alicloudapi.com');
 
     // Check if proxy is configured and matches
-    const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
-      ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
-      : DASHSCOPE_PROXY_BASE_URL;
+    const proxyBaseUrl = getDashscopeProxyBaseUrl();
+    const normalizedProxyUrl = proxyBaseUrl?.endsWith('/')
+      ? proxyBaseUrl.slice(0, -1)
+      : proxyBaseUrl;
 
     const isProxyMatch = Boolean(
       normalizedProxyUrl &&
@@ -291,12 +290,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
-    const defaultHeaders = {
+    const defaultHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
     };
+    // Omni experiment: oss:// media URLs from the temporary-upload channel
+    // are only resolved server-side when this header is present. Static
+    // injection (vs per-request threading) is deliberate — the header is
+    // harmless on requests without oss:// parts.
+    if (this.cliConfig.isOmniEnabled?.()) {
+      defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
+    }
 
     return customHeaders
       ? { ...defaultHeaders, ...customHeaders }
@@ -444,7 +450,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...requestParams,
         messages,
         ...(tools ? { tools } : {}),
-        ...(this.buildMetadata(userPromptId) || {}),
+        ...this.buildRequestMetadata(request.model, userPromptId),
         ...dashscopeExtras,
       };
       // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -473,7 +479,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...requestParams, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(tools ? { tools } : {}),
-      ...(this.buildMetadata(userPromptId) || {}),
+      ...this.buildRequestMetadata(request.model, userPromptId),
       ...dashscopeExtras,
     };
     // DashScope qwen models use top-level effort fields, not the OpenAI-style
@@ -540,19 +546,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private getConfiguredReasoning(model: string | undefined) {
-    const { authType, baseUrl } = this.contentGeneratorConfig;
-    const wireModel = model ?? this.contentGeneratorConfig.model;
-    const reasoning = authType
-      ? this.cliConfig.getResolvedModelConfig?.(authType, wireModel, baseUrl)
-          ?.capabilities.reasoning
-      : undefined;
-    return parseModelReasoningCapabilities(reasoning);
+    return this.getReasoningCapabilities(model);
   }
 
   private isTieredEffortModel(model: string | undefined): boolean {
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return configured.profile === 'dashscope-effort';
     return isTieredEffortWireModel(
       model ?? this.contentGeneratorConfig.model,
-      this.getConfiguredReasoning(model),
+      configured,
     );
   }
 
@@ -572,7 +574,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const configured = this.getConfiguredReasoning(model);
+    if (configured?.profile) return {};
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      configured,
+    );
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }
@@ -711,6 +718,54 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   private conflictingKnobDropWarned = false;
+
+  /**
+   * DashScope is an aggregating gateway: a non-qwen model (e.g. `ZHIPU/GLM-...`)
+   * reached through the same endpoint has its request forwarded to that vendor's
+   * own backend, `metadata` object included. Those backends type `metadata` as a
+   * string, so the object fails to deserialize and the request is rejected with a
+   * flat 400, making the model unusable through Qwen Code. `metadata` is a
+   * platform-private tracing field (sessionId / promptId / channel) that only
+   * means anything to DashScope's own inference path, so gate it on the wire model
+   * the same way `buildQwenEffortConfig` gates the qwen-only thinking knobs, for
+   * the same stated reason: qwen-specific fields must not leak to a non-qwen model
+   * sharing the endpoint.
+   *
+   * This is orthogonal to which *origins* count as DashScope-compatible, so the
+   * `*.alicloudapi.com` recognition added in #9103 is untouched: a qwen model
+   * behind such a gateway still ships metadata.
+   */
+  private buildRequestMetadata(
+    model: string | undefined,
+    userPromptId: string,
+  ): Record<string, unknown> {
+    if (!this.shouldSendRequestMetadata(model)) {
+      return {};
+    }
+    return this.buildMetadata(userPromptId) || {};
+  }
+
+  /**
+   * Auto by default: qwen-family wire models only, per the gateway reasoning on
+   * {@link buildRequestMetadata}. The client cannot tell a forwarded request from
+   * one DashScope serves itself, so an explicit `enableRequestMetadata` wins in
+   * both directions: `true` restores the field for a non-qwen model served
+   * first-party whose tracing still matters, `false` suppresses it everywhere.
+   * Read only from the provider's own config, never the session's. A
+   * side-model generator is built with its own per-model config but shares
+   * the session `Config`, and a cross-provider agent config deliberately
+   * clears this field, so any session fallback would let the main model's
+   * value decide a different model's request. On the main route the provider
+   * config is the same object the qwen-oauth hot switch mutates in place, so
+   * nothing is latched here.
+   */
+  private shouldSendRequestMetadata(model: string | undefined): boolean {
+    const configured = this.contentGeneratorConfig.enableRequestMetadata;
+    if (typeof configured === 'boolean') {
+      return configured;
+    }
+    return isQwenFamilyWireModel(this.resolveWireModel(model));
+  }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
     const channel = this.cliConfig.getChannel?.();

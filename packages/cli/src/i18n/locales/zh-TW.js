@@ -145,6 +145,7 @@ export default {
   'from {{marketplace}}': '來自 {{marketplace}}',
   installed: '已安裝',
   '{{count}} Agents': '{{count}} 個智能體',
+  '{{count}} Workflows': '{{count}} 個工作流程',
   '{{count}} Commands': '{{count}} 個命令',
   '{{count}} MCP': '{{count}} 個 MCP',
   '{{count}} Skills': '{{count}} 個技能',
@@ -183,6 +184,7 @@ export default {
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.RecordSource': '記錄來源',
@@ -215,11 +217,29 @@ export default {
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
   'toolDisplayName.ToolSearch': '工具搜尋',
+  'toolDisplayName.ToolCall': '工具呼叫',
   'toolDisplayName.EnterWorktree': '進入 Worktree',
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.DownsampleImage': '降採樣圖像',
+  'toolDisplayName.DownscaleVideo': '降採樣影片',
+  'toolDisplayName.DownsampleAudio': '降採樣音訊',
+  'toolDisplayName.ExtractKeyframes': '擷取關鍵影格',
+  'toolDisplayName.ExtractAudio': '擷取音軌',
+  'toolDisplayName.ClipVideo': '剪輯影片',
+  'toolDisplayName.ClipImage': '裁剪圖像',
+  'toolDisplayName.ClipAudio': '剪輯音訊',
+  'toolDisplayName.CaptionImage': '描述圖像',
+  'toolDisplayName.CaptionAudio': '描述音訊',
+  'toolDisplayName.OcrImage': '識別圖像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解影片',
+  'toolDisplayName.ConvertImage': '轉換圖像',
+  'toolDisplayName.TranscribeAudio': '轉寫音訊',
+  'toolDisplayName.RecallMediaMemory': '召回媒體記憶',
+  '[fixed-only: runs via media policies, not the model]':
+    '［僅固定策略：由媒體策略調用，不開放給模型］',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -337,11 +357,10 @@ export default {
   'Search:': '搜尋：',
   'type to filter…': '輸入以篩選…',
   'No skills are currently available.': '目前沒有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高範圍鎖定（詳見下方）。',
   'No skills match the search.': '沒有符合搜尋條件的技能。',
   'Locked by settings entries you cannot toggle here:':
     '被無法在此切換的設定條目鎖定：',
+  '{{count}} locked not shown': '{{count}} 個已鎖定技能未顯示',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',
@@ -633,6 +652,11 @@ export default {
   active: '已啟用',
   disabled: '已禁用',
   enabled: '已啟用',
+  'disabled (bare mode)': '已禁用（精簡模式）',
+  'disabled (safe mode)': '已禁用（安全模式）',
+  'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
+  'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',
   'Update failed:': '更新失敗：',
   'Updating {{name}}...': '正在更新 {{name}}...',
@@ -852,6 +876,10 @@ export default {
   'This extension will install the following skills:': '此擴展將安裝以下技能：',
   'This extension will install the following subagents:':
     '此擴展將安裝以下子智能體：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此擴展將安裝以下工作流程（可啟動子智能體的 JavaScript 腳本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流程腳本與已安裝版本相比有變更：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安裝 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安裝來自 {{originSource}} 的擴展。某些功能可能無法完美兼容 Qwen Code。',
@@ -923,6 +951,7 @@ export default {
   'Context files:': '上下文檔案：',
   'Skills:': '技能：',
   'Agents:': '智能體：',
+  'Workflows:': '工作流程：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '連結擴展安裝失敗。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1008,6 +1037,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 個 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此選單為只讀。要添加或修改 Hook，請直接編輯 settings.json 或詢問 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新開啟此選單可重新載入 Hook 定義。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制項與 HTTP 安全設定需要重新啟動後生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新載入 Hook 定義失敗：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 選擇 · Esc 取消',
   'Exit codes:': '退出碼：',
   'Configured hooks:': '已配置的 Hook：',
@@ -1022,6 +1057,20 @@ export default {
   'No hook config selected': '未選擇 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或刪除此 Hook，請直接編輯 settings.json 或詢問 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已開啟，本會話不會執行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精簡模式已開啟，本會話不會執行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 設定停用。',
+  'Timeout:': '逾時：',
+  'Status message:': '狀態訊息：',
+  'Condition:': '條件：',
+  'Options:': '選項：',
+  'Skill:': '技能：',
+  'runs in background': '在背景執行',
+  'runs once': '只執行一次',
+  sequential: '依序執行',
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
     '所有 Hook 當前已禁用。您有 {{count}} 未運行。',
@@ -1931,6 +1980,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -1944,6 +1996,9 @@ export default {
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
+  'Startup context': '啟動上下文',
+  Unattributed: '未歸因',
+  'Cached prefix': '快取前綴',
   'Run /context detail for per-item breakdown.':
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2035,8 +2090,6 @@ export default {
     '選擇用於塑造回答表達方式的輸出風格（{{styles}}，或自訂風格名稱）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已儲存，但此工作區不受信任時不會生效。',
-  'Set a goal — keep working until the condition is met':
-    '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
@@ -2080,6 +2133,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
@@ -2142,6 +2202,11 @@ export default {
   'No tasks currently running': '目前沒有正在執行的任務',
   'No entry to show.': '沒有可顯示的項目。',
   'needs approval': '待審批',
+  'Large workflow': '大型工作流程',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流程：已排定 {{agents}} 個 agent（警示門檻 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流程：預計輸出 ~{{tokens}} 個 token（警示門檻 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
@@ -2350,6 +2415,8 @@ export default {
   '{{count}} skills': '{{count}} 個技能',
   '{{count}} agent': '{{count}} 個代理',
   '{{count}} agents': '{{count}} 個代理',
+  '{{count}} workflow': '{{count}} 個工作流程',
+  '{{count}} workflows': '{{count}} 個工作流程',
   '{{count}} hook': '{{count}} 個鉤子',
   '{{count}} hooks': '{{count}} 個鉤子',
   '{{count}} extension MCP server': '{{count}} 個擴充 MCP 伺服器',

@@ -14,6 +14,7 @@ import {
   extractArchiveFile,
   extractFile,
   findReleaseAsset,
+  isArchiveShapedUrl,
   isSupportedArchivePath,
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
@@ -211,6 +212,8 @@ describe('git extension helpers', () => {
 
       expect(simpleGit).toHaveBeenCalledWith(destination, {
         abort: controller.signal,
+        config: ['core.fsmonitor=', 'log.showSignature=false'],
+        unsafe: { allowUnsafeFsMonitor: true },
       });
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
         '-c',
@@ -321,10 +324,13 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.env).toHaveBeenCalledWith(
@@ -382,10 +388,13 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.clone).toHaveBeenCalled();
@@ -420,6 +429,7 @@ describe('git extension helpers', () => {
             allowUnsafeConfigPaths: true,
             allowUnsafeProtocolOverride: true,
             allowUnsafeConfigEnvCount: true,
+            allowUnsafeFsMonitor: true,
           },
         }),
       );
@@ -486,6 +496,7 @@ describe('git extension helpers', () => {
             allowUnsafeConfigPaths: true,
             allowUnsafeProtocolOverride: true,
             allowUnsafeConfigEnvCount: true,
+            allowUnsafeFsMonitor: true,
           },
         }),
       );
@@ -1618,6 +1629,7 @@ describe('git extension helpers', () => {
               allowUnsafeConfigPaths: true,
               allowUnsafeProtocolOverride: true,
               allowUnsafeConfigEnvCount: true,
+              allowUnsafeFsMonitor: true,
             },
           }),
         );
@@ -1859,10 +1871,13 @@ describe('git extension helpers', () => {
           'http.proxy=',
           'protocol.allow=never',
           'protocol.https.allow=always',
+          'core.fsmonitor=',
+          'log.showSignature=false',
         ],
         unsafe: {
           allowUnsafeConfigPaths: true,
           allowUnsafeProtocolOverride: true,
+          allowUnsafeFsMonitor: true,
         },
       });
       expect(mockGit.listRemote).toHaveBeenCalledWith([
@@ -3550,9 +3565,31 @@ describe('git extension helpers', () => {
       expect(
         isSupportedArchiveUrl('https://example.com/extension.tar.gz'),
       ).toBe(true);
+      // A query string must not hide the archive extension.
+      expect(
+        isSupportedArchiveUrl('https://example.com/extension.zip?token=1'),
+      ).toBe(true);
       expect(isSupportedArchiveUrl('git@github.com:owner/repo.git')).toBe(
         false,
       );
+    });
+
+    it('should classify archive-shaped URLs regardless of scheme', () => {
+      expect(isArchiveShapedUrl('http://example.com/extension.zip')).toBe(true);
+      expect(isArchiveShapedUrl('https://example.com/extension.tar.gz')).toBe(
+        true,
+      );
+      expect(isArchiveShapedUrl('HTTP://example.com/ext.zip#frag')).toBe(true);
+      // A query string must not hide the archive extension.
+      expect(isArchiveShapedUrl('http://example.com/ext.zip?token=1')).toBe(
+        true,
+      );
+      expect(isArchiveShapedUrl('http://example.com/extension.tgz')).toBe(
+        false,
+      );
+      expect(isArchiveShapedUrl('http://example.com/repo')).toBe(false);
+      // Unparseable URLs classify as false, never throw.
+      expect(isArchiveShapedUrl('http://exa mple.com/plugin.zip')).toBe(false);
     });
   });
 

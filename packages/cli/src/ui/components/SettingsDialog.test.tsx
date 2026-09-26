@@ -624,6 +624,60 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    describe('integer settings', () => {
+      const editMaxPerSession = async (typed: string) => {
+        vi.mocked(saveModifiedSettings).mockClear();
+        const settings = createMockSettings();
+        const { stdin, unmount, lastFrame } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog settings={settings} onSelect={vi.fn()} />
+          </KeypressProvider>,
+        );
+        await waitFor(() => {
+          expect(lastFrame()).toContain('Settings');
+        });
+
+        const index = getDialogSettingKeys().indexOf(
+          'tools.webSearch.maxPerSession',
+        );
+        expect(index).toBeGreaterThanOrEqual(0);
+
+        const press = async (key: string) => {
+          act(() => {
+            stdin.write(key);
+          });
+          await wait();
+        };
+        for (let i = 0; i < index; i++) {
+          await press(TerminalKeys.DOWN_ARROW as string);
+        }
+        await press(TerminalKeys.ENTER as string);
+        for (const ch of typed) {
+          await press(ch);
+        }
+        await press(TerminalKeys.ENTER as string);
+        await wait();
+
+        unmount();
+        return vi
+          .mocked(saveModifiedSettings)
+          .mock.calls.find((call) =>
+            (call[0] as Set<string>).has('tools.webSearch.maxPerSession'),
+          );
+      };
+
+      it('edits an integer setting on Enter and saves the typed number', async () => {
+        const call = await editMaxPerSession('5');
+        expect(call?.[1]).toEqual({
+          tools: { webSearch: { maxPerSession: 5 } },
+        });
+      });
+
+      it('does not save a fractional value for an integer setting', async () => {
+        expect(await editMaxPerSession('1.5')).toBeUndefined();
+      });
+    });
+
     describe('enum values', () => {
       it('toggles enum values with the enter key', async () => {
         vi.mocked(saveModifiedSettings).mockClear();
@@ -1417,7 +1471,9 @@ describe('SettingsDialog', () => {
 
   describe('String Settings Editing', () => {
     it('should allow editing and committing a string setting', async () => {
-      let settings = createMockSettings({ advisorModel: 'initial' });
+      let settings = createMockSettings({
+        general: { outputLanguage: 'English' },
+      });
       const onSelect = vi.fn();
 
       const { stdin, unmount, rerender } = render(
@@ -1429,7 +1485,9 @@ describe('SettingsDialog', () => {
       // Wait for the dialog to render
       await wait();
 
-      const stringSettingIndex = getDialogSettingKeys().indexOf('advisorModel');
+      const stringSettingIndex = getDialogSettingKeys().indexOf(
+        'general.outputLanguage',
+      );
       expect(stringSettingIndex).toBeGreaterThanOrEqual(0);
       for (let i = 0; i < stringSettingIndex; i++) {
         stdin.write('j'); // Down
@@ -1441,14 +1499,18 @@ describe('SettingsDialog', () => {
       await wait();
 
       // Type a new value
-      stdin.write('new value');
+      stdin.write('French');
       await wait();
 
       // Press Enter to commit
       stdin.write('\r');
       await wait();
 
-      settings = createMockSettings({ advisorModel: 'new value' }, {}, {});
+      settings = createMockSettings(
+        { general: { outputLanguage: 'French' } },
+        {},
+        {},
+      );
       rerender(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SettingsDialog settings={settings} onSelect={onSelect} />

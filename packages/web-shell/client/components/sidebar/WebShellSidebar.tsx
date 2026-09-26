@@ -32,11 +32,13 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
+  BotIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
+  LoaderCircleIcon,
   ListTodoIcon,
   MessageCircleIcon,
   EllipsisVerticalIcon,
@@ -100,13 +102,14 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
-import { isLocalDaemon } from '../../config/daemon';
+import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
   sessionMatchesSource as matchesSessionSource,
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
+import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
@@ -134,6 +137,7 @@ import {
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import { UpdateControl } from './UpdateControl';
 import {
   useSessionCatalogController,
   useSessionCatalogPolling,
@@ -227,6 +231,7 @@ function comparePinnedSectionSessions(
 
 export type WebShellSidebarFooterItem =
   | 'settings'
+  | 'update'
   | 'version'
   | 'theme'
   | 'sessionsOverview'
@@ -257,7 +262,8 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'scheduledTasks'
   | 'workflows'
-  | 'goals';
+  | 'goals'
+  | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
   /** Built-in primary nav entries to show. Defaults to all. */
@@ -275,6 +281,7 @@ export interface WebShellSidebarFooterOptions {
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
+  'update',
   'version',
   'theme',
   'sessionsOverview',
@@ -298,6 +305,7 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'scheduledTasks',
   'workflows',
   'goals',
+  'managed',
 ];
 
 export type WebShellSidebarSessionActionItem =
@@ -401,6 +409,7 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
@@ -428,7 +437,16 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
-  onSessionsDeleted?: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before the delete request resolves, so the attachment is no longer
+   * readable off the connection by the time this callback runs (#12619).
+   */
+  onSessionsDeleted?: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -442,9 +460,11 @@ interface WebShellSidebarProps {
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
    * Open the working-tree Changes dialog for a workspace. Forwarded to each
-   * trusted workspace's folder header, where a live git chip fires it on click.
+   * trusted workspace's hover details, where the branch row fires it from the
+   * workspace's Git picker. Omit it and the row stays a plain-text summary.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
   onOpenCommit?: (workspaceCwd: string) => void;
   /**
    * Opens the shared App-owned Add Workspace dialog. Omit this callback when
@@ -933,6 +953,7 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenPlugins,
   onOpenChannels,
+  onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenWorkflows,
@@ -982,6 +1003,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const livePresence = useLivePresence(workspace.client);
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -1001,6 +1023,10 @@ export function WebShellSidebar({
     () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
     [primaryNavOptions?.items],
   );
+  const showUpdate =
+    footerItems.has('update') &&
+    !isDesktopShell() &&
+    connection.capabilities?.features?.includes('daemon_update');
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
@@ -1008,6 +1034,7 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
+    (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
@@ -1140,7 +1167,10 @@ export function WebShellSidebar({
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
-        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .filter(
+          (entry) =>
+            entry.kind !== 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+        )
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
   );
@@ -1955,6 +1985,7 @@ export function WebShellSidebar({
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('delete') &&
       canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
     [
@@ -1965,7 +1996,12 @@ export function WebShellSidebar({
   );
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
-      !isCurrentSession(session) && canShowDeleteSession(session),
+      // The current session is deletable too (issue #12619), but deleting the
+      // session the client is attached to tears its runtime down — match the
+      // Session Overview's idle-only policy for that case.
+      (!isCurrentSession(session) ||
+        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
   const canOrganizeSession = useCallback(
@@ -2055,6 +2091,7 @@ export function WebShellSidebar({
   );
   const canArchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
       !session.hasActivePrompt &&
@@ -2100,11 +2137,7 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
-  // One breakpoint degrades the whole footer: below it the settings button
-  // drops its text label, every footer button becomes a fixed 26px icon, and the
-  // version label leaves the row. That label can neither shrink nor truncate
-  // (`flex: 0 0 auto; white-space: nowrap`), so keeping it rendered past this
-  // point overflowed `.footerPrimary` into the action icons (#11453).
+  // Keep action buttons compact; the version and update share a separate row.
   const footerCompact =
     !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
   const sidebarStyle = {
@@ -2645,9 +2678,11 @@ export function WebShellSidebar({
 
   const copyWorkspacePath = useCallback(
     (candidate: DaemonWorkspaceCapability) => {
-      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
-        onError(error, t('sidebar.copyWorkspacePathFailed'));
-      });
+      void writeClipboardText(candidate.ssh?.directory ?? candidate.cwd).catch(
+        (error: unknown) => {
+          onError(error, t('sidebar.copyWorkspacePathFailed'));
+        },
+      );
     },
     [onError, t],
   );
@@ -2810,6 +2845,37 @@ export function WebShellSidebar({
       t,
     ],
   );
+
+  const livePendingContent = livePresence ? (
+    <>
+      <LoaderCircleIcon aria-hidden="true" />
+      <span>{t('sidebar.liveVoicePending')}</span>
+    </>
+  ) : null;
+  const liveCoordinator = livePresence?.coordinator;
+  const livePendingRow = liveCoordinator ? (
+    <button
+      type="button"
+      className={styles.livePendingSession}
+      data-live-pending-session
+      onClick={() =>
+        handleLoadSession(
+          liveCoordinator.sessionId,
+          liveCoordinator.workspaceCwd,
+        )
+      }
+    >
+      {livePendingContent}
+    </button>
+  ) : livePresence ? (
+    <div
+      className={styles.livePendingSession}
+      role="status"
+      data-live-pending-session
+    >
+      {livePendingContent}
+    </div>
+  ) : null;
 
   const startRename = useCallback(
     (session: DaemonSessionSummary) => {
@@ -3058,6 +3124,12 @@ export function WebShellSidebar({
       setDeleteCandidate(null);
       return;
     }
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = isCurrentSession(deleteCandidate)
+      ? sessionId
+      : undefined;
     const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
     const removeSession =
@@ -3082,7 +3154,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        onSessionsDeleted?.([sessionId]);
+        onSessionsDeleted?.([sessionId], { attachedSessionId });
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -3101,6 +3173,7 @@ export function WebShellSidebar({
     deleteCandidate,
     deleteSession,
     getIdentityForSession,
+    isCurrentSession,
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,
@@ -4187,6 +4260,11 @@ export function WebShellSidebar({
         standalone,
       } = options;
       const sessionIdentity = getIdentityForSession(session);
+      const liveStarting =
+        livePresence?.state === 'starting' &&
+        (livePresence.coordinator?.sessionId === session.sessionId ||
+          (livePresence.callId !== undefined &&
+            session.sourceId === `realtime_voice:${livePresence.callId}`));
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
@@ -4401,6 +4479,8 @@ export function WebShellSidebar({
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const backgroundRunning =
+        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -4417,7 +4497,9 @@ export function WebShellSidebar({
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
-        : sessionActionItems.has('archive') && canMutateSessionArchive(session);
+        : session.sourceType !== 'qwen-live' &&
+          sessionActionItems.has('archive') &&
+          canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
@@ -4428,6 +4510,21 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
+      // `showDelete` already applied the workspace-scope gate — standalone rows
+      // bypass it on purpose — so the disabled state only carries #12619's rule:
+      // the session this client is attached to is deletable once it goes idle.
+      // The no-workspace row is the exception: its delete route answers
+      // `session_busy` while this tab is still attached, so offering it would be
+      // a button that can never succeed. Keep it disabled until the user opens
+      // another chat (leaving first, then deleting, is tracked separately).
+      const currentStandalone = Boolean(standalone?.active);
+      const deleteDisabled =
+        busy || currentStandalone || (isCurrent && running);
+      const deleteDisabledTitle = currentStandalone
+        ? t('sidebar.currentStandaloneDeleteDisabled')
+        : isCurrent && running
+          ? t('sidebar.currentDeleteDisabled')
+          : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
@@ -4448,7 +4545,7 @@ export function WebShellSidebar({
             styles.sessionRow,
             isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
-            running && styles.runningSession,
+            running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
           onMouseEnter={(event) =>
@@ -4476,14 +4573,33 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
-            {completedUnread ? (
+            {liveStarting ? (
+              <LoaderCircleIcon
+                className={styles.liveSessionSpinner}
+                aria-label={t('live.state.starting')}
+                data-live-starting-session
+              />
+            ) : null}
+            {!liveStarting && completedUnread && !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-completed-unread
                 aria-hidden="true"
               />
             ) : null}
-            {session.hasActivePrompt && !completedUnread ? (
+            {!liveStarting && backgroundRunning && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundRunning,
+                )}
+                data-web-shell-session-background-running
+                role="img"
+                aria-label={t('background.running')}
+                title={t('background.running')}
+              />
+            )}
+            {!liveStarting && session.hasActivePrompt && !completedUnread ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,
@@ -4492,7 +4608,10 @@ export function WebShellSidebar({
                 data-web-shell-session-running
                 aria-hidden="true"
               />
-            ) : sessionWorkActive && !completedUnread ? (
+            ) : !liveStarting &&
+              sessionWorkActive &&
+              !completedUnread &&
+              !backgroundRunning ? (
               <span
                 className={styles.sessionStatusDot}
                 data-web-shell-session-active-work
@@ -4560,7 +4679,7 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {session.hasActivePrompt || sessionWorkActive ? (
+                {running && !backgroundRunning ? (
                   <span
                     className={styles.sessionLoading}
                     aria-label={
@@ -4634,11 +4753,9 @@ export function WebShellSidebar({
                           key: 'delete',
                           icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.delete'),
-                          disabled: busy || isCurrent,
+                          disabled: deleteDisabled,
                           destructive: true,
-                          title: isCurrent
-                            ? t('sidebar.currentDeleteDisabled')
-                            : undefined,
+                          title: deleteDisabledTitle,
                           visible:
                             showDelete && inlineActionItems.has('delete'),
                           onClick: () => {
@@ -4770,12 +4887,8 @@ export function WebShellSidebar({
                             {showDelete && !inlineActionItems.has('delete') && (
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={busy || isCurrent}
-                                title={
-                                  isCurrent
-                                    ? t('sidebar.currentDeleteDisabled')
-                                    : undefined
-                                }
+                                disabled={deleteDisabled}
+                                title={deleteDisabledTitle}
                                 onSelect={() => {
                                   if (standalone) standalone.onDelete();
                                   else handleDeleteSession(session);
@@ -4831,6 +4944,7 @@ export function WebShellSidebar({
       searchQuery,
       sessionActionItems,
       inlineActionItems,
+      livePresence,
       startRename,
       t,
     ],
@@ -5193,6 +5307,7 @@ export function WebShellSidebar({
         ref={sidebarRef}
         className={cx(
           styles.sidebar,
+          (footerItems.has('version') || showUpdate) && styles.withVersion,
           collapsed && styles.collapsed,
           isResizing && styles.resizing,
           mobileOpen && styles.mobileOpen,
@@ -5636,6 +5751,20 @@ export function WebShellSidebar({
                   {!collapsed && <span>{t('sidebar.goals')}</span>}
                 </button>
               )}
+              {primaryNavItems.has('managed') && onOpenManagedSessions && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('managed.title')}
+                  aria-label={t('managed.title')}
+                  onClick={onOpenManagedSessions}
+                >
+                  <span className={styles.navIcon}>
+                    <BotIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('managed.title')}</span>}
+                </button>
+              )}
               {primaryNavOptions?.render?.()}
             </div>
           )}
@@ -5666,13 +5795,17 @@ export function WebShellSidebar({
                   className="w-full"
                   aria-label={t('sidebar.sessionSource')}
                 >
-                  <TabsTrigger value="default">
+                  <TabsTrigger value="default" className="min-w-0">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
-                  <TabsTrigger value="channel">
+                  <TabsTrigger value="channel" className="min-w-0">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -5700,6 +5833,22 @@ export function WebShellSidebar({
                   )}
                 </>
               )}
+            {showLive && livePresence && liveWorkspaces.length === 0 && (
+              <div
+                className={styles.livePendingWorkspace}
+                data-live-pending-workspace
+              >
+                <div className={styles.livePendingHeader}>
+                  <RadioTowerIcon
+                    size={16}
+                    strokeWidth={1.2}
+                    aria-hidden="true"
+                  />
+                  <span>{t('sidebar.live')}</span>
+                </div>
+                {livePendingRow}
+              </div>
+            )}
             {liveWorkspaces.map((ws) => (
               <WorkspaceSection
                 key={ws.id}
@@ -5730,6 +5879,20 @@ export function WebShellSidebar({
                   </>
                 )}
                 client={workspace.client}
+                pendingSession={
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? {
+                        key: livePresence.callId ?? 'connecting',
+                        sessionId: livePresence.coordinator?.sessionId,
+                        sourceId: livePresence.callId
+                          ? `realtime_voice:${livePresence.callId}`
+                          : undefined,
+                        node: livePendingRow,
+                      }
+                    : undefined
+                }
                 reloadToken={workspaceSessionsReloadToken}
                 untrustedLabel={t('sidebar.workspaceUntrusted')}
                 readOnlyLabel={t('sidebar.workspaceReadOnly')}
@@ -5750,10 +5913,15 @@ export function WebShellSidebar({
                 limitSessions={editingSessionIdentity === null}
                 isPinnedSectionMember={isPinnedSectionMember}
                 autoExpandKey={
-                  autoExpandWorkspace?.id === ws.id
-                    ? autoExpandWorkspace.key
-                    : undefined
+                  livePresence &&
+                  (!livePresence.coordinator ||
+                    livePresence.coordinator.workspaceCwd === ws.cwd)
+                    ? `live:${livePresence.callId ?? 'connecting'}`
+                    : autoExpandWorkspace?.id === ws.id
+                      ? autoExpandWorkspace.key
+                      : undefined
                 }
+                forceAutoExpand={Boolean(livePresence)}
                 renderSession={(session, options) =>
                   renderSessionRow(
                     { ...session, workspaceCwd: ws.cwd },
@@ -5902,6 +6070,7 @@ export function WebShellSidebar({
                     <Fragment key={ws.id}>
                       <WorkspaceSection
                         workspace={ws}
+                        remote={!isPageOriginDaemon(workspace.baseUrl)}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>
@@ -6014,6 +6183,7 @@ export function WebShellSidebar({
                         }
                         showSessionDetails={sessionActionItems.has('details')}
                         overviewEnabled={workspaceOverviewEnabled}
+                        overviewMenuOpen={openWorkspaceMenuId === ws.id}
                         overviewItems={workspaceOverviewItems}
                         onOpenPathLocally={
                           localOpenEnabled
@@ -6076,7 +6246,10 @@ export function WebShellSidebar({
                                         copyPath: () => copyWorkspacePath(ws),
                                       }
                                     : {}),
-                                  ...(localOpenEnabled && ws.trusted && realPath
+                                  ...(localOpenEnabled &&
+                                  ws.trusted &&
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openFolder: () => {
                                           void openWorkspaceFolderLocally(
@@ -6087,7 +6260,8 @@ export function WebShellSidebar({
                                     : {}),
                                   ...(localTerminalEnabled &&
                                   ws.trusted &&
-                                  realPath
+                                  realPath &&
+                                  !ws.ssh
                                     ? {
                                         openTerminal: () => {
                                           void openWorkspaceTerminalLocally(
@@ -6106,6 +6280,7 @@ export function WebShellSidebar({
                                   // branch the composer never shows the armed
                                   // intent and the daemon rejects the session.
                                   ...(ws.trusted &&
+                                  !ws.ssh &&
                                   onNewWorktreeSession &&
                                   gitBranch
                                     ? {
@@ -6137,20 +6312,9 @@ export function WebShellSidebar({
                                       }
                                     : {}),
                                 };
-                                // The section caps the folder name so the
-                                // git chip never slides under this overlay;
-                                // the count drives the cap's width. The
-                                // menu trigger is absent under a lock.
-                                const headerActionCount =
-                                  (ws.trusted
-                                    ? 1 + Number(canOrganizeWorkspace(ws.cwd))
-                                    : 0) + (lockedWorkspaceCwd ? 0 : 1);
                                 return (
                                   <div
                                     className={styles.workspaceHeaderActions}
-                                    data-workspace-action-count={
-                                      headerActionCount
-                                    }
                                     style={{
                                       visibility:
                                         visible || openWorkspaceMenuId === ws.id
@@ -6276,6 +6440,24 @@ export function WebShellSidebar({
           <div
             className={cx(styles.footer, footerCompact && styles.footerCompact)}
           >
+            <div className={styles.footerVersion}>
+              {!collapsed && versionLabel && footerItems.has('version') && (
+                <span
+                  className={styles.version}
+                  title={`${brandName} ${versionLabel}`}
+                >
+                  {versionLabel}
+                </span>
+              )}
+              {showUpdate && (
+                <UpdateControl
+                  client={workspace.client}
+                  collapsed={collapsed && !mobileOpen}
+                  currentVersion={qwenCodeVersion}
+                  onError={onError}
+                />
+              )}
+            </div>
             <div className={styles.footerPrimary}>
               {footer && typeof footer === 'object' && footer.render?.()}
               {projectFeaturesEnabled && footerItems.has('settings') && (
@@ -6296,17 +6478,6 @@ export function WebShellSidebar({
                   )}
                 </button>
               )}
-              {!collapsed &&
-                !footerCompact &&
-                versionLabel &&
-                footerItems.has('version') && (
-                  <span
-                    className={styles.version}
-                    title={`${brandName} ${versionLabel}`}
-                  >
-                    {versionLabel}
-                  </span>
-                )}
             </div>
             <div className={styles.footerActions}>
               {footerItems.has('theme') && (
@@ -6389,12 +6560,15 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                // The browser-local bridge is only offered when the connected
+                // daemon is the page's own origin (see isPageOriginDaemon).
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

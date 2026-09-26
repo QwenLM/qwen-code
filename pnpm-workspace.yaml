@@ -16,9 +16,15 @@ packages:
   - 'packages/channels/weixin'
   - 'integrations/external-context'
   - 'integrations/external-context-mem0'
-  - '!packages/desktop-shell'
+  - '!packages/desktop'
   - '!packages/live-host'
+  - '!packages/mobile-shell'
 
+# npm links every workspace package into the root node_modules; pnpm links
+# one only where it is a declared dependency. The root package therefore
+# declares, as file: devDependencies, the workspace packages that root-level
+# code (integration-tests/, scripts/) imports, and .pnpmfile.mjs rewrites them
+# to workspace:* like every other internal dependency.
 nodeLinker: 'hoisted'
 # The root postinstall runs patch-package, which rewrites files inside
 # node_modules in place. Under the default import method those files are
@@ -32,6 +38,10 @@ nodeLinker: 'hoisted'
 packageImportMethod: 'clone-or-copy'
 linkWorkspacePackages: true
 verifyDepsBeforeRun: false
+fetchRetries: 5
+fetchRetryMintimeout: 20000
+fetchRetryMaxtimeout: 120000
+fetchTimeout: 300000
 
 overrides:
   typescript: '5.8.3'
@@ -46,7 +56,28 @@ overrides:
   '@types/react': '^19.2.0'
   '@types/react-dom': '^19.2.0'
   axios: '^1.19.0'
+  # @node-rs/jieba-wasm32-wasi brings in @napi-rs/wasm-runtime, which accepts
+  # ^0.10.3. Unpinned it resolves to 0.10.4, published 2026-09-13, which the
+  # minimumReleaseAge gate rejects until it ages out. The gate is enforced by
+  # pnpm itself, and scripts/tests/package-scripts.test.js keeps
+  # minimumReleaseAgeExclude internal-only, so the age-compliant version is
+  # pinned here rather than exempted there.
+  '@tybys/wasm-util': '0.10.3'
   react-markdown: '^9.0.0'
+  # The root package declares zod 3.25.76 as a devDependency on purpose. With
+  # resolve-peers-from-workspace-root (on by default), every zod peer that a
+  # workspace package does not declare itself resolves to it — the copy npm
+  # hoists. Without it pnpm fills such a peer with the highest locked zod
+  # (4.4.3): web-shell bundles @modelcontextprotocol/ext-apps, whose zod is a
+  # peer, and zod 4 pushed the export renderer past its size budget. It also
+  # covers the override below, which predates it.
+  # packages/acp-bridge declares no zod, so pnpm is free to satisfy the SDK's
+  # `^3.25.0 || ^4.0.0` peer with the highest locked zod, where npm served it
+  # 3.25.76. The split is not cosmetic: the SDK imports `zod` and `zod/v4` from
+  # different modules, so under zod 4 its own `instanceof z.ZodError` test
+  # stops matching and a malformed request answers -32602 instead of -32603.
+  # Pin it so every ACP consumer keeps the behaviour the tests verify.
+  '@agentclientprotocol/sdk>zod': '3.25.76'
 
 allowBuilds:
   '@google/genai': true
@@ -55,7 +86,11 @@ allowBuilds:
   esbuild: true
   # Darwin-only optional dependency whose install script is only
   # `node-gyp rebuild`; the macOS smoke install reports no ignored build for
-  # it, so false records the behaviour pnpm already has.
+  # it, so false records the behaviour pnpm already has. The consequence is
+  # that a macOS pnpm worktree runs the prebuilt binding shipped in the
+  # tarball, and where that is missing, vite, tsx, rollup, playwright and
+  # tailwindcss's nested chokidar fall back to fs.watch. All of them are
+  # build and test tooling, never shipped runtime.
   fsevents: false
   keytar: true
   msw: true

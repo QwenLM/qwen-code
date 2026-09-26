@@ -661,7 +661,7 @@ jobs:
     # Secret-bearing and executes agent-driven code, but the agent runs inside
     # the docker sandbox image and only ever writes a new branch as the
     # Full rationale → qwen-autofix.md#af-008
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
     # route.issue_number is only set for forced dispatches; label events carry
     # the issue in the payload, and scan-and-pick runs (cron, unforced
@@ -870,9 +870,8 @@ jobs:
               exit 1
               ;;
           esac
-          # The label routing pins ecs-agent. Existing relabelled hosts retain
-          # ecs-qwen names while future dedicated hosts may use ecs-agent, so
-          # accept both names and reject any other mis-labelled registration.
+          # The ecs-autofix label changes routing, not runner names.
+          # Keep the existing registration-name allowlist.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
               ecs-qwen-*|ecs-agent-*) ;;
@@ -901,12 +900,9 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          # No remote npm cache on the persistent pool: one measured
-          # review-address leg spent 339s in `Set up Node.js` restoring
-          # Full rationale → qwen-autofix.md#af-012
-          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          # No remote cache on the pool (qwen-autofix.md#af-012): its pnpm
+          # store stays on disk; only the hosted fallback restores it.
           package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
         run: |-
@@ -933,7 +929,7 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               break
             fi
             if [[ "${attempt}" == "3" ]]; then
@@ -1147,9 +1143,12 @@ jobs:
           # a hung assessment push the round into the JOB cap, which cancels
           # the always() reporters (claim withdrawal) — a silent round.
           QWEN_TIMEOUT_MS: '3000000'
+          # QWEN_AUTOFIX_EFFORT maps to Kimi K3 reasoning_effort (default: max).
+          # maxSessionTurns stays inside model because a model object replaces
+          # the flat V1 key during migration.
           SETTINGS_JSON: |-
             {
-              "maxSessionTurns": 60,
+              "model": { "maxSessionTurns": 60, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -1311,7 +1310,7 @@ jobs:
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
             {
-              "maxSessionTurns": 400,
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -2199,7 +2198,7 @@ jobs:
           fi
 
           # Reclaim hard-killed scan dirs on this persistent ecs-qwen pool;
-          # the agent jobs' sweep now runs on a separate ecs-agent pool.
+          # the agent jobs' sweep now runs on the ecs-autofix pool.
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # Pre-clean before create, mirroring the heavy jobs: run_id is
           # public and sequential, and mkdir -p alone would succeed over a
@@ -2514,21 +2513,6 @@ jobs:
             fi
           fi
 
-          # Review-workflow id, resolved ONCE per scan for the review-in-flight
-          # gate below (#8888): during qwen-code-pr-review.yml's 10-minute
-          # delay-automatic-review wait the review-pr JOB (and thus its
-          # check-run in statusCheckRollup) does not exist yet, so the rollup
-          # alone misses a just-triggered review; the runs API sees the run
-          # by head SHA before its job starts. Empty on lookup failure — the
-          # gate then degrades to the rollup check only (fail-open here,
-          # though the BUSY_PRS enumeration below is fail-closed).
-          REVIEW_WF_ID="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
-          REVIEW_RUNS_JSON='{"workflow_runs":[]}'
-          if [[ -n "${REVIEW_WF_ID}" ]] \
-            && ! REVIEW_RUNS_JSON="$(gh api "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null)"; then
-            REVIEW_RUNS_JSON='{"workflow_runs":[]}'
-          fi
-
           # PRs whose review-address is already RUNNING OR QUEUED in any live
           # autofix run must not be re-targeted. Schedule/dispatch runs execute
           # Full rationale → qwen-autofix.md#af-026
@@ -2681,30 +2665,9 @@ jobs:
             # Full rationale → qwen-autofix.md#af-028
             REVIEW_PR_LIVE="$(jq -r '
               [ .[]
-                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+                | select((((.status // .state // "") == "IN_PROGRESS") and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
-            REVIEW_RUN_STARTED_AT=""
-            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
-              # Delay-window fallback: a review run parked BEFORE its job
-              # starts (the 10-minute environment wait) has no review-pr
-              # check-run yet, but a push now would still supersede it
-              # (#10110: a parked or pre-threshold run yields to the push —
-              # its work is discarded exactly as a cancel did).
-              # Full rationale → qwen-autofix.md#af-099
-              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
-                [ .workflow_runs[]?
-                  | select((.workflow_id | tostring) == $wf)
-                  | select((.event // "") == "pull_request_target")
-                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
-                  | select(((.head_sha // "") == $head) or any(.pull_requests[]?; (.number | tostring) == $pr))
-                  | (.run_started_at // .created_at // "") ]
-                | map(select(. != "")) | sort | last // ""
-              ' <<< "${REVIEW_RUNS_JSON}")"
-              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
-                REVIEW_PR_LIVE="true"
-              fi
-            fi
 
             # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
             # INFRA_FAILURE_SIGNATURES).
@@ -2782,7 +2745,6 @@ jobs:
                     | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review")))
                     | (.startedAt // "")
                     | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
-                [[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"
                 # An empty key (a queued check with no startedAt yet) would
                 # make the marker match EVERY future deferral — skip the ack
                 # this scan rather than arm a permanently-dead dedup.
@@ -3642,12 +3604,8 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          # No remote npm cache on the persistent pool — the rationale and
-          # the ternary's operand-order trap live in issue-autofix's 'Set up
-          # Node.js' step; the contract tests pin all three copies.
-          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          # No remote cache on the pool: see issue-autofix's setup step.
           package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
 
       # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
       # are duplicated in issue-autofix and review-address; the workflow
@@ -3657,7 +3615,7 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               break
             fi
             if [[ "${attempt}" == "3" ]]; then
@@ -3715,7 +3673,7 @@ jobs:
     # Full rationale → qwen-autofix.md#af-038
     # 345 holds both shapes under the 25m reserve: unarmed 130+60+70+60,
     # armed 190+60 with the repair chain skipped (af-156).
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 345
     permissions:
       contents: 'read'
@@ -3998,9 +3956,8 @@ jobs:
               exit 1
               ;;
           esac
-          # The label routing pins ecs-agent. Existing relabelled hosts retain
-          # ecs-qwen names while future dedicated hosts may use ecs-agent, so
-          # accept both names and reject any other mis-labelled registration.
+          # The ecs-autofix label changes routing, not runner names.
+          # Keep the existing registration-name allowlist.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
               ecs-qwen-*|ecs-agent-*) ;;
@@ -4029,12 +3986,8 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          # No remote npm cache on the persistent pool — the rationale and
-          # the ternary's operand-order trap live in issue-autofix's 'Set up
-          # Node.js' step; the contract tests pin all three copies.
-          cache: "${{ runner.environment != 'self-hosted' && 'npm' || '' }}"
+          # No remote cache on the pool: see issue-autofix's setup step.
           package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
 
       - name: 'Install tmux'
         run: |-
@@ -4065,7 +4018,7 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               break
             fi
             if [[ "${attempt}" == "3" ]]; then
@@ -4519,7 +4472,7 @@ jobs:
           # `generate:settings-schema` run regenerates the committed schema —
           # skimmed, not reviewed, so they measure no review burden.
           # Full rationale → qwen-autofix.md#af-117
-          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
+          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
           # An orphan-history branch (fork takeover / adoption admits one —
           # nothing on this job's fetch requires a common ancestor) has no
           # Full rationale → qwen-autofix.md#af-044
@@ -5366,7 +5319,7 @@ jobs:
           BASE: 'main'
           SETTINGS_JSON: |-
             {
-              "maxSessionTurns": 400,
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -5612,7 +5565,7 @@ jobs:
           BASE: 'main'
           SETTINGS_JSON: |-
             {
-              "maxSessionTurns": 400,
+              "model": { "maxSessionTurns": 400, "generationConfig": { "samplingParams": { "reasoning_effort": "${{ vars.QWEN_AUTOFIX_EFFORT || 'max' }}" } } },
               "coreTools": [
                 "read_file",
                 "read_many_files",
@@ -6429,14 +6382,17 @@ jobs:
                       CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
                       if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
                         # Review-in-flight hold for the loop's OWN report-time
-                        # head move (#10110): same probe pair as the scan's
-                        # dispatch gate (#8888), fail-open on probe errors.
-                        # The probe sees LIFECYCLE runs only: a command run
-                        # executes against the base branch, so its review-pr
-                        # check never shows under this PR's rollup, and the
-                        # runs fallback is event-scoped exactly like the scan
-                        # gate's (af-099) — an in-flight command review does
-                        # NOT hold the refresh (af-155).
+                        # head move (#10110), fail-open on probe errors. Wider
+                        # than the scan's dispatch gate (#8888), which holds
+                        # only on IN_PROGRESS now that a queued review can sit
+                        # out a whole closed `ecs-review` window; a hold here
+                        # only defers one stale-base merge the next round
+                        # retries. The probe sees LIFECYCLE runs only: a
+                        # command run executes against the base branch, so its
+                        # review-pr check never shows under this PR's rollup,
+                        # and the runs fallback is event-scoped to
+                        # pull_request_target — an in-flight command review
+                        # does NOT hold the refresh (af-155).
                         # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '

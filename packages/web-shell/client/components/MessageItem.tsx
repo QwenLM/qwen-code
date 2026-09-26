@@ -13,7 +13,11 @@ import type {
   TodoItem,
 } from '../adapters/types';
 import { CompactModeContext } from '../WebShellContexts';
-import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
+import type {
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellSource,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -31,6 +35,7 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
 import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
@@ -38,15 +43,18 @@ import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
+import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
   message: Message;
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
@@ -69,8 +77,20 @@ interface MessageItemProps {
   branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
+  /** Turn id marks are keyed by; unset hides the marks for this message. */
+  assistantFeedbackTurnId?: string;
+  /** Admitted prompt id of the turn; unset hides the marks for this message. */
+  assistantFeedbackPromptId?: string;
+  assistantFeedbackRating?: WebShellAssistantFeedbackRating;
+  onAssistantFeedbackRate?: (
+    promptId: string,
+    turnId: string,
+    rating: WebShellAssistantFeedbackRating | null,
+  ) => void;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -78,8 +98,10 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
+  onTurnOutputOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -92,8 +114,14 @@ export const MessageItem = memo(function MessageItem({
   branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
+  assistantFeedbackTurnId,
+  assistantFeedbackPromptId,
+  assistantFeedbackRating,
+  onAssistantFeedbackRate,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  turnSources,
+  onSourceOpen,
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
@@ -131,6 +159,22 @@ export const MessageItem = memo(function MessageItem({
         : undefined,
     [onBranchSession, branchRecordId],
   );
+  const boundFeedbackRate = useMemo(
+    () =>
+      onAssistantFeedbackRate && assistantFeedbackPromptId
+        ? (rating: WebShellAssistantFeedbackRating | null) =>
+            onAssistantFeedbackRate(
+              assistantFeedbackPromptId,
+              assistantFeedbackTurnId ?? '',
+              rating,
+            )
+        : undefined,
+    [
+      onAssistantFeedbackRate,
+      assistantFeedbackPromptId,
+      assistantFeedbackTurnId,
+    ],
+  );
   const compactMode = useContext(CompactModeContext);
   const questionTool =
     message.role === 'tool_group' &&
@@ -146,6 +190,7 @@ export const MessageItem = memo(function MessageItem({
     message.role === 'user' ||
     (message.role === 'system' &&
       message.source === 'mid_turn_message_injected');
+  const openTurnCalls = useOpenTurnCalls();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -175,8 +220,13 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            showAssistantFeedback={assistantFeedbackPromptId !== undefined}
+            assistantFeedbackRating={assistantFeedbackRating}
+            onAssistantFeedbackRate={boundFeedbackRate}
             isLocateFlashing={isLocateFlashing}
             customFooterInfo={assistantTurnFooterInfo}
+            turnSources={turnSources}
+            onSourceOpen={onSourceOpen}
           />
         );
       case 'thinking':
@@ -211,6 +261,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ToolGroup
             tools={message.tools}
+            onTurnOutputOpen={onTurnOutputOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -237,6 +288,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
@@ -338,9 +390,22 @@ export const MessageItem = memo(function MessageItem({
     return selectableSafeBody;
   }
 
+  // A turn's identity is its leading user message's id, so the entry is
+  // available as soon as the turn exists — including while it is still running.
+  const turnCallsTurnId =
+    openTurnCalls &&
+    message.role === 'user' &&
+    isTurnCallsPrompt(message.source, message.content)
+      ? message.id
+      : undefined;
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={
@@ -353,6 +418,12 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onOpenTurnCalls={
+        openTurnCalls && turnCallsTurnId
+          ? () => openTurnCalls(turnCallsTurnId)
+          : undefined
+      }
+      turnCallsTitle={t('turnCalls.open')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -392,8 +463,11 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
@@ -407,8 +481,21 @@ function areMessageItemPropsEqual(
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
+  if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
+    return false;
+  if (prev.assistantFeedbackPromptId !== next.assistantFeedbackPromptId)
+    return false;
+  if (prev.assistantFeedbackRating !== next.assistantFeedbackRating)
+    return false;
+  if (prev.onAssistantFeedbackRate !== next.onAssistantFeedbackRate)
+    return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.turnSources !== next.turnSources ||
+    prev.onSourceOpen !== next.onSourceOpen
+  )
+    return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,
@@ -444,6 +531,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'user' &&
         prev.content === next.content &&
+        prev.source === next.source &&
         stableImagesEqual(prev.images, next.images)
       );
     case 'assistant':

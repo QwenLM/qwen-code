@@ -21,6 +21,7 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -51,12 +52,15 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.enableWelcomeBack',
 ]);
 
-// `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
-// the Web Shell `/model --voice` picker needs to read + persist it; the daemon
+// `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
+// not in the dialog allowlist), but the Web Shell settings panel still renders
+// their rows and needs to read + persist them; for `voiceModel` the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
+  'imageModel',
+  'advisorModel',
   'mcpServers',
 ]);
 
@@ -106,6 +110,12 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
+/** Both restriction lists, for the membership test the write guard needs. */
+const WORKSPACE_RESTRICTED_KEYS = new Set<string>([
+  ...WORKSPACE_RESTRICTED_SETTING_KEYS,
+  ...WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+]);
+
 /**
  * Refuse a workspace-scope write of a setting the merge strips anyway.
  *
@@ -129,7 +139,7 @@ function rejectWorkspaceRestrictedWrite(
   key: string,
 ): boolean {
   if (scope !== 'workspace') return false;
-  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+  if (WORKSPACE_RESTRICTED_KEYS.has(key)) {
     res.status(400).json({
       error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
       code: 'workspace_restricted_setting',
@@ -349,6 +359,9 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  syncImageModel?: (
+    scope: SettingScope,
+  ) => Promise<{ status: 'applied' | 'deferred' | 'failed' }>;
   updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   /**
    * Fan a user-scope Session Workflow write out to the non-primary workspace
@@ -697,11 +710,28 @@ export function registerWorkspaceSettingsRoutes(
       }
       if (writeOutcome !== 'ok') return;
 
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            !deps.syncImageModel ||
+            (await deps.syncImageModel(settingScope)).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );
@@ -894,7 +924,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
             throw err;
           }
-          if (key === 'experimental.sessionWorkflow') {
+          if (
+            key === 'experimental.sessionWorkflow' &&
+            !runtime.routeFileSystemFactory?.sshWorkspace
+          ) {
             if (
               !(await updateLiveSessionWorkflow(
                 (enabled) =>
@@ -946,11 +979,32 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
       if (writeOutcome !== 'ok') return;
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            (
+              await runtime.workspaceService.reloadModelProviders({
+                route: 'POST /workspaces/:workspace/settings imageModel',
+                workspaceCwd: runtime.workspaceCwd,
+              })
+            ).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );

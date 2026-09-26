@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
@@ -33,6 +36,7 @@ function makeApp(
   overrides: {
     captureGenerationAssertion?: () => (() => void) | undefined;
     afterPersist?: () => void;
+    imageSyncStatus?: 'applied' | 'deferred' | 'failed';
     userSettings?: Record<string, unknown>;
     workspaceSettings?: Record<string, unknown>;
   } = {},
@@ -73,6 +77,9 @@ function makeApp(
   const persistSetting = vi.fn(async () => {
     overrides.afterPersist?.();
   });
+  const syncImageModel = vi
+    .fn()
+    .mockResolvedValue({ status: overrides.imageSyncStatus ?? 'applied' });
   const updateSessionWorkflow = vi.fn().mockResolvedValue(undefined);
   const broadcastSettingsChanged = vi.fn();
   const updateSiblingSessionWorkflows = vi.fn().mockResolvedValue(undefined);
@@ -83,6 +90,7 @@ function makeApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    syncImageModel,
     updateSessionWorkflow,
     updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
@@ -94,6 +102,7 @@ function makeApp(
   return {
     app,
     persistSetting,
+    syncImageModel,
     updateSessionWorkflow,
     updateSiblingSessionWorkflows,
     broadcastSettingsChanged,
@@ -103,6 +112,7 @@ function makeApp(
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
 function makeQualifiedApp(
   overrides: {
+    ssh?: boolean;
     invokeWorkspaceCommand?: (
       method: string,
       params: Record<string, unknown>,
@@ -111,6 +121,7 @@ function makeQualifiedApp(
 ) {
   const app = express();
   app.use(express.json());
+  const reloadModelProviders = vi.fn().mockResolvedValue({ status: 'applied' });
   const persistSetting = vi.fn(async () => {});
   const invokeWorkspaceCommand =
     overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
@@ -125,10 +136,16 @@ function makeQualifiedApp(
               runtime: {
                 trusted: true,
                 workspaceCwd: '/workspace',
+                routeFileSystemFactory: overrides.ssh
+                  ? {
+                      sshWorkspace: { host: 'host', directory: '/srv/project' },
+                    }
+                  : {},
                 bridge: {
                   invokeWorkspaceCommand,
                   publishWorkspaceEvent,
                 },
+                workspaceService: { reloadModelProviders },
                 generationGuard: undefined,
               },
             },
@@ -149,6 +166,7 @@ function makeQualifiedApp(
 
   return {
     app,
+    reloadModelProviders,
     persistSetting,
     invokeWorkspaceCommand,
     publishWorkspaceEvent,
@@ -573,6 +591,35 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it('rejects a root-level workspace-restricted key at workspace scope', async () => {
+    // `advisorModel` is served to the Web Shell, whose model panel persists to
+    // the scope of the active settings tab, so it reaches this route; its
+    // Workspace value is stripped on merge, since the root list has no section
+    // to flatten into WORKSPACE_RESTRICTED_SETTING_KEYS.
+    const { app, persistSetting } = makeApp();
+
+    const workspace = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(user.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
+  });
+
   it('still accepts the same key at user scope', async () => {
     // User scope honors the setting — the guard must not reach beyond
     // workspace scope, or this PR's whole enablement path dies with it.
@@ -923,6 +970,170 @@ describe('POST /workspaces/:workspace/settings', () => {
           scope: 'workspace',
         },
       }),
+    );
+  });
+});
+
+describe('image model settings', () => {
+  it.each(['user', 'workspace'])(
+    'syncs the actual %s write scope after persistence',
+    async (scope) => {
+      const { app, persistSetting, syncImageModel } = makeApp();
+      const value = 'openai:image-01\0https://images.example/v1';
+      const response = await request(app)
+        .post('/workspace/settings')
+        .send({ scope, key: 'imageModel', value });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ value, requiresRestart: false });
+      expect(syncImageModel).toHaveBeenCalledWith(
+        scope === 'user' ? 'User' : 'Workspace',
+      );
+      expect(persistSetting.mock.invocationCallOrder[0]).toBeLessThan(
+        syncImageModel.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
+  it('reports a required restart when persistence succeeds but runtime sync fails', async () => {
+    const { app, broadcastSettingsChanged } = makeApp({
+      imageSyncStatus: 'failed',
+    });
+    const response = await request(app)
+      .post('/workspace/settings')
+      .send({ scope: 'workspace', key: 'imageModel', value: '' });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ value: '', requiresRestart: true });
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'imageModel',
+      '',
+      'workspace',
+      undefined,
+    );
+  });
+});
+
+it('refreshes only the resolved runtime for a qualified image model write', async () => {
+  const { app, reloadModelProviders } = makeQualifiedApp();
+  const response = await request(app)
+    .post('/workspaces/primary/settings')
+    .send({ scope: 'workspace', key: 'imageModel', value: '' });
+  expect(response.status).toBe(200);
+  expect(response.body.requiresRestart).toBe(false);
+  expect(reloadModelProviders).toHaveBeenCalledExactlyOnceWith({
+    route: 'POST /workspaces/:workspace/settings imageModel',
+    workspaceCwd: '/workspace',
+  });
+});
+
+it.each(['failed', 'deferred', 'rejected', 'closed'] as const)(
+  'reports a qualified image runtime sync outcome: %s',
+  async (status) => {
+    const { app, reloadModelProviders, persistSetting } = makeQualifiedApp();
+    if (status === 'closed' || status === 'rejected') {
+      reloadModelProviders.mockRejectedValueOnce(
+        status === 'closed'
+          ? new WorkspaceGenerationClosedError()
+          : new Error('sync unavailable'),
+      );
+    } else {
+      reloadModelProviders.mockResolvedValueOnce({ status });
+    }
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({ scope: 'workspace', key: 'imageModel', value: '' });
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(response.status).toBe(status === 'closed' ? 503 : 200);
+    if (status === 'closed')
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    else expect(response.body.requiresRestart).toBe(status !== 'deferred');
+  },
+);
+
+// The web shell settings panel (`packages/web-shell/client`) hides rows behind
+// the stable public aliases in client/settings.ts, while the served key set
+// drifts whenever the schema gains a showInDialog key — omni.enabled shipped
+// days without an alias (#11975). Compare the live route output against the
+// alias table so the next missing alias reddens CI instead of shipping.
+describe('web-shell settings alias drift', () => {
+  const webShellClientDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../web-shell/client',
+  );
+
+  function parseKeySet(source: string, name: string): Set<string> {
+    const match = source.match(
+      new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`),
+    );
+    if (!match) throw new Error(`${name} not found`);
+    return new Set(
+      [...match[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)'/g)].map(
+        (m) => m[1]!,
+      ),
+    );
+  }
+
+  it('aliases every rendered row and serves every published alias', async () => {
+    const { app } = makeApp();
+    const res = await request(app).get('/workspace/settings');
+    expect(res.status).toBe(200);
+    const servedKeys = (res.body.settings as Array<{ key: string }>).map(
+      (setting) => setting.key,
+    );
+
+    // The panel drops HIDDEN/LIVE keys before rendering; parse both sets from
+    // the component so a change on either side is caught here.
+    const panelSource = readFileSync(
+      join(webShellClientDir, 'components/messages/SettingsMessage.tsx'),
+      'utf8',
+    );
+    const hidden = parseKeySet(panelSource, 'HIDDEN_SETTING_KEYS');
+    const live = parseKeySet(panelSource, 'LIVE_SETTING_KEYS');
+    const rendered = servedKeys.filter(
+      (key) => !hidden.has(key) && !live.has(key),
+    );
+
+    const aliasSource = readFileSync(
+      join(webShellClientDir, 'settings.ts'),
+      'utf8',
+    );
+    const table = aliasSource.match(
+      /const SETTING_KEYS = \{([\s\S]*?)\} as const/,
+    );
+    if (!table) throw new Error('SETTING_KEYS not found in settings.ts');
+    const aliased = [...table[1].matchAll(/'[^']+':\s*'([^']+)'/g)].map(
+      (m) => m[1]!,
+    );
+
+    // A second stable ID for one control is invisible to the two membership
+    // checks below, and once published it cannot be removed without breaking
+    // a host that adopted it.
+    expect(aliased.length).toBe(new Set(aliased).size);
+    expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
+    expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
+  });
+  it('persists SSH workflow defaults without pushing disabled workflow controls to live sessions', async () => {
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+    } = makeQualifiedApp({
+      ssh: true,
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('unsupported_operation')),
+    });
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings_changed' }),
     );
   });
 });

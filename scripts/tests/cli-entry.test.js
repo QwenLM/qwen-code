@@ -6,15 +6,24 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const { spawnSyncMock, existsSyncMock, homedirMock, tmpdirMock } = vi.hoisted(
-  () => ({
-    spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
-    existsSyncMock: vi.fn(() => false),
-    homedirMock: vi.fn(() => '/home/test-user'),
-    tmpdirMock: vi.fn(() => '/tmp'),
-  }),
-);
+const {
+  spawnSyncMock,
+  existsSyncMock,
+  homedirMock,
+  tmpdirMock,
+  enableCompileCacheMock,
+} = vi.hoisted(() => ({
+  spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
+  existsSyncMock: vi.fn(() => false),
+  homedirMock: vi.fn(() => '/home/test-user'),
+  tmpdirMock: vi.fn(() => '/tmp'),
+  enableCompileCacheMock: vi.fn(() => ({
+    status: 1,
+    directory: '/tmp/node-compile-cache',
+  })),
+}));
 
 vi.mock('node:child_process', () => ({
   spawnSync: spawnSyncMock,
@@ -33,10 +42,19 @@ vi.mock('node:os', async (importOriginal) => ({
   tmpdir: tmpdirMock,
 }));
 
+// Mocked so the launcher never enables a real compile cache in the test worker.
+vi.mock('node:module', () => ({
+  default: {
+    enableCompileCache: enableCompileCacheMock,
+    constants: { compileCacheStatus: { ENABLED: 1, ALREADY_ENABLED: 2 } },
+  },
+}));
+
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
 
 describe('scripts/cli-entry.js production entry', () => {
   const originalArgv = process.argv;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   let exitSpy;
 
   beforeEach(() => {
@@ -44,15 +62,25 @@ describe('scripts/cli-entry.js production entry', () => {
     vi.clearAllMocks();
     homedirMock.mockReturnValue('/home/test-user');
     tmpdirMock.mockReturnValue('/tmp');
-    // A non-fast-path command, so the entry takes the spawnSync branch (mocked)
-    // instead of importing the real dist/cli.js in-process.
+    // Every import stamps these into the real process.env, and the pin's
+    // bootstrap guard cannot tell two imports of this file apart — Vitest drops
+    // the cache-buster query from import.meta.url — so a leftover pin would be
+    // honoured as an inherited managed-version pin and its updateRoot would win
+    // over the home this test is trying to observe. Each test here drives a
+    // top-level invocation, which starts with neither.
+    delete process.env.QWEN_CODE_MANAGED_NPM_PIN;
+    delete process.env.QWEN_CODE_MANAGED_NPM_ROOT;
+    // A non-fast-path command on Windows, so the entry takes the spawnSync
+    // branch (mocked) instead of importing the real dist/cli.js in-process.
     process.argv = ['node', 'scripts/cli-entry.js', 'review', 'check'];
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     // The entry exits after its child returns; the import must survive that.
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
     process.argv = originalArgv;
+    Object.defineProperty(process, 'platform', originalPlatform);
     exitSpy.mockRestore();
   });
 
@@ -142,6 +170,89 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
+  it('hands the post-update relaunch command line to cmd.exe verbatim', async () => {
+    // #12687: the ""…"" idiom only reaches cmd intact when the spawn passes
+    // windowsVerbatimArguments — otherwise Node's MSVCRT escaping rewrites
+    // every embedded quote as \" and cmd /s rule 2 strips the line down to
+    // a literal \"\"path\"\" program name, which is exactly the reporter's
+    // error. The standalone Windows shim stamps an un-normalized
+    // bin\..\bin launcher path, so the fixture carries one.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher =
+      'C:\\Users\\test\\AppData\\Local\\qwen-code\\qwen-code\\bin\\..\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    try {
+      await import('../cli-entry.js?verbatim-cmd-relaunch');
+      // First spawn is the managed-update child (exit 44), second is the
+      // relaunch through the standalone shim. The interpreter mirrors the
+      // production `process.env['ComSpec'] ?? 'cmd.exe'` so the assertion
+      // also holds on a real Windows host, where ComSpec is always set.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      expect(spawnSyncMock).toHaveBeenLastCalledWith(
+        process.env['ComSpec'] ?? 'cmd.exe',
+        ['/d', '/s', '/c', `""${launcher}""`],
+        expect.objectContaining({
+          stdio: 'inherit',
+          windowsVerbatimArguments: true,
+        }),
+      );
+    } finally {
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
+  it('refuses a verbatim cmd relaunch when the launcher has cmd metacharacters', async () => {
+    // windowsVerbatimArguments drops Node's escaping safety net, so a
+    // launcher path containing cmd metacharacters would be re-tokenized
+    // into extra commands. The update itself already landed at that point,
+    // so the entry must skip the relaunch instead of spawning a malformed
+    // command line.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher = 'C:\\evil&whoami\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await import('../cli-entry.js?unsafe-cmd-launcher');
+      // Only the managed-update child ran; no cmd.exe relaunch followed.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('next run'),
+      );
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      stderrSpy.mockRestore();
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
   it('leaves the startup version unset when package metadata is unreadable', async () => {
     const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
     delete process.env.QWEN_CODE_STARTUP_VERSION;
@@ -206,6 +317,44 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
+  it('hands the compile cache to the spawned CLI', async () => {
+    // Without it every spawned run — one-shot `-p` included — recompiles the
+    // whole bundle; only the in-process fast paths used to enable the cache.
+    const inherited = process.env.NODE_COMPILE_CACHE;
+    delete process.env.NODE_COMPILE_CACHE;
+    try {
+      await import('../cli-entry.js?compile-cache');
+      const spawnEnv = spawnSyncMock.mock.calls.at(-1)?.[2]?.env;
+      expect(spawnEnv.NODE_COMPILE_CACHE).toBe('/tmp/node-compile-cache');
+    } finally {
+      if (inherited === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = inherited;
+    }
+  });
+
+  it('keeps an inherited compile cache and a disabled one', async () => {
+    const inherited = process.env.NODE_COMPILE_CACHE;
+    process.env.NODE_COMPILE_CACHE = '/custom/cache';
+    try {
+      await import('../cli-entry.js?inherited-compile-cache');
+      expect(spawnSyncMock.mock.calls.at(-1)?.[2]?.env.NODE_COMPILE_CACHE).toBe(
+        '/custom/cache',
+      );
+
+      delete process.env.NODE_COMPILE_CACHE;
+      // NODE_DISABLE_COMPILE_CACHE=1 makes Node report the cache as disabled.
+      enableCompileCacheMock.mockReturnValueOnce({ status: 3 });
+      vi.resetModules();
+      await import('../cli-entry.js?disabled-compile-cache');
+      expect(
+        'NODE_COMPILE_CACHE' in spawnSyncMock.mock.calls.at(-1)[2].env,
+      ).toBe(false);
+    } finally {
+      if (inherited === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = inherited;
+    }
+  });
+
   it('falls back to tmpdir for tilde QWEN_HOME when homedir is unavailable', async () => {
     const inheritedHome = process.env.QWEN_HOME;
     homedirMock.mockImplementation(() => {
@@ -221,5 +370,85 @@ describe('scripts/cli-entry.js production entry', () => {
       if (inheritedHome === undefined) delete process.env.QWEN_HOME;
       else process.env.QWEN_HOME = inheritedHome;
     }
+  });
+
+  describe('outside Windows', () => {
+    const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
+
+    const inheritedCompileCache = process.env.NODE_COMPILE_CACHE;
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      vi.doMock(cliPath, () => ({}));
+      delete process.env.NODE_COMPILE_CACHE;
+    });
+
+    afterEach(() => {
+      vi.doUnmock(cliPath);
+      if (inheritedCompileCache === undefined) {
+        delete process.env.NODE_COMPILE_CACHE;
+      } else {
+        process.env.NODE_COMPILE_CACHE = inheritedCompileCache;
+      }
+    });
+
+    it('runs the CLI in this process with gc exposed', async () => {
+      await import('../cli-entry.js?in-process');
+
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(process.argv.slice(1)).toEqual([cliPath, 'review', 'check']);
+      expect(typeof globalThis.gc).toBe('function');
+      // Supervised relaunches and tool subprocesses inherit it from here.
+      expect(process.env.NODE_COMPILE_CACHE).toBe('/tmp/node-compile-cache');
+    });
+
+    it('keeps the spawned child with --expose-gc under Bun', async () => {
+      Object.defineProperty(process.versions, 'bun', {
+        value: '1.3.14',
+        configurable: true,
+      });
+      try {
+        await import('../cli-entry.js?bun');
+
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+          process.execPath,
+          ['--expose-gc', expect.stringMatching(/cli\.js$/), 'review', 'check'],
+          expect.anything(),
+        );
+      } finally {
+        delete process.versions.bun;
+      }
+    });
+
+    it('relaunches through the launcher when the CLI exits after an update', async () => {
+      const exitListeners = process.listeners('exit');
+      process.env.QWEN_CODE_LAUNCHER_PATH = '/opt/qwen-standalone/bin/qwen';
+      existsSyncMock.mockImplementation(
+        (p) => normalizePath(p) === '/opt/qwen-standalone/bin/qwen',
+      );
+      try {
+        await import('../cli-entry.js?in-process-update');
+        const hook = process
+          .listeners('exit')
+          .find((l) => !exitListeners.includes(l));
+
+        hook(0);
+        expect(spawnSyncMock).not.toHaveBeenCalled();
+
+        hook(44);
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+          '/opt/qwen-standalone/bin/qwen',
+          [],
+          expect.objectContaining({
+            env: expect.objectContaining({
+              QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(['review', 'check']),
+            }),
+          }),
+        );
+        process.removeListener('exit', hook);
+      } finally {
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      }
+    });
   });
 });
