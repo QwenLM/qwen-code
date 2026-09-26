@@ -536,7 +536,14 @@ describe('StandaloneRecents', () => {
       format: 'html',
     });
     expect(URL.createObjectURL).toHaveBeenCalledOnce();
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:standalone-export');
+    await vi.waitFor(
+      () => {
+        expect(URL.revokeObjectURL).toHaveBeenCalledWith(
+          'blob:standalone-export',
+        );
+      },
+      { timeout: 2000 },
+    );
   });
 
   it('reports a confirmed rename', async () => {

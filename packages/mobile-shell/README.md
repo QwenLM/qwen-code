@@ -57,8 +57,18 @@ The H5 loads directly from the daemon, without a local copy. Direct same-origin 
 configuration. Reverse proxies and remote terminal/voice WebSocket connections
 retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#security-threat-model). Same-origin navigation compares scheme, host and effective port. Supported external main-frame links open in other apps; file/content and mixed-content access are disabled. Connection failures show a native Retry screen.
 
+## Downloads
+
+With a matching updated Web Shell, session exports, workflow-history exports, and already loaded Blob/data artifact downloads open Android's system **Save as** picker. Choose a document provider and destination; cancelling keeps the app usable for a later attempt. Native saving supports one file at a time up to **16 MiB**, including empty files. Larger files must be saved from a browser; the browser's existing workspace download limit is unchanged. Android System WebView must expose both AndroidX `WEB_MESSAGE_LISTENER` and `WEB_MESSAGE_ARRAY_BUFFER`. Old H5/provider combinations show a native browser/update hint when a download reaches WebView.
+
+Artifact links provide the original Blob; image data URLs are decoded locally without changing the daemon's content security policy. A Blob URL whose original bytes are unavailable shows a reopen/browser hint.
+
+The controller accepts bytes only from the current connection's main frame. It never forwards the daemon credential to DownloadManager or a document provider, fetches remote URLs, requests broad storage access, or retains a destination grant. Navigation, disconnection, errors, and Activity destruction cancel the export; returning an old picker result cannot save into a new connection. A failed or cancelled write after destination selection can leave an empty or partial file. A stalled document provider keeps the native save slot busy until its writer returns, rather than accumulating queued file buffers.
+
+This download slice builds on connection profiles and remains separate from the file-picker and microphone slices. When integrated with microphone background teardown, opening Save from a microphone-authorized connection can cancel the download. See the [download design](../../docs/design/android-blob-downloads.md) for the contract and acceptance boundaries.
+
 ## Limitations
 
-This is not a released production mobile client. File selection, microphone permission bridging, downloads and new-window handling still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
+This is not a released production mobile client. File selection and microphone permission bridging have separate follow-ups; new-window handling still needs native integration. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
 
 JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.

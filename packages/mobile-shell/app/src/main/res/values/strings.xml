@@ -34,4 +34,5 @@
     <string name="storage_unavailable_hint">The saved data could not be opened or migrated safely. Retry, or reset it and enter your connection details again.</string>
     <string name="reset_profiles">Reset connections</string>
     <string name="reset_profiles_warning">Delete all saved connections and credentials on this device? You will need to enter them again. Daemon credentials are not revoked.</string>
+    <string name="download_update_required">This download needs an updated Web Shell and Android System WebView with native download support. Use a browser to save this file.</string>
 </resources>
