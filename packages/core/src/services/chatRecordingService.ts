@@ -16,6 +16,8 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import { SessionExecutionEngineError } from './session-execution-engine.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -314,6 +316,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_execution_engine'
     | 'omni_recall'
     | 'session_model'
     | 'rewind'
@@ -458,11 +461,13 @@ export interface UserPromptRecordPayload {
   /**
    * Core/headless: submitted projection, otherwise expanded pre-hook text.
    * ACP: display projection or raw request text before expansion. ACP omits
-   * this payload when no projection, attachment references, or resource links exist.
+   * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** UI-only annotations; interpreted by transcript consumers, not the model. */
+  inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */
@@ -1165,6 +1170,12 @@ export class ChatRecordingService {
           `Failed to create conversation file at ${conversationFile}: ${message}`,
         );
       }
+    }
+    if (isManagedSessionTranscriptSync(conversationFile)) {
+      throw new SessionExecutionEngineError(
+        this.getSessionId(),
+        'belongs to managed, cannot record with legacy',
+      );
     }
     this.cachedConversationFile = conversationFile;
     return conversationFile;

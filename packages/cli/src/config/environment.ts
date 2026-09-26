@@ -103,6 +103,65 @@ if (inheritedProvenance) {
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
+// Model credentials and endpoints that the docs name for each auth type
+// (docs/users/configuration/auth.md). Providers read them when a request is
+// made, never while a module loads.
+const DOCUMENTED_MODEL_ENV_KEYS = [
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+  'QWEN_MODEL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'GEMINI_API_KEY',
+  'GEMINI_MODEL',
+  'GOOGLE_API_KEY',
+  'GOOGLE_MODEL',
+];
+// Keys whose values are only read per request: the documented ones above plus
+// the `envKey` of every configured model provider, which is what `/auth` writes
+// to `settings.env`. Filled by loadEnvironment().
+const requestTimeEnvKeys = new Set<string>();
+
+function rememberRequestTimeEnvKeys(settings: Settings): void {
+  requestTimeEnvKeys.clear();
+  for (const key of DOCUMENTED_MODEL_ENV_KEYS) requestTimeEnvKeys.add(key);
+  for (const models of Object.values(settings.modelProviders ?? {})) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      const envKey = model?.envKey;
+      // A provider entry may name any variable; never let it exempt a key
+      // that Node or the loader treats specially.
+      if (
+        typeof envKey === 'string' &&
+        envKey &&
+        !isHardcodedProjectEnvExclusion(envKey) &&
+        !isLoaderEnvKey(envKey)
+      ) {
+        requestTimeEnvKeys.add(envKey);
+      }
+    }
+  }
+}
+
+/**
+ * Whether `.env` files or `settings.env` put a value into this process's
+ * environment that something may have read before those files loaded. Modules
+ * imported earlier captured the old values (and Node itself reads variables
+ * such as `NODE_EXTRA_CA_CERTS` only at boot), so only a fresh image sees
+ * such values. Model credentials and endpoints do not count: providers read
+ * them per request, so a process that keeps running sees them too.
+ */
+export function hasLoadedEnvironmentValues(): boolean {
+  for (const keys of [dotEnvSourcedKeys, settingsEnvSourcedKeys]) {
+    for (const key of keys) {
+      if (!requestTimeEnvKeys.has(key)) return true;
+    }
+  }
+  return false;
+}
+
 export function getRelaunchEnvProvenance(): Record<string, string> {
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
@@ -211,6 +270,7 @@ export function resetEnvironmentTrackingForTesting(): void {
   settingsEnvSourcedKeys.clear();
   inheritedDotEnvKeys.clear();
   inheritedSettingsEnvKeys.clear();
+  requestTimeEnvKeys.clear();
   delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
   lastReloadSnapshotSeeded = false;
@@ -664,6 +724,7 @@ export function loadEnvironment(
   startDir: string = process.cwd(),
 ): void {
   captureEnvironmentBeforeLoad();
+  rememberRequestTimeEnvKeys(settings);
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);

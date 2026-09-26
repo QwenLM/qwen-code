@@ -151,6 +151,15 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './tools/managed-tool-runtime.js';
+export {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from './tools/managed-tool-protocol.js';
 export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
@@ -711,6 +720,7 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
+export * from './utils/git-worktrees.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/git-ignore.js';

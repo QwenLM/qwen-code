@@ -16,6 +16,7 @@
  * and how to interpret the results.
  */
 
+import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
@@ -58,6 +59,7 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
+import { buildAdvisorReminder } from '../../core/advisor-policy.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
@@ -373,6 +375,7 @@ Important Rules:
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
@@ -824,6 +827,7 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    this.executionChat = chat;
     const inner = () =>
       this._runReasoningLoopInner(
         chat,
@@ -898,7 +902,10 @@ export class AgentCore {
             ...(this.taskName ? { taskName: this.taskName } : {}),
           },
           () => {
-            const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            const runWithView = () =>
+              runWithAgentChat(this.executionChat, () =>
+                this.withRuntimeView(fn, inheritedView),
+              );
             // Publish this agent's effective positive allowlist and its
             // disallowedTools blocklist so a fork it launches cannot widen
             // either policy. Both helpers always re-set their field, so an
@@ -1015,8 +1022,21 @@ export class AgentCore {
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
         }
+        const advisorReminder =
+          turnCounter === 1 && this.runtimeContext.getAdvisorModel?.()
+            ? buildAdvisorReminder(
+                !!this.runtimeContext
+                  .getToolRegistry()
+                  .getTool(ToolNames.ADVISOR) &&
+                  this.isToolExecutionAllowed(ToolNames.ADVISOR),
+                toolsList.map((tool) => tool.name),
+              )
+            : undefined;
         const messageParams = {
-          message: currentMessages[0]?.parts || [],
+          message: [
+            ...(advisorReminder ? [{ text: advisorReminder }] : []),
+            ...(currentMessages[0]?.parts || []),
+          ],
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],

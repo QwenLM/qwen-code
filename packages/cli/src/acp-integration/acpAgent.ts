@@ -228,6 +228,7 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -353,6 +354,7 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
+import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
@@ -1084,6 +1086,12 @@ function mapSessionRestoreRequestError(
 ): unknown {
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionExecutionEngineError) {
+    return new RequestError(-32024, error.message, {
+      errorKind: error.errorKind,
+      sessionId,
+    });
+  }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
       errorKind: 'transcript_snapshot_unavailable',
@@ -2923,6 +2931,11 @@ export async function runAcpAgent(
     externalToolGuardProviderAttached?: boolean;
   },
 ) {
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Tool execution sandbox does not support ACP sessions yet.',
+    );
+  }
   // Conversations-runtime provenance, accepted by the CLI entry point only in
   // ACP mode with the private parent capability present. Frozen for the
   // process lifetime alongside the writer-lease snapshot.
@@ -5039,6 +5052,11 @@ class QwenAgent implements Agent {
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
   ) {
+    if (config.getShellExecutionSandbox?.()) {
+      throw new Error(
+        'Tool execution sandbox does not support ACP sessions yet.',
+      );
+    }
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
@@ -9341,6 +9359,21 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const sessionId = params['sessionId'];
+    const sessionConfig =
+      typeof sessionId === 'string'
+        ? this.sessions.get(sessionId)?.getConfig()
+        : undefined;
+    if (
+      (this.config.getExecutionEnvironment?.() ||
+        sessionConfig?.getExecutionEnvironment?.()) &&
+      !isSshWorkspaceExtMethodAllowed(method)
+    ) {
+      throw RequestError.invalidParams(
+        { errorKind: 'unsupported_operation' },
+        'This operation is unavailable for SSH workspaces.',
+      );
+    }
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
@@ -11404,6 +11437,13 @@ class QwenAgent implements Agent {
             ? { sourceId: source.sourceId }
             : {}),
           persisted: ok,
+          ...(!ok
+            ? {
+                reason: recording
+                  ? 'write_not_confirmed'
+                  : 'recording_unavailable',
+              }
+            : {}),
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
