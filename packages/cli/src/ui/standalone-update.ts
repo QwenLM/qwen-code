@@ -538,6 +538,25 @@ function checkDeferredSwap(standaloneDir: string): void {
       throw pendingSwapError(standaloneDir);
     }
     if (isProcessAlive(batPid)) {
+      // A live PID normally means the bat is still swapping — but a hung
+      // bat or a reused PID would block every future update forever, so an
+      // aged marker escapes to the pending-swap remedy instead. The parent
+      // writes the marker right after spawning the bat and the bat deletes
+      // it on exit, so the marker's mtime ages the same way as the
+      // marker-less .new check below. The escape must not authorize
+      // deleting .new: a stale marker does not prove the swap directory is
+      // safe to remove, so swapProvenDead stays false.
+      let markerStale = false;
+      try {
+        markerStale =
+          Date.now() - fs.statSync(deferredMarker).mtimeMs >
+          PENDING_SWAP_STALE_MS;
+      } catch {
+        // unreadable — cannot prove age, keep waiting
+      }
+      if (markerStale) {
+        throw pendingSwapError(standaloneDir);
+      }
       throw new Error(
         'A previous update is still being applied. Please wait a moment and try again.',
       );

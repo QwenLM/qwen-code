@@ -937,6 +937,48 @@ describe('standalone-update', () => {
       const result = rollbackStandaloneUpdate(standaloneDir);
       expect(result.ok).toBe(true);
     });
+
+    // Pin the permissive direction at the rollback lock check: a lock whose
+    // content cannot name a live process must not wedge rollback. The marker
+    // path in checkDeferredSwap intentionally fails closed on the same class
+    // — the two directions are deliberate, not an inconsistency to resolve.
+    it('proceeds when the lock content is not a parseable PID', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const oldDir = `${standaloneDir}.old`;
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(standaloneDir);
+      fs.mkdirSync(oldDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.17.0' }),
+      );
+      fs.writeFileSync(
+        path.join(oldDir, 'manifest.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.16.0' }),
+      );
+      fs.writeFileSync(lockPath, 'not-a-pid');
+      const result = rollbackStandaloneUpdate(standaloneDir);
+      expect(result.ok).toBe(true);
+    });
+
+    it('proceeds when the lock holds an out-of-range PID', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const oldDir = `${standaloneDir}.old`;
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(standaloneDir);
+      fs.mkdirSync(oldDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.17.0' }),
+      );
+      fs.writeFileSync(
+        path.join(oldDir, 'manifest.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.16.0' }),
+      );
+      fs.writeFileSync(lockPath, '99999999999999');
+      const result = rollbackStandaloneUpdate(standaloneDir);
+      expect(result.ok).toBe(true);
+    });
   });
 
   describe('acquireLock deferred marker handling', () => {
@@ -951,6 +993,44 @@ describe('standalone-update', () => {
       );
       expect(fs.existsSync(lockPath)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+    });
+
+    it('still waits on a below-threshold deferred marker with a live PID', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      const markerPath = `${standaloneDir}.deferred`;
+      fs.writeFileSync(markerPath, String(process.pid));
+      const belowThreshold = new Date(Date.now() - 14 * 60 * 1000);
+      fs.utimesSync(markerPath, belowThreshold, belowThreshold);
+
+      // A marker younger than PENDING_SWAP_STALE_MS can still belong to a
+      // genuinely running swap — the wait-and-retry answer stays.
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'A previous update is still being applied',
+      );
+    });
+
+    it('routes an aged deferred marker with a live PID to the pending-swap remedy', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      const markerPath = `${standaloneDir}.deferred`;
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(markerPath, String(process.pid));
+      const aged = new Date(Date.now() - 16 * 60 * 1000);
+      fs.utimesSync(markerPath, aged, aged);
+
+      // A live bat PID with an aged marker is a hung bat or a reused PID;
+      // "please wait" can never resolve it. The escape must surface the
+      // actionable remedy (remove the pending swap) — and must not disturb
+      // the residue: a stale marker proves the bat is gone, not that .new
+      // is safe to delete, so swapProvenDead stays false.
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'remove the pending swap',
+      );
+      expect(fs.existsSync(markerPath)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      // The freshly taken lock must be released on the way out.
+      expect(fs.existsSync(lockPath)).toBe(false);
     });
 
     it('cleans a stale deferred marker before taking over a dead lock', () => {
