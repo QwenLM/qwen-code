@@ -1473,6 +1473,14 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // A -32601 "Method not found" response is a normal protocol reply from a
+      // tools-only server (e.g. GitLab MCP) that does not advertise
+      // prompts/resources. It is NOT a transport failure, so it must not flip
+      // the server to DISCONNECTED while discovery is still in flight.
+      if (isMethodNotFound(error)) {
+        debugLogger.debug(`MCP (${mcpServerName}): optional method absent (-32601), ignoring.`);
+        return;
+      }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
