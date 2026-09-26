@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -208,6 +215,14 @@ export function SkillsManagerPage({
     [displayedSkills, selectedName],
   );
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
+  const toggleScopeEpoch = useRef(0);
+  useLayoutEffect(() => {
+    setNotice(null);
+    setBusySkill(null);
+    return () => {
+      toggleScopeEpoch.current += 1;
+    };
+  }, [targetWorkspaceCwd, workspace.client]);
   const targetsActiveWorkspace =
     connection.workspaceCwd !== undefined
       ? targetWorkspaceCwd === connection.workspaceCwd
@@ -244,15 +259,21 @@ export function SkillsManagerPage({
     embedded?.onDetailChange(Boolean(selectedSkill));
   }, [embedded, selectedSkill]);
 
-  async function toggleSkill(skill: DaemonWorkspaceSkillStatus) {
-    const enabled = skill.status === 'disabled';
+  async function toggleSkill(
+    skill: DaemonWorkspaceSkillStatus,
+    enabled = skill.status === 'disabled',
+  ) {
+    const epoch = toggleScopeEpoch.current;
+    const isCurrent = () => epoch === toggleScopeEpoch.current;
     setBusySkill(skill.name);
     setNotice(null);
     try {
       const result = await setEnabled(skill.name, enabled, {
         clientId: targetsActiveWorkspace ? connection.clientId : undefined,
       });
+      if (!isCurrent()) return;
       const refreshed = await reloadConfig();
+      if (!isCurrent()) return;
       const refreshedSkill = refreshed?.skills.find(
         (item) => item.name.toLowerCase() === skill.name.toLowerCase(),
       );
@@ -263,19 +284,21 @@ export function SkillsManagerPage({
           ? t('skills.settingUnchanged')
           : !refreshedSkill
             ? t('skills.settingUpdated')
-            : refreshedSkill.status === expectedStatus
+            : refreshedSkill.status === expectedStatus &&
+                refreshedSkill.status !== skill.status
               ? t(enabled ? 'skills.enabled' : 'skills.disabled')
               : t('skills.settingUpdatedAvailabilityUnchanged'),
         error: false,
       });
     } catch (toggleError) {
+      if (!isCurrent()) return;
       setNotice({
         skillName: skill.name,
         text: toggleErrorMessage(toggleError, t),
         error: true,
       });
     } finally {
-      setBusySkill(null);
+      if (isCurrent()) setBusySkill(null);
     }
   }
 
@@ -317,6 +340,18 @@ export function SkillsManagerPage({
     setSelectedName(null);
     void reload();
   }
+
+  const toggleNotice =
+    notice && (!selectedSkill || notice.skillName === selectedSkill.name) ? (
+      <ManagementNotice
+        tone={notice.error ? 'error' : 'success'}
+        noticeKey={notice.text}
+        closeLabel={t('common.close')}
+        onDismiss={() => setNotice(null)}
+      >
+        {notice.text}
+      </ManagementNotice>
+    ) : null;
 
   const standaloneNavigation = (
     <Breadcrumb className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
@@ -457,6 +492,15 @@ export function SkillsManagerPage({
                         : 'skills.disable',
                     )}
                   </DropdownMenuItem>
+                  {selectedSkill.status === 'disabled' &&
+                  selectedSkill.lockedScope ? (
+                    <DropdownMenuItem
+                      disabled={busySkill !== null || !canToggleSkills}
+                      onSelect={() => void toggleSkill(selectedSkill, false)}
+                    >
+                      {t('skills.disableInWorkspace')}
+                    </DropdownMenuItem>
+                  ) : null}
                   {canManageSkills &&
                   (selectedSkill.level === 'project' ||
                     selectedSkill.level === 'user') ? (
@@ -473,16 +517,7 @@ export function SkillsManagerPage({
             </DropdownMenu>
           </div>
 
-          {notice?.skillName === selectedSkill.name ? (
-            <ManagementNotice
-              tone={notice.error ? 'error' : 'success'}
-              noticeKey={notice.text}
-              closeLabel={t('common.close')}
-              onDismiss={() => setNotice(null)}
-            >
-              {notice.text}
-            </ManagementNotice>
-          ) : null}
+          {toggleNotice}
 
           {message || selectedSkill.error ? (
             <Alert variant="destructive">
@@ -616,6 +651,8 @@ export function SkillsManagerPage({
             <AlertDescription>{message}</AlertDescription>
           </Alert>
         ) : null}
+
+        {toggleNotice}
 
         {listNotice ? (
           <ManagementNotice
