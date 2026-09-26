@@ -2395,10 +2395,18 @@ export function resolveCommandPath(
           stdio: ['ignore', 'pipe', 'pipe'],
           ...(probeCwd ? { cwd: probeCwd } : {}),
         });
-      } catch {
-        return { path: null, error: undefined };
+      } catch (error) {
+        // A numeric status means the finder ran: a nonzero exit is a plain
+        // miss. Without one the lookup never completed (e.g. ENOENT spawning
+        // into a missing cwd) and the cause must reach the caller.
+        if (typeof (error as { status?: unknown }).status === 'number') {
+          return { path: null, error: undefined };
+        }
+        return {
+          path: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
       }
-
       if (!result) return { path: null, error: undefined };
       const first = result.split(/\r?\n/)[0]?.trim();
       if (!first) return { path: null, error: undefined };
@@ -2423,10 +2431,16 @@ export function resolveCommandPath(
           stdio: ['ignore', 'pipe', 'pipe'],
           ...(probeCwd ? { cwd: probeCwd } : {}),
         });
-      } catch {
-        return { path: null, error: undefined };
+      } catch (error) {
+        // Same rule as the win32 arm: exit status present means the lookup ran.
+        if (typeof (error as { status?: unknown }).status === 'number') {
+          return { path: null, error: undefined };
+        }
+        return {
+          path: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
       }
-
       if (!result) return { path: null, error: undefined };
       const first = result.split(/\r?\n/)[0]?.trim();
       if (!first) return { path: null, error: undefined };

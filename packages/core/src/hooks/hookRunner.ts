@@ -47,15 +47,26 @@ let cachedPowerShell: string | undefined;
 export function __resetPowerShellCacheForTests(): void {
   cachedPowerShell = undefined;
 }
+
+// The finder searches the probe cwd before PATH, so probe from a directory
+// non-admin actors cannot write: the system directory on Windows, the temp
+// directory elsewhere (never the session's own cwd).
+function neutralProbeCwd(): string {
+  return process.platform === 'win32'
+    ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
+    : tmpdir();
+}
+
 export function resolvePowerShellExecutable(): string {
   if (cachedPowerShell !== undefined) {
     return cachedPowerShell;
   }
   let probeError: Error | undefined;
   for (const name of ['pwsh', 'powershell']) {
-    // `where` searches the cwd before PATH: probe from a neutral directory and
-    // spawn the absolute hit, never a bare name. Only POSIX reports an error.
-    const { path, error } = resolveCommandPath(name, { cwd: tmpdir() });
+    // Spawn the absolute hit, never a bare name.
+    const { path, error } = resolveCommandPath(name, {
+      cwd: neutralProbeCwd(),
+    });
     if (error) probeError ??= error;
     const resolved = path?.split(/\r?\n/)[0]?.trim();
     if (resolved) {
@@ -149,6 +160,12 @@ const SURVIVING_HOOK_SUPERVISOR_GRACE_MS =
 const LEGACY_PROJECT_DIR_REF_RE =
   /(?<!\$env:)\$(?:QWEN|CLAUDE|GEMINI)_PROJECT_DIR\b/;
 const warnedLegacyProjectDirRefs = new Set<string>();
+
+// A bare-quoted program path evaluates as a string and exits 0 under the
+// wrapper; warn so it is not silent. The shape check is best-effort.
+const BARE_QUOTED_PROGRAM_PATH_RE =
+  /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i;
+const warnedBareQuotedProgramPaths = new Set<string>();
 
 // An eval source works in both TypeScript development and the single-file CLI
 // bundle without shipping a second executable asset beside the entry point.
@@ -1320,31 +1337,6 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      // Refused bare-quoted paths route through the same blocking outcome as
-      // exit 2: the shared isBlockingHookOutput predicate already turns that
-      // into a deny in the shape each event reads.
-      if (
-        shellConfig.shell === 'powershell' &&
-        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i.test(
-          hookConfig.command,
-        )
-      ) {
-        const errorMessage =
-          `PowerShell command contains a bare-quoted Windows program or script path; ` +
-          `if you intend to invoke it, prefix with the call operator '& '. ` +
-          `Example: & ${stripAnsiAndControl(hookConfig.command)}`;
-        debugLogger.warn(`Hook configuration error: ${errorMessage}`);
-        resolve({
-          hookConfig,
-          eventName,
-          success: false,
-          outcome: 'blocking',
-          output: { systemMessage: errorMessage, reason: errorMessage },
-          error: new Error(errorMessage),
-          duration: Date.now() - startTime,
-        });
-        return;
-      }
       // StrictMode + ErrorActionPreference=Stop: undefined $VAR and a
       // non-terminating error terminate the script instead of masking the
       // failure with exit 0. LASTEXITCODE is pre-set to $null so the author's
@@ -1370,6 +1362,20 @@ export class HookRunner {
             `written this way silently never runs. Use the environment scope, ` +
             `e.g. "$env:QWEN_PROJECT_DIR", and prefix a quoted invocation with ` +
             `the call operator '&'.`,
+        );
+      }
+      if (
+        shellConfig.shell === 'powershell' &&
+        BARE_QUOTED_PROGRAM_PATH_RE.test(hookConfig.command) &&
+        !warnedBareQuotedProgramPaths.has(hookConfig.command)
+      ) {
+        warnedBareQuotedProgramPaths.add(hookConfig.command);
+        debugLogger.warn(
+          `PowerShell hook command begins with a bare-quoted Windows program ` +
+            `path. Under the hook wrapper it evaluates as a string and the ` +
+            `hook exits 0 without running the program, so a gate written this ` +
+            `way silently never runs. Prefix the invocation with the call ` +
+            `operator, e.g. "& ${stripAnsiAndControl(hookConfig.command)}".`,
         );
       }
       const command =

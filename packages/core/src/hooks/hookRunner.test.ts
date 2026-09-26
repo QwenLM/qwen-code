@@ -3181,70 +3181,6 @@ describe('HookRunner', () => {
       },
     );
 
-    it('rejects a bare-quoted path on the cmd fallback lane', async () => {
-      const spy = mockCmdShellConfig();
-      try {
-        const result = await hookRunner.executeHook(
-          {
-            type: HookType.Command,
-            command: '"C:\\hooks\\check.cmd"',
-            source: HooksConfigSource.Project,
-          },
-          HookEventName.PreToolUse,
-          createMockInput(),
-        );
-        expect(result.success).toBe(false);
-        expect(result.outcome).toBe('blocking');
-        expect(result.output?.systemMessage).toMatch(/call operator '& '/);
-        expect(result.error?.message).toMatch(/call operator '& '/);
-        expect(mockSpawn).not.toHaveBeenCalled();
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    it.each([
-      [
-        'bare-quoted .cmd path at start',
-        '"C:\\Program Files\\My App\\hook.cmd"',
-      ],
-      [
-        'bare-quoted .bat path with arguments',
-        '"C:\\Scripts\\setup.bat" arg1 arg2',
-      ],
-      ['bare-quoted .exe path at start', '"C:\\Windows\\notepad.exe"'],
-      ['single-quoted .exe', "'C:\\foo.exe'"],
-      ['bare-quoted .ps1 path at start', '"C:\\foo.ps1"'],
-      ['bare-quoted .ps1 with arguments', '"C:\\foo.ps1" arg1 arg2'],
-      [
-        'bare-quoted path carrying terminal escapes',
-        '"C:\\foo\u001b[2Jbar.cmd"',
-      ],
-    ])('rejects a PowerShell command that is %s', async (_label, command) => {
-      const result = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command,
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      expect(result.success).toBe(false);
-      expect(result.outcome).toBe('blocking');
-      expect(result.error?.message).toMatch(/prefix with the call operator/);
-      expect(result.error?.message).not.toContain('\u001b');
-      expect(result.output?.systemMessage).toMatch(/call operator/);
-      expect(result.output?.systemMessage).not.toContain('\u001b');
-      const aggregated = new HookAggregator().aggregateResults(
-        [result],
-        HookEventName.PreToolUse,
-      );
-      expect(aggregated.finalOutput?.decision).toBe('deny');
-      expect(aggregated.finalOutput?.reason).toMatch(/call operator/);
-    });
-
     it.each([
       ['call-operator prefix on quoted .cmd', '& "C:\\hook.cmd"'],
       ['command with quoted arguments', 'Get-Process "name"'],
@@ -3578,8 +3514,13 @@ describe('HookRunner', () => {
       execSpy.mockImplementation((() => ({ path: null })) as never);
       expect(() => resolvePowerShellExecutable()).toThrow();
       // `where` searches the current directory before PATH: probing from the
-      // process cwd would return a workspace-planted pwsh.exe.
-      expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: tmpdir() });
+      // process cwd would return a workspace-planted pwsh.exe, and the temp
+      // directory is writable, so Windows probes from the system directory.
+      const neutral =
+        process.platform === 'win32'
+          ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
+          : tmpdir();
+      expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: neutral });
     });
   });
 
