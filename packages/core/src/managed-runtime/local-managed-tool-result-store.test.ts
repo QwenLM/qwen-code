@@ -286,8 +286,12 @@ describe('local managed tool-result segments', () => {
       'managed-tool-result-manifest',
       Buffer.from(JSON.stringify(final)),
     );
+    const reader = await LocalToolResultSegmentStore.openReadOnly({
+      runtimeBaseDir,
+      sessionKey,
+    });
     expect(
-      await store.readRange({
+      await reader.readRange({
         manifestRef: oldRef,
         expectedIdentity: identityOf(initial),
         streamId: 'stdout',
@@ -295,6 +299,7 @@ describe('local managed tool-result segments', () => {
         length: 4,
       }),
     ).toEqual({ status: 'ok', result: stdout.subarray(1, 5) });
+    await reader.close();
     expect(
       await store.readRange({
         manifestRef: finalRef,

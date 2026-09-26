@@ -27,7 +27,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         fault.mode === 'write' &&
         flags === 'wx' &&
         String(file).includes('.pending-') &&
-        String(file).endsWith('/bytes')
+        path.basename(String(file)) === 'bytes'
       ) {
         fault.mode = '';
         throw Object.assign(new Error('injected write failure'), {
