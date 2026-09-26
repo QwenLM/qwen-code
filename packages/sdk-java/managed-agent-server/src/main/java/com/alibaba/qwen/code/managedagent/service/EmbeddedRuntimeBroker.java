@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -62,6 +63,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 failed.completeExceptionally(new IllegalArgumentException(
                         "Session is not owned by this service"));
                 return failed;
+            }
+            if (session.workspace() != null) {
+                return CompletableFuture.failedFuture(
+                        new RuntimeBrokerException(409,
+                                "workspace_unavailable",
+                                "Hosted Workspace execution is not available.",
+                                false));
             }
             return CompletableFuture.completedFuture(new RuntimeScope(
                     session.tenantId(), workspaceId,

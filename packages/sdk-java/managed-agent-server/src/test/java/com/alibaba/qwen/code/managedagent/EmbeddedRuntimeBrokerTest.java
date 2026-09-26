@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
@@ -53,6 +54,27 @@ class EmbeddedRuntimeBrokerTest {
             connection.setDoOutput(true);
             connection.getOutputStream().write("{}".getBytes());
             assertThat(connection.getResponseCode()).isEqualTo(401);
+        }
+    }
+
+    @Test
+    void boundSessionCannotResolveTheGlobalRuntimeWorkspace()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        ContextBinding binding = new ContextBinding("tenant-a", "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
+                new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                        null, "ACTIVE", null, null, 0, 0, 1, 1, null, 0,
+                        binding)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("workspace_unavailable"));
         }
     }
 

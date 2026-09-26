@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -18,6 +19,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +63,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final CommittedEventPublisher eventPublisher;
+    private final ManagedWorkspaceRegistry workspaces;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -72,7 +76,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getLong("created_at"),
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
-                    result.getLong("version"));
+                    result.getLong("version"), readBinding(result));
     private final RowMapper<TurnRecord> turnMapper = (result, row) ->
             new TurnRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -131,18 +135,141 @@ public class ManagedAgentStore implements AgentStateStore {
                             result.getLong("revision")));
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
-            Clock clock, CommittedEventPublisher eventPublisher) {
+            Clock clock, CommittedEventPublisher eventPublisher,
+            ManagedWorkspaceRegistry workspaces) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.eventPublisher = eventPublisher;
+        this.workspaces = workspaces;
     }
 
+    @Override
     @Transactional
     public Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String title, List<Map<String, Object>> input,
             String payloadDigest) {
+        requireCreationScope(tenantId, idempotencyKey, false);
+        return insertSession(tenantId, operation, idempotencyKey,
+                requestDigest, agentId, title, input, payloadDigest,
+                null, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest,
+            String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection) {
+        if (!input.isEmpty()) {
+            throw workspaceExecutionUnavailable();
+        }
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (!existing.isEmpty()) {
+            return replayWorkspaceCommand(tenantId, actorId,
+                    requestDigest, existing.getFirst());
+        }
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(
+                tenantId, actorId, selection);
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
+                requestDigest, agentId, title, input, payloadDigest,
+                workspace, actorId);
+    }
+
+    @Override
+    @Transactional
+    public Admission replayWorkspaceSessionCommand(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest) {
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (existing.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict", "The creation command is missing.");
+        }
+        return replayWorkspaceCommand(tenantId, actorId, requestDigest,
+                existing.getFirst());
+    }
+
+    private Admission replayWorkspaceCommand(String tenantId, String actorId,
+            String requestDigest, WorkspaceCommand command) {
+        if (!command.requestDigest().equals(requestDigest)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+        ContextBinding bound = requireSession(tenantId,
+                command.sessionId()).workspace();
+        if (bound == null) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable", "Workspace binding is missing.");
+        }
+        if (!workspaces.canRead(tenantId, actorId, bound.getWorkspaceId())) {
+            throw new ApiException(HttpStatus.NOT_FOUND,
+                    "workspace_not_found", "Workspace not found.");
+        }
+        return new Admission(command.sessionId(), command.turnId(), true,
+                false);
+    }
+
+    // H2 truncates bare BINARY casts; the suffix also prevents NUL-padding aliases.
+    private List<WorkspaceCommand> findWorkspaceCommand(String tenantId,
+            String actorId, String idempotencyKey) {
+        return jdbc.query("SELECT request_digest, session_id, turn_id"
+                        + " FROM managed_workspace_create_command"
+                        + " WHERE tenant_id = ? AND idempotency_key = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND actor_id = ?"
+                        + " AND CAST(CONCAT(idempotency_key, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))",
+                (result, row) -> new WorkspaceCommand(
+                        result.getString("request_digest"),
+                        result.getString("session_id"),
+                        result.getString("turn_id")),
+                tenantId, idempotencyKey, tenantId,
+                ManagedWorkspaceRegistry.actorKey(tenantId, actorId),
+                idempotencyKey);
+    }
+
+    private record WorkspaceCommand(String requestDigest, String sessionId,
+            String turnId) {
+    }
+
+    private static ApiException workspaceExecutionUnavailable() {
+        return new ApiException(HttpStatus.CONFLICT,
+                "workspace_unavailable",
+                "Hosted Workspace execution is not available.");
+    }
+
+    private void requireCreationScope(String tenantId, String idempotencyKey,
+            boolean workspaceBound) {
+        jdbc.update("INSERT INTO managed_session_create_scope"
+                        + " (tenant_id, idempotency_key, workspace_bound)"
+                        + " VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE"
+                        + " workspace_bound = workspace_bound",
+                tenantId, idempotencyKey, workspaceBound);
+        Boolean existing = jdbc.queryForObject(
+                "SELECT workspace_bound FROM managed_session_create_scope"
+                        + " WHERE tenant_id = ? AND idempotency_key = ?"
+                        + " FOR UPDATE",
+                Boolean.class, tenantId, idempotencyKey);
+        if (!Boolean.valueOf(workspaceBound).equals(existing)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+    }
+
+    private Admission insertSession(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved,
+            String actorId) {
+        ContextBinding workspace = resolved == null ? null
+                : resolved.binding();
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String turnId = input.isEmpty() ? null : publicId("turn");
@@ -150,8 +277,20 @@ public class ManagedAgentStore implements AgentStateStore {
                 : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                         + " session_id, agent_id, title, status, created_at,"
-                        + " updated_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)",
-                tenantId, sessionId, agentId, title, now, now);
+                        + " updated_at, workspace_id, workspace_generation,"
+                        + " workspace_storage_id, cwd_relative,"
+                        + " context_config_ref, context_revision,"
+                        + " workspace_config_ref, workspace_policy_ref)"
+                        + " VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tenantId, sessionId, agentId, title, now, now,
+                workspace == null ? null : workspace.getWorkspaceId(),
+                workspace == null ? null : workspace.getWorkspaceGeneration(),
+                workspace == null ? null : workspace.getStorageId(),
+                workspace == null ? null : workspace.getCwdRelative(),
+                workspace == null ? null : workspace.getContextConfigRef(),
+                workspace == null ? null : workspace.getContextRevision(),
+                resolved == null ? null : resolved.configRef(),
+                resolved == null ? null : resolved.policyRef());
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -161,8 +300,18 @@ public class ManagedAgentStore implements AgentStateStore {
             insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
         }
-        insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, now);
+        if (actorId == null) {
+            insertCommand(tenantId, operation, idempotencyKey, requestDigest,
+                    sessionId, turnId, now);
+        } else {
+            jdbc.update("INSERT INTO managed_workspace_create_command"
+                            + " (tenant_id, actor_id, idempotency_key,"
+                            + " request_digest, session_id, turn_id, created_at)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    tenantId, ManagedWorkspaceRegistry.actorKey(tenantId,
+                            actorId), idempotencyKey, requestDigest,
+                    sessionId, turnId, now);
+        }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {
@@ -177,6 +326,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
                 idempotencyKey, true);
         if (existing.isPresent()) {
@@ -206,7 +358,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
-        requireSessionForUpdate(tenantId, sessionId);
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
@@ -235,6 +389,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
                 idempotencyKey, true);
         if (existing.isPresent()) {
@@ -281,6 +438,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
         CommandRecord command = findCommand(tenantId, operation,
                 idempotencyKey, true).orElseThrow(() ->
                         new IllegalStateException(
@@ -369,8 +529,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " request_digest, session_id, turn_id,"
                         + " command_status, session_status_before,"
                         + " created_at, updated_at"
-                        + " FROM managed_agent_command WHERE tenant_id = ?"
-                        + " AND operation = ? AND idempotency_key = ?"
+                        + " FROM managed_agent_command WHERE"
+                        + " tenant_id = ? AND idempotency_key = ? AND"
+                        + " CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND operation = ? AND"
+                        + " CAST(CONCAT(idempotency_key, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + (forUpdate ? " FOR UPDATE" : ""),
                 (result, row) -> new CommandRecord(
                         result.getString("tenant_id"),
@@ -383,16 +548,18 @@ public class ManagedAgentStore implements AgentStateStore {
                         result.getString("session_status_before"),
                         result.getLong("created_at"),
                         result.getLong("updated_at")),
-                tenantId, operation, idempotencyKey);
+                tenantId, idempotencyKey, tenantId, operation, idempotencyKey);
         return rows.stream().findFirst();
     }
 
     public Optional<SessionRecord> findSession(String tenantId,
             String sessionId) {
         List<SessionRecord> rows = jdbc.query(
-                "SELECT * FROM managed_agent_session WHERE tenant_id = ?"
+                "SELECT * FROM managed_agent_session WHERE tenant_id = ? AND"
+                        + " CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND session_id = ?",
-                sessionMapper, tenantId, sessionId);
+                sessionMapper, tenantId, tenantId, sessionId);
         return rows.stream().findFirst();
     }
 
@@ -404,10 +571,13 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
-    public SessionPage listSessions(String tenantId, Long beforeUpdatedAt,
-            String beforeSessionId, int limit) {
+    public SessionPage listSessions(String tenantId, String actorId,
+            Long beforeUpdatedAt, String beforeSessionId, int limit) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
+        arguments.add(tenantId);
+        arguments.add(actorId == null ? null
+                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
         String cursorClause = "";
         if (beforeUpdatedAt != null && beforeSessionId != null) {
             cursorClause = " AND (updated_at < ? OR (updated_at = ?"
@@ -418,8 +588,24 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         arguments.add(limit + 1);
         List<SessionRecord> rows = jdbc.query(
-                "SELECT * FROM managed_agent_session WHERE tenant_id = ?"
+                "SELECT * FROM managed_agent_session WHERE tenant_id = ? AND"
+                        + " CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND status <> 'DELETED'"
+                        + " AND (workspace_id IS NULL OR EXISTS (SELECT 1"
+                        + " FROM managed_workspace_access wa"
+                        + " WHERE wa.tenant_id = managed_agent_session.tenant_id"
+                        + " AND wa.workspace_id = managed_agent_session.workspace_id"
+                        + " AND CAST(CONCAT(wa.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT("
+                        + "managed_agent_session.tenant_id, '!')"
+                        + " AS BINARY(513))"
+                        + " AND CAST(CONCAT(wa.workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT("
+                        + "managed_agent_session.workspace_id, '!')"
+                        + " AS BINARY(513))"
+                        + " AND wa.actor_id = ?"
+                        + " AND wa.can_read = TRUE))"
                         + cursorClause
                         + " ORDER BY updated_at DESC, session_id DESC LIMIT ?",
                 sessionMapper, arguments.toArray());
@@ -1365,9 +1551,11 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId) {
         try {
             return jdbc.queryForObject("SELECT * FROM managed_agent_session"
-                            + " WHERE tenant_id = ? AND session_id = ?"
+                            + " WHERE tenant_id = ?"
+                            + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                            + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND session_id = ?"
                             + " FOR UPDATE",
-                    sessionMapper, tenantId, sessionId);
+                    sessionMapper, tenantId, tenantId, sessionId);
         } catch (EmptyResultDataAccessException error) {
             throw new ApiException(HttpStatus.NOT_FOUND,
                     "session_not_found", "The Session was not found.");
@@ -1617,6 +1805,29 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException("Stored snapshot is invalid",
                     error);
         }
+    }
+
+    private static ContextBinding readBinding(java.sql.ResultSet result)
+            throws java.sql.SQLException {
+        String workspaceId = result.getString("workspace_id");
+        if (workspaceId == null) {
+            return null;
+        }
+        String configRef = result.getString("workspace_config_ref");
+        String policyRef = result.getString("workspace_policy_ref");
+        String contextConfigRef = result.getString("context_config_ref");
+        if (!ManagedWorkspaceRegistry.descriptorRef(configRef, policyRef)
+                .equals(contextConfigRef)) {
+            throw new IllegalStateException(
+                    "Persisted Workspace configuration descriptor changed for session "
+                            + result.getString("session_id") + " of tenant "
+                            + result.getString("tenant_id"));
+        }
+        return new ContextBinding(result.getString("tenant_id"), workspaceId,
+                result.getLong("workspace_generation"),
+                result.getString("workspace_storage_id"),
+                result.getString("cwd_relative"), contextConfigRef,
+                result.getLong("context_revision"));
     }
 
     private static Long nullableLong(java.sql.ResultSet result, String name)
