@@ -60,7 +60,7 @@ export QQ_APP_SECRET=<your-app-secret>
       "appSecret": "$QQ_APP_SECRET",
       "sandbox": false,
       "privatePolicy": "open",
-      "sessionScope": "user",
+      "sessionScope": "thread",
       "cwd": "/path/to/your/project",
       "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
       "groupPolicy": "disabled",
@@ -71,6 +71,8 @@ export QQ_APP_SECRET=<your-app-secret>
   }
 }
 ```
+
+> `sessionScope` defaults to `"thread"`. With `groupPolicy: "disabled"` this is a DM-only setup, where both `"thread"` and `"user"` behave identically — each direct message gets its own context. `"thread"` is shown here for consistency with the [Session Isolation](#session-isolation) section below.
 
 ### QQ-Specific Options
 
@@ -105,6 +107,14 @@ To use the bot in QQ groups:
 4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group.
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
+
+### Session Isolation
+
+The QQ channel defaults to `sessionScope: "thread"`: members of the same group share a single conversation context keyed by `<channel>:<group_openid>`, while different groups are isolated from each other. Each direct message gets its own context keyed by `<channel>:<user_openid>`.
+
+A group thread session is a **shared session**: every member of the group reads and continues the same conversation history. Commands that operate on that session (`/clear`, `/who`, `/status`, `/loop`, `/btw`) and permission answers (`/approve`, `/approve-always`, `/deny`) are restricted to the members listed in the channel's `operators`; `allowedUsers` and `senderPolicy` do **not** grant them. `operators` is unset by default, so out of the box a shared group session has **no** member authorized to run those commands — and a permission request raised in a group has no one who can answer it. Set `operators` to the QQ user ids that should be able to steer the group's session. The `!` host-shell prefix is disabled in every QQ group chat, regardless of scope. If group members should not share history or control each other's turns, set `sessionScope: "user"` (each member gets a private session), or restrict who can talk to the bot with the group-scoped `senders` / `allowedUsers` control — for example `groups: {"*": {"senders": "allowlist", "allowedUsers": ["<member_openid>"]}}`. The top-level `senderPolicy`, `allowedUsers` and `privatePolicy` govern direct messages only; they do not gate members of an approved group.
+
+For full-message mode this default is already what you want — with `groupAllPolicy: "all"`, keeping `"thread"` gives you shared context within a group and isolation across groups. If you instead set `sessionScope: "user"`, full-message traffic is fragmented per sender (a separate session for every member), which is not suitable for group full-message scenarios.
 
 See [Group Chats](./overview#group-chats) for full details on group policies and mention gating.
 

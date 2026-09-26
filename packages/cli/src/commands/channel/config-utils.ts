@@ -641,15 +641,19 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
-  const configuredSessionScope =
-    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-    plugin.defaultSessionScope ||
-    'user';
   const multiSession = optionalBooleanField(
     name,
     'multiSession',
     rawConfig['multiSession'],
   );
+  // multiSession only supports per-sender sessions (ChannelBase enforces the
+  // same invariant at construction), so a plugin's group-shared default must
+  // not be applied over it: an unconfigured scope keeps resolving to 'user'
+  // instead of tripping the compatibility check below.
+  const configuredSessionScope =
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    (multiSession ? 'user' : plugin.defaultSessionScope) ||
+    'user';
   const groups = parseGroups(name, rawConfig);
   const webhooks = parseWebhookConfig(name, rawConfig);
 

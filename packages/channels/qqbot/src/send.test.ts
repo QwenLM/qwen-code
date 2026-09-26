@@ -155,6 +155,10 @@ type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 afterEach(() => {
   vi.useRealTimers();
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
 });
 
 /** Create a mock Response-like object for sendQQMessage. */
@@ -289,6 +293,586 @@ describe('session persistence paths', () => {
         'registerBridgeEvents'
       ],
     ).toBe(false);
+  });
+});
+
+describe('groupAllPolicy session-scope warning (no forcing)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        groupAllPolicy: 'log',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
+    // The user's scope choice is preserved — no forced flattening to 'single'.
+    expect(ch.config.sessionScope).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('Forcing');
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=keyword and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).toContain('WARNING');
+  });
+
+  it('emits NO warning when groupAllPolicy=all and sessionScope=thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('emits NO warning when groupAllPolicy=all and sessionScope=chat_thread', () => {
+    // chat_thread is a shared-context scope (ChannelBase treats it as shared;
+    // QQ has no threadId, so its routing key falls back to channel:chatId —
+    // identical to 'thread' under groupAllPolicy).
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'chat_thread' as const,
+    });
+    expect(ch.config.sessionScope).toBe('chat_thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is single (global-session exemption)', () => {
+    // 'single' is a shared-context scope too (one global session keyed as
+    // channel:__single__) — the warning exists only for per-sender scopes.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
+    expect(ch.config.sessionScope).toBe('single');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('emits NO warning for log policy with non-thread scope (baseline)', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
+    expect(ch.config.sessionScope).toBe('user');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('declares thread as defaultSessionScope, so zero-config defaults get per-group shared context', async () => {
+    const { plugin } = await import('./index.js');
+    expect(plugin.defaultSessionScope).toBe('thread');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is the CLI-filled default (thread)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { plugin } = await import('./index.js');
+    // Simulate parseChannelConfig (packages/cli/src/commands/channel/
+    // config-utils.ts): when the config omits sessionScope, the plugin's
+    // defaultSessionScope becomes the effective scope before construction.
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: plugin.defaultSessionScope as 'thread',
+    });
+    expect(ch.config.sessionScope).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+});
+
+describe('shared-session operator warning (R7-3)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  it('warns when group access is enabled on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open' });
+    const logged = capturedStderr();
+    expect(logged).toContain('no operators are configured');
+    expect(logged).toContain('session-control commands');
+  });
+
+  it('warns for chat_thread and single shared scopes too', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'allowlist', sessionScope: 'chat_thread' });
+    makeChannel({ groupPolicy: 'pairing', sessionScope: 'single' });
+    expect(capturedStderr()).toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when operators are configured', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', operators: ['member-1'] });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when group access is disabled', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'disabled' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning for a per-sender (user) scope', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+});
+
+describe('purgeSingleScopeOrphans', () => {
+  function makeChannelWithRouter(
+    router: unknown,
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+  }
+
+  function callPurge(ch: QQChannelInstance): void {
+    (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
+  }
+
+  it("purges single-scope orphans and this channel's unroutable 3-part keys, keeping sibling routes", () => {
+    const removeSessionId = vi.fn((sid: string) =>
+      ['single-era-1', 'user-era-1'].includes(sid),
+    );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live single-scope route: the exact-match guard
+        // (entry.key === `${this.name}:__single__`) must NOT purge it — a
+        // suffix match would silently reset the sibling channel's session.
+        {
+          key: 'other-bot:__single__',
+          sessionId: 'sibling-live',
+          target: { channelName: 'other-bot' },
+        },
+        // Live two-part keys under thread scope are never purged.
+        {
+          key: 'test-bot:group-openid-1',
+          sessionId: 'normal-1',
+          target: { channelName: 'test-bot' },
+        },
+        // This channel's user-scope key under thread scope: purged — under
+        // thread scope the routing key is `channel:chatId`, so a user-scope
+        // key can never resolve again (R8-1).
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+        // Sibling channel's live user-scope route: the owned-by-name guard
+        // (entry.target?.channelName === this.name) must NOT purge it — a
+        // string-prefix match would hit a sibling whose name is a prefix of
+        // ours, and a suffix match would reset its live per-sender sessions.
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router);
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
+    expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+    // The purge reports what it dropped on stderr (thread 57 gate).
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'Purged 2 orphaned single-scope session mapping(s)',
+    );
+  });
+
+  it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
+    // restoreSessions() re-attaches orphaned sessions via bridge.loadSession;
+    // removeSessionId alone only clears the router maps, leaving the orphan
+    // alive in the daemon until the process ends. The purge must also
+    // discard the daemon-side session.
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(discardSession).toHaveBeenCalledTimes(1);
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+  });
+
+  it("purges this channel's unroutable user-scope legacy keys under thread scope (R8-1), sparing a sibling channel", () => {
+    const removeSessionId = vi.fn(() => true);
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const router = {
+      getAll: () => [
+        // User-scope key of THIS channel under thread scope: purged — under
+        // thread scope the routing key is `channel:chatId`, so the key can
+        // never resolve again and only inflates the persisted file (and
+        // loadSession's 32-session cap) forever.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'thread-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+        // Legacy single-scope orphan.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live user-scope route: owned-by-name guard must
+        // keep it — the key shape alone is not enough to call it an orphan
+        // (thread 60).
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+    // Both purged entries also release their daemon-side sessions.
+    expect(discardSession).toHaveBeenCalledTimes(2);
+    expect(discardSession).toHaveBeenCalledWith('user-scope-1');
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
+  });
+
+  it('classifies legacy user keys by the router key, not by colon count (R8-1)', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // Live thread-scope route of a channel whose NAME contains a colon:
+        // `qq:prod` + `:GROUP1`. The key has three colon-separated parts, but
+        // it is not the string the router builds for 'user' scope, so it must
+        // survive a cold start.
+        {
+          key: 'qq:prod:GROUP1',
+          sessionId: 'live-thread-1',
+          target: { channelName: 'qq:prod', senderId: 'u1', chatId: 'GROUP1' },
+        },
+        // A real legacy user-scope key of the same channel: exactly
+        // `${channelName}:${senderId}:${chatId}` — four parts, because the
+        // channel name itself has a colon.
+        {
+          key: 'qq:prod:sender:chat',
+          sessionId: 'legacy-user-1',
+          target: {
+            channelName: 'qq:prod',
+            senderId: 'sender',
+            chatId: 'chat',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'qq:prod',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('legacy-user-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-thread-1');
+  });
+
+  it('keeps user-scope 3-part keys when sessionScope is user (live routing state)', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'live-user-session',
+          target: { channelName: 'test-bot' },
+        },
+        // Under 'user' scope the single-era `channel:__single__` key is
+        // still dead weight: the single-scope router re-keys the global
+        // session as `channel:__single__`, which the user-scope router can
+        // never route to again — so it is purged even though the 3-part key
+        // above is live (thread 61).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'user' });
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-user-session');
+  });
+
+  it('is a safe no-op when bridge.discardSession rejects or throws', () => {
+    const discardSession = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('daemon error'))
+      .mockImplementationOnce(() => {
+        throw new Error('sync daemon error');
+      });
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        { key: 'test-bot:__single__', sessionId: 'single-era-2' },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      { discardSession } as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    // Neither an async rejection nor a synchronous throw aborts the purge.
+    expect(() => callPurge(ch)).not.toThrow();
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+  });
+
+  it('is a safe no-op when the router throws during purge', () => {
+    const ch = makeChannelWithRouter({
+      getAll: () => {
+        throw new Error('router unavailable');
+      },
+    });
+    expect(() => callPurge(ch)).not.toThrow();
+  });
+
+  it('is a safe no-op when getAll returns nothing', () => {
+    const removeSessionId = vi.fn();
+    const ch = makeChannelWithRouter({ getAll: () => [], removeSessionId });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live __single__ key under explicit single scope (not an orphan)', () => {
+    const removeSessionId = vi.fn();
+    const router = {
+      getAll: () => [
+        // Under 'single' scope, `channel:__single__` IS the live routing key —
+        // purging it would silently reset the user's global session on restart.
+        { key: 'test-bot:__single__', sessionId: 'live-session' },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it("purges this channel's unroutable user-scope key under explicit single scope, keeping its live __single__ key", () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // The live single-scope routing key — kept.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'live-single',
+          target: { channelName: 'test-bot' },
+        },
+        // Under 'single' scope the routing key is `channel:__single__`, so a
+        // user-scope key can never resolve: this channel's own legacy entry
+        // is purged even under the explicit single scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // A sibling channel's user-scope key is never touched.
+        {
+          key: 'other-bot:u9:c9',
+          sessionId: 'sibling-3part',
+          target: {
+            channelName: 'other-bot',
+            senderId: 'u9',
+            chatId: 'c9',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-single');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
   });
 });
 
@@ -1201,6 +1785,13 @@ describe('sendMessage', () => {
       replyMsgId: 'msg-old',
       replyMsgIdTimestamp: Date.now() - 300_001,
     });
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    // Seed the counter so the cleanup below is observable: with no session
+    // anchored to msg-old, the expired-entry path must purge the orphaned
+    // seq (previously the map never held this key, so `has === false` was a
+    // vacuous pass).
+    seqMap.set('msg-old', 5);
 
     await ch.sendMessage('test-chat-id', 'hello');
 
@@ -1215,11 +1806,50 @@ describe('sendMessage', () => {
     expect(body['msg_id']).toBeUndefined();
     expect(body['msg_seq']).toBeUndefined();
     // Verify expired entries were cleaned from maps
-    const chp = ch as unknown as Record<string, unknown>;
     const replyMap = chp['replyMsgId'] as Map<string, unknown>;
-    const seqMap = chp['msgSeqMap'] as Map<string, unknown>;
     expect(replyMap.has('test-chat-id')).toBe(false);
     expect(seqMap.has('msg-old')).toBe(false);
+  });
+
+  it('keeps msg_seq of an expired chat entry that is still session-anchored (sendMessage)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat-level entry for msg-OLD has expired past the TTL, but a
+    // session is still streaming under msg-OLD (fresh anchor). The
+    // expired-entry path must evict the chat entry yet keep the msg_seq
+    // counter alive so the tail send does not reset the sequence.
+    sessionAnchors.set('sess-A', { msgId: 'msg-OLD', timestamp: Date.now() });
+    replyMap.set('test-chat-id', {
+      msgId: 'msg-OLD',
+      timestamp: Date.now() - ttl - 1,
+    });
+    seqMap.set('msg-OLD', 3);
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // Anchored msg_seq survives (isMsgIdAnchoredBySession guard).
+    expect(seqMap.get('msg-OLD')).toBe(3);
+    // The expired chat entry is evicted.
+    expect(replyMap.has('test-chat-id')).toBe(false);
+    // Send went out without a stale msg_id/msg_seq.
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
   });
 
   it('increments msg_seq on consecutive sendMessage calls', async () => {
@@ -1602,7 +2232,7 @@ describe('lifecycle status hooks', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+  it('sets the reply anchor at prompt start and releases it at prompt end', () => {
     const ch = makeChannel();
     const chp = ch as unknown as {
       onPromptStart: (
@@ -1616,11 +2246,26 @@ describe('lifecycle status hooks', () => {
         messageId?: string,
       ) => void;
     };
+    const sessionAnchors = (ch as unknown as Record<string, unknown>)[
+      'sessionReplyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
 
     expect(() => {
+      // Inbound turn: anchor to the triggering message's id.
       chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
-      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
     }).not.toThrow();
+    expect(sessionAnchors.get('session-1')!.msgId).toBe('msg-1');
+
+    // Proactive turn (loop/webhook/cron): no messageId → clear the anchor.
+    chp.onPromptStart('test-chat-id', 'session-1');
+    expect(sessionAnchors.has('session-1')).toBe(false);
+
+    expect(() => {
+      // onPromptEnd releases the anchor.
+      chp.onPromptStart('test-chat-id', 'session-2', 'msg-2');
+      chp.onPromptEnd('test-chat-id', 'session-2', 'msg-2');
+    }).not.toThrow();
+    expect(sessionAnchors.has('session-2')).toBe(false);
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
@@ -1644,6 +2289,40 @@ describe('lifecycle status hooks', () => {
     }).not.toThrow();
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('releaseSessionReplyAnchor keeps msg_seq while another session is anchored to the same msgId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const release = (
+      chp['releaseSessionReplyAnchor'] as (
+        sessionId: string,
+        expectedMsgId?: string,
+      ) => void
+    ).bind(ch);
+
+    // Two sessions are streaming under the same msg-X; no chat-level entry
+    // points at it. Releasing one must NOT purge the seq — the other session
+    // still needs it (isMsgIdAnchoredBySession guard).
+    sessionAnchors.set('sess-A', { msgId: 'msg-X', timestamp: Date.now() });
+    sessionAnchors.set('sess-B', { msgId: 'msg-X', timestamp: Date.now() });
+    seqMap.set('msg-X', 4);
+
+    release('sess-A', 'msg-X');
+    expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(sessionAnchors.has('sess-B')).toBe(true);
+    expect(seqMap.get('msg-X')).toBe(4);
+
+    // Releasing the LAST session anchored to msg-X orphans it: the seq is
+    // finally purged.
+    release('sess-B', 'msg-X');
+    expect(sessionAnchors.has('sess-B')).toBe(false);
+    expect(seqMap.has('msg-X')).toBe(false);
   });
 });
 
@@ -2254,6 +2933,42 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
+  it('keeps msg_seq of an expired replyMsgId that is still session-anchored', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat entry for msg-A expired past the TTL, but a session is still
+    // streaming under msg-A: cleanup must evict the chat entry yet keep the
+    // msg_seq counter alive so the tail send doesn't reset the sequence.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: Date.now() });
+    replyMsgId.set('test-chat', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - ttl - 1000,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // The expired chat entry is gone, but the anchored msg_seq survives.
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
   it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
@@ -2306,6 +3021,14 @@ describe('replyMsgId cleanup timer', () => {
   // ---------------------------------------------------------------------------
   // flushAndTrack transient vs permanent error handling
   // ---------------------------------------------------------------------------
+  // PORT NOTE (main + PR #8241 merge): on main, `flushAndTrack` delivers
+  // through the private `sendMessageWithReplyContext(chatId, text,
+  // replyContext, sourceLabel, msgIdOverride)` — the PR was written when
+  // `sendMessage` was still the delivery point, so these spies originally
+  // targeted `sendMessage` and never intercepted the send (main's own copies
+  // of the tests were correspondingly weak and only asserted "state kept").
+  // The spy target below is the only change; every assertion is the PR's.
+  // ---------------------------------------------------------------------------
   describe('flushAndTrack transient errors', () => {
     function makeChannelForFlush(): QQChannelInstance {
       const ch = new QQChannel(
@@ -2334,7 +3057,12 @@ describe('replyMsgId cleanup timer', () => {
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        // Distinct seed text so the re-buffer ORDER is observable: the
+        // failed send's text must come FIRST, the concurrently accumulated
+        // buffer SECOND (current.buffer = buffer + (current.buffer || '')).
+        // A reversed implementation would produce 'accumulatedflushed-text'
+        // and fail this gate (thread 69).
+        buffer: 'accumulated',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2349,15 +3077,13 @@ describe('replyMsgId cleanup timer', () => {
       >;
       streamState.set('session-1', state);
 
-      // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      // Spy on sendMessageWithReplyContext to throw RATE_LIMITED
+      vi.spyOn(
+        QQChannel.prototype as unknown as {
+          sendMessageWithReplyContext: () => Promise<void>;
+        },
+        'sendMessageWithReplyContext',
+      ).mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
 
       // Call flushAndTrack
       (
@@ -2367,16 +3093,27 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('session-1', 'flushed-text', state, 'test');
 
-      // Drain microtask queue so the .catch() handler runs
-      // (must NOT advance timers — that would fire the retry setTimeout)
-      await Promise.resolve();
+      // Drain the full microtask chain so the .catch() handler actually runs
+      // before asserting. A single `await Promise.resolve()` is NOT enough —
+      // the rejected sendMessage promise needs several microtask hops
+      // (P → .then → .catch → .finally) to settle, and one await resumes the
+      // test before the catch handler has executed. advanceTimersByTimeAsync
+      // flushes the microtask queue (advancing 0ms does NOT fire the retry
+      // setTimeout).
+      await vi.advanceTimersByTimeAsync(0);
 
-      // RATE_LIMITED is transient — streamState should keep the entry
+      // RATE_LIMITED is transient — the entry stays, the buffer is re-buffered
+      // and a retry timer is armed.
       expect(streamState.has('session-1')).toBe(true);
+      // catch re-buffered: current.buffer = buffer + (current.buffer || '')
+      expect(state.buffer).toBe('flushed-textaccumulated');
+      // retryCount incremented by the re-buffer path
+      expect(state.retryCount).toBe(1);
+      // retry timer armed (IDLE_FLUSH_MS) — 0ms advance must not have fired it
+      expect(state.timer).not.toBeNull();
 
-      sendSpy.mockRestore();
       vi.useRealTimers();
     });
 
@@ -2401,7 +3138,7 @@ describe('replyMsgId cleanup timer', () => {
         return ch;
       }
 
-      it('keeps streamState on RETRY_EXHAUSTED when buffer has concurrent chunks', async () => {
+      it('deletes streamState and releases anchor on RETRY_EXHAUSTED', async () => {
         vi.useFakeTimers();
         const ch = makeChannelForPerm();
         const chp = ch as unknown as Record<string, unknown>;
@@ -2414,6 +3151,8 @@ describe('replyMsgId cleanup timer', () => {
           buffer: 'test buffer',
           timer: null as ReturnType<typeof setTimeout> | null,
           retryCount: 0,
+          // Per-session reply anchor this flush is sending under.
+          msgId: 'msg-X',
         };
         const streamState = chp['streamState'] as Map<
           string,
@@ -2422,20 +3161,40 @@ describe('replyMsgId cleanup timer', () => {
             buffer: string;
             timer: ReturnType<typeof setTimeout> | null;
             retryCount: number;
+            msgId?: string;
           }
         >;
         streamState.set('session-perm', state);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-          );
+        // Anchor the session to msg-X (as onPromptStart would) and seed a
+        // msg_seq counter for it. No chat-level replyMsgId entry points at
+        // msg-X, so a release must cascade: session anchor dropped + the
+        // orphaned seq purged — and the cascade persists via saveQQState
+        // (thread 52 gate: the release path must not silently skip saving).
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-perm', {
+          msgId: 'msg-X',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-X', 4);
+
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
 
         (
           chp['flushAndTrack'] as (
@@ -2446,15 +3205,30 @@ describe('replyMsgId cleanup timer', () => {
           ) => void
         )('session-perm', 'test buffer', state, 'test');
 
-        await Promise.resolve();
+        // Drain the full microtask chain so the .catch() handler runs (a
+        // single await Promise.resolve() resumes the test before the catch
+        // executes — the previous version asserted on the pre-catch state and
+        // even contradicted the source: the permanent-failure branch DELETES
+        // the streamState entry).
+        await vi.advanceTimersByTimeAsync(0);
 
-        expect(streamState.has('session-perm')).toBe(true);
+        // RETRY_EXHAUSTED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter — whose
+        // removal is persisted (saveQQState must have been called).
+        expect(streamState.has('session-perm')).toBe(false);
+        expect(sessionAnchors.has('session-perm')).toBe(false);
+        expect(seqMap.has('msg-X')).toBe(false);
+        expect(saveSpy).toHaveBeenCalled();
 
-        sendSpy.mockRestore();
         vi.useRealTimers();
       });
 
-      it('keeps streamState on ACTIVE_MSG_DISABLED (permanent error)', async () => {
+      it('clears pending-cleanup flags on RETRY_EXHAUSTED (permanent-catch teardown)', async () => {
+        // A dead-session tail chain (pendingStreamDelete + flushedSessions +
+        // turnCounter parked) that hits a permanent failure must be torn
+        // down entirely by the catch branch — onResponseComplete/onPromptEnd
+        // would otherwise have cleaned these, but the permanent failure
+        // settles the turn without them (thread 53).
         vi.useFakeTimers();
         const ch = makeChannelForPerm();
         const chp = ch as unknown as Record<string, unknown>;
@@ -2464,6 +3238,8 @@ describe('replyMsgId cleanup timer', () => {
           buffer: 'test buffer',
           timer: null as ReturnType<typeof setTimeout> | null,
           retryCount: 0,
+          msgId: 'msg-P',
+          turn: 1,
         };
         const streamState = chp['streamState'] as Map<
           string,
@@ -2472,23 +3248,183 @@ describe('replyMsgId cleanup timer', () => {
             buffer: string;
             timer: ReturnType<typeof setTimeout> | null;
             retryCount: number;
+            msgId?: string;
+            turn: number;
+          }
+        >;
+        streamState.set('session-pc', state);
+
+        const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+        const flushedSessions = chp['flushedSessions'] as Set<string>;
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        pendingStreamDelete.add('session-pc');
+        flushedSessions.add('session-pc');
+        turnCounter.set('session-pc', 1);
+
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-pc', {
+          msgId: 'msg-P',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-P', 4);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-pc', 'test buffer', state, 'test');
+
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The permanent-catch branch deletes the stream entry, clears the
+        // pending-delete flag, and drops the deferred turn's flushedSessions
+        // + turnCounter records.
+        expect(streamState.has('session-pc')).toBe(false);
+        expect(pendingStreamDelete.has('session-pc')).toBe(false);
+        expect(flushedSessions.has('session-pc')).toBe(false);
+        expect(turnCounter.has('session-pc')).toBe(false);
+        // The anchor + orphaned seq are released/cascaded as usual.
+        expect(sessionAnchors.has('session-pc')).toBe(false);
+        expect(seqMap.has('msg-P')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('keeps the successor anchor when the failed flush had no own msgId', async () => {
+        // A flush started without a per-session reply anchor (msgId
+        // undefined, e.g. a proactive turn) that fails permanently must NOT
+        // release — the release path is guarded on state.msgId, and an
+        // unconditional release here would delete the successor turn's
+        // anchor (thread 54).
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          msgId: undefined,
+          turn: 1,
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
+            turn: number;
+          }
+        >;
+        streamState.set('session-guard', state);
+
+        // A successor turn holds the anchor (msg-B) with its seq counter.
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-guard', {
+          msgId: 'msg-B',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-B', 1);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-guard', 'test buffer', state, 'test');
+
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The failed flush's stream entry is dropped...
+        expect(streamState.has('session-guard')).toBe(false);
+        // ...but the successor's anchor and its seq survive untouched.
+        expect(sessionAnchors.get('session-guard')!.msgId).toBe('msg-B');
+        expect(seqMap.get('msg-B')).toBe(1);
+
+        vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on ACTIVE_MSG_DISABLED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          // Per-session reply anchor this flush is sending under.
+          msgId: 'msg-Y',
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
           }
         >;
         streamState.set('session-ads', state);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError(
-              'ACTIVE_MSG_DISABLED',
-              'active messages disabled',
-            ),
-          );
+        // Anchor the session to msg-Y and seed its msg_seq counter, with no
+        // chat-level entry pointing at msg-Y — a release must cascade to the
+        // orphaned seq (same as the RETRY_EXHAUSTED case).
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-ads', {
+          msgId: 'msg-Y',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-Y', 4);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(
+          new DeliveryError('ACTIVE_MSG_DISABLED', 'active messages disabled'),
+        );
 
         (
           chp['flushAndTrack'] as (
@@ -2499,12 +3435,120 @@ describe('replyMsgId cleanup timer', () => {
           ) => void
         )('session-ads', 'test buffer', state, 'test');
 
-        await Promise.resolve();
+        // Drain the full microtask chain so the .catch() handler runs.
+        await vi.advanceTimersByTimeAsync(0);
 
-        expect(streamState.has('session-ads')).toBe(true);
+        // ACTIVE_MSG_DISABLED is permanent: the entry is dropped and the
+        // reply anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-ads')).toBe(false);
+        expect(sessionAnchors.has('session-ads')).toBe(false);
+        expect(seqMap.has('msg-Y')).toBe(false);
 
-        sendSpy.mockRestore();
         vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on FALLBACK_FAILED', async () => {
+        // FALLBACK_FAILED is the passive-markdown → active-message fallback
+        // exhaustion: permanent, same teardown as RETRY_EXHAUSTED (thread
+        // 67 — this code path previously had zero coverage).
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          // Per-session reply anchor this flush is sending under.
+          msgId: 'msg-Z',
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
+          }
+        >;
+        streamState.set('session-fb', state);
+
+        // Anchor the session to msg-Z and seed its msg_seq counter, with no
+        // chat-level entry pointing at msg-Z — a release must cascade to the
+        // orphaned seq (same as the RETRY_EXHAUSTED case).
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-fb', {
+          msgId: 'msg-Z',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-Z', 4);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(
+          new DeliveryError('FALLBACK_FAILED', 'passive fallback failed'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-fb', 'test buffer', state, 'test');
+
+        // Drain the full microtask chain so the .catch() handler runs.
+        await vi.advanceTimersByTimeAsync(0);
+
+        // FALLBACK_FAILED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-fb')).toBe(false);
+        expect(sessionAnchors.has('session-fb')).toBe(false);
+        expect(seqMap.has('msg-Z')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('does not call saveQQState when another session still anchors the released msgId', () => {
+        // The release cascade is what persists (msgSeqMap.delete → saveQQState);
+        // when a sibling session still anchors the same msgId the counter is
+        // kept and nothing must be written (thread 52 keep-scenario gate).
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('s-1', { msgId: 'msg-K', timestamp: Date.now() });
+        sessionAnchors.set('s-2', { msgId: 'msg-K', timestamp: Date.now() });
+        seqMap.set('msg-K', 3);
+
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        (chp['releaseSessionReplyAnchor'] as (sessionId: string) => void)(
+          's-1',
+        );
+
+        // s-1's own anchor is released, but msg-K is still live (s-2 holds
+        // it), so its seq counter survives — and no state write happens.
+        expect(sessionAnchors.has('s-1')).toBe(false);
+        expect(sessionAnchors.get('s-2')!.msgId).toBe('msg-K');
+        expect(seqMap.get('msg-K')).toBe(3);
+        expect(saveSpy).not.toHaveBeenCalled();
       });
     });
   });
