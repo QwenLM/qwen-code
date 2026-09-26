@@ -149,7 +149,8 @@ function rejectWorkspaceRestrictedWrite(
   return false;
 }
 
-function getAllowedKeys(includeLiveVoice = false): Set<string> {
+/** Keys the daemon may serve to Web Shell clients; exported for tests. */
+export function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
