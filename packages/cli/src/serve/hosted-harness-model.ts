@@ -82,14 +82,18 @@ export async function runHostedHarnessTextTurn(input: {
       }
       return [];
     });
-    // Failed and cancelled turns have no assistant record. Omit their
-    // prompts even when later completed turns follow them in the journal.
+    // Failed and cancelled turns have no assistant record, and curated
+    // history drops an empty assistant record while keeping its prompt. Omit
+    // both kinds of unanswered prompt even when later completed turns follow.
+    const answered = (entry: Content | undefined): boolean =>
+      entry?.role === 'model' && !!entry.parts?.some((part) => !!part.text);
     client
       .getChat()
       .setHistory(
-        history.filter(
-          (entry, index) =>
-            entry.role !== 'user' || history[index + 1]?.role === 'model',
+        history.filter((entry, index) =>
+          entry.role === 'user'
+            ? answered(history[index + 1])
+            : answered(entry),
         ),
       );
     let text = '';
