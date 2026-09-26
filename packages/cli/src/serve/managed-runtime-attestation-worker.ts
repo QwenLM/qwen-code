@@ -94,9 +94,10 @@ async function collectManagedRuntimeWorkerBoot(
     }
     chunks.push(bytes);
   }
+  const document = Buffer.concat(chunks);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    parsed = JSON.parse(document.toString('utf8'));
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
@@ -104,6 +105,8 @@ async function collectManagedRuntimeWorkerBoot(
     return parsed;
   }
   try {
+    // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
+    new TextDecoder('utf-8', { fatal: true }).decode(document);
     return parseManagedContextBoot(parsed);
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);

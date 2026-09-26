@@ -13,6 +13,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   CdWhilePromptActiveError,
+  RequestedSessionIdRejectedError,
   SessionArchivingError,
   SessionNotFoundError,
   StandaloneSessionSpawnError,
@@ -2845,12 +2846,23 @@ export class StandaloneSessionService {
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        const outcome = serviceError(
-          'standalone_creation_rolled_back',
-          sessionId,
-          true,
-          error,
-        );
+        // A paired Bridge refuses an ID a direct creator registered after
+        // shared admission; nothing was dispatched for this request.
+        const outcome =
+          error.cause instanceof RequestedSessionIdRejectedError &&
+          error.cause.errorKind === 'session_id_conflict'
+            ? serviceError(
+                'standalone_session_conflict',
+                sessionId,
+                false,
+                error,
+              )
+            : serviceError(
+                'standalone_creation_rolled_back',
+                sessionId,
+                true,
+                error,
+              );
         attempt.diagnostic.cleanupOutcome = 'rolled_back';
         if (error.cause instanceof AcpChildCapacityExceededError) {
           throw new StandaloneSessionServiceError(
