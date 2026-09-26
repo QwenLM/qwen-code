@@ -82,6 +82,7 @@ import {
   SendMessageType,
   clearWorktreeSession,
   restoreWorktreeContext,
+  WorktreeRestoreRefusedError,
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
@@ -1268,9 +1269,21 @@ export const AppContainer = (props: AppContainerProps) => {
             const restored = await restoreWorktreeContext(
               sessionPath,
               (err) => {
+                // An ownership refusal means the session loads WITHOUT its
+                // worktree binding — the model is never told the worktree
+                // exists, so later edits land in the original checkout.
+                // That must be visible, not a debug line.
+                if (err instanceof WorktreeRestoreRefusedError) {
+                  historyManager.addItem(
+                    { type: MessageType.WARNING, text: err.message },
+                    Date.now(),
+                  );
+                  return;
+                }
                 // eslint-disable-next-line no-console
                 console.debug('worktree session restore warning:', err);
               },
+              config.getSessionId(),
             );
             if (restored.contextMessage) {
               // UI: show the notice in the transcript so the user knows.

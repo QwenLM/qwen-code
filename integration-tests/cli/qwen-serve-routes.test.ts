@@ -482,6 +482,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_hooks',
       'workspace_extensions',
       'session_branch',
+      'session_branch_worktree',
       'workspace_reload',
       'channel_delivery',
       'channel_control',

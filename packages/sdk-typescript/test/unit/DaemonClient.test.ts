@@ -1987,6 +1987,11 @@ describe('DaemonClient', () => {
       await ws.workspaceGitDiffFile('src/a.ts', undefined, cwd);
       await ws.workspaceGitDiffFile('src/a.ts', 'src/old.ts', cwd);
       await ws.workspaceGitLog(50, 0, cwd);
+      await ws.workspaceGitLog(50, 0, cwd, undefined, {
+        all: true,
+        search: 'fix',
+        sessionId: 'session-worktree',
+      });
       await ws.workspaceGitCommitDetail('abc123', cwd);
 
       expect(calls.map((c) => c.url)).toEqual([
@@ -1994,6 +1999,7 @@ describe('DaemonClient', () => {
         'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&cwd=%2Fworktrees%2Ffeature-x',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&oldPath=src%2Fold.ts&cwd=%2Fworktrees%2Ffeature-x',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x&all=1&search=fix&sessionId=session-worktree',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/log/commit?sha=abc123&cwd=%2Fworktrees%2Ffeature-x',
       ]);
     });
@@ -2237,6 +2243,25 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('binds a managed worktree cwd to its session id', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+      const cwd = '/repo/.qwen/worktrees/branch-a';
+      const sessionId = 'session-a';
+
+      await ws.workspaceGit({ cwd, sessionId });
+      await ws.workspaceGitDiff(cwd, sessionId);
+      await ws.workspaceGitCommit('fix: thing', { all: true }, cwd, sessionId);
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git?cwd=${encodeURIComponent(cwd)}&sessionId=session-a`,
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/diff?cwd=${encodeURIComponent(cwd)}&sessionId=session-a`,
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/commit?cwd=${encodeURIComponent(cwd)}&sessionId=session-a`,
+      ]);
+    });
+
     it('lets workspaceGitPull outsize the client default fetch timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
@@ -2295,7 +2320,7 @@ describe('DaemonClient', () => {
 
       const inflight = client
         .workspaceByCwd('/work/secondary')
-        .workspaceGitPull({ force: true }, cwd, 1_000);
+        .workspaceGitPull({ force: true }, cwd, undefined, 1_000);
       setTimeout(() => {
         resolveResponse?.(jsonResponse(200, { success: true, output: '' }));
       }, 5);
@@ -5106,6 +5131,42 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         name: 'Historical branch',
         atRecordId: 'checkpoint-1',
+      });
+    });
+
+    it('posts worktree isolation for a historical branch', async () => {
+      const reply = {
+        sessionId: 'branch-worktree',
+        workspaceCwd: '/work/a',
+        currentCwd: '/repo/.qwen/worktrees/branch-worktree',
+        attached: false,
+        clientId: 'branch-client',
+        state: {},
+        displayName: 'Worktree branch',
+        forkedFrom: {
+          sessionId: 'source-1',
+          displayName: 'Source session',
+        },
+        worktree: {
+          slug: 'branch-worktree',
+          path: '/repo/.qwen/worktrees/branch-worktree',
+          branch: 'worktree-branch-worktree',
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(201, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.branchSession('source-1', {
+        name: 'Worktree branch',
+        atRecordId: 'checkpoint-1',
+        worktree: {},
+      });
+
+      expect(result).toEqual(reply);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Worktree branch',
+        atRecordId: 'checkpoint-1',
+        worktree: {},
       });
     });
 

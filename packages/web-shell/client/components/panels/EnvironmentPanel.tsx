@@ -43,6 +43,7 @@ interface EnvironmentPanelProps {
   workspaceCwd?: string;
   gitWorkspaceCwd?: string;
   gitCwd?: string;
+  gitSessionId?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
@@ -151,6 +152,7 @@ export function EnvironmentPanel({
   workspaceCwd,
   gitWorkspaceCwd,
   gitCwd,
+  gitSessionId,
   branch,
   gitStatus,
   tasks,
@@ -313,6 +315,7 @@ export function EnvironmentPanel({
                   onOpenChange={setBranchPickerOpen}
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
+                  gitSessionId={gitSessionId}
                   side="left"
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}

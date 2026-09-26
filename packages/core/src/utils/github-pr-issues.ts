@@ -6,8 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { findGitRoot } from './gitUtils.js';
-import { gitEnv } from './git-branches.js';
-import { ghErrorMessage } from './github-prs.js';
+import { ghEnv, ghErrorMessage } from './github-prs.js';
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -209,7 +208,7 @@ function runGhGraphql(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: ghEnv(env),
       },
       (error, stdout, stderr) => {
         // gh exits non-zero whenever the response carries GraphQL errors,
