@@ -8,7 +8,7 @@ The Web Shell exports sessions, workflow history, and workspace artifacts throug
 
 ## Proposed changes
 
-Add an internal Web Shell Blob-saving helper and a native controller. Existing export producers await the helper and surface failures in their existing error UI; preview download links use it only when the native capability is present. Plain browsers and the desktop shell retain their download-anchor behavior. Preview-only object URLs are unchanged. Native transport handles already acquired bytes, never authenticated network requests or remote URL fetching.
+Add an internal Web Shell Blob-saving helper and a native controller. Existing export producers await the helper and surface failures in their existing error UI; preview download links use it only when the native capability is present. Plain browsers and the desktop shell retain their download-anchor behavior: the click stops propagation to host navigation handlers and object URLs are revoked after a one-second grace period so the browser can consume them. Preview-only object URLs are unchanged. Native transport handles already acquired bytes, never authenticated network requests or remote URL fetching.
 
 Artifact links pass their original Blob directly; image tabs decode their data URLs locally. The daemon's `connect-src 'self'` policy blocks `fetch(blob:...)` and `fetch(data:...)` in the tested WebView, so the helper never fetches either scheme. A Blob URL without its original bytes produces a visible reopen/browser hint instead of weakening CSP or silently failing.
 
@@ -16,7 +16,7 @@ Android injects `qwenAndroidDownloadV1` before loading the configured origin usi
 
 ## Protocol and limits
 
-There is one active export per native controller. A version-1 JSON `begin` message carries a random 32-hex-digit `id`, filename, MIME type, and exact byte size. Metadata is limited to 2 KiB. Android sanitizes filenames, validates MIME types, and accepts sizes from zero through 16 MiB. This is an explicit native-only limit; the existing 100 MiB workspace-download limit in ordinary browsers is unchanged.
+There is one active export per native controller. A version-1 JSON `begin` message carries a random 32-hex-digit `id`, filename, MIME type, and exact byte size. Metadata is limited to 2 KiB. The sender limits names by Unicode code points rather than splitting UTF-16 pairs. Android replaces path separators, Unicode control/format characters and unpaired surrogates, then bounds the name to 255 UTF-8 bytes without splitting a code point. It validates MIME types and accepts sizes from zero through 16 MiB. This is an explicit native-only limit; the existing 100 MiB workspace-download limit in ordinary browsers is unchanged.
 
 After the `ready` reply, the sender transfers at most 64 KiB per ArrayBuffer message. Each frame starts with the 32 ASCII ID bytes and a four-byte unsigned big-endian offset. Android accepts only the current ID and exact next offset, acknowledges each chunk, and rejects overflow or incomplete transfers. Only one chunk is awaiting acknowledgement at a time. The bounded in-memory buffer avoids plaintext staging files; the active slot stays occupied until any document-provider writer exits, even after cancellation.
 
@@ -36,7 +36,7 @@ Native changes are limited to the mobile-shell download controller, Activity wir
 
 Before implementation, exercise the parent APK with a real HTML Blob download and confirm that no native destination opens. Global CLI execution cannot exercise Android WebView and is replaced with the parent APK plus a local synthetic fixture; record CLI availability separately.
 
-Verify ordinary browser fallback, byte-for-byte binary and zero-length exports, filenames, native size limits, chunk ordering/IDs, busy behavior, timeout and cancellation. Verify all changed H5 producers with focused tests. On emulator APIs 26 and 35, test actual WebMessage transport, the real system Save picker, destination bytes, cancellation followed by retry, hostile frame/origin messages, navigation, recreation, and stale picker results. Build and typecheck the repository, bundle the CLI, and build/lint/test the native package. Record unsupported provider capabilities rather than claiming they passed. Read the entire final diff twice and obtain independent review before publication.
+Verify ordinary browser fallback, byte-for-byte binary and zero-length exports, filenames, native size limits, chunk ordering/IDs, busy behavior, timeout and cancellation. Verify all changed H5 producers with focused tests. On emulator APIs 26 and 36, test actual WebMessage transport, the real system Save picker, destination bytes, cancellation followed by retry, hostile frame/origin messages, navigation, recreation, and stale picker results. Build and typecheck the repository, bundle the CLI, and build/lint/test the native package. Record unsupported provider capabilities rather than claiming they passed. Read the entire final diff twice and obtain independent review before publication.
 
 ## Open questions
 

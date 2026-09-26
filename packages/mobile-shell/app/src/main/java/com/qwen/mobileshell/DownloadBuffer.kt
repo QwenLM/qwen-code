@@ -25,8 +25,23 @@ internal class DownloadBuffer(val id: String, size: Int) {
         const val CHUNK_SIZE = 64 * 1024
         const val HEADER_SIZE = 36
 
-        fun fileName(value: String): String = value
-            .replace(Regex("[\\p{Cntrl}/\\\\:*?\"<>|]"), "_")
-            .trim().trim('.').take(255).ifEmpty { "download" }
+        fun fileName(value: String): String {
+            val clean = value.replace(Regex("[\\p{Cc}\\p{Cf}\\p{Cs}/\\\\:*?\"<>|]"), "_")
+                .trim { it.isWhitespace() || it == '.' }
+            val result = StringBuilder()
+            var byteCount = 0
+            var index = 0
+            // Document providers commonly limit names in UTF-8 bytes, not UTF-16 units.
+            while (index < clean.length) {
+                val codePoint = clean.codePointAt(index)
+                val part = String(Character.toChars(codePoint))
+                val bytes = part.toByteArray(Charsets.UTF_8).size
+                if (byteCount + bytes > 255) break
+                result.append(part)
+                byteCount += bytes
+                index += Character.charCount(codePoint)
+            }
+            return result.toString().trim { it.isWhitespace() || it == '.' }.ifEmpty { "download" }
+        }
     }
 }
