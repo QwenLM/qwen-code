@@ -17,7 +17,11 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
-import { SessionExecutionEngineError } from './session-execution-engine.js';
+import {
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+  type SessionExecutionEnginePayload,
+} from './session-execution-engine.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -389,6 +393,7 @@ export interface ChatRecord {
     | ParentSessionRecordPayload
     | SessionSourceRecordPayload
     | SessionModelRecordPayload
+    | SessionExecutionEnginePayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -2807,6 +2812,20 @@ export class ChatRecordingService {
       }
       return false;
     }
+  }
+
+  /**
+   * Persist the execution engine that owns this session. Strict: the caller
+   * fails session creation rather than continue without a durable owner.
+   */
+  async recordExecutionEngine(engine: SessionExecutionEngine): Promise<void> {
+    const systemPayload: SessionExecutionEnginePayload = { version: 1, engine };
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload,
+    });
   }
 
   /** Persist immutable creator attribution near the start of the transcript. */

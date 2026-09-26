@@ -40,7 +40,7 @@ The facts below are from `main` at `16496a71ec`.
 
 ### Boot and readiness
 
-The worker reads the boot document as before. It accepts either exactly boot v1, which is unchanged, or a document that the envelope's boot v2 rules accept. Anything else makes it exit with status 1 before it writes to standard output. Its standard error carries a fixed message and a stack trace, never the document. The worker writes no refusal line (see [Open questions of the envelope](#open-questions-of-the-envelope)).
+The worker reads the boot document as before. It accepts either exactly boot v1, which is unchanged, or a document that the envelope's boot v2 rules accept. A boot v2 document must also be valid UTF-8: bytes that are not are refused, where boot v1 still replaces them. Anything else makes it exit with status 1 before it writes to standard output. Its standard error carries a fixed message and a stack trace, never the document. The worker writes no refusal line (see [Open questions of the envelope](#open-questions-of-the-envelope)).
 
 Under boot v2 the ready line is ready v2, built from the boot document and the listening port. Like v1, it carries no token.
 
@@ -63,7 +63,7 @@ Attestation v3 is the envelope's check. It compares the request with the boot do
 The handler runs the envelope's steps in order. Steps 1 to 5 never touch the filesystem. A request that passes them and does not repeat a recorded installation reaches step 6, which verifies the effective directory:
 
 1. **Mount root.** `mountRoot` must be absolute on this host: a drive or UNC path on Windows, a path starting with `/` elsewhere. The boot rule also admits the other platform's forms, which would otherwise resolve against the worker's working directory. The worker resolves the root to its real path. The root may itself be reached through a symbolic link, because the Broker configured it.
-2. **Mount identity.** The first successful verification pins the root's device and inode for the Runtime's lifetime. Every later verification requires the same two values. So a root on another device, such as a volume remounted or unmounted to an empty mount point, is refused and never followed, and so is a root whose inode changed. Some file systems reuse a freed inode number at once, so a root deleted and recreated in place is not always detected; the directories below it are still verified on every call. The worker cannot tell which storage backs a path. A Runtime whose root has changed must be replaced.
+2. **Mount identity.** The first successful verification pins the root's device and inode, as `stat` reports them, for the Runtime's lifetime. Every later verification requires the same two values. This refuses a root unmounted to the directory beneath it, a volume remounted on another device node, and a root directory replaced by another whose inode differs. It does not detect everything. On APFS and ext4 every volume root has the same inode and a freed device node is reused, so a different volume mounted where the first one was can keep both values. Some file systems also reuse a freed inode at once, so a root deleted and recreated in place can keep them too. The worker cannot tell which storage backs a path: whoever changes the mount must replace the Runtime. The directories below the root are still verified on every call.
 3. **Effective directory.** The effective directory is the real root joined with the segments of `cwdRelative`, which W0a's normal form writes as `.` for the root and otherwise without `.` or `..` segments. Its real path must equal that path exactly. So no segment below the root may be a symbolic link, whether it points inside the Workspace or out of it. Where the real path reports a name as it is stored, as on macOS and Windows, a segment whose letter case differs from the disk is refused too, and so, on macOS, is a name in another Unicode normalization form. On a file system whose real path repeats the requested name, such as a case-folding volume on Linux, such a segment names the same directory and is accepted.
 4. **Access.** The effective directory must be a directory that the worker can read and search. On Windows this check cannot see access-control lists, so there it only confirms that the directory exists.
 
@@ -71,7 +71,7 @@ If any check fails, the answer is 409 `managed_context_unavailable` and nothing 
 
 Refusing every link keeps the starting directory equal to the path the binding names. A link inside the Workspace would be followed on some calls and not others, because the Workspace's own tools can retarget it at any time.
 
-Verification is asynchronous, so two installations can be verified at the same time. After the verification, whether it passed or failed, the worker checks steps 4 and 5 again before it answers. Concurrent requests therefore get the answers they would get one after the other: the first to record wins, a repeat returns its receipt even if its own verification failed meanwhile, and a conflicting installation is refused. The root is the one exception: if it changes while the first verifications are in flight, the first to finish pins the root it saw, and the others are refused, even one that saw the earlier root. A root that changes needs a new Runtime anyway (step 2).
+Verification is asynchronous, so two installations can be verified at the same time. After the verification, whether it passed or failed, the worker checks steps 4 and 5 again before it answers. Concurrent requests therefore get the answers they would get one after the other: the first to record wins, a repeat returns its receipt even if its own verification failed meanwhile, and a conflicting installation is refused. The root is the one exception: if it changes while the first verifications are in flight, the first to pass pins the root it saw. A verification that saw a different root is refused, even if it saw its root earlier. A root that changes needs a new Runtime anyway (step 2).
 
 ### Activation gate
 
@@ -85,6 +85,8 @@ The request's shape and the tool name are checked before the gate, as today. A r
 
 A `status` or `cancel` that arrives while a new call is still at the gate answers `unknown`, as it would for a call that has not arrived yet, and the call then runs unless the gate refuses it. Closing the worker likewise aborts the calls that are running, but not one still at the gate.
 
+Each call runs as its Session. Its shells see `QWEN_CODE_SESSION_ID` set to a key derived from the Runtime instance ID and a hash of the Runtime Session ID, which may hold characters that are not safe in a file name, and `QWEN_CODE_PROJECT_DIR` set to the project directory of the Session's effective directory. Core derives that directory from the path, so two directories whose names differ only in punctuation share one. Under boot v1 both keep their values: the Runtime instance ID, and the project directory of `workspaceCwd`.
+
 The directory is fixed when the call is journaled. The Shell tool checks a `directory` parameter against its workspace, which is now the effective directory, so a call whose `directory` lies outside it settles as an error without running. That check is the tool's own, made when the call starts, and like any path in tool input it is not a boundary (see [Security](#security)): a command can still change directory.
 
 The gate and the tool's start are not atomic. A directory replaced between them is detected only by the next call. This is acceptable because the effective directory is a starting point, not a sandbox (see [Security](#security)).
@@ -93,7 +95,7 @@ Under boot v1 there is no gate, and every call runs in `workspaceCwd`, as before
 
 ### Retention
 
-A Runtime keeps its installations for its lifetime, as it keeps its tool journal. Nothing is evicted, so step 5 keeps protecting a live Session, and an `operationId` reused with other values is always refused. The Broker bounds that lifetime when it reclaims the Runtime. Each entry holds only bounded fields, a few kilobytes at most. Tool configurations are not kept: each call builds its own. Releasing a Session's entries earlier needs a signal that the Session has ended. The Broker's `release` session verb is that signal, and it has no worker route yet.
+A Runtime keeps its installations for its lifetime, as it keeps its tool journal. Nothing is evicted, so step 5 keeps protecting a live Session, and an `operationId` reused with other values is always refused. The Broker bounds that lifetime when it reclaims the Runtime. Each entry holds only bounded fields, a few kilobytes at most. Tool configurations are not kept: each call builds its own, in its Session's context so that core does not keep it for its debug log, and core compiles each parameter schema that JSON text describes exactly only once, so rebuilding adds no compiled validators. Each Session also keeps three small entries under its key for the Runtime's lifetime, as its installation is kept: its project directory, and core's record of its model and model identity. Releasing a Session's entries earlier needs a signal that the Session has ended. The Broker's `release` session verb is that signal, and it has no worker route yet.
 
 ### Errors
 
@@ -115,7 +117,7 @@ A Java test pins these answers to the shared fixtures, and checks that the fake 
 The envelope left four questions to W0c. The worker answers them as follows:
 
 1. **Refusal line.** The worker writes none. A worker that implements only v1 cannot write one, so the Broker could never rely on it. Instead, W0c-2 bounds boot v2 retries and never retries as v1.
-2. **Configuration installation.** Not in this slice. The route keeps its v3 shape. Installing configuration from `contextConfigRef` needs a later version of the route, which the question remains open for.
+2. **Configuration installation.** Still open. This slice installs no configuration, and the route keeps its v3 shape. Whether the installation request carries it, or a later version of the route does, is undecided.
 3. **Control characters in `cwdRelative`.** The worker applies the W0a rule unchanged, which refuses every Cc character. If W0a narrows the rule, the worker follows it.
 4. **Retention.** A Runtime's lifetime, as above. Releasing entries earlier waits for the session verbs.
 
@@ -131,11 +133,12 @@ The envelope left four questions to W0c. The worker answers them as follows:
 - `packages/cli/src/serve/managed-context-worker.ts` (new): the boot v2 routes, the mount verification and the activation gate. Its test (new) replays the shared fixtures over real HTTP and exercises a real filesystem.
 - `packages/cli/src/serve/managed-context-envelope.ts`: installation takes the step 6 verification and exposes a Session's installed binding.
 - `packages/cli/src/serve/managed-runtime-attestation-worker.ts`: boot dispatch, the routes of each version, and ready v2.
-- `packages/cli/src/serve/managed-runtime-tool-executor.ts`: the tools come from a resolver asked before each new call is journaled. Boot v1 builds them once at startup; boot v2 builds them for each call.
-- `packages/cli/src/serve/managed-runtime-tool-routes.ts` and `managed-runtime-attestation-contract.ts`: the 409 for an unavailable directory, and a route gate parameterized by boot version.
-- The fake worker, its Java test, and the tests of the attestation worker, the tool worker and the envelope.
+- `packages/cli/src/serve/managed-runtime-tool-executor.ts`: the tools come from a resolver asked before each new call is journaled. Boot v1 builds them once at startup; boot v2 builds them for each call. Each call runs as its session, whose project directory is registered for its shells.
+- `packages/cli/src/serve/managed-runtime-tool-routes.ts` and `managed-runtime-attestation-contract.ts`: the 409 for an unavailable directory, a route gate parameterized by boot version, and one JSON body parser for every owned route.
+- `packages/core/src/utils/schemaValidator.ts`: a parameter schema that JSON text describes exactly and that compiles is compiled once per validator, keyed by that text; any other schema is compiled as Ajv always compiled it.
+- The fake worker, its Java test, a helper it shares with `LocalProcessRuntimeProvisionerTest`, and the tests of the attestation worker, the tool worker, the envelope and the schema validator.
 - `packages/cli/src/serve/managed-workspace-binding.ts`: its header comment only.
-- This document in both languages; the status, errors, open questions and follow-up work of the envelope document; the status of the W0a document; and a pointer here from the worker section of the Tool v2 contract document.
+- This document in both languages; the status, errors, open questions and follow-up work of the envelope document; the status and the wiring line of the W0a document; and pointers here from the worker section and the error classes of the Tool v2 contract document.
 
 ## Validation
 
@@ -145,26 +148,34 @@ The envelope left four questions to W0c. The worker answers them as follows:
   - Every installation sequence is sent to a fresh worker whose mount root is a temporary directory holding the directories that the fixtures install.
 - **Directory checks on a real filesystem:**
   - missing directories, files, and links inside and outside the Workspace;
-  - a mount root that is missing, a file, reached through a link, or in the other platform's form;
+  - a mount root that is missing, a file, reached through a link, or in the other platform's form, which is never resolved;
   - a root replaced by another directory, and names that differ only in letter case, as this file system reports them;
-  - an unreadable directory, when not running as root.
+  - an access check that fails, faked so that the test runs whatever the user, and an unreadable directory when not running as root.
 - **Concurrency:** identical and conflicting installations verified at the same time, including a repeat whose verification fails after the original was recorded.
 - **Activation gate:**
   - a call without a context, and Sessions in three different directories;
   - Read, Write and Edit in a Session's directory, and the cancellation of a running call;
+  - the session and project directory that each Session's shells see;
   - a Shell `directory` that becomes a link out of the Workspace after an earlier call used it;
   - a directory removed or turned into a link after installation;
   - identical calls at the gate together, including one whose gate refuses it after the other was journaled.
-- **Boot v1:** the workspace is still taken at startup, and the existing tool-worker tests pass unchanged.
+- **Boot v1:** the workspace is still taken at startup, the shells still see the Runtime's session and project directory, a document is still read when its bytes are not UTF-8, and the existing tool-worker tests pass unchanged.
+- **Boot v2 encoding:** a document whose bytes are not UTF-8 is refused.
+- **Core:**
+  - equal parameter schemas compile once, and a schema object is not serialized a second time;
+  - a schema that JSON text does not describe exactly, or that fails to compile, behaves as it did before;
+  - a caller that mutates its own schema object changes no other schema's validator;
+  - a rebuilt schema with an `$id` is validated.
 - **Process level:** the hidden CLI command starts with boot v2 and answers attestation v3. It exits before the ready line on refused documents.
-- **Java:** the fake worker's v2 answers, and its refusals of documents that change one thing in an accepted one, including joined keys and input that is not JSON; the unchanged provisioner tests.
+- **Java:** the fake worker's v2 answers, and its refusals of documents that change one thing in an accepted one, including joined keys, `type`, and input that is not JSON, without the token on standard error; the provisioner tests, which share a helper with it.
 
 ## Acceptance criteria
 
 - The worker gives every boot, attestation and installation case of the shared fixtures its expected answer over real HTTP. Boot cases are read through standard input.
-- A missing, non-directory, unreadable, linked or escaping effective directory, and a mount root on another device or with another inode, are refused with 409 `managed_context_unavailable`, and the refusal records nothing.
+- A missing, non-directory, unreadable, linked or escaping effective directory, and a mount root whose device or inode, as `stat` reports them, differs from the first successful verification, are refused with 409 `managed_context_unavailable`, and the refusal records nothing.
 - A tool call whose Session has no installed context, or whose directory no longer verifies, never runs, and no other directory is used.
-- Sessions with different effective directories run their tools in their own directories.
+- Sessions with different effective directories run their tools in their own directories. Each Session's shells see its own session key, and the project directory that core derives from its own effective directory.
+- A boot v2 document whose bytes are not UTF-8 is refused.
 - Boot v1 and its routes behave as before.
 
 ## Follow-up work
@@ -174,4 +185,4 @@ The envelope left four questions to W0c. The worker answers them as follows:
 | W0c-2         | The provisioner writes boot v2 and checks ready v2; the v3 attestation and installation clients; no downgrade, and a retry bound for boot v2; identifier and Session ID checks tightened to the envelope's rules; a test that the Broker's JSON writer leaves non-ASCII characters unescaped; `managed_context_unavailable` from installation and `execute`. |
 | W0c-3         | Session and storage resolvers in `managed-agent-server` instead of one startup directory, and the Workspace turn lease for shared Workspaces.                                                                                                                                                                                                                |
 | Session verbs | A worker route for `release`, which drops the released Session's installation.                                                                                                                                                                                                                                                                               |
-| Configuration | Installing configuration from `contextConfigRef`, in a later version of the installation route.                                                                                                                                                                                                                                                              |
+| Configuration | Installing configuration from `contextConfigRef`, in the installation request or in a later version of the route (open question 2).                                                                                                                                                                                                                          |
