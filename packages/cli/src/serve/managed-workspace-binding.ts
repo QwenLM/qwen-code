@@ -10,7 +10,8 @@ import { createHash } from 'node:crypto';
 // com.alibaba.qwen.code.runtimebroker.managedworkspace package in
 // packages/sdk-java/runtime-broker. The shared fixtures in
 // contracts/managed-workspace-binding-v1.fixtures.json keep both byte for
-// byte identical. Nothing wires this into the Runtime worker yet.
+// byte identical. The Runtime worker uses it through the managed-context/1
+// envelope.
 
 export const WORKSPACE_ROOT = '.';
 export const CONTEXT_BINDING_DOMAIN_TAG = 'qwen-managed-context-binding-v1';
@@ -143,6 +144,21 @@ export function computeManagedContextDigest(
   return `sha256:${createHash('sha256')
     .update(encodeManagedContextBinding(binding))
     .digest('hex')}`;
+}
+
+/** Whether a value follows the W0a identifier rule, as tenant IDs do. */
+export function isManagedIdentifier(value: unknown): value is string {
+  return matches(IDENTIFIER_PATTERN, value);
+}
+
+/** Whether a value is a storage ID under the W0a rule. */
+export function isWorkspaceStorageId(value: unknown): value is string {
+  return matches(STORAGE_ID_PATTERN, value);
+}
+
+/** Whether a value is canonical decimal text from 1 to 2^63-1. */
+export function isCanonicalDecimalText(value: unknown): value is string {
+  return isCanonicalDecimal(value);
 }
 
 function matches(pattern: RegExp, value: unknown): boolean {
