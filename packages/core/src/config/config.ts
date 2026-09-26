@@ -4496,11 +4496,12 @@ export class Config {
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
-    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits — so
-    // running it on every startup cannot destroy user work. We do not
-    // await this: it is a hygiene task that must never delay the
-    // first model turn.
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
+    // removal on worktreeHasWork — tracked, untracked and ignored content
+    // (minus disposable build output) all preserve the worktree, and any
+    // probe error fails closed — so running it on every startup cannot
+    // destroy user work. We do not await this: it is a hygiene task
+    // that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and
