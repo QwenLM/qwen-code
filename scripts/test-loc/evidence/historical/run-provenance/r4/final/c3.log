@@ -1,0 +1,19 @@
+base1 ab61e04161 exit=1 wall_s=266
+  tests 30206 failed 1 files 788
+  failed src/utils/git-worktrees.test.ts > counts any link in the admin directory against the prune
+head1 e15058c26b exit=1 wall_s=262
+  tests 30225 failed 1 files 788
+  failed src/utils/git-worktrees.test.ts > counts any link in the admin directory against the prune
+base2 ab61e04161 exit=1 wall_s=267
+  tests 30206 failed 1 files 788
+  failed src/utils/git-worktrees.test.ts > counts any link in the admin directory against the prune
+head2 e15058c26b exit=1 wall_s=261
+  tests 30225 failed 1 files 788
+  failed src/utils/git-worktrees.test.ts > counts any link in the admin directory against the prune
+== base1 -> head1: C3 lost lines 1 C3 lost branches 34 
+== base1 -> head2: C3 lost lines 0 C3 lost branches 35 
+== base2 -> head1: C3 lost lines 0 C3 lost branches 15 
+== base2 -> head2: C3 lost lines 0 C3 lost branches 12 
+== base1 -> base2: C3 lost lines 1 C3 lost branches 30 
+== head1 -> head2: C3 lost lines 0 C3 lost branches 10 
+C3_FULL_DONE

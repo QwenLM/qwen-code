@@ -1,0 +1,76 @@
+{
+  "repo": "/projects/qwen-code-testloc-base",
+  "pkg": "packages/core",
+  "since": "2026-01-01",
+  "built": "2026-09-25T14:12:20.457Z",
+  "corpus": [
+    {
+      "sha": "13059e079629b1847976dc33f3d6df5dd7b8d760",
+      "subject": "fix(core): short-circuit the flush wait when the output stream cannot flush (#7905)",
+      "impl": [
+        "packages/core/src/tools/shell.ts"
+      ],
+      "tests": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "patchLines": 62
+    },
+    {
+      "sha": "39702ad2f8372eb70670a0d3bcbb1506a98d8e03",
+      "subject": "fix(core): Preserve usage after empty OpenAI stream frames (#7650)",
+      "impl": [
+        "packages/core/src/core/openaiContentGenerator/pipeline.ts"
+      ],
+      "tests": [
+        "packages/core/src/core/openaiContentGenerator/pipeline.test.ts"
+      ],
+      "patchLines": 14
+    },
+    {
+      "sha": "fcc250beb51dfb39465e559ccfa8b606502f71cf",
+      "subject": "fix(core): record auto-memory index reads in FileReadCache (#7468)",
+      "impl": [
+        "packages/core/src/config/config.ts",
+        "packages/core/src/memory/store.ts"
+      ],
+      "tests": [
+        "packages/core/src/config/config.test.ts",
+        "packages/core/src/memory/store.test.ts"
+      ],
+      "patchLines": 133
+    },
+    {
+      "sha": "02847d724574285eb2cf36695633c6e4718a352c",
+      "subject": "fix(core): keep bare fast model on current auth (#5553)",
+      "impl": [
+        "packages/core/src/config/config.ts"
+      ],
+      "tests": [
+        "packages/core/src/config/config.test.ts"
+      ],
+      "patchLines": 31
+    },
+    {
+      "sha": "56e76e7ecd2195e1c914a61566422a17c6c18ec8",
+      "subject": "fix(core): enforce shell directory workspace boundary (#5454)",
+      "impl": [
+        "packages/core/src/tools/shell.ts"
+      ],
+      "tests": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "patchLines": 20
+    },
+    {
+      "sha": "be62f0e93d4e2f59259650aa39a0a389fd033d44",
+      "subject": "fix(core): give complete intentional-sleep guidance on first rejection for sleep chains (#4948)",
+      "impl": [
+        "packages/core/src/tools/shell.ts"
+      ],
+      "tests": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "patchLines": 24
+    }
+  ]
+}

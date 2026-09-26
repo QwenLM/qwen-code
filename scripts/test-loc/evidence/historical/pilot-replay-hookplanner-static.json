@@ -1,0 +1,110 @@
+[
+  {
+    "fault": "none",
+    "variant": "full",
+    "failed": 0,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "none",
+    "variant": "static",
+    "failed": 0,
+    "skipped": 67,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "1162ed9c0a",
+    "subject": "fix(core): keep escaped trailing whitespace when trimming hook matchers (#11871)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 1,
+    "failed": 3,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher-whole-matcher-trim.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "1162ed9c0a",
+    "subject": "fix(core): keep escaped trailing whitespace when trimming hook matchers (#11871)",
+    "variant": "static",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 1,
+    "failed": 3,
+    "skipped": 67,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher-whole-matcher-trim.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "e04f2ec5d4",
+    "subject": "fix(core): accept Claude Code tool names in tool hook matchers (#11826)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 2,
+    "failed": 8,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hookPlanner.test.ts"
+    ],
+    "targetFailed": 5
+  },
+  {
+    "fault": "e04f2ec5d4",
+    "subject": "fix(core): accept Claude Code tool names in tool hook matchers (#11826)",
+    "variant": "static",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 2,
+    "failed": 5,
+    "skipped": 67,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hookPlanner.test.ts"
+    ],
+    "targetFailed": 2
+  },
+  {
+    "fault": "f7e48d5c4b",
+    "subject": "fix(core): keep escaped whitespace at pipe-list entry edges (#11860)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 1,
+    "appliedHunks": 2,
+    "failed": 3,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "f7e48d5c4b",
+    "subject": "fix(core): keep escaped whitespace at pipe-list entry edges (#11860)",
+    "variant": "static",
+    "status": "detected",
+    "rejectedHunks": 1,
+    "appliedHunks": 2,
+    "failed": 3,
+    "skipped": 67,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher.test.ts"
+    ],
+    "targetFailed": 0
+  }
+]

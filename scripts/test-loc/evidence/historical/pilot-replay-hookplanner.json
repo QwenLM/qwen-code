@@ -1,0 +1,238 @@
+[
+  {
+    "fault": "none",
+    "variant": "full",
+    "failed": 0,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "none",
+    "variant": "narrow",
+    "failed": 0,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "none",
+    "variant": "wide",
+    "failed": 0,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "1162ed9c0a",
+    "subject": "fix(core): keep escaped trailing whitespace when trimming hook matchers (#11871)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 1,
+    "failed": 3,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher-whole-matcher-trim.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "1162ed9c0a",
+    "subject": "fix(core): keep escaped trailing whitespace when trimming hook matchers (#11871)",
+    "variant": "narrow",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 1,
+    "failed": 3,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher-whole-matcher-trim.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "1162ed9c0a",
+    "subject": "fix(core): keep escaped trailing whitespace when trimming hook matchers (#11871)",
+    "variant": "wide",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 1,
+    "failed": 3,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher-whole-matcher-trim.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "e04f2ec5d4",
+    "subject": "fix(core): accept Claude Code tool names in tool hook matchers (#11826)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 0,
+    "appliedHunks": 2,
+    "failed": 8,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hookPlanner.test.ts"
+    ],
+    "targetFailed": 5
+  },
+  {
+    "fault": "e04f2ec5d4",
+    "subject": "fix(core): accept Claude Code tool names in tool hook matchers (#11826)",
+    "variant": "narrow",
+    "status": "missed",
+    "rejectedHunks": 0,
+    "appliedHunks": 2,
+    "failed": 0,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "e04f2ec5d4",
+    "subject": "fix(core): accept Claude Code tool names in tool hook matchers (#11826)",
+    "variant": "wide",
+    "status": "missed",
+    "rejectedHunks": 0,
+    "appliedHunks": 2,
+    "failed": 0,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "f7e48d5c4b",
+    "subject": "fix(core): keep escaped whitespace at pipe-list entry edges (#11860)",
+    "variant": "full",
+    "status": "detected",
+    "rejectedHunks": 1,
+    "appliedHunks": 2,
+    "failed": 3,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "f7e48d5c4b",
+    "subject": "fix(core): keep escaped whitespace at pipe-list entry edges (#11860)",
+    "variant": "narrow",
+    "status": "detected",
+    "rejectedHunks": 1,
+    "appliedHunks": 2,
+    "failed": 3,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "f7e48d5c4b",
+    "subject": "fix(core): keep escaped whitespace at pipe-list entry edges (#11860)",
+    "variant": "wide",
+    "status": "detected",
+    "rejectedHunks": 1,
+    "appliedHunks": 2,
+    "failed": 3,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [
+      "src/hooks/hook-matcher.test.ts"
+    ],
+    "targetFailed": 0
+  },
+  {
+    "fault": "14f02c132a",
+    "subject": "fix(core): Match hook display-name matchers to tool ids (#6373)",
+    "variant": "full",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "14f02c132a",
+    "subject": "fix(core): Match hook display-name matchers to tool ids (#6373)",
+    "variant": "narrow",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "14f02c132a",
+    "subject": "fix(core): Match hook display-name matchers to tool ids (#6373)",
+    "variant": "wide",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "b588f74f64",
+    "subject": "fix(core): align session hook matcher targets (#4354)",
+    "variant": "full",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 0,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "b588f74f64",
+    "subject": "fix(core): align session hook matcher targets (#4354)",
+    "variant": "narrow",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 69,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  },
+  {
+    "fault": "b588f74f64",
+    "subject": "fix(core): align session hook matcher targets (#4354)",
+    "variant": "wide",
+    "status": "missed",
+    "rejectedHunks": 4,
+    "appliedHunks": 0,
+    "failed": 0,
+    "skipped": 68,
+    "total": 1076,
+    "failedFiles": [],
+    "targetFailed": 0
+  }
+]

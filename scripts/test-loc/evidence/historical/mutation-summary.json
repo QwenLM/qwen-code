@@ -1,0 +1,497 @@
+{
+  "schemaVersion": 1,
+  "comparisons": [
+    {
+      "sample": "round1:src/config/config.ts",
+      "mutants": 572,
+      "identitySetSha256": "b08e5f4750c233e9391799eefd1f2cdbba3217c3ae64157b72197d1874a8c775",
+      "baselineReportSha256": "436f0621b489b34244aa577c2a682dfc2c162e6856b9e9b67d9e50817c098290",
+      "candidateReportSha256": "c11792f676e4a3d7d342fe5ff75037a866b5cabf92be3720983e4cb0dff33b12",
+      "beforeStatusCounts": {
+        "NoCoverage": 35,
+        "Ignored": 105,
+        "Killed": 330,
+        "Survived": 102
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 35,
+        "Ignored": 105,
+        "Killed": 331,
+        "Survived": 101
+      },
+      "statusChanges": [
+        {
+          "identity": [
+            "src/config/config.ts",
+            {
+              "end": {
+                "column": 35,
+                "line": 4403
+              },
+              "start": {
+                "column": 9,
+                "line": 4403
+              }
+            },
+            "ConditionalExpression",
+            "true"
+          ],
+          "before": "Survived",
+          "after": "Killed",
+          "beforeKilledBy": [],
+          "afterKilledBy": [
+            "2125"
+          ]
+        },
+        {
+          "identity": [
+            "src/config/config.ts",
+            {
+              "end": {
+                "column": 29,
+                "line": 4434
+              },
+              "start": {
+                "column": 7,
+                "line": 4433
+              }
+            },
+            "ConditionalExpression",
+            "true"
+          ],
+          "before": "Killed",
+          "after": "Survived",
+          "beforeKilledBy": [
+            "2500"
+          ],
+          "afterKilledBy": []
+        },
+        {
+          "identity": [
+            "src/config/config.ts",
+            {
+              "end": {
+                "column": 33,
+                "line": 4466
+              },
+              "start": {
+                "column": 7,
+                "line": 4464
+              }
+            },
+            "LogicalOperator",
+            "!this.shellExecutionSandbox && !this.getBareMode() || !this.provisionalWorkspace"
+          ],
+          "before": "Survived",
+          "after": "Killed",
+          "beforeKilledBy": [],
+          "afterKilledBy": [
+            "2125"
+          ]
+        },
+        {
+          "identity": [
+            "src/config/config.ts",
+            {
+              "end": {
+                "column": 26,
+                "line": 4465
+              },
+              "start": {
+                "column": 7,
+                "line": 4464
+              }
+            },
+            "LogicalOperator",
+            "!this.shellExecutionSandbox || !this.getBareMode()"
+          ],
+          "before": "Killed",
+          "after": "Survived",
+          "beforeKilledBy": [
+            "2500"
+          ],
+          "afterKilledBy": []
+        },
+        {
+          "identity": [
+            "src/config/config.ts",
+            {
+              "end": {
+                "column": 10,
+                "line": 4507
+              },
+              "start": {
+                "column": 13,
+                "line": 4469
+              }
+            },
+            "BlockStatement",
+            "{}"
+          ],
+          "before": "Survived",
+          "after": "Killed",
+          "beforeKilledBy": [],
+          "afterKilledBy": [
+            "2125"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": "round1:src/core/anthropicContentGenerator/anthropicContentGenerator.ts",
+      "mutants": 590,
+      "identitySetSha256": "4effc119053f4a302c8bc29499ce86d597927e680b8f8379945f1c25f3d83d58",
+      "baselineReportSha256": "d6fa3350a41cdeeed263f114faf94a2e84917a2852adb41d5eeacd5e12461e21",
+      "candidateReportSha256": "1f700928bebc3394da0c84b3c1df1bf717c826c83b70e37a04c78a9d0a72ba5c",
+      "beforeStatusCounts": {
+        "NoCoverage": 5,
+        "Ignored": 78,
+        "Killed": 402,
+        "Survived": 105
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 5,
+        "Ignored": 78,
+        "Killed": 402,
+        "Survived": 105
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/core/client.ts",
+      "mutants": 551,
+      "identitySetSha256": "ffb7ae457da033c55d0f11a9f3051ae11989bc1d08e7406f394cd9e1e38c2288",
+      "baselineReportSha256": "6200c65366d369a25c32d7b71e0158eabc3640fb7ba7b303b071eaa9166eaf6a",
+      "candidateReportSha256": "e54b1ebf27e12769a81e7ba4927328e7b2a887d33052e43517d915fb5d6dc86f",
+      "beforeStatusCounts": {
+        "NoCoverage": 49,
+        "Ignored": 92,
+        "Killed": 257,
+        "Survived": 152,
+        "Timeout": 1
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 49,
+        "Ignored": 92,
+        "Killed": 257,
+        "Survived": 152,
+        "Timeout": 1
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/core/coreToolScheduler.ts",
+      "mutants": 495,
+      "identitySetSha256": "28f7bd2750ac00704433c384d4667b56588749a9c0894893774f3c7ab6a9dd8c",
+      "baselineReportSha256": "9a14d3aca4b9a8a8c5d5b6888b0379997d96037ee3d294a45b0b35c372f805e2",
+      "candidateReportSha256": "342c0d52602650ceef091ce0c3b991a14c2ce1935d1c081c2a5ab0559b5496d8",
+      "beforeStatusCounts": {
+        "NoCoverage": 57,
+        "Ignored": 94,
+        "Killed": 195,
+        "Survived": 145,
+        "Timeout": 3,
+        "RuntimeError": 1
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 57,
+        "Ignored": 94,
+        "Killed": 195,
+        "Survived": 145,
+        "Timeout": 3,
+        "RuntimeError": 1
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/core/llm-chat.ts",
+      "mutants": 526,
+      "identitySetSha256": "dfdd3da350286f25369a933d88367a6406ff113c191f78ead10646e2f733652c",
+      "baselineReportSha256": "9765b7ea26b69eaa6e281e9fc1689e91c13e35b9dc70b7e522ce50d3f64475ef",
+      "candidateReportSha256": "774cd0690075b7898854d0cc2ab2608a80d8935f4cbc70c342ba72ee40d51daa",
+      "beforeStatusCounts": {
+        "NoCoverage": 14,
+        "Ignored": 72,
+        "Survived": 114,
+        "Killed": 322,
+        "Timeout": 4
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 14,
+        "Ignored": 72,
+        "Survived": 114,
+        "Killed": 322,
+        "Timeout": 4
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/core/openaiContentGenerator/converter.ts",
+      "mutants": 823,
+      "identitySetSha256": "4c608892591d83f664c918483d739dcc0d1bfe9cb42083296a98e81fbdcdb8db",
+      "baselineReportSha256": "62c5bd3f1b15493c76a67266f60d0a8d99fb662a35264dfa43d5138d7b339a7b",
+      "candidateReportSha256": "7231c699604e285606ee587181bd7f4fc25b4f932168ec2c7c59a4acfad5a68d",
+      "beforeStatusCounts": {
+        "NoCoverage": 77,
+        "Ignored": 135,
+        "Survived": 176,
+        "Killed": 435
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 77,
+        "Ignored": 135,
+        "Survived": 176,
+        "Killed": 435
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/core/openaiContentGenerator/pipeline.ts",
+      "mutants": 649,
+      "identitySetSha256": "b257315acc420ade85c7e0ca3b9af70b937b014f655360086545b6f4d177ade2",
+      "baselineReportSha256": "608c5d517a17bdcea04c5753d5ada80c70c39520c28b2e53dd5b1b55b304686e",
+      "candidateReportSha256": "b51ab1f9d2d8ae9ffec4e5eedb9ffc68870edfd5de4abb01e38bd149123a7048",
+      "beforeStatusCounts": {
+        "NoCoverage": 29,
+        "Ignored": 144,
+        "Survived": 120,
+        "Killed": 356
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 29,
+        "Ignored": 144,
+        "Survived": 120,
+        "Killed": 356
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/hooks/hookEventHandler.ts",
+      "mutants": 233,
+      "identitySetSha256": "13ca70ea28aad6e128cc50bb50ce0196960b47eff049ead790b561cff4991db4",
+      "baselineReportSha256": "08a392143e04761ff22c7a31e227a38a08c11f7b190b128533704aafab5c0224",
+      "candidateReportSha256": "fa706fe627eaabdc916e26227dbc775d68e7d5d28c101ed0086d5c5c4b159a0e",
+      "beforeStatusCounts": {
+        "NoCoverage": 3,
+        "Ignored": 74,
+        "Killed": 114,
+        "Survived": 42
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 3,
+        "Ignored": 74,
+        "Killed": 114,
+        "Survived": 42
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/services/chatCompressionService.ts",
+      "mutants": 247,
+      "identitySetSha256": "91e442aa6894ac1419722352923cab82853ebf7a57eb4207aa7668dd372d48de",
+      "baselineReportSha256": "f038ad6e44c8519e2472d78616c04802793748ee6da6e1a0455db1d25c82f56a",
+      "candidateReportSha256": "dd40e4595d0327d0017467e326525241fa1937ba889738cbac898bb9767b72e6",
+      "beforeStatusCounts": {
+        "NoCoverage": 5,
+        "Ignored": 55,
+        "Killed": 138,
+        "Survived": 49
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 5,
+        "Ignored": 55,
+        "Killed": 138,
+        "Survived": 49
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round1:src/tools/shell.ts",
+      "mutants": 532,
+      "identitySetSha256": "31ac616a491d01192a372a6cf18f95f00b9fd7bdace289325462a89b76d7d5b6",
+      "baselineReportSha256": "93ad79a3c5094c490fbc19ece6d7f371a0d98540eb9ae493c91361d0c3717ec1",
+      "candidateReportSha256": "5f33b514a8881aac8ee330acbedeb01c830b40a3c1aae8a327bb7f3956b4b0d7",
+      "beforeStatusCounts": {
+        "NoCoverage": 33,
+        "Ignored": 159,
+        "Survived": 89,
+        "Killed": 248,
+        "Timeout": 3
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 33,
+        "Ignored": 159,
+        "Survived": 89,
+        "Killed": 248,
+        "Timeout": 3
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/agents/workflow-run-registry.ts",
+      "mutants": 542,
+      "identitySetSha256": "7ae1489865b170cfa701cc09f0874aed12e52d21418258fa5826bca9edaf9397",
+      "baselineReportSha256": "12cef2c8beb6d89f37b2bc3a4474e5adc7a56476c6b3f4e9d6b7686bcce54649",
+      "candidateReportSha256": "c6d3edcdb1e1574c6534d69e61292b504d9b566899476f09423383669f187dc7",
+      "beforeStatusCounts": {
+        "NoCoverage": 24,
+        "Ignored": 79,
+        "Killed": 357,
+        "Survived": 82
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 24,
+        "Ignored": 79,
+        "Killed": 357,
+        "Survived": 82
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/hooks/asyncHookRegistry.ts",
+      "mutants": 170,
+      "identitySetSha256": "759a20c492a531a457422ce9e5ad950f7b34b721d93a3a82c45ae50925364f3d",
+      "baselineReportSha256": "1bd1ca89771d54cd44cddc90c4737b297011969b180da0690a9eef10f8fe0ff3",
+      "candidateReportSha256": "05d2a5b829ef462aa8a9c60663d40375e6e540bccc3f63438d0847b656b97fd1",
+      "beforeStatusCounts": {
+        "NoCoverage": 23,
+        "Ignored": 29,
+        "Survived": 37,
+        "Killed": 81
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 23,
+        "Ignored": 29,
+        "Survived": 37,
+        "Killed": 81
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/hooks/sessionHooksManager.ts",
+      "mutants": 134,
+      "identitySetSha256": "65f9004475a5c87712e5f43bfb68eb3fb00874c04b148739216a4a5b6ba63508",
+      "baselineReportSha256": "1a551eccf0f547d692d111b05498cfed8cb48e55c6abfbf883c0c8e94bf7554d",
+      "candidateReportSha256": "e17dc9d7d9378b373905711a9f34764d79c01a0a81135e322560b3d7aab09d5c",
+      "beforeStatusCounts": {
+        "NoCoverage": 7,
+        "Ignored": 13,
+        "Killed": 97,
+        "Survived": 17
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 7,
+        "Ignored": 13,
+        "Killed": 97,
+        "Survived": 17
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/services/image-generation-service.ts",
+      "mutants": 354,
+      "identitySetSha256": "9d58bdccf0221af0d07f3b053dd8838cebbe7a38a077cf4e05ec123f15bf3abc",
+      "baselineReportSha256": "08505ab5ca1da81feed656db259c5e614a52f85deb6d12f392b232875e19cdfa",
+      "candidateReportSha256": "4aba92c8dc0f8baa98022b6938be78271480663e5241ba7ce813dd7b7672ebb6",
+      "beforeStatusCounts": {
+        "NoCoverage": 22,
+        "Ignored": 121,
+        "Survived": 63,
+        "Killed": 147,
+        "Timeout": 1
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 22,
+        "Ignored": 121,
+        "Survived": 63,
+        "Killed": 147,
+        "Timeout": 1
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/tools/shell.ts",
+      "mutants": 536,
+      "identitySetSha256": "e23f168fed215fe0b9784d05d2d60a321677f56577838a30c65ad731ce550c0f",
+      "baselineReportSha256": "51686ad3fa71f90b510925781006dc8b42469a0d3812bfd21e4574b81f99e9a1",
+      "candidateReportSha256": "bdde32014344f0ea5d0ae373f5dff80628a4393822fe05a463e73c889642e0bb",
+      "beforeStatusCounts": {
+        "NoCoverage": 102,
+        "Ignored": 87,
+        "Killed": 254,
+        "Survived": 90,
+        "Timeout": 3
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 102,
+        "Ignored": 87,
+        "Killed": 254,
+        "Survived": 90,
+        "Timeout": 3
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/utils/filesearch/fileSearch.ts",
+      "mutants": 156,
+      "identitySetSha256": "9ecad0d9b920350c22ef0847908cbf21e9f6aadf2d269477fa02df4f4fcd086c",
+      "baselineReportSha256": "cd643ac24efbf9cd83b62c8e6945b7a21b850e00ae9340eab08f6c7e132bffe3",
+      "candidateReportSha256": "481d86c9764e64a5fbe89b28f45fa8ad7d38939c2fb6772b0c35299d52b19730",
+      "beforeStatusCounts": {
+        "NoCoverage": 8,
+        "Ignored": 14,
+        "Killed": 96,
+        "Survived": 38
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 8,
+        "Ignored": 14,
+        "Killed": 96,
+        "Survived": 38
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/utils/gitDiff.ts",
+      "mutants": 678,
+      "identitySetSha256": "4be25c64bf28196597e1bad807aa65eefd8474b2c37a9e26fc07767d4cbb1e5e",
+      "baselineReportSha256": "d384a973369d739bffa56c0503e9576e892715df557bad4cece1ca283ea38aca",
+      "candidateReportSha256": "af1362ea9213e69ec8f6ee0c040249fb72a19687c8ef8e394249588799a621b9",
+      "beforeStatusCounts": {
+        "NoCoverage": 25,
+        "Ignored": 183,
+        "Killed": 357,
+        "Survived": 103,
+        "Timeout": 10
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 25,
+        "Ignored": 183,
+        "Killed": 357,
+        "Survived": 103,
+        "Timeout": 10
+      },
+      "statusChanges": []
+    },
+    {
+      "sample": "round4:src/utils/memoryImportProcessor.ts",
+      "mutants": 239,
+      "identitySetSha256": "fcf894717a55cf34603dc4f6d1201a469d235b082584a0bc0d3374f321e689cd",
+      "baselineReportSha256": "7f331560e8e75a8534108d3cd30fee508536dd415cab4f4ed8ff32faa181c58a",
+      "candidateReportSha256": "3415782ff8cd2c861c094c52672f687cf1fbbe1111302c48083454e9040d40e0",
+      "beforeStatusCounts": {
+        "NoCoverage": 19,
+        "Ignored": 36,
+        "Killed": 131,
+        "Survived": 53
+      },
+      "afterStatusCounts": {
+        "NoCoverage": 19,
+        "Ignored": 36,
+        "Killed": 131,
+        "Survived": 53
+      },
+      "statusChanges": []
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "qwen-test-loc-measurement",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated dependency lock for replaying the historical core mutation experiments",
+  "engines": {
+    "node": "^22.18.0 || >=24.11.0"
+  },
+  "dependencies": {
+    "@stryker-mutator/core": "10.0.0",
+    "@stryker-mutator/vitest-runner": "10.0.0"
+  }
+}

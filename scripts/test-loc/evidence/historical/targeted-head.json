@@ -1,0 +1,88 @@
+{
+  "corpus": "/tmp/claude-502/-projects-qwen-code/aafb13e7-0fe1-4917-8ec7-fdca963d0d78/scratchpad/corpus-targeted.json",
+  "ran": "2026-09-25T14:28:46.737Z",
+  "detected": 6,
+  "missed": 0,
+  "other": 0,
+  "results": [
+    {
+      "sha": "13059e079629b1847976dc33f3d6df5dd7b8d760",
+      "subject": "fix(core): short-circuit the flush wait when the output stream cannot flush (#7905)",
+      "status": "detected",
+      "failedTests": 7,
+      "totalTests": 1766,
+      "candidateFiles": 7,
+      "failedFiles": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "seconds": 21.5,
+      "exit": 1
+    },
+    {
+      "sha": "39702ad2f8372eb70670a0d3bcbb1506a98d8e03",
+      "subject": "fix(core): Preserve usage after empty OpenAI stream frames (#7650)",
+      "status": "detected",
+      "failedTests": 5,
+      "totalTests": 806,
+      "candidateFiles": 4,
+      "failedFiles": [
+        "packages/core/src/core/openaiContentGenerator/pipeline.test.ts"
+      ],
+      "seconds": 73.6,
+      "exit": 1
+    },
+    {
+      "sha": "fcc250beb51dfb39465e559ccfa8b606502f71cf",
+      "subject": "fix(core): record auto-memory index reads in FileReadCache (#7468)",
+      "status": "detected",
+      "failedTests": 237,
+      "totalTests": 3301,
+      "candidateFiles": 40,
+      "failedFiles": [
+        "packages/core/src/config/config.test.ts",
+        "packages/core/src/memory/store.test.ts"
+      ],
+      "seconds": 166.8,
+      "exit": 1
+    },
+    {
+      "sha": "02847d724574285eb2cf36695633c6e4718a352c",
+      "subject": "fix(core): keep bare fast model on current auth (#5553)",
+      "status": "detected",
+      "failedTests": 4,
+      "totalTests": 3287,
+      "candidateFiles": 40,
+      "failedFiles": [
+        "packages/core/src/config/config.test.ts"
+      ],
+      "seconds": 132.6,
+      "exit": 1
+    },
+    {
+      "sha": "56e76e7ecd2195e1c914a61566422a17c6c18ec8",
+      "subject": "fix(core): enforce shell directory workspace boundary (#5454)",
+      "status": "detected",
+      "failedTests": 4,
+      "totalTests": 1766,
+      "candidateFiles": 7,
+      "failedFiles": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "seconds": 43.9,
+      "exit": 1
+    },
+    {
+      "sha": "be62f0e93d4e2f59259650aa39a0a389fd033d44",
+      "subject": "fix(core): give complete intentional-sleep guidance on first rejection for sleep chains (#4948)",
+      "status": "detected",
+      "failedTests": 4,
+      "totalTests": 1766,
+      "candidateFiles": 7,
+      "failedFiles": [
+        "packages/core/src/tools/shell.test.ts"
+      ],
+      "seconds": 70.2,
+      "exit": 1
+    }
+  ]
+}

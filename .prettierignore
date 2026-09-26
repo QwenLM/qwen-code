@@ -32,6 +32,8 @@ packages/cua-driver/
 # "intentionally non-idiomatic ink input/output", so normalising them to
 # house style would corrupt the very data the codemod tests assert on.
 scripts/codemod/fixtures/
+# Recovered measurement evidence retains its original bytes and SHA-256 hashes.
+scripts/test-loc/evidence/historical/
 packages/live-host/
 packages/desktop/runtime/
 packages/core/src/skills/bundled/browser-use/runtime/
