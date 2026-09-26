@@ -48,10 +48,17 @@ function isEntry(value: unknown): value is ModelCatalogEntry {
   }
   const { context, output, modalities } = value as ModelCatalogEntry;
   return (
-    (context === undefined || typeof context === 'number') &&
-    (output === undefined || typeof output === 'number') &&
+    (context === undefined || (Number.isSafeInteger(context) && context > 0)) &&
+    (output === undefined || (Number.isSafeInteger(output) && output > 0)) &&
     (modalities === undefined ||
-      (typeof modalities === 'object' && modalities !== null))
+      (typeof modalities === 'object' &&
+        modalities !== null &&
+        !Array.isArray(modalities) &&
+        Object.entries(modalities).every(
+          ([key, value]) =>
+            ['image', 'pdf', 'audio', 'video'].includes(key) &&
+            typeof value === 'boolean',
+        )))
   );
 }
 
@@ -117,8 +124,22 @@ export function loadModelCatalog(): ModelCatalog {
   if (!loaded) {
     const bundled = bundledCatalog as ModelCatalog;
     const cached = readCache(getModelCatalogCachePath());
-    const base =
+    let base =
       cached && cached.fetchedAt > bundled.fetchedAt ? cached : bundled;
+    // Sonnet 4.5's retired 1M beta must not override the default API limit.
+    // https://platform.claude.com/docs/en/build-with-claude/context-windows
+    if (base.models['claude-sonnet-4-5']) {
+      base = {
+        ...base,
+        models: {
+          ...base.models,
+          'claude-sonnet-4-5': {
+            ...base.models['claude-sonnet-4-5'],
+            context: 200_000,
+          },
+        },
+      };
+    }
     const custom = customSource
       ? readCache(getCustomModelCatalogCachePath())
       : undefined;

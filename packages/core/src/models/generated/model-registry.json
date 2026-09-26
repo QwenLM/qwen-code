@@ -1,6 +1,6 @@
 {
-  "source": "/tmp/claude-0/-root-workspace-qwen-code/6d44229e-2f5c-47c5-b5ef-9bf1e13377d5/scratchpad/api.json",
-  "fetchedAt": "2026-09-16T14:17:59.537Z",
+  "source": "https://models.dev/api.json",
+  "fetchedAt": "2026-09-26T08:57:50.330Z",
   "models": {
     "claude-fable-5": {
       "context": 1000000,
@@ -66,6 +66,14 @@
         "pdf": true
       }
     },
+    "claude-opus-5-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
     "claude-sonnet-4-5": {
       "context": 1000000,
       "output": 64000,
@@ -112,14 +120,10 @@
     },
     "deepseek-flash": {
       "context": 1000000,
-      "output": 384000,
+      "output": 393216,
       "modalities": {
         "image": true
       }
-    },
-    "deepseek-r1": {
-      "context": 131072,
-      "output": 16384
     },
     "deepseek-r1-distill-llama-70b": {
       "context": 32768,
@@ -161,24 +165,31 @@
       "context": 163840,
       "output": 65536
     },
-    "deepseek-v4-flash-ga": {
+    "deepseek-v4-flash-0731": {
       "context": 1000000,
       "output": 384000
     },
-    "deepseek-v4-flash-vision": {
+    "deepseek-v4-flash-ga-260731": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "context": 1000000,
+      "output": 393216,
+      "modalities": {
+        "image": true
+      }
+    },
+    "deepseek-v4-pro-ga-260813": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "deepseek-v4.1-flash": {
       "context": 1000000,
       "output": 384000,
       "modalities": {
         "image": true
       }
-    },
-    "deepseek-v4-pro": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "deepseek-v4-pro-ga": {
-      "context": 1000000,
-      "output": 384000
     },
     "doubao-seed-1-6": {
       "context": 256000,
@@ -270,8 +281,8 @@
       }
     },
     "gemini-2.5-computer-use-10": {
-      "context": 131072,
-      "output": 65536,
+      "context": 128000,
+      "output": 64000,
       "modalities": {
         "image": true
       }
@@ -328,7 +339,7 @@
     },
     "gemini-3.1-flash-lite-image": {
       "context": 65536,
-      "output": 65536,
+      "output": 4096,
       "modalities": {
         "image": true
       }
@@ -466,11 +477,15 @@
         "video": true
       }
     },
-    "glm-4.6": {
-      "context": 204800,
-      "output": 131072
-    },
     "glm-4.6v": {
+      "context": 128000,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "glm-4.6v-flash": {
       "context": 128000,
       "output": 32768,
       "modalities": {
@@ -494,6 +509,15 @@
       "context": 1000000,
       "output": 131072
     },
+    "glm-5-3-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
     "glm-5-turbo": {
       "context": 200000,
       "output": 131072
@@ -503,6 +527,15 @@
       "output": 131072
     },
     "glm-5.3-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "glm-5.3-flashx": {
       "context": 1000000,
       "output": 131072,
       "modalities": {
@@ -755,6 +788,22 @@
         "pdf": true
       }
     },
+    "gpt-6-luna": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-6-sol": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
     "gpt-realtime": {
       "context": 96000,
       "output": 32000,
@@ -803,6 +852,14 @@
         "pdf": true
       }
     },
+    "grok-4.7": {
+      "context": 500000,
+      "output": 500000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
     "grok-build": {
       "context": 256000,
       "output": 256000,
@@ -815,14 +872,6 @@
       "context": 262144,
       "output": 16384
     },
-    "kimi-k2.5": {
-      "context": 262144,
-      "output": 32768,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
-    },
     "kimi-k2.7-code": {
       "context": 262144,
       "output": 262144,
@@ -834,14 +883,6 @@
     "kimi-k2.7-code-highspeed": {
       "context": 262144,
       "output": 262144,
-      "modalities": {
-        "image": true,
-        "video": true
-      }
-    },
-    "kimi-k3": {
-      "context": 1048576,
-      "output": 131072,
       "modalities": {
         "image": true,
         "video": true
@@ -872,7 +913,7 @@
       "output": 131072
     },
     "minimax-m3": {
-      "context": 1048576,
+      "context": 1000000,
       "output": 512000,
       "modalities": {
         "image": true,
@@ -1231,10 +1272,6 @@
         "image": true,
         "video": true
       }
-    },
-    "qwen3.7-max": {
-      "context": 1000000,
-      "output": 65536
     },
     "qwen3.8-flash": {
       "context": 1000000,

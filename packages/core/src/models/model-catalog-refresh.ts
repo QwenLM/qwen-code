@@ -36,8 +36,8 @@ const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 
 /**
- * models.dev providers whose entries feed the catalog, in priority order: a
- * model id served by several of them takes the first provider's numbers.
+ * models.dev providers whose entries feed the catalog. Conflicting normalized
+ * ids are omitted so endpoint-specific limits fall back to existing tables.
  * Third-party routers are left out — they republish vendor models under
  * their own aliases and limits.
  */
@@ -78,10 +78,14 @@ const MODALITIES: ReadonlyArray<keyof InputModalities> = [
 function toEntry(model: ModelsDevModel): ModelCatalogEntry | undefined {
   const entry: ModelCatalogEntry = {};
   const context = model.limit?.input || model.limit?.context;
-  if (context) {
+  if (context !== undefined && Number.isSafeInteger(context) && context > 0) {
     entry.context = context;
   }
-  if (model.limit?.output) {
+  if (
+    model.limit?.output !== undefined &&
+    Number.isSafeInteger(model.limit.output) &&
+    model.limit.output > 0
+  ) {
     entry.output = model.limit.output;
   }
   const modalities: InputModalities = {};
@@ -99,13 +103,9 @@ function toEntry(model: ModelsDevModel): ModelCatalogEntry | undefined {
 function sortedModels(
   entries: Iterable<readonly [string, ModelCatalogEntry]>,
 ): Record<string, ModelCatalogEntry> {
-  const models: Record<string, ModelCatalogEntry> = {};
-  for (const [key, entry] of [...entries].sort(([a], [b]) =>
-    a < b ? -1 : a > b ? 1 : 0,
-  )) {
-    models[key] = entry;
-  }
-  return models;
+  return Object.fromEntries(
+    [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
 }
 
 /**
@@ -135,8 +135,7 @@ function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
  *
  * Two ids can land on the same key, either because they normalize together
  * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
- * the same model. An id that is already its own normalized form wins, since
- * it is the one a user types. If what remains still disagrees, the key is
+ * the same model. If any of these entries disagree, the key is
  * dropped rather than guessed: a context window or output limit is a property
  * of the endpoint, not of the weights, and the catalog cannot tell which
  * endpoint a request will reach. DashScope caps GLM-5 output at 16,384 while
@@ -150,10 +149,7 @@ export function trimModelsDevCatalog(
   source: string = MODELS_DEV_URL,
   providers: readonly string[] = MODELS_DEV_PROVIDERS,
 ): ModelCatalog {
-  const candidates = new Map<
-    string,
-    Array<{ exact: boolean; entry: ModelCatalogEntry }>
-  >();
+  const candidates = new Map<string, ModelCatalogEntry[]>();
   for (const provider of providers) {
     for (const model of Object.values(api[provider]?.models ?? {})) {
       if (typeof model.id !== 'string' || !servesAgentTurns(model)) {
@@ -164,22 +160,18 @@ export function trimModelsDevCatalog(
         continue;
       }
       const key = normalize(model.id);
-      const candidate = { exact: key === model.id.toLowerCase(), entry };
       const existing = candidates.get(key);
       if (existing) {
-        existing.push(candidate);
+        existing.push(entry);
       } else {
-        candidates.set(key, [candidate]);
+        candidates.set(key, [entry]);
       }
     }
   }
   const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
   for (const [key, all] of candidates) {
-    const preferred = all.some((c) => c.exact)
-      ? all.filter((c) => c.exact)
-      : all;
-    const first = preferred[0]!.entry;
-    if (preferred.every((c) => sameEntry(c.entry, first))) {
+    const first = all[0]!;
+    if (all.every((entry) => sameEntry(entry, first))) {
       agreed.push([key, first]);
     }
   }

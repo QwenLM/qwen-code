@@ -8,6 +8,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { AuthType } from '../core/contentGenerator.js';
+import { resolveModelConfig } from './modelConfigResolver.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getCustomModelCatalogCachePath,
@@ -146,6 +148,52 @@ describe('model catalog', () => {
     expect(lookupModelCatalog('custom-model')).toEqual({ output: 2 });
   });
 
+  it('uses real bundled defaults without overriding explicit model settings', () => {
+    const sources = {
+      authType: AuthType.USE_OPENAI,
+      cli: {},
+      settings: {},
+      env: { OPENAI_MODEL: 'qwen-flash' },
+    };
+    expect(resolveModelConfig(sources).config.contextWindowSize).toBe(
+      bundled.models['qwen-flash'].context,
+    );
+    expect(
+      resolveModelConfig({
+        ...sources,
+        settings: {
+          generationConfig: {
+            contextWindowSize: 12345,
+            modalities: { image: false },
+          },
+        },
+      }).config,
+    ).toMatchObject({
+      contextWindowSize: 12345,
+      modalities: { image: false },
+    });
+    process.env['QWEN_CODE_MODELS_DEV'] = 'off';
+    expect(resolveModelConfig(sources).config.contextWindowSize).toBe(262144);
+  });
+
+  it('keeps Sonnet 4.5 at its default API limit even after a refresh', () => {
+    expect(lookupModelCatalog('claude-sonnet-4-5')?.context).toBe(200_000);
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://models.dev/api.json',
+      fetchedAt: FAR_FUTURE,
+      models: {
+        'claude-sonnet-4-5': { context: 1_000_000, output: 64_000 },
+        'claude-sonnet-4-6': { context: 1_000_000 },
+      },
+    });
+    invalidateModelCatalog();
+    expect(lookupModelCatalog('claude-sonnet-4-5')).toEqual({
+      context: 200_000,
+      output: 64_000,
+    });
+    expect(lookupModelCatalog('claude-sonnet-4-6')?.context).toBe(1_000_000);
+  });
+
   it('drops malformed entries while parsing', () => {
     const parsed = parseModelCatalog({
       fetchedAt: FAR_FUTURE,
@@ -154,6 +202,11 @@ describe('model catalog', () => {
         good: { context: 1, modalities: { image: true } },
         bad: { context: 'x' },
         worse: null,
+        negative: { context: -1 },
+        zero: { output: 0 },
+        infinite: { context: Infinity },
+        fractional: { output: 1.5 },
+        invalidModality: { modalities: { image: 'false' } },
       },
     });
     expect(parsed).toEqual({

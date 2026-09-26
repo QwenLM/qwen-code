@@ -83,14 +83,12 @@ const api: ModelsDevApi = {
         'image',
         'video',
       ]),
-      // Normalizes onto `qwen-x`, which exists verbatim, so it loses.
-      'qwen-x-20260101': chat('qwen-x-20260101', { context: 1, output: 1 }),
       'glm-x': chat('glm-x', { context: 202752, output: 16384 }),
       // Both normalize onto `foo`, neither verbatim, and they disagree.
       'foo-v3': chat('foo-v3', { context: 3000 }),
       'foo-v4': chat('foo-v4', { context: 4000 }),
-      // Every field empty once zeroes are dropped.
-      'nothing-known': chat('nothing-known', { context: 0, output: 0 }),
+      // Invalid limits must not become catalog defaults.
+      'nothing-known': chat('nothing-known', { context: -1, output: 0 }),
     },
   },
   alibaba: {
@@ -139,10 +137,26 @@ describe('trimModelsDevCatalog', () => {
     });
   });
 
-  it('prefers the verbatim id over one that normalizes onto it', () => {
-    expect(trimModelsDevCatalog(api, NOW).models['qwen-x']).toEqual(
-      trimmed['qwen-x'],
-    );
+  it('drops conflicts with dated or provider-qualified ids too', () => {
+    const models = trimModelsDevCatalog(
+      {
+        zai: { models: { 'glm-4.6': chat('glm-4.6', { output: 131072 }) } },
+        modelscope: {
+          models: {
+            'ZhipuAI/GLM-4.6': chat('ZhipuAI/GLM-4.6', { output: 98304 }),
+          },
+        },
+        deepseek: {
+          models: {
+            'deepseek-r1': chat('deepseek-r1', { output: 16384 }),
+            'deepseek-r1-0528': chat('deepseek-r1-0528', { output: 32768 }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models).not.toHaveProperty('glm-4.6');
+    expect(models).not.toHaveProperty('deepseek-r1');
   });
 
   it('drops an id whose providers disagree instead of picking one', () => {
