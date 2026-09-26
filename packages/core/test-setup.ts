@@ -20,6 +20,12 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
 // Disable 429 simulation globally for all tests
 setSimulate429(false);
 
+// Model limits and modalities come from the regex tables unless a test opts
+// into the models.dev catalog.
+if (process.env['QWEN_CODE_MODELS_DEV'] === undefined) {
+  process.env['QWEN_CODE_MODELS_DEV'] = 'off';
+}
+
 // Keep managed auto-memory test fixtures under per-test temp project roots.
 if (process.env['QWEN_CODE_MEMORY_LOCAL'] === undefined) {
   process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';

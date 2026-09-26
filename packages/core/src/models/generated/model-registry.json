@@ -1,0 +1,1302 @@
+{
+  "source": "https://models.dev/api.json",
+  "fetchedAt": "2026-09-26T08:57:50.330Z",
+  "models": {
+    "claude-fable-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-fable-5-1": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-haiku-4-5": {
+      "context": 200000,
+      "output": 64000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-4-5": {
+      "context": 200000,
+      "output": 64000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-4-6": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-4-7": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-4-8": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-opus-5-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-sonnet-4-5": {
+      "context": 1000000,
+      "output": 64000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-sonnet-4-6": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "claude-sonnet-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "deep-research-04": {
+      "context": 131072,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "deep-research-max-04": {
+      "context": 131072,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "deepseek-flash": {
+      "context": 1000000,
+      "output": 393216,
+      "modalities": {
+        "image": true
+      }
+    },
+    "deepseek-r1-distill-llama-70b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-r1-distill-llama-8b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-r1-distill-qwen-1-5b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-r1-distill-qwen-14b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-r1-distill-qwen-32b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-r1-distill-qwen-7b": {
+      "context": 32768,
+      "output": 16384
+    },
+    "deepseek-v3": {
+      "context": 163840,
+      "output": 163840
+    },
+    "deepseek-v3-1": {
+      "context": 131072,
+      "output": 65536
+    },
+    "deepseek-v3-2": {
+      "context": 131072,
+      "output": 65536
+    },
+    "deepseek-v3.1-terminus": {
+      "context": 163840,
+      "output": 65536
+    },
+    "deepseek-v4-flash-0731": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "deepseek-v4-flash-ga-260731": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "context": 1000000,
+      "output": 393216,
+      "modalities": {
+        "image": true
+      }
+    },
+    "deepseek-v4-pro-ga-260813": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "deepseek-v4.1-flash": {
+      "context": 1000000,
+      "output": 384000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "doubao-seed-1-6": {
+      "context": 256000,
+      "output": 64000
+    },
+    "doubao-seed-1-6-flash": {
+      "context": 256000,
+      "output": 32000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "doubao-seed-1-6-vision": {
+      "context": 256000,
+      "output": 32000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "doubao-seed-1-8": {
+      "context": 256000,
+      "output": 64000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "doubao-seed-2-0-code": {
+      "context": 262144,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-2-0-lite": {
+      "context": 256000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-2-0-mini": {
+      "context": 256000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-2-0-pro": {
+      "context": 256000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-2-1-pro": {
+      "context": 256000,
+      "output": 256000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-2-1-turbo": {
+      "context": 256000,
+      "output": 256000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-character": {
+      "context": 256000,
+      "output": 256000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "doubao-seed-evolving": {
+      "context": 256000,
+      "output": 256000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "gemini-2.5-computer-use-10": {
+      "context": 128000,
+      "output": 64000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gemini-2.5-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-2.5-flash-lite": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-2.5-pro": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.1-flash-lite": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.1-flash-lite-image": {
+      "context": 65536,
+      "output": 4096,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gemini-3.1-flash-live": {
+      "context": 131072,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.1-pro": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.1-pro-customtools": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.5-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.5-flash-lite": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.6-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.7-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-3.8-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-flash": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemini-flash-lite": {
+      "context": 1048576,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "gemma-4-26b-a4b-it": {
+      "context": 262144,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gemma-4-31b-it": {
+      "context": 262144,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "glm-4.5": {
+      "context": 131072,
+      "output": 98304
+    },
+    "glm-4.5-air": {
+      "context": 131072,
+      "output": 98304
+    },
+    "glm-4.5-flash": {
+      "context": 131072,
+      "output": 98304
+    },
+    "glm-4.5v": {
+      "context": 64000,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "glm-4.6v": {
+      "context": 128000,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "glm-4.6v-flash": {
+      "context": 128000,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "glm-4.7": {
+      "context": 204800,
+      "output": 131072
+    },
+    "glm-4.7-flash": {
+      "context": 200000,
+      "output": 131072
+    },
+    "glm-4.7-flashx": {
+      "context": 200000,
+      "output": 131072
+    },
+    "glm-5-2": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "glm-5-3-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "glm-5-turbo": {
+      "context": 200000,
+      "output": 131072
+    },
+    "glm-5.3": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "glm-5.3-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "glm-5.3-flashx": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "glm-5v-turbo": {
+      "context": 200000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "gpt-4": {
+      "context": 8192,
+      "output": 8192
+    },
+    "gpt-4-turbo": {
+      "context": 128000,
+      "output": 4096,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-4.1": {
+      "context": 1047576,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-4.1-mini": {
+      "context": 1047576,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-4.1-nano": {
+      "context": 1047576,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-4o": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-4o-2024-05-13": {
+      "context": 128000,
+      "output": 4096,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-4o-2024-08-06": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-4o-2024-11-20": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-4o-mini": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5-mini": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5-nano": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5-pro": {
+      "context": 272000,
+      "output": 272000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.1": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.2": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.2-chat": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.2-pro": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.3-chat": {
+      "context": 128000,
+      "output": 16384,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.3-codex": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.3-codex-spark": {
+      "context": 100000,
+      "output": 32000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.4": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.4-mini": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.4-nano": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.4-pro": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "gpt-5.5": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.5-pro": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.6": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.6-luna": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.6-sol": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-5.6-terra": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-6-astra": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-6-luna": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-6-sol": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-realtime": {
+      "context": 96000,
+      "output": 32000,
+      "modalities": {
+        "image": true,
+        "audio": true
+      }
+    },
+    "grok-4.20-0309-non-reasoning": {
+      "context": 1000000,
+      "output": 30000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-4.20-0309-reasoning": {
+      "context": 1000000,
+      "output": 30000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-4.3": {
+      "context": 1000000,
+      "output": 30000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-4.5": {
+      "context": 500000,
+      "output": 500000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-4.6": {
+      "context": 500000,
+      "output": 500000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-4.7": {
+      "context": 500000,
+      "output": 500000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "grok-build": {
+      "context": 256000,
+      "output": 256000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "kimi-k2-thinking": {
+      "context": 262144,
+      "output": 16384
+    },
+    "kimi-k2.7-code": {
+      "context": 262144,
+      "output": 262144,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "kimi-k2.7-code-highspeed": {
+      "context": 262144,
+      "output": 262144,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "minimax-m2": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m2.1": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m2.5": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m2.5-highspeed": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m2.7": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m2.7-highspeed": {
+      "context": 204800,
+      "output": 131072
+    },
+    "minimax-m3": {
+      "context": 1000000,
+      "output": 512000,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "moonshot-kimi-k2-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "o1": {
+      "context": 200000,
+      "output": 100000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "o1-pro": {
+      "context": 200000,
+      "output": 100000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "o3": {
+      "context": 200000,
+      "output": 100000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "o3-mini": {
+      "context": 200000,
+      "output": 100000
+    },
+    "o3-pro": {
+      "context": 200000,
+      "output": 100000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "o4-mini": {
+      "context": 200000,
+      "output": 100000,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qvq-max": {
+      "context": 131072,
+      "output": 8192,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen-deep-research": {
+      "context": 1000000,
+      "output": 32768
+    },
+    "qwen-doc-turbo": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen-flash": {
+      "context": 1000000,
+      "output": 32768
+    },
+    "qwen-long": {
+      "context": 10000000,
+      "output": 8192
+    },
+    "qwen-math-plus": {
+      "context": 4096,
+      "output": 3072
+    },
+    "qwen-math-turbo": {
+      "context": 4096,
+      "output": 3072
+    },
+    "qwen-omni-turbo": {
+      "context": 32768,
+      "output": 2048,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen-omni-turbo-realtime": {
+      "context": 32768,
+      "output": 2048,
+      "modalities": {
+        "image": true,
+        "audio": true
+      }
+    },
+    "qwen-plus": {
+      "context": 1000000,
+      "output": 32768
+    },
+    "qwen-plus-character": {
+      "context": 32768,
+      "output": 4096
+    },
+    "qwen-plus-character-ja": {
+      "context": 8192,
+      "output": 512
+    },
+    "qwen-turbo": {
+      "context": 1000000,
+      "output": 16384
+    },
+    "qwen-vl-max": {
+      "context": 131072,
+      "output": 8192,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen-vl-plus": {
+      "context": 131072,
+      "output": 8192,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen2-5-14b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-32b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-72b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-7b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-coder-32b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-coder-7b-instruct": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen2-5-math-72b-instruct": {
+      "context": 4096,
+      "output": 3072
+    },
+    "qwen2-5-math-7b-instruct": {
+      "context": 4096,
+      "output": 3072
+    },
+    "qwen2-5-omni-7b": {
+      "context": 32768,
+      "output": 2048,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen2-5-vl-72b-instruct": {
+      "context": 131072,
+      "output": 8192,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen2-5-vl-7b-instruct": {
+      "context": 131072,
+      "output": 8192,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen3-14b": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen3-235b-a22b": {
+      "context": 131072,
+      "output": 16384
+    },
+    "qwen3-235b-a22b-instruct": {
+      "context": 262144,
+      "output": 131072
+    },
+    "qwen3-235b-a22b-thinking": {
+      "context": 262144,
+      "output": 131072
+    },
+    "qwen3-30b-a3b-instruct": {
+      "context": 262144,
+      "output": 16384
+    },
+    "qwen3-30b-a3b-thinking": {
+      "context": 262144,
+      "output": 32768
+    },
+    "qwen3-32b": {
+      "context": 131072,
+      "output": 16384
+    },
+    "qwen3-8b": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwen3-coder-30b-a3b-instruct": {
+      "context": 262144,
+      "output": 65536
+    },
+    "qwen3-coder-480b-a35b-instruct": {
+      "context": 262144,
+      "output": 65536
+    },
+    "qwen3-coder-flash": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "qwen3-coder-plus": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "qwen3-max": {
+      "context": 262144,
+      "output": 65536
+    },
+    "qwen3-next-80b-a3b-instruct": {
+      "context": 131072,
+      "output": 32768
+    },
+    "qwen3-next-80b-a3b-thinking": {
+      "context": 131072,
+      "output": 32768
+    },
+    "qwen3-omni-flash": {
+      "context": 65536,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3-vl-235b-a22b": {
+      "context": 131072,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen3-vl-30b-a3b": {
+      "context": 131072,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen3-vl-plus": {
+      "context": 262144,
+      "output": 32768,
+      "modalities": {
+        "image": true
+      }
+    },
+    "qwen3.5-122b-a10b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.5-27b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.5-35b-a3b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.5-flash": {
+      "context": 1000000,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.5-plus": {
+      "context": 1000000,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.6-27b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.6-35b-a3b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.6-flash": {
+      "context": 1000000,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.6-plus": {
+      "context": 1000000,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.7-flash": {
+      "context": 991000,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.8-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.8-max": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "pdf": true,
+        "video": true
+      }
+    },
+    "qwq-32b": {
+      "context": 131072,
+      "output": 8192
+    },
+    "qwq-plus": {
+      "context": 131072,
+      "output": 8192
+    }
+  }
+}
