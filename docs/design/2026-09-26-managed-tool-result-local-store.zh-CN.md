@@ -12,7 +12,7 @@ O1b 增加归 Session 所有的私有本地分段存储。它不挂载 Tool v3 �
 
 `ToolResultSegmentStore` 提供异步 `publish`、`seal`、`prefix`、`readRange` 和 `close`。前三项沿用 O1a 的请求校验、回执及 `invalid`、`conflict`、`digest_mismatch` 结果。内存账本保留为行为参照；本地适配器不在内存保存整次捕获。
 
-`publish` 在排队前复制一个调用方分段。单段为 1–16 MiB；生产者在复用 Buffer 前等待回执。`seal` 仅接受准确齐全的序号和匹配的总长度、摘要。`prefix` 覆盖从序号零起最长的已校验连续区间。这三项在 writable handle 上串行执行。`close` 拒绝新操作并等待已接收操作完成。调用方在释放 `SessionWriterLease` 或删除 Session 前关闭存储；O1c 接入此生命周期。存储要求传入现有 lease，校验其 Session 与 runtime 根目录，绝不再次获取 lease。
+`publish` 在排队前复制一个调用方分段。单段为 1–16 MiB；生产者在复用 Buffer 前等待回执。`seal` 仅接受准确齐全的序号和匹配的总长度、摘要。`prefix` 覆盖从序号零起最长的已校验连续区间。这三项在 writable handle 上串行执行。只读前缀查询若与发布或封存竞争，会重试一次；持续不匹配仍视为错误。`close` 拒绝新操作并等待已接收操作完成。调用方在释放 `SessionWriterLease` 或删除 Session 前关闭存储；O1c 接入此生命周期。存储要求传入现有 lease，校验其 Session 与 runtime 根目录，绝不再次获取 lease。
 
 `readRange` 接收 `manifestRef`、调用方预期的完整执行身份、`streamId`、offset 和 length。读取固定在该不可变 manifest 版本，返回精确的 Buffer，拒绝超出该版本描述符边界的请求。单次读取上限为 16 MiB。空读取仅在合法边界内允许。返回前校验完整 manifest 身份、page 位置、分段身份、长度及摘要。对 `body.pages` 校验相关分段；对 `body.ref` 流式读取并校验整份资源，只保留请求范围。I/O 故障保持为失败，不能伪装成空结果。
 

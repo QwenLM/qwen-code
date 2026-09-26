@@ -15,12 +15,24 @@ import { LocalToolResultSegmentStore } from './local-managed-tool-result-store.j
 const fault = vi.hoisted(() => ({
   mode: '' as '' | 'write' | 'sync',
   target: '',
+  missingOnce: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      if (fault.missingOnce && String(args[0]) === fault.target) {
+        const beforeMissing = fault.missingOnce;
+        fault.missingOnce = undefined;
+        await beforeMissing();
+        throw Object.assign(new Error('stale missing segment'), {
+          code: 'ENOENT',
+        });
+      }
+      return actual.lstat(...args);
+    },
     open: async (...args: Parameters<typeof actual.open>) => {
       const [file, flags] = args;
       if (
@@ -80,11 +92,12 @@ async function harness() {
     sessionKey: key,
   });
   opened.push({ root, store, lease });
-  return { store };
+  return { store, runtimeBaseDir };
 }
 
 afterEach(async () => {
   fault.mode = '';
+  fault.missingOnce = undefined;
   for (const { root, store, lease } of opened) {
     await store.close();
     await lease.release();
@@ -94,6 +107,63 @@ afterEach(async () => {
 });
 
 describe('local tool-result disk faults', () => {
+  it('rechecks a sealed prefix after a concurrent reader saw a stale gap', async () => {
+    const { store, runtimeBaseDir } = await harness();
+    const bytes = Buffer.from('first');
+    const later = Buffer.from('later');
+    const request = { captureId: 'capture', streamId: 'stdout' };
+    expect(
+      (await store.publish({ ...request, ordinal: 0, bytes })).status,
+    ).toBe('ok');
+    const reader = await LocalToolResultSegmentStore.openReadOnly({
+      runtimeBaseDir,
+      sessionKey: key,
+    });
+    fault.target = path.join(
+      store.root,
+      'capture-capture',
+      'stream-stdout',
+      'segment-00001',
+    );
+    fault.missingOnce = async () => {
+      expect(
+        (await store.publish({ ...request, ordinal: 1, bytes: later })).status,
+      ).toBe('ok');
+      expect(
+        (
+          await store.seal({
+            ...request,
+            segmentCount: 2,
+            byteLength: bytes.byteLength + later.byteLength,
+            digest: createHash('sha256')
+              .update(bytes)
+              .update(later)
+              .digest('hex'),
+          })
+        ).status,
+      ).toBe('ok');
+    };
+    expect(await reader.prefix(request)).toMatchObject({
+      status: 'ok',
+      result: { segmentCount: 2, sealed: true },
+    });
+    await fs.writeFile(
+      path.join(
+        store.root,
+        'capture-capture',
+        'stream-stdout',
+        'segment-00000',
+        'bytes',
+      ),
+      'wrong',
+    );
+    expect(await reader.prefix(request)).toEqual({
+      status: 'refused',
+      code: 'managed_tool_result_digest_mismatch',
+    });
+    await reader.close();
+  });
+
   it('retries syncing a parent after its child directory already exists', async () => {
     const { store } = await harness();
     const request = {

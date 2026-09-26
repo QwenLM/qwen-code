@@ -1007,66 +1007,73 @@ export class LocalToolResultSegmentStore implements ToolResultSegmentStore {
       return Promise.reject(error);
     }
     const operation = async () => {
-      try {
-        const stream = await this.existingStream(
-          fields.captureId,
-          fields.streamId,
-        );
-        if (!stream) {
-          return ok({
-            segmentCount: 0,
-            byteLength: 0,
-            digest: EMPTY_DIGEST,
-            sealed: false,
-          });
-        }
-        const hash = createHash('sha256');
-        let segmentCount = 0;
-        let byteLength = 0;
-        while (segmentCount <= MANAGED_TOOL_RESULT_LIMITS.maxOrdinal) {
-          const receipt = await this.readSegment(
+      let retried = false;
+      while (true) {
+        try {
+          const stream = await this.existingStream(
+            fields.captureId,
+            fields.streamId,
+          );
+          if (!stream) {
+            return ok({
+              segmentCount: 0,
+              byteLength: 0,
+              digest: EMPTY_DIGEST,
+              sealed: false,
+            });
+          }
+          const hash = createHash('sha256');
+          let segmentCount = 0;
+          let byteLength = 0;
+          while (segmentCount <= MANAGED_TOOL_RESULT_LIMITS.maxOrdinal) {
+            const receipt = await this.readSegment(
+              stream,
+              segmentCount,
+              (chunk) => hash.update(chunk),
+              !!this.lease,
+            );
+            if (!receipt) break;
+            segmentCount++;
+            byteLength += receipt.byteLength;
+          }
+          const digest = hash.digest('hex');
+          const seal = await this.readSeal(
             stream,
-            segmentCount,
-            (chunk) => hash.update(chunk),
-            !!this.lease,
+            fields.captureId,
+            fields.streamId,
           );
-          if (!receipt) break;
-          segmentCount++;
-          byteLength += receipt.byteLength;
-        }
-        const digest = hash.digest('hex');
-        const seal = await this.readSeal(
-          stream,
-          fields.captureId,
-          fields.streamId,
-        );
-        if (
-          seal &&
-          (seal.segmentCount !== segmentCount ||
-            seal.byteLength !== byteLength ||
-            seal.digest !== digest)
-        ) {
-          throw new CorruptToolResultError(
-            'sealed tool-result stream changed.',
-          );
-        }
-        if (this.lease && (segmentCount > 0 || seal)) {
-          await syncDirectory(stream);
-          await this.ensureStreamAnchor(fields.captureId, fields.streamId);
-          if (seal) {
-            await this.ensureSealAnchor(
-              fields.captureId,
-              fields.streamId,
-              seal,
+          if (
+            seal &&
+            (seal.segmentCount !== segmentCount ||
+              seal.byteLength !== byteLength ||
+              seal.digest !== digest)
+          ) {
+            throw new CorruptToolResultError(
+              'sealed tool-result stream changed.',
             );
           }
+          if (this.lease && (segmentCount > 0 || seal)) {
+            await syncDirectory(stream);
+            await this.ensureStreamAnchor(fields.captureId, fields.streamId);
+            if (seal) {
+              await this.ensureSealAnchor(
+                fields.captureId,
+                fields.streamId,
+                seal,
+              );
+            }
+          }
+          return ok({ segmentCount, byteLength, digest, sealed: !!seal });
+        } catch (error) {
+          if (error instanceof CorruptToolResultError) {
+            if (!this.lease && !retried) {
+              retried = true;
+              continue;
+            }
+            return refused('managed_tool_result_digest_mismatch');
+          }
+          throw error;
         }
-        return ok({ segmentCount, byteLength, digest, sealed: !!seal });
-      } catch (error) {
-        if (error instanceof CorruptToolResultError) {
-          return refused('managed_tool_result_digest_mismatch');
-        }
-        throw error;
       }
     };
     return this.enqueue(operation);
