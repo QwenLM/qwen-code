@@ -357,8 +357,15 @@ describe('OpenTuiSessionPicker', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(listSessions).toHaveBeenNthCalledWith(1, { size: 20 });
-    expect(listSessions).toHaveBeenNthCalledWith(2, { size: 20, cursor: 3 });
+    expect(listSessions).toHaveBeenNthCalledWith(1, {
+      size: 20,
+      excludeSourceType: 'agent-host',
+    });
+    expect(listSessions).toHaveBeenNthCalledWith(2, {
+      size: 20,
+      cursor: 3,
+      excludeSourceType: 'agent-host',
+    });
     expect(titles()).toHaveLength(5);
   });
 

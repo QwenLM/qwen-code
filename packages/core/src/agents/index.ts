@@ -29,4 +29,32 @@ export {
   sanitizeFilenameComponent,
 } from './agent-transcript.js';
 export type { AgentTrace, AgentTraceNode } from './agent-transcript.js';
+export {
+  claimAgentHostSession,
+  readThread,
+  releaseAgentHostSession,
+} from './workspace-agents/store.js';
+export { consumeAgentInput } from './workspace-agents/run-lifecycle.js';
+export { resolveAgentPersona } from './workspace-agents/persona.js';
+export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
+export { strandLocalRuns } from './workspace-agents/stranded-runs.js';
+export type { AgentRunContext } from './workspace-agents/run-context.js';
+export {
+  requireAgentRunContext,
+  runWithAgentRunContext,
+} from './workspace-agents/run-context.js';
+export type {
+  DispatchRecord,
+  // The port contract the daemon implements. Exported because the
+  // implementation lives in the cli package, which can only see this barrel.
+  AgentBodyState,
+  AgentDispatchPort,
+  AgentStartResult,
+} from './workspace-agents/dispatcher.js';
+export type {
+  WorkspaceAgent,
+  Thread,
+  ThreadRun,
+  ThreadPriority,
+} from './workspace-agents/types.js';
 export * from './tasks/types.js';

@@ -36,6 +36,7 @@ import {
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -725,6 +726,7 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
     });
     signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
@@ -1089,6 +1091,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
+    if (session.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE) return false;
     if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
@@ -1290,6 +1293,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const matches = [...bySessionId.values()]
     .filter(
       (session) =>
+        session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
         matchesSessionMetadataSource(session, filter),
@@ -1457,6 +1461,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
+    excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
   readOptions.signal?.throwIfAborted();
@@ -1487,7 +1492,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return { sessions, nextCursor };
   }
 
-  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  const liveSessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .filter((session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE);
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
@@ -1554,6 +1561,9 @@ export async function listLiveWorkspaceSessionsForResponse(
         : undefined;
     const sessions = bridge
       .listWorkspaceSessions(workspaceCwd)
+      .filter(
+        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+      )
       .sort((a, b) =>
         compareLiveSessionCursorKeys(
           getLiveSessionCursorKey(a),
@@ -1634,7 +1644,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item)
+      if (item && item.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE)
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
@@ -1677,14 +1687,23 @@ export async function getWorkspaceSessionInfoForResponse(
   workspaceCwd: string,
   options: { includeLive?: boolean } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
+    excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+  });
   return {
     active: counts.active,
     archived: counts.archived,
     total: counts.total,
     ...(options.includeLive === false
       ? {}
-      : { live: bridge.listWorkspaceSessions(workspaceCwd).length }),
+      : {
+          live: bridge
+            .listWorkspaceSessions(workspaceCwd)
+            .filter(
+              (session) =>
+                session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+            ).length,
+        }),
     expensive: true,
     cost: 'disk_scan',
     ...(counts.truncated ? { truncated: true } : {}),
