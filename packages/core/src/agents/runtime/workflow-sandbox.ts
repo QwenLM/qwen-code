@@ -28,17 +28,40 @@ export function stripExportMeta(source: string): string {
 }
 
 /**
- * Locate the `export const meta = {...}` declaration's bounds in the source.
+ * Walk past leading whitespace and comments in `source` starting at
+ * `from`, and return the resulting offset. Used by `findMetaBlockBounds`
+ * to position the meta anchor.
  *
- * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
- * start (no `/m` flag — see T33 comment below); walks the brace block while
- * skipping over comment / regex / string contexts; throws on unbalanced
- * braces rather than returning a truncated string (T9/T17 — silently
- * deleting the script body is the worst-case failure mode).
- *
- * Returns null when no meta declaration is present at the file start —
- * callers treat this as "no meta", not an error.
+ * Why a walk, not a regex: a single-pass regex that skips leading
+ * whitespace, line and block comments in one expression either lets the
+ * inner quantifiers compete over trailing whitespace (K+1^N backtrack
+ * paths on K-space × N-comment input — a ReDoS vector), or silently
+ * extends a leading block comment past the comment terminator that lives
+ * inside a template literal (the T33-class false match). A walk consumes
+ * characters only from where it stands, so neither hazard is reachable.
  */
+const LINE_TERMINATORS = new Set(['\n', '\r', '\u2028', '\u2029']);
+const isLineTerminator = (ch: string) => LINE_TERMINATORS.has(ch);
+
+function skipTrivia(source: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < source.length && /\s/.test(source[i]!)) i++;
+    if (source.startsWith('//', i)) {
+      i += 2;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end === -1) return source.length; // unterminated — let the anchor check fail
+      i = end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
 function findMetaBlockBounds(source: string): {
   /** Start offset of the `export const meta` match. */
   exportIdx: number;
@@ -49,25 +72,40 @@ function findMetaBlockBounds(source: string): {
   /** Offset past meta + any trailing whitespace + optional `;`. */
   afterMeta: number;
 } | null {
-  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's FIRST statement.
-  // With `/m`, the regex matched every line-start occurrence — including
-  // inside template literals — and the brace-walker then ripped content
-  // out of the string body, silently corrupting the script.
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
-  const match = re.exec(source);
-  if (!match) return null;
-  const exportIdx = match.index;
-  const startBrace = source.indexOf('{', exportIdx);
+  // T33 (PR #4732 R4): the meta declaration must be the first
+  // non-trivia token of the script. Walk past leading whitespace and
+  // comments rather than regex-matching the whole shape — see `skipTrivia`
+  // for the rationale. Once we are at the first non-trivia character,
+  // the anchor matches `export const meta = {` with whitespace tolerance
+  // (any number of spaces/tabs/newlines between the tokens), so:
+  //  - A `{` inside a leading comment cannot be confused with the meta
+  //    `{` (the brace-walker starts at the `=` after `meta`, not at index 0,
+  //    so it never scans characters before `exportIdx`).
+  //  - A template literal inside a leading block comment cannot
+  //    contribute to a false match: the walk consumes the comment
+  //    wholesale, including any `export const meta = {...}` it
+  //    contains, then continues.
+  const exportIdx = skipTrivia(source, 0);
+  // Match the meta anchor at the trivia offset. The walk already skipped
+  // leading whitespace and comments, so this is anchored at a single
+  // position and cannot extend through a `*/` inside a template
+  // literal. Whitespace between `export`/`const`/`meta`/`=`/`{` is
+  // tolerated to match the spellings Claude Code accepts.
+  const anchor = /^export\s+const\s+meta\s*=\s*\{/.exec(
+    source.slice(exportIdx),
+  );
+  if (!anchor) return null;
+  const startBrace = exportIdx + anchor[0].length - 1;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
     const ch = source[i];
     const next = source[i + 1];
-    // Single-line comment: skip to newline (T16).
+    // Single-line comment: skip to end-of-line (all four ECMAScript
+    // LineTerminators — T16 plus CR, LS, PS).
     if (ch === '/' && next === '/') {
       i += 2;
-      while (i < source.length && source[i] !== '\n') i++;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
       continue;
     }
     // Block comment: skip to closing `*/` (T16).
@@ -87,7 +125,7 @@ function findMetaBlockBounds(source: string): {
       while (
         i < source.length &&
         (inClass || source[i] !== '/') &&
-        source[i] !== '\n'
+        !isLineTerminator(source[i]!)
       ) {
         if (source[i] === '\\') i += 2;
         else if (source[i] === '[') {

@@ -142,6 +142,39 @@ return x;`;
     const src = `\n\n  export const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
     expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
   });
+
+  // Reported in PR #12245 review: the anchor must tolerate every
+  // whitespace spelling Claude Code accepts (`export  const`,
+  // `export const meta=`, tabs and newlines around `=`).
+  it.each([
+    [
+      'single space',
+      `export const meta = { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'double space after export',
+      `export  const meta = { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'double space after equals',
+      `export const meta =  { name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'no space around equals',
+      `export const meta={ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'tab before brace',
+      `export const meta =\t{ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+    [
+      'newline before brace',
+      `export const meta =\n{ name: 'x', description: 'd' }\nreturn 1;`,
+    ],
+  ])('accepts the anchor spelling: %s', (_label, src) => {
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'x', description: 'd' });
+  });
 });
 
 describe('extractAndStripMeta', () => {
@@ -2941,6 +2974,103 @@ describe('createWorkflowSandbox primitives', () => {
 
   // ── Compilation ──────────────────────────────────────────────────────
   describe('compileWorkflowScript', () => {
+    // Issue #12217: model-authored scripts commonly start with a header
+    // comment that the user did not strip by hand. The regex must allow
+    // leading line and block comments without re-introducing the T33 risk
+    // (no `/m`, no inner-of-template-literal false match). Exercised through
+    // `compileWorkflowScript` — the production entry — so a regression
+    // surfaces as a V8 syntax error, not just a wrong string.
+    describe('#12217 leading comments', () => {
+      it('compiles a workflow whose meta is preceded by a single-line comment', () => {
+        const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('compiles a workflow whose meta is preceded by a block comment', () => {
+        const src = `/* note */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('compiles a workflow whose meta is preceded by mixed comments', () => {
+        const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+
+      it('does not match meta inside a template literal even with a leading comment (#12217 × T33)', () => {
+        const src = `// header\nconst banner = \`\nexport const meta = { name: 'fake' }\n\`;\nreturn banner;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toBeNull();
+      });
+
+      it('does not false-match a brace inside a leading line comment', () => {
+        const src = `// { what: 'fake' }\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'real', description: 'real' });
+      });
+
+      it('does not false-match a meta-looking line inside a leading block comment (#12217 × T33)', () => {
+        const src = `/* header with export const meta = { name: 'fake' } inside */\nexport const meta = { name: 'real', description: 'real' }\nreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'real', description: 'real' });
+      });
+
+      // R1-1: all four ECMAScript LineTerminators in leading comment
+      it.each([
+        [
+          'CR only',
+          `// header\rexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+        ],
+        [
+          'LF only',
+          `// header\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+        ],
+        [
+          'CR+LF',
+          `// header\r\nexport const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+        ],
+        [
+          'LS only',
+          `// header\u2028export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+        ],
+        [
+          'PS only',
+          `// header\u2029export const meta = { name: 'real', description: 'd' }\nreturn 1;`,
+        ],
+      ])(
+        'handles all four ECMAScript line terminators in leading comment (%s)',
+        (_case, src) => {
+          const { meta } = compileWorkflowScript(src);
+          expect(meta).toEqual({ name: 'real', description: 'd' });
+        },
+      );
+
+      // #12651 R1-2: with skipTrivia the meta anchor sits past the leading
+      // comment, so the stripped source must retain the comment verbatim —
+      // the same `slice(0, exportIdx)` term compileWorkflowScript builds
+      // its compilable copy from. Under the old ^-anchored regex that term
+      // was provably '' and the comment disappeared from the compiled
+      // program while all assertions on `meta` stayed green.
+      it('keeps the leading comment in the stripped script (#12651)', () => {
+        const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+        const { stripped, meta } = extractAndStripMeta(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+        expect(stripped.startsWith('// note\n')).toBe(true);
+        expect(stripped.endsWith('\nreturn 1;')).toBe(true);
+      });
+
+      // #12651 R1-3: the brace-walker's `//` skip must also end at any
+      // LineTerminator — a CR-only note inside the meta block used to scan
+      // for \n to end-of-source and hit the unbalanced-brace throw.
+      it('parses a meta block whose body lines and inner comment are CR-separated (#12651)', () => {
+        const src = `export const meta = {\r // note\r name: 'x',\r description: 'd'\r}\rreturn 1;`;
+        const { meta } = compileWorkflowScript(src);
+        expect(meta).toEqual({ name: 'x', description: 'd' });
+      });
+    });
+
     it('compiles a body and hands back its meta', () => {
       const { script, meta } = compileWorkflowScript(
         "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
