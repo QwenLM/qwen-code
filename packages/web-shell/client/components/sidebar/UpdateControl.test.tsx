@@ -57,6 +57,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanupReact();
   vi.useRealTimers();
+  window.history.replaceState(null, '', '/');
 });
 
 describe('UpdateControl', () => {
@@ -148,6 +149,25 @@ describe('UpdateControl', () => {
     });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(onRestarted).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns to the click-time task URL after navigation during restart', async () => {
+    const taskUrl = `${window.location.origin}/session/task-1?workspace=other#turn-2`;
+    window.history.replaceState(null, '', taskUrl);
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    window.history.replaceState(null, '', '/');
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.6',
+      canInstall: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onRestarted).toHaveBeenCalledExactlyOnceWith(taskUrl);
   });
 
   it('reports an explicit restart failure and allows retry', async () => {

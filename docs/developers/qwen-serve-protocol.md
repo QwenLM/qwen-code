@@ -741,7 +741,10 @@ launcher; clients cannot supply a version or command.
   with the updated launcher. Repeated clicks share one restart. The replacement
   preserves PID, working directory, CLI options, bound port, and effective daemon
   token, clears old version pins, and does not reopen a browser. The client polls
-  GET until `currentVersion` changes, then reloads its current page.
+  GET until `currentVersion` changes, then reloads the document at the URL
+  captured when the update was requested. Standalone launcher validation runs before closing
+  services; a failed check leaves the daemon running. Failures after shutdown
+  begins or during process replacement are not guaranteed to recover.
 
 Web Shell automatically checks and prepares available supported updates in the
 background, and displays its version-adjacent update button only when ready.

@@ -335,6 +335,26 @@ describe('daemon update routes', () => {
     await ready(app);
   });
 
+  it('keeps update recovery available when restart cleanup runs before a failed drain', async () => {
+    const app = await makeApp();
+    mocks.restart.mockImplementationOnce(async () => {
+      await (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)();
+      throw new Error('Drain failed');
+    });
+    await ready(app);
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(async () =>
+      expect((await request(app).get('/daemon/update')).body).toMatchObject({
+        state: 'error',
+        message: 'Drain failed',
+      }),
+    );
+    await request(app).get('/daemon/update?refresh=true');
+    await ready(app);
+    await request(app).post('/daemon/update/restart').send({}).expect(202);
+    await vi.waitFor(() => expect(mocks.restart).toHaveBeenCalledTimes(2));
+  });
+
   it('discards readiness if the operator disables automatic updates', async () => {
     const app = await makeApp();
     await ready(app);

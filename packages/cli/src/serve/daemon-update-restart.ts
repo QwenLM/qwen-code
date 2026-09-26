@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { access } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { access, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
 import { isAbsolute } from 'node:path';
+import { promisify } from 'node:util';
+import semver from 'semver';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import { normalizeServeFastPathArgv } from '../utils/serve-fast-path-argv.js';
 
@@ -71,6 +74,20 @@ export function createDaemonUpdateRestarter(options: {
       throw new Error('Update launcher must be absolute');
     const npmLauncher = launcher.endsWith('.js');
     await access(launcher, npmLauncher ? constants.R_OK : constants.X_OK);
+    if (!npmLauncher) {
+      // execFile may fall back to a shell for scripts execve would reject.
+      const [header] = (await readFile(launcher, 'utf8')).split('\n', 1);
+      if (header !== '#!/usr/bin/env sh') {
+        throw new Error('Unsupported standalone update launcher');
+      }
+      const { stdout } = await promisify(execFile)(launcher, ['--version'], {
+        env,
+        timeout: 10_000,
+      });
+      if (!semver.valid(stdout.trim())) {
+        throw new Error('Updated launcher did not report a valid version');
+      }
+    }
     const cliArgs = [...args, '--port', String(options.getPort())];
     await options.close();
     if (npmLauncher) {

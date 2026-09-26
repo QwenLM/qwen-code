@@ -40,7 +40,7 @@ test('downloads silently, shows a version-adjacent button and restarts in place 
   await page.addInitScript(() => {
     localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
   });
-  const url = `/session/${scenario.sessionId}?language=zh-CN`;
+  const url = `/session/${scenario.sessionId}?language=zh-CN#turn-2`;
   await page.goto(url);
   const entry = page.locator('[data-web-shell-update]');
   await expect.poll(() => preparations).toBe(1);
@@ -112,6 +112,85 @@ test('older daemons do not expose update controls @smoke', async ({
   ).toBeVisible();
   await expect(page.locator('[data-web-shell-update]')).toHaveCount(0);
   expect(requests).toBe(0);
+});
+
+test('returns to the original task after a restart-time session 404 @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('daemon_update');
+  scenario.capabilities.qwenCodeVersion = '0.24.4';
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  // Install before the SDK captures fetch; the mock SSE transport otherwise
+  // answers every connection with 200, including while the daemon restarts.
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const request = new Request(input, init);
+      if (
+        sessionStorage.getItem('restart-session-unavailable') === 'true' &&
+        /^\/session\/[^/]+\/events$/.test(new URL(request.url).pathname)
+      ) {
+        sessionStorage.setItem('restart-session-404-observed', 'true');
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'Session not found' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }
+      return originalFetch(input, init);
+    };
+  });
+  let status: DaemonUpdateStatus = {
+    state: 'ready',
+    currentVersion: '0.24.4',
+    latestVersion: '0.24.6',
+    canInstall: false,
+  };
+  let restarts = 0;
+  await page.route('**/daemon/update**', async (route) => {
+    if (route.request().method() === 'POST') {
+      restarts++;
+      status = { ...status, state: 'restarting' };
+    }
+    await route.fulfill({
+      status: route.request().method() === 'POST' ? 202 : 200,
+      json: status,
+    });
+  });
+  await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  const originalUrl = page.url();
+  const entry = page.locator('[data-web-shell-update]');
+  await expect(entry).toHaveAccessibleName('Update');
+  await entry.click();
+  await expect(entry).toHaveAccessibleName('Restarting…');
+  expect(restarts).toBe(1);
+
+  await page.evaluate(() => {
+    sessionStorage.setItem('restart-session-unavailable', 'true');
+  });
+  await daemon.sse.error('Daemon restarting');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        sessionStorage.getItem('restart-session-404-observed'),
+      ),
+    )
+    .toBe('true');
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(entry).toBeDisabled();
+  await page.evaluate(() =>
+    sessionStorage.removeItem('restart-session-unavailable'),
+  );
+  status = { state: 'up-to-date', currentVersion: '0.24.6', canInstall: false };
+  await page.waitForEvent('load');
+  await expect(page).toHaveURL(originalUrl);
+  await expect(entry).toHaveCount(0);
+  expect(restarts).toBe(1);
 });
 
 test('nightly versions leave the update button visible in a narrow sidebar', async ({

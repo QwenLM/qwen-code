@@ -7,7 +7,7 @@
 Web Shell shows the running version but cannot prepare or apply updates. Check
 and download in the background; only show a small **Update** button beside the
 lower-left version when the payload is ready. Clicking applies the update,
-restarts the connected daemon, and reloads the current browser URL after recovery.
+restarts the connected daemon, and returns to the URL open when clicked.
 
 This updates the connected daemon's installation, including remote daemons. It
 does not update an embedded host. Restart ends running work through the daemon's
@@ -28,6 +28,11 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   replace the process with `process.execve`. Preserve PID, startup directory,
   bound primary port, authentication token, and CLI arguments; discard managed
   version pins and browser-opening flags so the new launcher selects the update.
+  Before closing services, require the standalone launcher's official shell
+  header and run its `--version` with the restart environment, a 10-second timeout,
+  and a valid semver result. A failed check leaves the current daemon serving.
+  This checks the actual interpreter/runtime chain; it cannot guarantee recovery
+  if files change after checking or if process replacement or serve startup fails.
 - Restrict preparation/restart to primary connections using the daemon token
   or trusted tokenless loopback, actual CLI entry points with a restart callback, POSIX platforms with `process.execve`, supported
   standalone/global managed npm installs, and operator settings permitting
@@ -49,8 +54,12 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   when ready. Use the shared button, semantic colors, and English/Chinese labels.
 - Keep checks/downloads quiet. Explicit restart failures use the existing error
   notification. During restart, disable the button and tolerate connection loss;
-  after the running version changes, reload the same URL. If recovery has not
-  completed, show an error on the first completed poll after 60 seconds.
+  capture the full URL when clicked and, after the running version changes,
+  restore that URL in the current history entry and reload the document,
+  including when the URL has an unchanged fragment. Session requests may return 404 and
+  navigate the shell home during restart; that must not change the return target.
+  If recovery has not completed, show an error on the first completed poll after
+  60 seconds.
   Unmounting cancels browser polling, not daemon work.
 - Hide the control for older daemons and the desktop shell. Custom footer items
   can omit `update`; this also disables the browser's preparation requests.
@@ -59,10 +68,11 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
 
 The routes, release check, installer, staged payload, and restart belong to the
 **daemon process**, not a selected workspace or session owner. Detection uses the
-startup directory and operator settings. The primary listener/token restriction
-avoids breaking ephemeral device-pairing credentials on restart; paired
-connections do not offer updates. SDK and Web Shell are the consumers; neither
-can redirect the operation into a workspace runtime.
+startup directory and operator settings. Only primary connections with
+credentials that survive restart (or trusted tokenless loopback) offer updates.
+Restarting still invalidates other devices' ephemeral pairings; those devices
+must pair again. SDK and Web Shell are the consumers; neither can redirect the
+operation into a workspace runtime.
 
 Changes cover CLI serve routes/lifecycle/entry points and installer staging
 helpers, SDK daemon types/client exports, Web Shell sidebar/translations, and
@@ -77,11 +87,16 @@ not change the active install, cached payload activation works, and cleanup and
 existing direct update behavior hold. Test authorization, primary-listener scope,
 settings/platform/embedding restrictions, duplicate operations, failure recovery,
 response-before-restart ordering, and preserved restart arguments/environment.
+Exercise an unusable launcher in a disposable process with real `execve`, and
+verify that the startup check rejects before closing a working listener. Pin
+cleanup during a failed restart so a refreshed check can prepare another update.
 
 Test hidden/up-to-date/downloading/ready/restarting/error states, explicit-only
 activation, disconnection/recovery, timeout, collapsed controls, narrow layouts,
 and bilingual labels. Build, typecheck, bundle, run focused package tests, and
 verify the packaged daemon plus browser flow. Record limitations separately.
+The browser regression must drive a restart-time session 404, observe the shell's
+own navigation, then verify recovery restores the original task URL.
 
 Acceptance: no update control appears until preparation completes; the version
 and update button sit together without overlapping footer actions; clicking once

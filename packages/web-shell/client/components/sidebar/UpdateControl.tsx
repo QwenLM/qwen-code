@@ -12,10 +12,11 @@ interface UpdateControlProps {
   collapsed: boolean;
   currentVersion: string;
   onError: (error: unknown, fallback: string) => void;
-  onRestarted?: () => void;
+  onRestarted?: (url: string) => void;
 }
 
-function reloadPage() {
+function reloadPage(url: string) {
+  window.history.replaceState(window.history.state, '', url);
   window.location.reload();
 }
 
@@ -31,6 +32,7 @@ export function UpdateControl({
   const [restarting, setRestarting] = useState<{
     startedAt: number;
     version: string;
+    url: string;
   } | null>(null);
   const restartRequested = useRef(false);
   const clientGeneration = useRef(0);
@@ -60,7 +62,7 @@ export function UpdateControl({
             next.currentVersion &&
             next.currentVersion !== restarting.version
           ) {
-            callbacks.current.onRestarted();
+            callbacks.current.onRestarted(restarting.url);
             return;
           }
           if (next.state === 'error') {
@@ -107,6 +109,7 @@ export function UpdateControl({
     setRestarting({
       startedAt: Date.now(),
       version: status?.currentVersion || currentVersion,
+      url: window.location.href,
     });
     try {
       await client.restartDaemonForUpdate();
