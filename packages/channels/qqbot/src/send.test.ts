@@ -532,13 +532,17 @@ describe('purgeSingleScopeOrphans', () => {
           sessionId: 'normal-1',
           target: { channelName: 'test-bot' },
         },
-        // This channel's user-scope three-part key under thread scope:
-        // purged — under thread scope the routing key is `channel:chatId`,
-        // so a 3-part key can never resolve again (R8-1).
+        // This channel's user-scope key under thread scope: purged — under
+        // thread scope the routing key is `channel:chatId`, so a user-scope
+        // key can never resolve again (R8-1).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
-          target: { channelName: 'test-bot' },
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
         },
         // Sibling channel's live user-scope route: the owned-by-name guard
         // (entry.target?.channelName === this.name) must NOT purge it — a
@@ -547,7 +551,11 @@ describe('purgeSingleScopeOrphans', () => {
         {
           key: 'other-bot:user-9:chat-9',
           sessionId: 'sibling-3part',
-          target: { channelName: 'other-bot' },
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
         },
       ],
       removeSessionId,
@@ -606,25 +614,25 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
-  it("purges this channel's unroutable 3-part legacy keys under thread scope (R8-1), sparing a sibling channel", () => {
+  it("purges this channel's unroutable user-scope legacy keys under thread scope (R8-1), sparing a sibling channel", () => {
     const removeSessionId = vi.fn(() => true);
     const discardSession = vi.fn().mockResolvedValue(undefined);
     const router = {
       getAll: () => [
-        // User-scope three-part key of THIS channel under thread scope:
-        // purged — under thread scope the routing key is `channel:chatId`,
-        // so the key can never resolve again and only inflates the persisted
-        // file (and loadSession's 32-session cap) forever.
+        // User-scope key of THIS channel under thread scope: purged — under
+        // thread scope the routing key is `channel:chatId`, so the key can
+        // never resolve again and only inflates the persisted file (and
+        // loadSession's 32-session cap) forever.
         {
           key: 'test-bot:u1:c1',
           sessionId: 'user-scope-1',
-          target: { channelName: 'test-bot' },
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
         },
         // Live thread-scope two-part key: never purged.
         {
           key: 'test-bot:g1',
           sessionId: 'thread-scope-1',
-          target: { channelName: 'test-bot' },
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
         },
         // Legacy single-scope orphan.
         {
@@ -633,12 +641,16 @@ describe('purgeSingleScopeOrphans', () => {
           target: { channelName: 'test-bot' },
         },
         // Sibling channel's live user-scope route: owned-by-name guard must
-        // keep it — the three-part split alone is not enough to call it an
-        // orphan (thread 60).
+        // keep it — the key shape alone is not enough to call it an orphan
+        // (thread 60).
         {
           key: 'other-bot:user-9:chat-9',
           sessionId: 'sibling-3part',
-          target: { channelName: 'other-bot' },
+          target: {
+            channelName: 'other-bot',
+            senderId: 'user-9',
+            chatId: 'chat-9',
+          },
         },
       ],
       removeSessionId,
@@ -672,6 +684,58 @@ describe('purgeSingleScopeOrphans', () => {
     expect(discardSession).toHaveBeenCalledWith('user-scope-1');
     expect(discardSession).toHaveBeenCalledWith('single-era-1');
     expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
+  });
+
+  it('classifies legacy user keys by the router key, not by colon count (R8-1)', () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // Live thread-scope route of a channel whose NAME contains a colon:
+        // `qq:prod` + `:GROUP1`. The key has three colon-separated parts, but
+        // it is not the string the router builds for 'user' scope, so it must
+        // survive a cold start.
+        {
+          key: 'qq:prod:GROUP1',
+          sessionId: 'live-thread-1',
+          target: { channelName: 'qq:prod', senderId: 'u1', chatId: 'GROUP1' },
+        },
+        // A real legacy user-scope key of the same channel: exactly
+        // `${channelName}:${senderId}:${chatId}` — four parts, because the
+        // channel name itself has a colon.
+        {
+          key: 'qq:prod:sender:chat',
+          sessionId: 'legacy-user-1',
+          target: {
+            channelName: 'qq:prod',
+            senderId: 'sender',
+            chatId: 'chat',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = new QQChannel(
+      'qq:prod',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+      { router } as unknown as QQChannelOptions,
+    );
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('legacy-user-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-thread-1');
   });
 
   it('keeps user-scope 3-part keys when sessionScope is user (live routing state)', () => {
@@ -772,7 +836,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).not.toHaveBeenCalled();
   });
 
-  it("purges this channel's unroutable 3-part key under explicit single scope, keeping its live __single__ key", () => {
+  it("purges this channel's unroutable user-scope key under explicit single scope, keeping its live __single__ key", () => {
     const removeSessionId = vi.fn(() => true);
     const router = {
       getAll: () => [
@@ -783,18 +847,22 @@ describe('purgeSingleScopeOrphans', () => {
           target: { channelName: 'test-bot' },
         },
         // Under 'single' scope the routing key is `channel:__single__`, so a
-        // 3-part key can never resolve: this channel's own legacy entry is
-        // purged even under the explicit single scope.
+        // user-scope key can never resolve: this channel's own legacy entry
+        // is purged even under the explicit single scope.
         {
           key: 'test-bot:u1:c1',
           sessionId: 'user-scope-1',
-          target: { channelName: 'test-bot' },
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
         },
-        // A sibling channel's 3-part key is never touched.
+        // A sibling channel's user-scope key is never touched.
         {
           key: 'other-bot:u9:c9',
           sessionId: 'sibling-3part',
-          target: { channelName: 'other-bot' },
+          target: {
+            channelName: 'other-bot',
+            senderId: 'u9',
+            chatId: 'c9',
+          },
         },
       ],
       removeSessionId,

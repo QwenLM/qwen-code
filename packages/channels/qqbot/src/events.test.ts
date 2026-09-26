@@ -1766,7 +1766,7 @@ describe('群管理事件', () => {
     // tail send and keep the msg_seq counter. A delete-then-release order
     // would drop the counter here and the in-flight send's re-flush would
     // resolve nextSeq = 1 (QQ dedupes on msg_id + msg_seq and drops the tail).
-    it('releases before teardown while a flush is in flight, keeping the msg_seq counter and clearing turn/orphan state (wenshao §4)', () => {
+    it('releases before teardown while a flush is in flight, keeping the msg_seq counter (wenshao §4)', () => {
       const ch = makeChannel({ sessionScope: 'single' });
       const pvt = ch as unknown as QQChannelRaw;
       const chp = ch as unknown as Record<string, unknown>;
@@ -1792,7 +1792,7 @@ describe('群管理事件', () => {
       const turnCounter = chp['turnCounter'] as Map<string, number>;
       const orphanBuffer = chp['streamOrphanBuffer'] as Map<
         string,
-        { turn: number; text: string }
+        { turn: number; text: string; pre?: string }
       >;
 
       // A streaming session in this group with its flush in flight: the
@@ -1813,7 +1813,10 @@ describe('群管理事件', () => {
       });
       flushingSessions.set('sid-1', streamState.get('sid-1'));
       turnCounter.set('sid-1', 1);
-      orphanBuffer.set('sid-1', { turn: 1, text: 'stray' });
+      orphanBuffer.set('sid-1', {
+        turn: 1,
+        text: 'stray',
+      });
 
       const releaseSpy = vi.spyOn(
         ch as unknown as { releaseSessionReplyAnchor: (s: string) => void },
@@ -1832,14 +1835,149 @@ describe('群管理事件', () => {
       expect(releaseSpy).toHaveBeenCalledTimes(1);
       // The release saw the live entry + flush marker and kept the counter.
       expect(msgSeqMap.get('msg-X')).toBe(3);
-      // Everything the turn touched is torn down.
+      // Everything the turn's flush touched is torn down, but the turn
+      // counter and orphan-buffer ownership stay with the prompt lifecycle
+      // (onPromptStart/onPromptEnd), not this group-removal loop: under
+      // 'single' scope the matched session is channel-wide and its live turn
+      // must not be reset by a group deletion (R9-5).
       expect(streamState.has('sid-1')).toBe(false);
       expect(sessionReplyMsgId.has('sid-1')).toBe(false);
       expect(flushingSessions.has('sid-1')).toBe(false);
-      expect(turnCounter.has('sid-1')).toBe(false);
-      expect(orphanBuffer.has('sid-1')).toBe(false);
+      expect(turnCounter.get('sid-1')).toBe(1);
+      expect(orphanBuffer.get('sid-1')).toEqual({
+        turn: 1,
+        text: 'stray',
+      });
 
       releaseSpy.mockRestore();
+    });
+
+    // R9-5: the release must carry the matched entry's msgId identity (the
+    // shared single-scope session may already belong to a newer turn) and
+    // must not touch the turn counter / orphan buffer, which the prompt
+    // lifecycle owns.
+    it("does not delete the shared single-scope session's newer anchor or turn state (R9-5)", () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-shared-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+      const turnCounter = chp['turnCounter'] as Map<string, number>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >;
+
+      // The single-scope session is channel-wide: the entry this group's
+      // cleanup matches belongs to an older turn, while the session already
+      // holds a newer turn's anchor and buffered head.
+      sessionReplyMsgId.set('__single__', {
+        msgId: 'msg-live',
+        timestamp: Date.now(),
+      });
+      streamState.set('__single__', {
+        chatId: groupId,
+        buffer: 'pending',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-old',
+        turn: 1,
+      });
+      turnCounter.set('__single__', 2);
+      orphanBuffer.set('__single__', {
+        turn: 2,
+        text: 'live-head',
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The matched stream entry is still torn down (rest of the loop), but
+      // the live anchor survives because the release is identity-gated.
+      expect(streamState.has('__single__')).toBe(false);
+      expect(sessionReplyMsgId.get('__single__')!.msgId).toBe('msg-live');
+      expect(turnCounter.get('__single__')).toBe(2);
+      expect(orphanBuffer.get('__single__')).toEqual({
+        turn: 2,
+        text: 'live-head',
+      });
+    });
+
+    // R9-5: a matched entry with no msgId (proactive/loop turn) offers no
+    // identity to release against. Passing `undefined` to the release helper
+    // means "no identity expectation", which would delete the shared
+    // single-scope session's live anchor — the exact defect the identity gate
+    // exists to prevent.
+    it('does not release the shared anchor when the matched entry has no msgId (R9-5)', () => {
+      const ch = makeChannel({ sessionScope: 'single' });
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-no-msgid-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // The matched entry belongs to a proactive/loop turn and carries no
+      // msgId, while the channel-wide session already holds a live anchor.
+      sessionReplyMsgId.set('__single__', {
+        msgId: 'msg-live',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-live', 3);
+      streamState.set('__single__', {
+        chatId: groupId,
+        buffer: '',
+        timer: null,
+        retryCount: 0,
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The matched stream entry is still torn down (rest of the loop), but
+      // with no identity to check the release is skipped — the live anchor and
+      // its msg_seq counter survive.
+      expect(streamState.has('__single__')).toBe(false);
+      expect(sessionReplyMsgId.get('__single__')!.msgId).toBe('msg-live');
+      expect(msgSeqMap.get('msg-live')).toBe(3);
     });
   });
 
@@ -2176,7 +2314,7 @@ describe('Gateway message handling', () => {
     ch.disconnect();
   });
 
-  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps 3-part keys', async () => {
+  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps live thread-scope keys', async () => {
     // The purge must run as part of the READY restore chain and drop
     // single-era orphan keys from the router (thread 62 gate: previously the
     // purge had no wiring-level test).
@@ -2200,18 +2338,22 @@ describe('Gateway message handling', () => {
           sessionId: 'single-era-1',
           target: { channelName: 'test-bot' },
         },
-        // User-scope 3-part key under thread scope: purged — unroutable under
+        // User-scope key under thread scope: purged — unroutable under
         // thread scope, where the routing key is channel:chatId (R8-1).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
-          target: { channelName: 'test-bot' },
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
         },
         // Live thread-scope two-part key: never purged.
         {
           key: 'test-bot:g1',
           sessionId: 'live-1',
-          target: { channelName: 'test-bot' },
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
         },
       ],
       removeSessionId,
@@ -2232,8 +2374,8 @@ describe('Gateway message handling', () => {
     )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
 
     // purgeSingleScopeOrphans ran inside the restore chain and removed both
-    // the single-scope orphan and this channel's unroutable 3-part key,
-    // keeping the live two-part key.
+    // the single-scope orphan and this channel's unroutable user-scope key,
+    // keeping the live thread-scope key.
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
