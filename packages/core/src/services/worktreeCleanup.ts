@@ -21,10 +21,16 @@ const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
  *
  * Currently only the `agent-<7hex>` shape produced by
  * `AgentTool isolation:'worktree'` qualifies. User-named worktrees created
- * via `EnterWorktreeTool` are NEVER swept — they are managed manually via
- * `ExitWorktreeTool`, and `validateUserWorktreeSlug` reserves the
- * `agent-` prefix so a user-named slug can never accidentally match
- * here.
+ * via `EnterWorktreeTool` are managed manually via `ExitWorktreeTool`, and
+ * `validateUserWorktreeSlug` reserves the `agent-` prefix — except for the
+ * exact `agent-<7hex>` shape, which is allowed through so `AgentTool`
+ * isolation can share the same `createUserWorktree` path. A user can
+ * therefore still pick that exact shape explicitly, and on disk such a
+ * worktree is indistinguishable from an ephemeral agent one (no marker
+ * records which path created it). That is why the dirty check below must
+ * treat ANY content — including untracked files — as a reason to keep the
+ * worktree: name-shape matching alone cannot protect a user-named
+ * `agent-<7hex>` worktree from being swept (issue #12735).
  *
  * Mirrors claude-code's `EPHEMERAL_WORKTREE_PATTERNS` in
  * `utils/worktree.ts`, restricted to the patterns qwen-code actually emits.
@@ -122,7 +128,22 @@ export async function cleanupStaleAgentWorktrees(
       worktreeHasWork(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
-    if (dirty || unmerged) continue;
+    if (dirty || unmerged) {
+      // A deliberately preserved entry needs its own breadcrumb. The caller
+      // logs "nothing to remove" at debug when the sweep returns 0, so
+      // without this line an operator chasing growth under
+      // `.qwen/worktrees/` cannot tell "the sweep never saw it" from "the
+      // sweep saw it and refused" — and now that any untracked file
+      // preserves an entry, refusing is a common outcome. Stays at `debug`
+      // for the reason recorded at the call site in config.ts: `info` on
+      // every CLI start that has any dirty worktree is log noise.
+      debugLogger.debug(
+        `cleanupStaleAgentWorktrees: keeping ${entry.name} (${
+          dirty ? 'uncommitted changes' : 'unmerged commits'
+        })`,
+      );
+      continue;
+    }
 
     const result = await service.removeUserWorktree(entry.name, {
       deleteBranch: true,
