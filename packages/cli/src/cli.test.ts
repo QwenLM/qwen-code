@@ -1658,6 +1658,7 @@ describe('runCliEntry', () => {
     // declare must sit in the gate set — a new alias that misses it
     // silently dispatches the subcommand launch as a prompt.
     const { authCommand } = await import('./commands/auth.js');
+    const { batchCommand } = await import('./commands/batch.js');
     const { boardCommand } = await import('./commands/board.js');
     const { channelCommand } = await import('./commands/channel.js');
     const { extensionsCommand } = await import('./commands/extensions.js');
@@ -1671,6 +1672,7 @@ describe('runCliEntry', () => {
 
     const commandModules = [
       authCommand,
+      batchCommand,
       boardCommand,
       channelCommand,
       extensionsCommand,
