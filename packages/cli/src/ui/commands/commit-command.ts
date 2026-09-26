@@ -23,16 +23,16 @@ import { t } from '../../i18n/index.js';
 export const COMMIT_PROMPT = `You are executing the /commit slash command: create a single git commit in the current repository on behalf of the user. Do the work yourself using your available tools.
 
 ## 1. Gather context
-- Run \`git status\` to see every modified, deleted, and untracked file — and to spot repository state such as a detached HEAD or an in-progress merge, rebase, or cherry-pick.
-- Run \`git diff HEAD\` to read the actual changes (also check anything already staged). Untracked files never appear in this diff — open and read each untracked file directly before judging it.
+- Run \`git status\` to see every modified, deleted, and untracked file — and to spot repository state such as a detached HEAD or an in-progress merge, rebase, or cherry-pick. A directory whose files are all untracked collapses to a single \`dir/\` line, so re-run it with \`-uall\` (\`git status -uall\`) whenever you need the files inside such a directory listed one by one.
+- Run \`git diff HEAD\` to read the actual changes (also check anything already staged). Untracked files never appear in this diff — open and read each untracked file directly before judging it, except a file whose name marks it as a secret: that one is refused by name and never opened (see Stage selectively).
 - Run \`git log --oneline -n 20\` to learn the repository's existing commit message style.
 - Note the current branch name; it often hints at the purpose of the change.
 - If the repository has no commits yet, \`git diff HEAD\` and \`git log\` fail — skip them and work from \`git status\` plus reading the new files directly.
 
 ## 2. Stage selectively
 - Review the \`git status\` output and deliberately choose which files belong in this commit.
-- Stage the chosen files with targeted \`git add <path>\` commands. Do not run \`git add -A\` or \`git add .\` blindly.
-- Never stage a file whose contents you have not seen; the secrets rule below applies to file contents, not file names.
+- Stage the chosen files with targeted \`git add <path>\` commands. Do not run \`git add -A\` or \`git add .\` blindly, and do not treat \`git add <dir>\` as targeted either: a directory pathspec stages every file under it, including ones you never opened. Name the files you chose.
+- Never stage a file whose contents you have not seen. A file whose name or path marks it as a secret (\`.env\` and friends, private keys, credentials or token files) is refused by name — warn the user and leave it out without opening it; for every other file, read the contents before judging it.
 - Leave out build artifacts, debug scratch files, and changes unrelated to this commit's purpose.
 - If the user gave additional instructions with the command, let them guide the selection.
 
@@ -42,6 +42,7 @@ export const COMMIT_PROMPT = `You are executing the /commit slash command: creat
 - For a multi-line message, prefer repeated inline \`-m\` flags (\`git commit -m "subject" -m "body"\`; git joins the values with blank lines) over ANSI-C $'...' quoting or \`-m "$(cat <<EOF ...)"\` wrappers — see Attribution for why the message form matters.
 
 ## 4. Commit
+- Before committing, run \`git diff --cached --name-status\` and confirm every listed path is one you chose and have read: \`git commit\` commits the entire index, including anything the user had already staged before this command ran. Unstage whatever does not belong with \`git restore --staged <path>\` — a secret file the user had already staged gets unstaged and reported, never committed.
 - Create the commit with the complete message text (subject plus body when present).
 - If nothing ends up staged or there is nothing to commit, skip the commit and tell the user there is nothing to commit. Never pass \`--allow-empty\`.
 
@@ -53,7 +54,7 @@ export const COMMIT_PROMPT = `You are executing the /commit slash command: creat
 - If the user's instructions conflict with these rules, follow the rules and explain why.
 
 ## Attribution
-- Qwen Code auto-appends the configured \`Co-authored-by\` trailer only when ALL of these hold: \`general.gitCoAuthor.commit\` is enabled (it is by default), the active shell is bash, and the commit carries a plain inline \`-m\`/\`--message\` value (quoted, without \`$()\` command substitution). On any other setup — PowerShell or cmd, a heredoc or \`git commit -F\` message, an editor session — no trailer is added.
+- Qwen Code auto-appends the configured \`Co-authored-by\` trailer only when all of these hold: \`general.gitCoAuthor.commit\` is enabled (it is by default), the active shell is bash, the commit carries a plain inline \`-m\`/\`--message\` value (quoted, without \`$()\` command substitution), and the \`git commit\` runs as a single-line command in the current directory — a backslash-continued multi-line command, one wrapped in \`bash -c\`, or one redirected with \`git -C\` or an absolute \`cd\` is not rewritten. On any other setup — PowerShell or cmd, a heredoc or \`git commit -F\` message, an editor session — no trailer is added. This list is not exhaustive: \`git log -1 --format=%B\` is the authority on what actually landed.
 - When the auto-append fires, the trailer is inserted as a new final paragraph of the message. Do not add your own AI-assistance trailer on top of it, or the commit ends up with two; and since git only recognizes the final trailer block, any trailer lines you wrote earlier in the message would be pushed out of it and degrade to body text.
 - When the user explicitly names additional co-authors: on bash, commit with a non-inline message (a heredoc or \`git commit -F -\`) so the auto-append stays out of the way, and write the \`Co-authored-by: Name <email>\` lines yourself as the final paragraph (the configured trailer is not auto-added in that form). On other shells nothing is appended, so an inline \`-m\` message with your own trailer lines is fine.
 - After committing, run \`git log -1 --format=%B\` and check which trailers actually landed. If the user asked for credit and a trailer is missing, say so — never claim attribution the commit does not contain.

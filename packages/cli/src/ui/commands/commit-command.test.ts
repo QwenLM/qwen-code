@@ -77,9 +77,33 @@ describe('commitCommand', () => {
       /never stage or commit files that look like they contain secrets/i,
     );
     expect(text.toLowerCase()).toContain('.env');
+    // The name-based floor from #4000: a file whose name marks it as a
+    // secret is refused without being opened, so the rule keeps working
+    // for a `.env` whose values do not read as credentials — and the
+    // secrets never enter the model context on the way to that refusal.
+    expect(text).toMatch(/refused by name/i);
+    expect(text).not.toMatch(/not file names/i);
     // Skip empty commits.
     expect(text).toMatch(/nothing to commit/i);
     expect(text).toMatch(/never pass `--allow-empty`/i);
+  });
+
+  it('reconciles the index with what the model chose before committing', async () => {
+    const ctx = createMockCommandContext();
+    const result = await commitCommand.action!(ctx, '');
+    const text = promptText(result);
+    // `git commit` ships the whole index, including files the user staged
+    // before /commit ran, so the prompt must name a pre-commit check and
+    // the remedy for a path that does not belong.
+    expect(text).toContain('git diff --cached --name-status');
+    expect(text).toMatch(/commits the entire index/i);
+    expect(text).toContain('git restore --staged');
+    // `git add <dir>` is a pathspec, not a file list — a directory add
+    // stages files the model never opened.
+    expect(text).toMatch(/directory pathspec/i);
+    // Default `git status` collapses a wholly-untracked directory to one
+    // line, so the enumeration the checks above rely on needs `-uall`.
+    expect(text).toContain('git status -uall');
   });
 
   it('describes co-author attribution the way the platform applies it', async () => {
@@ -91,6 +115,18 @@ describe('commitCommand', () => {
     // The auto-append is gated on the active shell being bash — the prompt
     // must name that gate so non-bash users are not promised a trailer.
     expect(text).toMatch(/active shell is bash/i);
+    // The rewrite additionally requires the commit segment to be
+    // attributable back to the raw command in the tool's cwd
+    // (`findAttributableCommitSegment` in packages/core/src/tools/shell.ts):
+    // a backslash-continued command, a `bash -c` wrapper, `git -C` or an
+    // absolute `cd` reaches the executor unrewritten.
+    expect(text).toMatch(/single-line command in the current directory/i);
+    expect(text).toMatch(/backslash-continued/i);
+    expect(text).toContain('git -C');
+    expect(text).toMatch(/bash -c/);
+    // The list must not read as exhaustive-and-sufficient.
+    expect(text).not.toMatch(/ALL of these hold/);
+    expect(text).toMatch(/not exhaustive/i);
     expect(text).toMatch(/do not add your own ai-assistance trailer/i);
     // The platform trailer lands as a new final paragraph, so model-written
     // trailer lines would leave git's trailer block; user-named co-authors
