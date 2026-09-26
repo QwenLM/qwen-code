@@ -279,6 +279,10 @@ export const PRIVATE_FILE_MODE = 0o600;
 export class BatchTaskStore {
   constructor(private readonly homeDir: string) {}
 
+  /** Records `list` has already reported unreadable, so a caller that
+   * re-scans every minute says so once instead of on every pass. */
+  private readonly reportedUnreadable = new Set<string>();
+
   private dirOf(id: string): string {
     // The id becomes a directory name verbatim; refuse anything that could
     // walk out of the store, however it got into a task file.
@@ -475,8 +479,15 @@ export class BatchTaskStore {
    * Every readable task, newest first. With `cache`, a task file whose mtime
    * and size are unchanged is not re-read — the session's auto-collector
    * scans every minute, and most records are long settled.
+   *
+   * A record this build cannot parse is skipped rather than allowed to hide
+   * the rest, and named through `onUnreadable` (once per store): it can hold
+   * a paid batch, so it must stay discoverable instead of vanishing.
    */
-  list(cache?: Map<string, { stamp: string; task: BatchTask }>): BatchTask[] {
+  list(
+    cache?: Map<string, { stamp: string; task: BatchTask }>,
+    onUnreadable?: (detail: string) => void,
+  ): BatchTask[] {
     const root = path.join(this.homeDir, 'tasks');
     if (!fs.existsSync(root)) return [];
     const tasks: BatchTask[] = [];
@@ -495,8 +506,15 @@ export class BatchTaskStore {
           cache.set(entry.name, hit);
         }
         tasks.push(hit.task);
-      } catch {
+      } catch (error) {
         // A task another version cannot read must not hide the rest.
+        if (!onUnreadable || this.reportedUnreadable.has(entry.name)) continue;
+        this.reportedUnreadable.add(entry.name);
+        onUnreadable(
+          `${entry.name}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
     return tasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

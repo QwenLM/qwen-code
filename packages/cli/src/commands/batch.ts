@@ -421,7 +421,11 @@ const listWorkflowCommand: CommandModule = {
   // Local only: no endpoint or credentials needed.
   handler: () =>
     run(async () => {
-      await listTasks({ env: process.env, out: writeStdoutLine });
+      await listTasks({
+        env: process.env,
+        out: writeStdoutLine,
+        err: writeStderrLine,
+      });
     }),
 };
 

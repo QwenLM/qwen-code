@@ -200,6 +200,53 @@ describe('BatchTaskStore', () => {
     expect(() => store.load(task.id)).toThrow(/schema version/);
   });
 
+  /** A task directory whose record this build cannot parse. */
+  const breakRecord = (id: string, content = '{ truncated') => {
+    const dir = path.join(root, 'tasks', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'task.json'), content);
+  };
+
+  it('lists the healthy tasks and reports an unreadable record once', () => {
+    const healthy = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    breakRecord('paid-but-unreadable');
+    const details: string[] = [];
+    const report = (detail: string) => details.push(detail);
+
+    expect(store.list(undefined, report).map((task) => task.id)).toEqual([
+      healthy.id,
+    ]);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toContain('paid-but-unreadable');
+    expect(details[0]).toMatch(/cannot load task/);
+
+    // The session collector re-scans every minute; one bad record must not be
+    // reported again on every pass.
+    store.list(undefined, report);
+    expect(details).toHaveLength(1);
+  });
+
+  it('reports a record from another schema version by id and reason', () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const raw = JSON.parse(fs.readFileSync(store.fileOf(task.id), 'utf8'));
+    raw.schemaVersion = 99;
+    fs.writeFileSync(store.fileOf(task.id), JSON.stringify(raw));
+
+    const details: string[] = [];
+    expect(store.list(undefined, (detail) => details.push(detail))).toEqual([]);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toContain(task.id);
+    expect(details[0]).toMatch(/schema version 99/);
+  });
+
   it('refuses task ids that would walk out of the store', () => {
     expect(() => store.load('../escape')).toThrow(/invalid task id/);
   });
