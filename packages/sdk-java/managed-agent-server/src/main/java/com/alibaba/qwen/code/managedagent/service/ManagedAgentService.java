@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
@@ -11,6 +12,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
@@ -21,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
@@ -55,6 +59,7 @@ public class ManagedAgentService {
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
     private final AgentStateStore store;
+    private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
@@ -62,8 +67,10 @@ public class ManagedAgentService {
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
-            HarnessConnector harness, RuntimeWarmer runtimeWarmer) {
+            HarnessConnector harness, RuntimeWarmer runtimeWarmer,
+            ManagedWorkspaceRegistry workspaces) {
         this.store = store;
+        this.workspaces = workspaces;
         this.digests = digests;
         this.coordinator = coordinator;
         this.harness = harness;
@@ -105,10 +112,51 @@ public class ManagedAgentService {
         return response(admission);
     }
 
-    public CommandAdmission submitTurn(String tenantId,
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection) {
+        validateIdempotencyKey(idempotencyKey);
+        if (actorId == null || actorId.isEmpty()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED,
+                    "actor_required", "A trusted actor is required.");
+        }
+        List<Map<String, Object>> input = input(blocks, false);
+        if (!input.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        String effectiveTitle = metadataTitle(title, metadata);
+        Map<String, Object> semantic = new LinkedHashMap<>();
+        semantic.put("agentId", agentId);
+        semantic.put("title", effectiveTitle);
+        semantic.put("input", input);
+        semantic.put("workspace", selection == null
+                ? Map.of("default", true)
+                : Map.of("workspaceId", selection.workspaceId(),
+                        "cwdRelative", selection.cwdRelative()));
+        String requestDigest = digests.digest(semantic);
+        String payloadDigest = input.isEmpty() ? null
+                : SubmitHarnessTurn.computePayloadDigest(input);
+        Admission admission;
+        try {
+            admission = store.insertWorkspaceSessionCommand(tenantId,
+                    actorId, idempotencyKey, requestDigest, agentId,
+                    effectiveTitle, input, payloadDigest, selection);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayWorkspaceSessionCommand(tenantId,
+                    actorId, idempotencyKey, requestDigest);
+        }
+        dispatch(tenantId, admission);
+        return response(admission);
+    }
+
+    public CommandAdmission submitTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         requireHarness();
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
@@ -133,9 +181,10 @@ public class ManagedAgentService {
         return response(admission);
     }
 
-    public CommandAdmission cancelTurn(String tenantId,
+    public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
         Admission replay = replay(tenantId, CANCEL, idempotencyKey,
@@ -162,9 +211,10 @@ public class ManagedAgentService {
     }
 
     public SessionMutationResult<PublicSession> renameSession(
-            String tenantId, String idempotencyKey, String sessionId,
+            String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
@@ -194,14 +244,15 @@ public class ManagedAgentService {
     }
 
     public SessionMutationResult<PublicSession> archiveSession(
-            String tenantId, String idempotencyKey, String sessionId) {
-        return lifecycleMutation(tenantId, idempotencyKey, sessionId,
+            String tenantId, String actorId, String idempotencyKey, String sessionId) {
+        return lifecycleMutation(tenantId, actorId, idempotencyKey, sessionId,
                 ARCHIVE, SessionMutationKind.ARCHIVE);
     }
 
     public SessionMutationResult<PublicSession> unarchiveSession(
-            String tenantId, String idempotencyKey, String sessionId) {
+            String tenantId, String actorId, String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,
@@ -224,8 +275,9 @@ public class ManagedAgentService {
     }
 
     public SessionMutationResult<DeletedSession> deleteSession(
-            String tenantId, String idempotencyKey, String sessionId) {
+            String tenantId, String actorId, String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, DELETE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 DELETE, idempotencyKey, requestDigest, sessionId,
@@ -240,21 +292,28 @@ public class ManagedAgentService {
                 "agent.session.deleted", true), command.replayed());
     }
 
-    public PublicSession getPublicSession(String tenantId,
+    private PublicSession getPublicSession(String tenantId,
             String sessionId) {
         return publicSession(requireVisibleSession(tenantId, sessionId));
     }
 
-    public WebShellSession getWebShellSession(String tenantId,
+    public PublicSession getPublicSession(String tenantId, String actorId,
             String sessionId) {
-        return webShellSession(requireVisibleSession(tenantId, sessionId));
+        return publicSession(requireReadableSession(tenantId, actorId,
+                sessionId));
+    }
+
+    public WebShellSession getWebShellSession(String tenantId, String actorId,
+            String sessionId) {
+        return webShellSession(requireReadableSession(tenantId, actorId,
+                sessionId));
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
-            String cursor, int requestedLimit) {
+            String actorId, String cursor, int requestedLimit) {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor);
-        SessionPage page = store.listSessions(tenantId,
+        SessionPage page = store.listSessions(tenantId, actorId,
                 decoded == null ? null : decoded.updatedAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
         List<PublicSession> sessions = page.sessions().stream()
@@ -264,10 +323,11 @@ public class ManagedAgentService {
     }
 
     public WebShellPage<WebShellSession> listWebShellSessions(
-            String tenantId, String cursor, int requestedLimit) {
+            String tenantId, String actorId, String cursor,
+            int requestedLimit) {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor);
-        SessionPage page = store.listSessions(tenantId,
+        SessionPage page = store.listSessions(tenantId, actorId,
                 decoded == null ? null : decoded.updatedAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
         return new WebShellPage<>(page.sessions().stream()
@@ -275,19 +335,21 @@ public class ManagedAgentService {
                 page.hasMore());
     }
 
-    public List<PublicEvent> publicEvents(String tenantId, String sessionId,
-            long afterSequence, int requestedLimit) {
-        return events(tenantId, sessionId, afterSequence, requestedLimit)
+    public List<PublicEvent> publicEvents(String tenantId, String actorId,
+            String sessionId, long afterSequence, int requestedLimit) {
+        return events(tenantId, actorId, sessionId, afterSequence,
+                requestedLimit)
                 .stream().map(this::publicEvent).toList();
     }
 
-    public List<WebShellEvent> webShellEvents(String tenantId,
+    public List<WebShellEvent> webShellEvents(String tenantId, String actorId,
             String sessionId, long afterSequence, int requestedLimit) {
-        return events(tenantId, sessionId, afterSequence, requestedLimit)
+        return events(tenantId, actorId, sessionId, afterSequence,
+                requestedLimit)
                 .stream().map(this::webShellEvent).toList();
     }
 
-    public PublicItemList listPublicItems(String tenantId,
+    public PublicItemList listPublicItems(String tenantId, String actorId,
             String sessionId, long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -295,7 +357,7 @@ public class ManagedAgentService {
                     "Item sequence must be non-negative.");
         }
         int limit = limit(requestedLimit);
-        store.requireSession(tenantId, sessionId);
+        requireReadableSession(tenantId, actorId, sessionId);
         SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
                 .orElse(null);
         if (snapshot == null) {
@@ -314,9 +376,10 @@ public class ManagedAgentService {
                 snapshot.coveredSequence());
     }
 
-    public WebShellTranscript transcript(String tenantId, String sessionId,
-            String cursor, int requestedLimit) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
+    public WebShellTranscript transcript(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        SessionRecord session = requireReadableSession(tenantId, actorId,
+                sessionId);
         int limit = limit(requestedLimit);
         if (cursor == null || cursor.isBlank()) {
             SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
@@ -346,17 +409,14 @@ public class ManagedAgentService {
                 page.hasMore(), session.lastSequence());
     }
 
-    public long lastSequence(String tenantId, String sessionId) {
-        return store.requireSession(tenantId, sessionId).lastSequence();
-    }
-
-    private List<EventRecord> events(String tenantId, String sessionId,
-            long afterSequence, int requestedLimit) {
+    private List<EventRecord> events(String tenantId, String actorId,
+            String sessionId, long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_event_cursor",
                     "Event sequence must be non-negative.");
         }
+        requireReadableSession(tenantId, actorId, sessionId);
         return store.findEvents(tenantId, sessionId, afterSequence,
                 limit(requestedLimit));
     }
@@ -370,7 +430,7 @@ public class ManagedAgentService {
                 session.agentId(), session.status().toLowerCase(),
                 session.createdAt() / 1000, session.updatedAt() / 1000,
                 metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence());
+                session.lastSequence(), publicWorkspace(session));
     }
 
     private WebShellSession webShellSession(SessionRecord session) {
@@ -383,7 +443,19 @@ public class ManagedAgentService {
                 session.createdAt(), session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
-                session.lastSequence());
+                session.lastSequence(), webShellWorkspace(session));
+    }
+
+    private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
+        return session.workspace() == null ? null
+                : new WebShellWorkspace(session.workspace().getWorkspaceId(),
+                        session.workspace().getCwdRelative());
+    }
+
+    private static PublicWorkspace publicWorkspace(SessionRecord session) {
+        return session.workspace() == null ? null
+                : new PublicWorkspace(session.workspace().getWorkspaceId(),
+                        session.workspace().getCwdRelative());
     }
 
     private static Map<String, Object> webShellEnvironment(
@@ -495,9 +567,10 @@ public class ManagedAgentService {
     }
 
     private SessionMutationResult<PublicSession> lifecycleMutation(
-            String tenantId, String idempotencyKey, String sessionId,
+            String tenantId, String actorId, String idempotencyKey, String sessionId,
             String operation, SessionMutationKind kind) {
         validateIdempotencyKey(idempotencyKey);
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
         String requestDigest = lifecycleDigest(sessionId, operation);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 operation, idempotencyKey, requestDigest, sessionId, kind);
@@ -540,6 +613,45 @@ public class ManagedAgentService {
     private String lifecycleDigest(String sessionId, String operation) {
         return digests.digest(Map.of(
                 "sessionId", sessionId, "operation", operation));
+    }
+
+    private void requireLegacyWorkspace(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (session.workspace() != null) {
+            if (!workspaces.canRead(tenantId, actorId,
+                    session.workspace().getWorkspaceId())) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        "session_not_found", "The Session was not found.");
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+    }
+
+    SessionRecord requireReadableSession(String tenantId,
+            String actorId, String sessionId) {
+        SessionRecord session = requireVisibleSession(tenantId, sessionId);
+        requireReadGrant(session, actorId);
+        return session;
+    }
+
+    void requireReadGrant(SessionRecord session, String actorId) {
+        if (session.workspace() != null && !workspaces.canRead(session.tenantId(),
+                actorId, session.workspace().getWorkspaceId())) {
+            throw new ApiException(HttpStatus.NOT_FOUND,
+                    "session_not_found", "The Session was not found.");
+        }
+    }
+
+    List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
+        if (afterSequence < 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "invalid_event_cursor",
+                    "Event sequence must be non-negative.");
+        }
+        return store.findEvents(session.tenantId(), session.sessionId(),
+                afterSequence, 100);
     }
 
     private SessionRecord requireVisibleSession(String tenantId,
