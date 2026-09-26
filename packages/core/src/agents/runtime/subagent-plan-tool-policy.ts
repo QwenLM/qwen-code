@@ -82,9 +82,9 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
 /**
  * Whether an agent running with `toolConfig` is declared the Skill tool.
  *
- * Mirrors the declaration-level filter `AgentCore.prepareTools()` applies to
- * the Skill tool, so it answers from the `ToolConfig` alone and does not
- * re-run it. A filter added there propagates here only by hand.
+ * Mirrors the *Direct-mode* declaration filter `AgentCore.prepareTools()`
+ * applies to the Skill tool, so it answers from the `ToolConfig` alone and
+ * does not re-run it. A filter added there propagates here only by hand.
  *
  * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
  * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
@@ -93,18 +93,33 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * listing and the pointer cannot disagree about whether a skill can actually
  * be loaded — the disagreement #12424 reports.
  *
- * Session-level reachability is deliberately not this predicate's input: a
- * `permissions.deny`, `excludeTools`, or a `tools.eager` allowlist deferring
- * the schema are properties of the registry, and
- * `resolveBundledReferenceRoute` already answers the route from it. The
- * per-agent policy is the one input that resolver cannot see (#12424).
+ * Tool mode and registry state are deliberately not this predicate's input: a
+ * `permissions.deny` or `excludeTools` entry is a registry property, and
+ * `resolveBundledReferenceRoute` answers the route from it. The per-agent
+ * policy is the one input that resolver cannot see (#12424).
+ *
+ * Two `ToolMode.CodeModeOnly` arms are therefore NOT covered here. Both are
+ * open on this PR's review thread, not settled behaviour — recorded so the
+ * next reader does not mistake the omission for a verified answer:
+ * - `prepareTools()` additionally admits every `code-mode-callable` registry
+ *   tool when the configured names include `exec` (`inheritsCodeModeBindings`,
+ *   `agent-core.ts`), and `getToolExposure(SKILL)` is `code-mode-callable`
+ *   because SKILL is in neither `HIDDEN_TOOLS` nor `DIRECT_ONLY_TOOLS`. So a
+ *   finite list naming `exec` but not `skill` still reaches the Skill tool
+ *   through that gateway, while this predicate answers `false` for it.
+ * - A `tools.eager` allowlist omitting `skill` defers the schema, but the
+ *   resolver's CodeModeOnly branch short-circuits
+ *   `isToolDeferredBehindToolSearch` to `false` and still answers `pointer`,
+ *   handing the agent a route it cannot follow. That cell is byte-identical
+ *   to `main`: it predates this PR and is not fixed here.
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
  *
  * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
  * agent cannot follow, a wrong `false` takes skills away from an agent that
- * could load them.
+ * could load them. The `exec`-gateway arm above is the one known place this
+ * rule currently goes the unsafe way.
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
