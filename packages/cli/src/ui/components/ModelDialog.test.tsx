@@ -1046,6 +1046,58 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the endpoint disambiguator when storing the fast model (#12760)', async () => {
+    const setFastModel = vi.fn();
+    const { props, mockSettings, recordSlashCommand } = renderComponent(
+      { isFastModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'qwen3.7-max'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'shared-fast',
+            label: 'shared-fast (token plan)',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://exhausted-plan.example.com/v1',
+          },
+          {
+            id: 'shared-fast',
+            label: 'shared-fast (free quota)',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://free-quota.example.com/v1',
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+        })),
+        setFastModel,
+      } as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(
+      `${AuthType.USE_OPENAI}::shared-fast\0https://free-quota.example.com/v1`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'fastModel',
+      'openai:shared-fast\0https://free-quota.example.com/v1',
+    );
+    expect(setFastModel).toHaveBeenCalledWith(
+      'openai:shared-fast\0https://free-quota.example.com/v1',
+    );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'success', text: 'Fast Model: openai:shared-fast' },
+      ],
+    });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('stores authType-qualified selectors in vision model mode without switching models', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
@@ -2265,10 +2317,13 @@ describe('<ModelDialog />', () => {
 });
 
 describe('encodeAuxModelSelector', () => {
-  it('encodes the "authType::modelId" key, dropping the baseUrl', () => {
+  it('encodes the "authType::modelId" key, keeping the baseUrl disambiguator', () => {
+    // Same-id endpoints under one authType are distinct registry entries; the
+    // persisted selector must carry the endpoint or resolution falls back to
+    // a first-match scan that can bind the wrong provider's key (#12760).
     expect(
       encodeAuxModelSelector('openai::gpt-4o\0https://api.example.com'),
-    ).toBe('openai:gpt-4o');
+    ).toBe('openai:gpt-4o\0https://api.example.com');
     expect(encodeAuxModelSelector('openai::gpt-4o')).toBe('openai:gpt-4o');
   });
 

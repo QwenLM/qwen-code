@@ -619,12 +619,12 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
-          const fastModel =
-            context.services.settings?.merged?.fastModel ?? 'not set';
+          const fastModelSetting =
+            context.services.settings?.merged?.fastModel?.trim();
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current fast model: ${fastModel}\nUse "/model --fast <model-id>" to set fast model.`,
+            content: `Current fast model: ${fastModelSetting ? formatVisionModelSettingForDisplay(fastModelSetting) : 'not set'}\nUse "/model --fast <model-id>" to set fast model.`,
           };
         }
         return {
@@ -684,6 +684,29 @@ export const modelCommand: SlashCommand = {
                 availableModels,
               )
             : formatUnavailableFastModelMessage(modelName, availableModels),
+        };
+      }
+
+      // A typed selector cannot express an endpoint, so a same-id match
+      // across multiple configured endpoints would silently bind whichever
+      // provider registered first (registry first-match fallback) — e.g. an
+      // exhausted token plan (#12760). The picker is the way to pin one.
+      const matchingModels = availableModels.filter(
+        (model) => model.id === selector.modelId,
+      );
+      const currentAuthMatches = selector.authType
+        ? matchingModels
+        : matchingModels.filter((model) => model.authType === authType);
+      const endpointCandidates =
+        currentAuthMatches.length > 0 ? currentAuthMatches : matchingModels;
+      if (endpointCandidates.length > 1) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            "Fast model '{{modelName}}' matches multiple configured endpoints. Run /model --fast without an argument and choose the exact endpoint.",
+            { modelName },
+          ),
         };
       }
 
