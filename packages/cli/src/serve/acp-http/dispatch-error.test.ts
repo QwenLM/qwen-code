@@ -15,9 +15,13 @@ import {
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
   InvalidSessionMetadataError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
@@ -87,6 +91,93 @@ describe('capacity RPC errors', () => {
         capacity,
         sessionId: 'id',
       },
+    });
+  });
+});
+
+describe('paired Bridge rejections', () => {
+  it('maps an invalid requested ID to 400 without echoing it', () => {
+    expect(
+      toRpcError(new RequestedSessionIdRejectedError('invalid_session_id')),
+    ).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: 'Invalid params: Requested session ID is invalid',
+      data: { httpStatus: 400, errorKind: 'invalid_session_id' },
+    });
+  });
+
+  it('maps a live requested ID to the shared 409 conflict shape', () => {
+    expect(
+      toRpcError(
+        new RequestedSessionIdRejectedError('session_id_conflict', 'id'),
+      ),
+    ).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: 'Invalid params: Session id is already live',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        sessionId: 'id',
+        conflict: 'live',
+      },
+    });
+  });
+
+  it('maps an unsupported Managed branch to 409', () => {
+    const error = new ManagedSessionBranchUnsupportedError('id');
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: error.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: 'id',
+      },
+    });
+  });
+
+  it.each([
+    ['host selection', new SessionExecutionEngineError('id', 'empty')],
+    [
+      'the ACP child',
+      new RequestError(-32024, 'belongs to managed', {
+        errorKind: 'session_execution_engine_unavailable',
+        sessionId: 'id',
+      }),
+    ],
+  ])('maps an owner rejection from %s to 409', (_source, error) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    });
+  });
+});
+
+describe('transcript snapshot rejections', () => {
+  it.each([
+    [
+      'the daemon',
+      new SessionTranscriptSnapshotUnavailableError('id'),
+      'Transcript snapshot is unavailable for session id',
+    ],
+    [
+      'the ACP child',
+      new RequestError(-32010, 'Transcript snapshot is unavailable', {
+        errorKind: 'transcript_snapshot_unavailable',
+        sessionId: 'id',
+      }),
+      'Transcript snapshot is unavailable',
+    ],
+  ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message,
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     });
   });
 });

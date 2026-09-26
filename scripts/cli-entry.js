@@ -307,6 +307,11 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
+  // cmd.exe metacharacters. Mirrors UNSAFE_CMD_CHARS in
+  // packages/cli/src/ui/standalone-update.ts — kept local because this
+  // plain-ESM entry ships in the standalone package and cannot import the
+  // TypeScript sources.
+  const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
   const entryPath = resolve(process.argv[1]);
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launchEnv = { ...process.env };
@@ -369,12 +374,38 @@ if (isInProcessFastPath()) {
     // its own version instead of inheriting the old process's session version.
     delete relaunchEnv['QWEN_CODE_STARTUP_VERSION'];
     delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
+    if (
+      process.platform === 'win32' &&
+      launcher.endsWith('.cmd') &&
+      UNSAFE_CMD_CHARS.test(launcher)
+    ) {
+      // The cmd.exe relaunch below hands its command line over verbatim
+      // (windowsVerbatimArguments), which drops Node's escaping safety net:
+      // a launcher path with cmd metacharacters would be re-tokenized into
+      // extra commands. The update itself already landed, so skip the
+      // relaunch instead of spawning a malformed command line.
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
+      process.exit(0);
+      // Unreachable in production; keeps tests with a mocked exit honest.
+      return;
+    }
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')
         ? spawnSync(
             process.env['ComSpec'] ?? 'cmd.exe',
             ['/d', '/s', '/c', `""${launcher}""`],
-            { stdio: 'inherit', env: relaunchEnv },
+            // cmd.exe does not understand Node's MSVCRT argv escaping: it
+            // rewrites every embedded quote of the ""…"" idiom as \", and
+            // cmd /s rule 2 then strips the line down to a literal
+            // \"\"path\"\" program name (#12687). Hand the line over
+            // verbatim, as shellExecutionService already does for cmd.
+            {
+              stdio: 'inherit',
+              env: relaunchEnv,
+              windowsVerbatimArguments: true,
+            },
           )
         : spawnSync(launcher, [], {
             stdio: 'inherit',

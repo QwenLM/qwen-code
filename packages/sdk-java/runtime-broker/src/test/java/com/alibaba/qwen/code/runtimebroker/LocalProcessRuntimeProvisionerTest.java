@@ -479,7 +479,7 @@ class LocalProcessRuntimeProvisionerTest {
                 .collect(Collectors.toSet());
     }
 
-    private static void requireNode() {
+    static void requireNode() {
         if (commandExists("node")) {
             return;
         }
