@@ -1,0 +1,142 @@
+# 远程 Qwen Code 使用本地桌面机：launchd 按需拉起的 node_repl 中继
+
+> 状态：v4，已实现（本 PR）。2026-09-25 真实 Linux → Mac 的原生授权、桌面读写与裁剪截图、会话切换保持、主动断开撤销和非 GUI 取消恢复已通过；2026-09-26 的最终候选又收敛为单一 Web Shell 路径，并完成受限凭证和失败路径回归。未覆盖场景与发布前提见 §6 及 `docs/verification/remote-computer-use/results.md`。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
+> 真机验证步骤见 `docs/verification/remote-computer-use/README.md`。
+> 关联：#5626（反向工具通道）、#10962（本地文件桥）、#11548（Web Shell 连接远程 daemon）、#11475（远程 daemon 工作流）、`docs/users/features/computer-use.md`
+
+## 0. 结论
+
+用户面前那台有图形会话的机器（下称桌面机）把自己的 `node_repl`（连同 `@qwen-code/cua-sdk` 和内嵌驱动）借给一个远端会话。两个部件：
+
+1. **桌面机上一次性安装**：`npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install`。它把运行时装到 `~/.qwen/desktop-relay`，并向 launchd 注册 `127.0.0.1:47821` 上的 socket（inetd 模式）。平时没有任何进程；有连接进来时 launchd 才拉起一个短命进程。
+2. **Web Shell 的“使用这台电脑”入口**：页面先向 daemon 换取一次性、短时且只绑定当前会话与 `desktop-node-repl` 的凭证，再把 daemon 地址、`sessionId` 和该凭证交给本机中继；中继在桌面机上弹出原生确认框；用户允许后，中继拉起 `node_repl`，通过 daemon 的反向工具通道按会话注册给这一个会话。daemon 的完整 bearer token 不会发送到本机中继。
+
+Computer Use skill 会优先选择 `desktop-node-repl`，并在它存在时跳过普通 `node_repl` 的安装引导；未连接桌面中继时仍走原有本地路径。
+
+## 1. 为什么中继的是 node_repl
+
+- skill 的常规路径 `ComputerUse.create()` 返回 `DriverBackend::Embedded`：驱动以原生库形式跑在 `node_repl` 进程里，不经过 `qwen-cua-driver` 守护进程。TCC 授权落在拉起 `node_repl` 的进程身份上。
+- `ComputerUse.connect({ socketPath })` 发 `trusted_session_begin`，standalone 守护进程只接受“原始的嵌入宿主连接”（`cua-driver/src/serve.rs:787`，错误码 77），经 SSH 转发的连接永远不满足。
+- 守护进程的 HTTP MCP 是给外部 agent 用的原始工具面，走它会绕过 #9856 之后的 skill 层。
+
+所以要搬的是 `node_repl` 这个 MCP server，而不是驱动。
+
+## 2. 形态是怎么定下来的
+
+| 候选                              | 否决理由                                       |
+| --------------------------------- | ---------------------------------------------- |
+| 独立的桌面 app（签名、菜单栏）    | 要用户额外装一个 app                           |
+| `qwen bridge` 子命令              | 每次使用都要在桌面机上敲命令，不是开箱即用     |
+| 桌面机上常驻本地 `qwen serve`     | 浏览器用户为此多跑一个服务，不合适             |
+| 本地 TUI 连远端 daemon            | TUI 今天没有这种模式，离本需求太远             |
+| **launchd socket 激活（本方案）** | 一次性安装，之后零常驻进程；浏览器里点按钮即可 |
+
+有一个事实绕不开：浏览器页面不能读别的 app 的界面、也不能替用户点鼠标，所以桌面机上必须有一个原生进程充当“桌面”这项能力的服务端。本方案让这个进程只在需要时存在。
+
+## 3. 实现
+
+### 3.1 部件
+
+```text
+桌面机                                                     远端开发机
+浏览器 Web Shell ──(1) POST /desktop-relay/credential ───────► qwen serve
+       └──────────(2) POST http://127.0.0.1:47821/connect
+                        │
+launchd（inetd 模式）拉起：node-repl-mcp desktop-relay agent
+   ├─ 原生确认框（osascript）
+   ├─ 拉起 node_repl（stdio，cwd = ~/.qwen/desktop-relay）
+   └─ (3) WebSocket /acp ────────────────────────────►  qwen serve（QWEN_SERVE_CLIENT_MCP_OVER_WS=1）
+         ACP initialize → mcp_register {server:'desktop-node-repl', sessionId}
+         mcp_message ⇄ node_repl                         该会话里出现 node_repl 工具
+```
+
+会话生命周期补充（2026-09-25）：session-scoped MCP 注册持有服务端现有事件订阅，不注册普通客户端、不参与权限投票，也不把会话事件转发给桌面。订阅防止浏览器切走时 live session 被自动回收；真正关闭会话会终止订阅、撤回工具，并让中继退出 connected。注销、断开和同名注册替换都会释放旧所有者的订阅；不持久化或自动恢复桌面授权。直接使用 `session/resume` 保活的方案已撤回，因为它会增加 consensus 模式下的投票者。
+
+中继代码在 `packages/node-repl/src/desktop-relay/`，入口是 `node-repl-mcp desktop-relay <command>`（`src/index.ts` 按参数动态加载，普通 MCP 模式不受影响）：
+
+| 文件                 | 作用                                                                                                      |
+| -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `cli.ts`             | `install` / `uninstall` / `status`，以及 launchd 调用的 `agent`                                           |
+| `launchd.ts`         | 生成 LaunchAgent plist（`Sockets` + `inetdCompatibility { Wait: false }`），`launchctl bootstrap/bootout` |
+| `agent.ts`           | 一条浏览器 HTTP 连接的处理：安全校验、原生确认和 ACP 中继启动                                             |
+| `http.ts`            | 单请求的 HTTP/1.1 解析与响应（`Connection: close`）                                                       |
+| `consent.ts`         | 原生确认框与通知（`osascript`，消息作为参数传入，不拼进脚本）                                             |
+| `acp-relay.ts`       | 反向工具通道客户端：initialize、按会话注册、重试预热、应答 `mcp_message`                                  |
+| `mcp-child-relay.ts` | 一个 `node_repl` 子进程服务多个 MCP 客户端                                                                |
+| `runtime.ts`         | 生产环境接线：拉起子进程、`ws` 连接、`active.json` 状态文件、中继主流程                                   |
+
+### 3.2 一条连接的处理（`agent.ts`）
+
+launchd 的 inetd 模式把接受的连接作为新进程的 stdin/stdout。进程只接受浏览器 HTTP 请求：
+
+- `Host` 必须是 `127.0.0.1:47821` 或 `localhost:47821`，否则 421。这挡住 DNS rebinding。
+- `OPTIONS` 预检：回显 `Origin`，并带 `Access-Control-Allow-Private-Network: true`（Chrome 对“公网页面访问回环地址”的要求）。
+- `GET /status`：返回版本；只有发起连接的那个 `Origin` 能看到当前连接的会话和阶段。
+- `POST /connect`：必须有合法的 web `Origin`；校验 body（daemon 地址只允许 http/https、不带凭据；`sessionId`；可选 token 和 workspace）；**弹原生确认框**；拒绝或超时返回 403；允许后结束上一个中继（一台机器只有一个），写 `active.json`（不含 token），回 202，然后在同一个进程里跑中继，直到结束。
+- `POST /disconnect`：只接受发起连接的 `Origin`，给中继进程发 SIGTERM。
+
+### 3.3 一个 node_repl 服务多个客户端（`mcp-child-relay.ts`）
+
+daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一个注册接入，每个客户端的请求 id 都从 0 开始；而 `node_repl` 是只服务一个客户端的 stdio server。所以：
+
+- 第一个 `initialize` 转发给子进程，之后的用缓存结果应答；`notifications/initialized` 只转发一次；
+- 请求 id 改写成中继自己的编号，回复时还原；反向通道没有携带来源客户端身份，不同客户端会复用请求 id，因此 `notifications/cancelled` 会转发给所有匹配该原始 id 的在途请求并立即清理映射（停止对话必须能停下正在操作屏幕的单元）；
+- 子进程发起的请求一律回 -32601（反向通道只承载 daemon 发起的请求），通知丢弃；
+- 回复超过 9 MB 时换成错误（daemon 的 `/acp` 单帧上限 10 MB），提示模型减少输出，比如缩小截图；
+- 子进程退出后，挂起的和之后的请求都返回错误。
+
+### 3.4 反向通道客户端（`acp-relay.ts`）
+
+行为照搬 Web Shell 本地文件桥（`bridge-client.ts`）实测过的规则：30 秒内完成 ACP `initialize`；`register_failed` 时先预热再重试（主工作区用 `POST /workspace/acp/preheat`，其他工作区用 `POST /workspaces/:w/runtime/ensure`），最多 6 次；`already_registered` 时等待而不消耗重试次数；`rate_limited` 在注册阶段计入重试，连接后忽略。
+
+有一处刻意不同：**连接断开即结束，不自动重连**。桌面控制权不会在没有新的确认的情况下恢复。
+
+本机中继用 `Authorization: Bearer` 携带 daemon 签发的一次性凭证；该凭证只允许一次 `/acp` 升级，初始化客户端必须是 `qwen-desktop-relay`，之后只能为签发时指定的会话收发 `desktop-node-repl` 帧。
+
+### 3.5 Web Shell 入口
+
+`packages/web-shell/client/components/DesktopRelayControl.tsx`，放在侧边栏底部“本地文件”旁边（桌面端外壳默认隐藏，因为它的 daemon 本来就在本机）：
+
+- 只在用户打开面板、或连接处于进行中时才探测 `/status`：未经提示就访问回环端口可能触发浏览器的本地网络权限提示，而且每次探测都会在桌面机上拉起一个短命进程。连接稳定后每 30 秒探测一次。
+- 状态：检测中 / 未设置（显示一次性安装命令和复制按钮）/ 未连接 / 等待确认 / 连接中 / 已连接 / 被其他会话使用 / 失败 / 不可用。
+- 与本地文件桥共用工作区路由规则（`resolveLocalFilesWorkspaceRoute`）：daemon 未启用 `client_mcp_over_ws`、工作区不受信任或是 live 工作区时不提供入口；页面不是安全上下文时也不提供（浏览器不允许）。
+
+## 4. 安全模型
+
+- **被允许的会话可以在桌面机上以用户权限运行任意代码，并查看、操作屏幕。** 这是中继 `node_repl` 的直接后果（`node_repl` 没有能力沙箱），与本地 computer use 相同。确认框、README 和用户文档都这样写明。
+- 每次连接都要在桌面机上确认，不记住任何选择。确认框是原生对话框，网页无法绘制或点击。
+- 连接成功和结束时发系统通知。停止：Web Shell 里断开；或结束会话；或 `kill` 中继进程。
+- daemon 的完整 token 只用于页面到原 daemon 的同源签发请求。本机中继仅收到 2 分钟内有效、单次使用并绑定 ACP 路径、会话和 server 的凭证；凭证和 token 都不写盘。
+- 残余风险：
+  - 任何网页都能请求 `/connect` 并弹出确认框，确认框里写着请求来源和 daemon 地址，靠用户判断。Chrome 的本地网络访问权限提示是额外的一层。
+  - TCC 授权记在 launchd 拉起的 `node` 可执行文件名下，而不是终端；其他由非终端拉起的同一个 `node` 也会继承这份授权。
+  - `/status` 会向任意来源暴露“已安装”和版本号。
+
+## 5. 已核实的事实
+
+| #   | 事实                                                                                                                          | 证据                                                                                      |
+| --- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 1   | skill 的常规路径 `ComputerUse.create()` 使用 `DriverBackend::Embedded`，驱动在 `node_repl` 进程内运行                         | `typescript/computer-use/index.js:438-446`；`cua-driver-sdk/src/lib.rs`                   |
+| 2   | standalone 守护进程拒绝非嵌入宿主的 `trusted_session_begin`（错误码 77）                                                      | `cua-driver-sdk/src/service_session.rs:38`；`cua-driver/src/serve.rs:787`                 |
+| 3   | `node_repl` 的裸包从 `<cwd>/node_modules` 解析                                                                                | `packages/node-repl/src/runtime/module-loader.mjs:123`                                    |
+| 4   | skill 只在 `node_repl` 不可用时 bootstrap；平台参考文档始终由托管 skill 的主机用 `read_file` 读取，不让远端 REPL 读取本机路径 | `packages/core/src/skills/bundled/computer-use/SKILL.md`                                  |
+| 5   | `/acp` 升级优先读 `Authorization: Bearer`；跨站检查只在请求带 `Origin` 时生效；单帧上限 10 MB                                 | `cli/src/serve/acp-http/index.ts:270-300`、`:1568`                                        |
+| 6   | 会话级注册带 `alwaysLoadTools: true`；client MCP 不允许遮蔽设置里的同名 server，因此 Web 路径使用独立名称 `desktop-node-repl` | `client-mcp-sender-registry.ts`；`core/src/tools/mcp-client-manager.ts`                   |
+| 7   | 预热路由：`POST /workspace/acp/preheat`、`POST /workspaces/:workspace/runtime/ensure`                                         | `cli/src/serve/routes/workspace-status.ts:150`；`sdk-typescript/.../DaemonClient.ts:6545` |
+| 8   | server 名称只允许 `[A-Za-z0-9_-]`，`desktop-node-repl` 合法                                                                   | `cli/src/runtime/validate-server-name.ts:7`                                               |
+| 9   | MCP SDK 1.30 的 server 用一个 handler 处理 `initialize`；中继不依赖它能否重复初始化，自己缓存                                 | `@modelcontextprotocol/sdk/dist/esm/server/index.js:52`                                   |
+
+## 6. 验证边界与发布前提
+
+1. 已实测 macOS launchd socket 激活、HTTP 安全边界及用户点击原生 Allow 后连接；原生框没有成功留存截图，不以窗口元数据冒充用户确认。
+2. 已实测 Chromium 浏览器通过 SSH localhost 转发访问 Linux Serve，再调用 Mac Computer Use 读写测试文稿并返回裁剪截图；不代表 Safari、HTTPS 部署或所有截图尺寸已验收。
+3. 非 GUI cell 的取消、超过 30 秒后的继续调用、会话切换保持及断开撤销已通过；连续 GUI 输入中的取消尚未完整验收。
+4. 全新 Mac 的首次安装、TCC 首次授权及权限归属仍需专门验证；本轮使用已有 Mac 上安装的候选 tarball。
+5. 发布：安装命令固定到 `@qwen-code/node-repl-mcp@0.1.7`（不用 `@latest`——已发布的 0.1.6 没有 `desktop-relay` 子命令，其入口不读 argv，照文档敲下去只会静默挂在 stdin 上）。本 PR 同步把 `packages/node-repl/package.json` 从 0.1.6 bump 到 0.1.7，并带上 `cd-cua-driver.yml` validate-version 门禁要求的三处版本行（computer-use/browser-use 的 SKILL.md、用户指南）；不 bump 则发布链路会以 “already exists with different integrity” 拒绝发布，固定出去的版本里依然没有中继。发布前仍用 `--package <tarball>` 安装（见验证说明）。
+6. 2026-09-26 最终候选在 Node 22 上通过 612 项聚焦回归、全仓 build、typecheck 和 lint；这些自动化结果验证受限凭证、路由、状态机和失败路径，不冒充一次新的 macOS 授权截图或跨机 GUI 实测。
+
+## 7. 非目标与后续
+
+- 非目标：在远端模拟桌面（Xvfb）；独立的桌面 app；中继 `qwen-cua-driver` 守护进程或它的 HTTP MCP。
+- 后续：Linux 桌面（systemd socket 激活）和 Windows 的安装方式；是否需要比“Web Shell 断开 / kill”更直接的本地停止开关。
+- HTTP + 服务器 IP 访问时的安全连接引导单独由 #12696 跟进，不在本 PR 放宽浏览器安全上下文限制。

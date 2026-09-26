@@ -116,6 +116,32 @@ Uncaught errors preserve a string `code` and bounded `details` text in MCP outpu
 including action and verification diagnostics. External side effects may already
 have happened when an error is thrown; use those diagnostics before retrying.
 
+## Desktop relay
+
+`node-repl-mcp desktop-relay` lends this server to a Qwen Code session running
+somewhere else, typically a headless dev box, so the computer-use skill can
+drive the desktop you are sitting at. On macOS:
+
+```bash
+npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
+```
+
+This installs the server and `@qwen-code/cua-sdk` under `~/.qwen/desktop-relay`
+and registers a launchd socket on `127.0.0.1:47821` in inetd mode: nothing runs
+until something connects, and each connection gets its own short-lived process.
+
+- **Web Shell.** In a session served by a remote `qwen serve` (started with
+  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`), choose **Use this computer** in the sidebar
+  footer. A native dialog on this computer asks for approval; once allowed, the
+  relay starts `node_repl` here and registers it for that one session over the
+  daemon's reverse tool channel. Disconnect from the same entry.
+
+An approved session can run code on this computer with your permissions and see
+and control its screen, exactly as a local `node_repl` can. Every connection is
+approved separately; nothing is remembered. `desktop-relay status` shows the last
+connection, `desktop-relay uninstall [--purge]` removes the socket (and the
+runtime).
+
 ## Build & test
 
 ```bash

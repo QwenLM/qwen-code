@@ -25,7 +25,7 @@ Node.js 22 or later and npm are required.
 When first used, the skill runs these commands itself:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
 npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
 ```
 
@@ -85,6 +85,32 @@ On macOS, accessibility observation and input require Accessibility permission.
 Screenshots additionally require Screen Recording permission. macOS may
 attribute the grant to the terminal or IDE that launched Qwen Code. Windows and
 Linux use their platform accessibility and input facilities.
+
+## Use the computer in front of you from a remote session
+
+When Qwen Code runs on a headless machine (a dev box, a server), the skill can
+still drive the desktop you are sitting at: that computer lends its own
+`node_repl` to one remote session. It works on macOS today.
+
+Set it up once on your computer:
+
+```bash
+npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
+```
+
+This installs `node_repl` and the SDK under `~/.qwen/desktop-relay` and registers
+a launchd socket on `127.0.0.1:47821`. Nothing runs in the background; launchd
+starts a short-lived process only when something connects.
+
+- **From the Web Shell.** The remote daemon must run with
+  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`, and the Web Shell must be a secure page
+  (https, or `http://localhost` through an SSH tunnel). In a session, choose
+  **Use this computer** in the sidebar footer, then **Connect this computer**.
+
+A dialog on your computer asks you to allow every connection. An allowed session
+can run code on your computer with your permissions and see and control its
+screen, just like local Computer Use, until you disconnect it or it ends. macOS
+asks to allow `node` under Accessibility and Screen Recording the first time.
 
 ## Troubleshooting
 

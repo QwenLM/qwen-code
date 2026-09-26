@@ -6,7 +6,7 @@
 
 import { createServer } from 'node:http';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   allowOriginCors,
   bearerAuth,
@@ -124,6 +124,62 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(credentials.verify('pairing-token', { kind: 'local-control' })).toBe(
       true,
     );
+  });
+
+  it('keeps desktop relay credentials one-time, short-lived, and outside bearer auth', () => {
+    const credentials = new CredentialStore('runtime-token');
+    const credential = credentials.createDesktopRelayCredential({
+      acpPath: '/workspaces/w/acp',
+      sessionId: 'session-1',
+    });
+
+    expect(credential).toBeDefined();
+    expect(credentials.verify(credential!, { kind: 'primary' })).toBe(false);
+    expect(
+      credentials.consumeDesktopRelayCredential(
+        credential!,
+        '/workspaces/w/acp',
+      ),
+    ).toEqual({ acpPath: '/workspaces/w/acp', sessionId: 'session-1' });
+    expect(
+      credentials.consumeDesktopRelayCredential(
+        credential!,
+        '/workspaces/w/acp',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('consumes a desktop relay credential when the ACP path does not match', () => {
+    const credentials = new CredentialStore();
+    const credential = credentials.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+
+    expect(
+      credentials.consumeDesktopRelayCredential(
+        credential,
+        '/workspaces/w/acp',
+      ),
+    ).toBeUndefined();
+    expect(
+      credentials.consumeDesktopRelayCredential(credential, '/acp'),
+    ).toBeUndefined();
+  });
+
+  it('expires a desktop relay credential after two minutes', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    const credentials = new CredentialStore();
+    const credential = credentials.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+    now.mockReturnValue(121_001);
+
+    expect(
+      credentials.consumeDesktopRelayCredential(credential, '/acp'),
+    ).toBeUndefined();
+    now.mockRestore();
   });
 
   it('passes through when --require-auth is on (global bearerAuth handles enforcement)', () => {

@@ -19,6 +19,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import {
   singleTokenCredentials,
+  type DesktopRelayCredentialClaim,
   type ListenerScopedCredentials,
 } from '../local-control/credentials.js';
 import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
@@ -206,6 +207,8 @@ function pluralWorkspaceRawSelector(
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const DESKTOP_RELAY_CLIENT_NAME = 'qwen-desktop-relay';
+const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
 
@@ -1755,14 +1758,22 @@ export function mountAcpHttp(
       // credential, and the runtime token does not satisfy it. Without this
       // the subprotocol path would be a way around the scoping that
       // `bearerAuth` enforces for plain HTTP.
+      let desktopRelayClaim: DesktopRelayCredentialClaim | undefined;
       if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
         const presented = extractUpgradeBearer(req);
+        desktopRelayClaim = presented
+          ? upgradeCredentials.consumeDesktopRelayCredential?.(
+              presented,
+              rawPath,
+            )
+          : undefined;
         if (
           !presented ||
-          !upgradeCredentials.verify(presented, upgradeListenerIdentity)
+          (!desktopRelayClaim &&
+            !upgradeCredentials.verify(presented, upgradeListenerIdentity))
         ) {
           logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -2035,6 +2046,32 @@ export function mountAcpHttp(
             parsed !== null && typeof parsed === 'object'
               ? (parsed as { type?: unknown }).type
               : undefined;
+          const isClientMcpFrame =
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            ClientMcpWsConnection.isClientMcpFrameType(frameType);
+          if (desktopRelayClaim && initialized && !isClientMcpFrame) {
+            ws.close(1008, 'Desktop relay credential scope violation');
+            return;
+          }
+          if (desktopRelayClaim && isClientMcpFrame) {
+            const frame = parsed as Record<string, unknown>;
+            if (
+              frame['server'] !== DESKTOP_RELAY_SERVER_NAME ||
+              (frameType === 'mcp_register' &&
+                frame['sessionId'] !== desktopRelayClaim.sessionId)
+            ) {
+              ws.send(
+                JSON.stringify({
+                  type: 'mcp_error',
+                  code: 'credential_scope_violation',
+                  message:
+                    'desktop relay credential is scoped to one server and session',
+                }),
+              );
+              return;
+            }
+          }
           if (
             activeMount.draining &&
             frameType === 'mcp_message' &&
@@ -2093,9 +2130,7 @@ export function mountAcpHttp(
             opts.clientMcpOverWs === true &&
             parsed !== null &&
             typeof parsed === 'object' &&
-            ClientMcpWsConnection.isClientMcpFrameType(
-              (parsed as { type?: unknown }).type,
-            )
+            isClientMcpFrame
           ) {
             // Client-MCP requires an initialized connection (the ACP handshake
             // establishes the connection identity + stream first).
@@ -2296,6 +2331,30 @@ export function mountAcpHttp(
               return;
             }
 
+            const clientName =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params)
+                ? (
+                    (message.params as Record<string, unknown>)[
+                      'clientInfo'
+                    ] as { name?: string } | undefined
+                  )?.name
+                : undefined;
+            if (desktopRelayClaim && clientName !== DESKTOP_RELAY_CLIENT_NAME) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INVALID_REQUEST,
+                    'Desktop relay credential requires the desktop relay client',
+                  ),
+                ),
+              );
+              ws.close(1008, 'Desktop relay credential scope violation');
+              return;
+            }
+
             const conn = activeMount.registry.create(fromLoopback);
             if (!conn) {
               ws.send(
@@ -2356,16 +2415,6 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
-              message.params &&
-              typeof message.params === 'object' &&
-              !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
-                : undefined;
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&

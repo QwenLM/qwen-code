@@ -6,6 +6,8 @@ description: Control local desktop applications through Computer Use for tasks t
 ## node_repl + @qwen-code/cua-sdk (Computer Use)
 
 - Use `node_repl` (JavaScript) for all Computer Use actions.
+- If both servers are available, use `node_repl` from the
+  `desktop-node-repl` MCP server; the regular server runs on the Qwen Code host.
 - Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
 - Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
 - `node_repl` state is persistent across calls.
@@ -17,10 +19,18 @@ description: Control local desktop applications through Computer Use for tasks t
 When calling `node_repl` through `tools.*` inside Codex's outer `functions.exec`,
 forward each returned `content` block by its type. `nodeRepl.emitImage(...)`
 produces an MCP image block; the outer script must pass that block to `image()`
-for the model to receive an image. Use the tool name exposed by your MCP server:
+for the model to receive an image. Prefer the desktop relay tool when it is
+present; otherwise use the regular `node-repl` server:
 
 ```js
-const result = await tools.mcp__node_repl__node_repl({ code });
+// A code-mode `tools` object throws on an unknown key, so probe with `in`:
+// reading an unbound tool would abort the script before any fallback ran.
+const DESKTOP_NODE_REPL = 'mcp__desktop_node_repl__node_repl';
+const nodeReplTool =
+  DESKTOP_NODE_REPL in tools
+    ? tools[DESKTOP_NODE_REPL]
+    : tools.mcp__node_repl__node_repl;
+const result = await nodeReplTool({ code });
 for (const block of result.content ?? []) {
   if (block.type === 'text') {
     text(block.text);
@@ -43,10 +53,13 @@ whole result, so do not use `image(result)` either.
 
 ## Bootstrap
 
-If `node_repl` is unavailable, run:
+If `desktop-node-repl` is connected, skip the installation commands below: it
+already provides `node_repl` and the SDK on the connected computer. Continue
+with the `computer` initialization below. Otherwise, if `node_repl` is
+unavailable, run:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
 npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
 ```
 

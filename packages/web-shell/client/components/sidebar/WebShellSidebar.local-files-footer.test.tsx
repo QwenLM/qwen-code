@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type Root } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneContext } from '../../config/standalone';
+import {
+  disconnectDesktopRelay,
+  probeDesktopRelay,
+} from '../../desktop-relay/desktop-relay-client';
 import type { WebShellSidebarFooterItem } from './WebShellSidebar';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
@@ -31,7 +35,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
       },
       workspace: {
         baseUrl: '',
-        capabilities: undefined,
+        capabilities: undefined as { features?: string[] } | undefined,
         client: {
           workspaceByCwd: vi.fn(() => ({
             listWorkspaceSessions: vi.fn().mockResolvedValue([]),
@@ -67,6 +71,12 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
 // of LocalFilesControl would keep the trigger assertions green while the bridge
 // registered for a remote daemon.
 const bridgeHookCalls = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../desktop-relay/desktop-relay-client', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  probeDesktopRelay: vi.fn(),
+  disconnectDesktopRelay: vi.fn(),
+}));
 
 vi.mock('../../local-files/useLocalFilesBridge', () => ({
   useLocalFilesBridge: () => {
@@ -138,6 +148,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 const LOCAL_FILES_LABEL = 'Local files';
+const DESKTOP_RELAY_LABEL = 'Use this computer';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -177,6 +188,10 @@ function localFilesTrigger(): HTMLElement | null {
   return container.querySelector(`button[aria-label="${LOCAL_FILES_LABEL}"]`);
 }
 
+function desktopRelayTrigger(): HTMLElement | null {
+  return container.querySelector(`button[aria-label="${DESKTOP_RELAY_LABEL}"]`);
+}
+
 function setDesktopShell(enabled: boolean) {
   const win = window as unknown as { __TAURI__?: unknown };
   if (enabled) {
@@ -189,6 +204,11 @@ function setDesktopShell(enabled: boolean) {
 beforeEach(() => {
   window.localStorage.clear();
   workspace.baseUrl = window.location.origin;
+  workspace.capabilities = undefined;
+  vi.mocked(probeDesktopRelay)
+    .mockReset()
+    .mockResolvedValue({ kind: 'missing' });
+  vi.mocked(disconnectDesktopRelay).mockReset().mockResolvedValue(undefined);
   bridgeHookCalls.count = 0;
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -220,6 +240,67 @@ describe('local files footer entry', () => {
     setDesktopShell(true);
     renderSidebar({ items: ['localFiles'] });
     expect(localFilesTrigger()).not.toBeNull();
+  });
+});
+
+describe('desktop relay footer entry', () => {
+  it('keeps a live relay revocable after switching to an unsupported daemon', async () => {
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    vi.mocked(probeDesktopRelay).mockResolvedValue({
+      kind: 'ready',
+      version: '0.1.6',
+      active: {
+        sessionId: 'approved-session',
+        daemonUrl: workspace.baseUrl,
+        phase: 'connected',
+      },
+    });
+    renderSidebar();
+    await act(async () => desktopRelayTrigger()?.click());
+    workspace.capabilities = { features: [] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).not.toBeNull();
+    const disconnect = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disconnect',
+    );
+    expect(disconnect).toBeDefined();
+    vi.mocked(probeDesktopRelay).mockResolvedValue({
+      kind: 'ready',
+      version: '0.1.6',
+    });
+    await act(async () => disconnect?.click());
+    expect(disconnectDesktopRelay).toHaveBeenCalledOnce();
+    expect(desktopRelayTrigger()).toBeNull();
+  });
+
+  it('is hidden until the daemon advertises the reverse tool channel', () => {
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
+    expect(probeDesktopRelay).not.toHaveBeenCalled();
+
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).not.toBeNull();
+  });
+
+  it('stays available when a host explicitly configures it', () => {
+    renderSidebar({ items: ['desktopRelay'] });
+    expect(desktopRelayTrigger()).not.toBeNull();
+  });
+
+  it('is hidden by default inside the desktop shell', () => {
+    setDesktopShell(true);
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
+  });
+
+  it('is withheld when the selected daemon is not the page origin', () => {
+    workspace.baseUrl = 'https://remote.example';
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
+    expect(probeDesktopRelay).not.toHaveBeenCalled();
   });
 });
 

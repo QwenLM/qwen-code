@@ -148,6 +148,7 @@ import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { LocalFilesControl } from '../LocalFilesControl';
+import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -239,6 +240,7 @@ export type WebShellSidebarFooterItem =
   | 'splitView'
   | 'daemonStatus'
   | 'localFiles'
+  | 'desktopRelay'
   | 'collapse';
 
 export interface WebShellSidebarBranding {
@@ -288,15 +290,18 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'splitView',
   'daemonStatus',
   'localFiles',
+  'desktopRelay',
   'collapse',
 ];
 
 // The desktop shell always spawns its own loopback daemon, whose regular tools
-// already reach the local disk, so the bridge has nothing to add there — and on
-// WebKit webviews it could only ever render a dead entry. An explicit
-// `footer.items` still wins, so the entry stays reachable by choice.
+// already reach the local disk and desktop, so neither bridge has anything to
+// add there — and on WebKit webviews the local-files one could only ever render
+// a dead entry. An explicit `footer.items` still wins, so both stay reachable.
 const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
-  DEFAULT_FOOTER_ITEMS.filter((item) => item !== 'localFiles');
+  DEFAULT_FOOTER_ITEMS.filter(
+    (item) => item !== 'localFiles' && item !== 'desktopRelay',
+  );
 
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
@@ -6567,6 +6572,20 @@ export function WebShellSidebar({
                   <LocalFilesControl
                     triggerClassName={styles.collapseButton}
                     workspaces={workspaces}
+                  />
+                )}
+              {footerItems.has('desktopRelay') &&
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <DesktopRelayControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                    showWhenIdle={Boolean(
+                      (footer !== false &&
+                        footer?.items?.includes('desktopRelay')) ||
+                        workspace.capabilities?.features?.includes(
+                          'client_mcp_over_ws',
+                        ),
+                    )}
                   />
                 )}
               {(mobileOpen || footerItems.has('collapse')) && (
