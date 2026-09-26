@@ -11,13 +11,17 @@ const UPDATE_CHECK_FAILED_MESSAGE =
   'Failed to check for updates ({{reason}}). Please check your network or registry configuration.';
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
+const UPDATE_FAILED_WITH_ERROR_MESSAGE =
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.';
 
 export async function updateBeforeRelaunch(
   settings: LoadedSettings,
   projectRoot: string,
   relaunchOnFailure: boolean,
 ): Promise<boolean> {
-  let translate = (message: string) => message;
+  let translate: (key: string, params?: Record<string, string>) => string = (
+    message,
+  ) => message;
   try {
     const [
       { checkForUpdatesDetailed, describeUpdateCheckFailure },
@@ -79,8 +83,12 @@ export async function updateBeforeRelaunch(
         }),
       );
     }
-  } catch {
-    writeStderrLine(translate(UPDATE_FAILED_MESSAGE));
+  } catch (error) {
+    writeStderrLine(
+      translate(UPDATE_FAILED_WITH_ERROR_MESSAGE, {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
   }
   return relaunchOnFailure;
 }

@@ -534,11 +534,17 @@ function checkDeferredSwap(standaloneDir: string): void {
     }
   }
 
-  if (fs.existsSync(`${standaloneDir}.new`)) {
-    throw new Error(
-      `A previous update left a pending swap at ${standaloneDir}.new. ` +
-        'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
-    );
+  const pendingDir = `${standaloneDir}.new`;
+  if (fs.existsSync(pendingDir)) {
+    // Reaching here means no deferred bat process is alive (a live one threw
+    // above), so a leftover .new is residue from an interrupted swap. Remove
+    // it instead of permanently failing every future update. Best-effort: on
+    // win32, atomicReplace retries the removal before staging over it.
+    try {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
+    } catch (err) {
+      debugLogger.warn(`Failed to remove stale ${pendingDir}:`, err);
+    }
   }
 }
 

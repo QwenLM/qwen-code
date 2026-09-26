@@ -359,7 +359,7 @@ describe('standalone-update', () => {
       fs.unlinkSync(lockPath);
     });
 
-    it('rejects a stale lock when a Windows deferred swap is pending', async () => {
+    it('self-heals a leftover pending swap behind a stale lock', async () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       const parentDir = path.dirname(standaloneDir);
       fs.mkdirSync(standaloneDir, { recursive: true });
@@ -375,12 +375,16 @@ describe('standalone-update', () => {
       const lockPath = path.join(parentDir, '.qwen-update.lock');
       fs.writeFileSync(lockPath, '999999999');
 
-      await expect(
-        performStandaloneUpdate(standaloneDir, '1.0.0'),
-      ).rejects.toThrow('A previous update left a pending swap');
+      // No deferred bat process is alive, so the stale .new residue must not
+      // block the update; it is removed and the run proceeds past the swap
+      // check (it then fails for an unrelated reason: no fetch mock here).
+      const err = await performStandaloneUpdate(standaloneDir, '1.0.0').catch(
+        (e: unknown) => e,
+      );
 
-      expect(fs.existsSync(lockPath)).toBe(true);
-      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain('pending swap');
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
     });
   });
 
@@ -799,6 +803,42 @@ describe('standalone-update', () => {
       expect(acquireLock(lockPath, standaloneDir)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
       expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('removes a leftover .new directory when the deferred bat process is dead', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('removes a leftover .new directory when no deferred marker exists', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('keeps a leftover .new directory while the deferred bat process is alive', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, String(process.pid));
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'A previous update is still being applied',
+      );
+      // The in-flight swap must not be disturbed.
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
     });
   });
 
