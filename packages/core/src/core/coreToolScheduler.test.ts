@@ -8523,6 +8523,12 @@ describe('CoreToolScheduler', () => {
       const extendedTool = scheduler.getToolSuggestion('edit_file_path', 1);
       expect(extendedTool).toBe(' Did you mean "edit"?');
 
+      // @ts-expect-error accessing private method
+      const extendedTopN = scheduler.getToolSuggestion('edit_file_path');
+      expect(extendedTopN).toBe(
+        ' Did you mean one of: "edit", "list_files", "write_file"?',
+      );
+
       // Test that the right tool is first
       // @ts-expect-error accessing private method
       const suggestionMultiple = scheduler.getToolSuggestion('list_fils');
