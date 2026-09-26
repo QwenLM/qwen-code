@@ -1557,7 +1557,24 @@ describe('matchesRule', () => {
     const providerSafeName = normalizeToolNameForProvider(legacyName);
 
     expect(providerSafeName).not.toBe(legacyName);
-    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+    // Production supplies the tool's advertised `permissionAliases` with the
+    // evaluation; for this name the legacy reduction is lossless, so the
+    // alias IS the exact raw spelling the matcher compares literally
+    // (#10199). Without the alias channel the registered name alone cannot
+    // vouch for a legacy unsafe spelling.
+    expect(
+      matchesRule(
+        parseRule(legacyName),
+        providerSafeName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [legacyName],
+      ),
+    ).toBe(true);
   });
 
   it('keeps exact provider-safe MCP permission matches collision-safe', () => {
@@ -1567,8 +1584,39 @@ describe('matchesRule', () => {
     const slashedProviderName = normalizeToolNameForProvider(slashedName);
 
     expect(dottedProviderName).not.toBe(slashedProviderName);
-    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
-    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        dottedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [dottedName],
+      ),
+    ).toBe(true);
+    // The negative arm threads the alias channel too. Unthreaded it returns
+    // `false` for the same structural reason the positive arm does, so it would
+    // not be comparing two aliased tools at all and the `.`-versus-`/`
+    // invariant this test is named for would go unobserved: both raws sanitize
+    // to the identical body `mcp__zybio__literature_search` and differ only in
+    // the FNV hash, so admitting a reduced spelling to the comparison has to be
+    // caught here.
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        slashedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [slashedName],
+      ),
+    ).toBe(false);
   });
 
   it('MCP server-level match (2-part pattern)', async () => {
@@ -1581,10 +1629,20 @@ describe('matchesRule', () => {
   it('matches a legacy dotted MCP server rule against provider-safe names', () => {
     const rule = parseRule('mcp__zybio.db');
 
+    // Production supplies the tool's own `permissionAliases` with the
+    // evaluation; the alias carries the raw spelling the registered name
+    // lost (#10199).
     expect(
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -1603,6 +1661,13 @@ describe('matchesRule', () => {
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -2042,9 +2107,14 @@ describe('PermissionManager', () => {
       );
       pm2.initialize();
 
+      // Production supplies the tool's own `permissionAliases` with the
+      // evaluation; the alias carries the raw spelling the registered name
+      // lost (#10199). For this name the legacy reduction is lossless, so
+      // the alias equals the raw spelling.
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
+          toolAliases: [legacyName],
         }),
       ).toBe('deny');
     });

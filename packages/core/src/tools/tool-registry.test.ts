@@ -33,6 +33,10 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeMcpToolName,
+} from '../utils/tool-name-utils.js';
 
 vi.mock('node:fs');
 
@@ -357,6 +361,51 @@ describe('ToolRegistry', () => {
       );
 
       expect(mcpTool.name).not.toBe(legacyName);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('publishes the exact raw identity through getPermissionAliases (#10199)', () => {
+      const registry = new ToolRegistry(config);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'foo:bar',
+        'a.b',
+        'description',
+        {},
+      );
+      registry.registerTool(mcpTool);
+
+      // The exact raw spelling comes first — it is the only spelling the
+      // permission matcher accepts as provenance for legacy unsafe rules —
+      // followed by the legacy reduction for pre-normalization settings.
+      expect(registry.getPermissionAliases(mcpTool.name)).toEqual([
+        'mcp__foo:bar__a.b',
+        generateLegacyMcpToolName('mcp__foo:bar__a.b'),
+      ]);
+      expect(registry.getPermissionAliases('read_file')).toBeUndefined();
+    });
+
+    it('disables an MCP tool whose disabledTools entry uses the legacy spelling', () => {
+      // The legacy reduction is the spelling `isToolDisabled`'s surviving
+      // `normalizeMcpToolName(entry) === name` arm cannot reach, so only the
+      // alias channel can disable this tool.
+      const legacyName = generateLegacyMcpToolName('mcp__foo:bar__a.b');
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'foo:bar',
+        'a.b',
+        'description',
+        {},
+      );
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
       registry.registerTool(mcpTool);
       expect(registry.getTool(mcpTool.name)).toBeUndefined();
     });

@@ -3019,13 +3019,17 @@ export class CoreToolScheduler {
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
           const pm = this.config.getPermissionManager?.();
+          const toolAliases = this.config
+            .getToolRegistry?.()
+            ?.getPermissionAliases?.(canonicalName);
           const permissionEnabled = pm
-            ? await pm.isToolEnabled(canonicalName)
+            ? await pm.isToolEnabled(canonicalName, toolAliases)
             : true;
           if (recordPrevalidationCancellation()) continue;
           if (pm && !permissionEnabled) {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
+              toolAliases,
             });
             let permissionErrorMessage: string;
             if (matchingRule) {

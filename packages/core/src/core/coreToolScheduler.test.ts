@@ -1308,7 +1308,7 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name, undefined);
     expect(messageBus.request.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         eventName: 'PreToolUse',

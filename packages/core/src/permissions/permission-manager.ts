@@ -817,8 +817,14 @@ export class PermissionManager {
    * of the eager model request (#9827) — but it only ever demotes them to
    * `deferred`, so this method still reports them enabled.
    */
-  async isToolEnabled(toolName: string): Promise<boolean> {
-    return (await this.getToolRegistrationStatus(toolName)) !== 'disabled';
+  async isToolEnabled(
+    toolName: string,
+    toolAliases?: readonly string[],
+  ): Promise<boolean> {
+    return (
+      (await this.getToolRegistrationStatus(toolName, toolAliases)) !==
+      'disabled'
+    );
   }
 
   /**
@@ -925,6 +931,7 @@ export class PermissionManager {
    */
   async getToolRegistrationStatus(
     toolName: string,
+    toolAliases?: readonly string[],
   ): Promise<ToolRegistrationStatus> {
     const canonicalName = resolveToolName(toolName);
 
@@ -932,7 +939,13 @@ export class PermissionManager {
     // from the session regardless of eager-allowlist membership.
     // evaluate({ toolName }) without a command will only match rules that
     // have no specifier, which is the correct registry-level check.
-    const decision = await this.evaluate({ toolName: canonicalName });
+    // `toolAliases` carries the tool's advertised permissionAliases so a
+    // deny written in a legacy MCP spelling still matches; without them the
+    // registered name alone cannot recover an unsafe raw prefix (#10199).
+    const decision = await this.evaluate({
+      toolName: canonicalName,
+      toolAliases,
+    });
     if (decision === 'deny') {
       return 'disabled';
     }

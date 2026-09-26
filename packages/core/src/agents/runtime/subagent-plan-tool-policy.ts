@@ -5,7 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
@@ -160,22 +160,25 @@ export function isSubagentLikeExecutionContext(): boolean {
 /**
  * Whether `toolName` matches a per-agent `disallowedTools` blocklist, with
  * the exact match semantics AgentCore.prepareTools() applies at declaration
- * level: MCP server-level patterns via {@link matchesMcpPattern} for `mcp__`
- * tools, exact match otherwise. Shared so a fork's inherited execution
+ * level: delegates to {@link matchesToolPattern} — exact match for non-MCP
+ * names, MCP patterns via `matchesMcpPattern` with the caller-resolved alias
+ * channel. Shared so a fork's inherited execution
  * allowlist (tools/agent/agent.ts) cannot drift from the parent's own
  * declaration/invocation enforcement.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so callers resolve them from the registry.
  */
 export function matchesAgentToolBlocklist(
   blocklist: readonly string[] | undefined,
   toolName: string,
+  toolAliases?: readonly string[],
 ): boolean {
   if (!blocklist?.length) {
     return false;
   }
   return blocklist.some((pattern) =>
-    toolName.startsWith('mcp__')
-      ? matchesMcpPattern(pattern, toolName)
-      : pattern === toolName,
+    matchesToolPattern(pattern, toolName, toolAliases),
   );
 }
 

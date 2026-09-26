@@ -11,8 +11,8 @@ import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  generateLegacyMcpToolName,
   normalizeMcpToolName,
-  sanitizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
 
@@ -1634,45 +1634,163 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer" matches any tool provided by the puppeteer server
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
+ *
+ * `toolName` is the registered provider-safe name and `rawToolName` the
+ * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
+ * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
+ * are compared *literally* against those two spellings — never through
+ * `sanitizeToolNameForProvider`, which is what let a rule for the server
+ * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
+ * The wildcard arm additionally reads the legacy reduction of the raw
+ * identity, because a persisted prefix was copied from the spelling settings
+ * showed when it was written.
+ *
+ * A rule written provider-safe (`mcp__foo_bar`) still matches any server
+ * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
+ * registered spelling a literal comparison runs against *is* that reduction.
+ * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
+ * `disallowedTools`, which is why every reachable caller threads the alias
+ * channel.
  */
-export function matchesMcpPattern(pattern: string, toolName: string): boolean {
+export function matchesMcpPattern(
+  pattern: string,
+  toolName: string,
+  rawToolName?: string,
+): boolean {
   if (pattern === toolName) {
     return true;
   }
 
   // Exact rules persisted before provider-safe MCP names were introduced
-  // should continue matching their deterministic normalized registration.
+  // match literally against the tool's exact raw identity — the only
+  // spelling besides the registered name that can vouch for a 3-part rule.
   if (
     !pattern.endsWith('*') &&
     pattern.split('__').length >= 3 &&
-    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+    rawToolName !== undefined &&
+    pattern === rawToolName
   ) {
     return true;
   }
+
+  // Spellings a prefix pattern may match literally: the registered name (what
+  // the model and the UI show, so rules copied from there keep working) plus
+  // the raw identity when it is known.
+  const spellings =
+    rawToolName === undefined || rawToolName === toolName
+      ? [toolName]
+      : [toolName, rawToolName];
+  const matchesPrefixLiterally = (prefix: string): boolean =>
+    spellings.some((spelling) => spelling.startsWith(prefix));
 
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
-    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
+    const prefix = pattern.slice(0, -1);
+    // A bare `*` is not an MCP pattern: its empty prefix would match every
+    // MCP tool. Reducing patterns through `sanitizeToolNameForProvider` used
+    // to turn it into `tool_`, which matched nothing — keep that.
+    if (prefix === '') {
+      return false;
+    }
+    // A persisted prefix was copied from the spelling settings showed when it
+    // was written, which for a pre-normalization entry is the legacy
+    // reduction. Losing that match is a fail-open on `deny`/`ask`/
+    // `disallowedTools`. Wildcard arm only: exact rules reach every advertised
+    // spelling through `matchesAdvertisedExactName`, server-level rules
+    // through `spellings`.
+    const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
+    return (
+      matchesPrefixLiterally(prefix) ||
+      (legacySpelling !== undefined && legacySpelling.startsWith(prefix))
+    );
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
-  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+
+  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
+  // The 3-part test is asked of every spelling, not of the registered name
+  // alone: past the 63-character budget truncation can cut the `__` separator
+  // out of the registered name while the raw identity still exposes the tool
+  // segment, and a whole-server deny that silently matches nothing is a
+  // fail-open.
   const patternParts = pattern.split('__');
   const toolParts = toolName.split('__');
   if (
     patternParts.length === 2 &&
-    toolParts.length >= 3 &&
-    patternParts[0] === toolParts[0] &&
-    sanitizeToolNameForProvider(patternParts[1]) ===
-      sanitizeToolNameForProvider(toolParts[1])
+    spellings.some((spelling) => spelling.split('__').length >= 3) &&
+    patternParts[0] === toolParts[0]
   ) {
-    return true;
+    return matchesPrefixLiterally(`${pattern}__`);
   }
 
   return false;
+}
+
+/**
+ * Pick the advertised alias that serves as the tool's raw identity for
+ * matching, or `undefined` when no alias can vouch for it.
+ *
+ * `DiscoveredMCPTool.permissionAliases` publishes the exact raw
+ * `mcp__<server>__<tool>` spelling first, then the legacy
+ * `generateLegacyMcpToolName` reduction for pre-normalization settings. An
+ * alias vouches for the registered name only when its own normalization IS
+ * that name — the exact raw spelling's always is, while a legacy spelling
+ * that lost characters (an unsafe server segment, a middle-truncated long
+ * name) is not — so a different server's tool can never supply the identity
+ * a rule is matched against (#10199).
+ */
+function resolveRawMcpIdentity(
+  canonicalCtxToolName: string,
+  toolAliases: readonly string[] | undefined,
+): string | undefined {
+  return toolAliases?.find(
+    (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
+  );
+}
+
+/**
+ * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
+ * for a wildcard prefix persisted in that spelling — or `undefined` when the
+ * reduction cut the name.
+ *
+ * Character substitution is length-preserving, so the server segment stays
+ * recognizable. Past 63 characters the reduction instead cuts at
+ * `slice(0, 28) + '___' + slice(-32)`, which shortens a long server key *and*
+ * injects the very `__` separator a prefix match needs: two different long
+ * keys can land in one window, and a rule written for
+ * `weather-forecast-server` would reach `weather-forecast-server-premium`.
+ * A reduction that changed the length therefore vouches for no server.
+ */
+function resolveLegacyMcpSpelling(
+  rawToolName: string | undefined,
+): string | undefined {
+  if (rawToolName === undefined || !rawToolName.startsWith('mcp__')) {
+    return undefined;
+  }
+  const legacy = generateLegacyMcpToolName(rawToolName);
+  if (legacy === rawToolName) {
+    return undefined;
+  }
+  return legacy.length === rawToolName.length ? legacy : undefined;
+}
+
+/**
+ * Whether a 3-part entry names the tool in one of its advertised spellings —
+ * the exact raw identity or the legacy reduction — so an exact rule written
+ * in either spelling still covers the tool. The aliases are the tool's own
+ * advertised `permissionAliases`, resolved by the caller from the registry
+ * or the invocation, so they are authentic by construction.
+ */
+function matchesAdvertisedExactName(
+  pattern: string,
+  toolAliases: readonly string[] | undefined,
+): boolean {
+  return (
+    !pattern.endsWith('*') &&
+    pattern.split('__').length >= 3 &&
+    (toolAliases ?? []).some((alias) => pattern === resolveToolName(alias))
+  );
 }
 
 /**
@@ -1681,11 +1799,26 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
  * {@link matchesMcpPattern}); every other tool matches only its exact name.
  * One predicate for every place that applies a deny list to a tool pool, so the
  * declaration filter and the callers that predict it cannot disagree.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so every reachable caller resolves them from
+ * the registry rather than matching on the registered name alone.
  */
-export function matchesToolPattern(pattern: string, toolName: string): boolean {
-  return toolName.startsWith('mcp__')
-    ? matchesMcpPattern(pattern, toolName)
-    : pattern === toolName;
+export function matchesToolPattern(
+  pattern: string,
+  toolName: string,
+  toolAliases?: readonly string[],
+): boolean {
+  if (!toolName.startsWith('mcp__')) {
+    return pattern === toolName;
+  }
+  return (
+    matchesMcpPattern(
+      pattern,
+      toolName,
+      resolveRawMcpIdentity(toolName, toolAliases),
+    ) || matchesAdvertisedExactName(pattern, toolAliases)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1753,15 +1886,13 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    const matchesLegacyExactName =
-      !rule.toolName.endsWith('*') &&
-      rule.toolName.split('__').length >= 3 &&
-      (toolAliases ?? []).some(
-        (alias) => rule.toolName === resolveToolName(alias),
-      );
+    const rawMcpToolName = resolveRawMcpIdentity(
+      canonicalCtxToolName,
+      toolAliases,
+    );
     const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
-      matchesLegacyExactName;
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
+      matchesAdvertisedExactName(rule.toolName, toolAliases);
     if (!matchesMcpName) {
       return false;
     }
