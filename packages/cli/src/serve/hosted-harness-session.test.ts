@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
@@ -340,6 +341,84 @@ describe('Hosted Harness no-tool session', () => {
       expect(done).toBe(true);
     } finally {
       listener.close();
+    }
+  });
+
+  it('stops writing an event stream after backpressure ends it', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    await vi.waitFor(async () => {
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events.length).toBeGreaterThan(2);
+    });
+
+    const originalWrite = ServerResponse.prototype.write;
+    let frames = 0;
+    let ends = 0;
+    const write = vi
+      .spyOn(ServerResponse.prototype, 'write')
+      .mockImplementation(function (
+        this: ServerResponse,
+        ...args: Parameters<ServerResponse['write']>
+      ) {
+        if (typeof args[0] === 'string' && args[0].startsWith('id: ')) {
+          frames++;
+          originalWrite.apply(this, args);
+          return false;
+        }
+        return originalWrite.apply(this, args);
+      });
+    const end = vi
+      .spyOn(ServerResponse.prototype, 'end')
+      .mockImplementation(function (this: ServerResponse) {
+        ends++;
+        return this;
+      });
+    const listener = server.listen(0);
+    const abort = new AbortController();
+    try {
+      const address = listener.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const stream = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': clientId,
+          },
+          signal: abort.signal,
+        },
+      );
+      expect(stream.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(frames).toBe(1);
+      expect(ends).toBe(1);
+    } finally {
+      write.mockRestore();
+      end.mockRestore();
+      abort.abort();
+      listener.closeAllConnections();
+      listener.close();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
     }
   });
 

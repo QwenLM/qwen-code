@@ -135,6 +135,17 @@ it.each([
     [],
   ],
   [
+    'completed turn before an empty answer',
+    [
+      record('user', 'OLD_PROMPT'),
+      record('assistant', 'OLD_RESPONSE'),
+      record('user', 'EMPTY_ANSWER_PROMPT'),
+      record('assistant', ''),
+    ],
+    ['EMPTY_ANSWER_PROMPT'],
+    ['OLD_PROMPT', 'OLD_RESPONSE'],
+  ],
+  [
     'completed turn',
     [record('user', 'OLD_PROMPT'), record('assistant', 'OLD_RESPONSE')],
     [],

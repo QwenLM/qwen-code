@@ -106,6 +106,18 @@ describe('Hosted Harness model boundary', () => {
     });
   });
 
+  it('discards abandoned output after a fresh retry alone', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'first attempt' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'final answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+      text: 'final answer',
+    });
+  });
+
   it('keeps output across a continuation and accepts chat compaction', async () => {
     config([
       { type: LlmEventType.Content, value: 'first' },
