@@ -491,6 +491,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // The route stays subject to the per-workspace trust check even when the
   // tag is advertised.
   workspace_session_live_state: { since: 'v1' },
+  // Trusted, memory-only live-state snapshots for selected workspaces in one
+  // request (`POST /sessions/live-state`).
+  workspace_session_live_state_batch: { since: 'v1' },
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },

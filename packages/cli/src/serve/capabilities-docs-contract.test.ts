@@ -69,3 +69,9 @@ it('advertises batched session catalogs for single and multiple workspaces', () 
     getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
   ).toContain('session_catalog_batch');
 });
+
+it('advertises batched workspace live-state snapshots', () => {
+  expect(getAdvertisedServeFeatures()).toContain(
+    'workspace_session_live_state_batch',
+  );
+});

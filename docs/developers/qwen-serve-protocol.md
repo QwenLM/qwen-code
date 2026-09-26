@@ -248,7 +248,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_local_path_install',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
- 'workspace_session_live_state',
+ 'workspace_session_live_state', 'workspace_session_live_state_batch',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -312,6 +312,8 @@ Runtime status and ensure responses use this shape:
 `workspace_archived_session_export` advertises `GET /workspaces/:workspace/session/:id/archive/export`, a trusted-only full export from the selected workspace's archived persisted storage. It is independent of `workspace_session_export` and `workspace_qualified_rest_core`; clients must pre-flight this tag directly. A distinct route prevents an older daemon from ignoring archive intent and returning an active transcript with the same id.
 
 `workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state. The tag means the endpoint exists; it does not promise that every live item carries the optional `updatedAt` activity watermark, which is lifecycle-dependent.
+
+`workspace_session_live_state_batch` advertises `POST /sessions/live-state`. Clients pre-flight it once before batching polls and retain the single-workspace route for older daemons. The batch uses the same trusted, memory-only snapshot and catalog-version semantics as the single-workspace route.
 
 The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` advertises the daemon-wide live-state polling interval in milliseconds. It is resolved once from the startup environment variable `QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS`, independently of workspace environment overlays. Integer values from `1000` to `2147483647` are accepted; missing or invalid values use `5000`. Web Shell consumes this hint for all workspace live-state polling and also falls back to `5000` for an absent or invalid field from an older or incompatible daemon. This field does not change the route's snapshot semantics, immediate local/visibility refreshes, or full-catalog polling. SDK clients remain responsible for their own timers.
 
@@ -3023,6 +3025,12 @@ The result preserves selection order and the original selector as `workspace`. S
 Unknown, internal, and removed workspaces produce `404 workspace_not_found`; unavailable or changed runtime generations produce `503 workspace_runtime_unavailable`; an untrusted primary produces `403 untrusted_workspace`. Untrusted secondaries keep the existing persisted-only catalog policy without live bridge reads, repair writes, or debug-session logging. Thrown cursor and group failures retain their existing codes; other thrown read failures become `500 session_catalog_failed`. Trusted active entries can merge existing live bridge state; archived entries remain storage-only.
 
 The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
+
+### `POST /sessions/live-state`
+
+Read live-state snapshots for 1–20 explicitly selected registered workspaces in one request. The strict body is `{ "workspaces": ["workspace-id", "/absolute/workspace/path"] }`; selectors resolve as exact workspace ids before canonical absolute paths. The response is `{ "workspaces": [...] }` in request order. Each successful entry includes its original `workspace` selector, canonical `workspaceId` and `cwd`, plus the same `v: 1`, `catalogVersion`, and complete `sessions` snapshot as the single-workspace route below. The snapshots are independent; there is no cross-workspace atomicity or merged session feed. Both routes share catalog-version exposure and cache invalidation, so alternating between them preserves the single-workspace catalog reconciliation contract. A valid batch returns HTTP 200 and `Cache-Control: no-store` even if some entries fail.
+
+Each failed entry contains `workspace`, optional resolved `workspaceId` and `cwd`, and `error: { code, message, status }` without a successful empty `sessions` list. Unknown, internal, or removed selectors return `404 workspace_not_found`; unavailable or replaced runtime generations return `503 workspace_runtime_unavailable`; untrusted primary or secondary workspaces return `403 untrusted_workspace`; unexpected bridge failures return `500 session_live_state_failed`. A successful entry exceeding 512 KiB returns `413 live_state_response_too_large`. Invalid envelopes, extra keys, empty arrays, more than 20 selectors, and selectors longer than 4096 characters return HTTP 400 `invalid_session_live_state_batch_request` before any bridge reads. The route reads only each selected active runtime's in-memory bridge, never persisted catalogs or ACP children; member reads run sequentially, and the POST is charged to the daemon read rate-limit tier.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 

@@ -112,6 +112,10 @@ import type {
   DaemonSessionCatalogError,
   DaemonSessionCatalogResult,
   DaemonSessionLiveState,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchSnapshot,
+  DaemonSessionLiveStateBatchError,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
@@ -715,6 +719,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       catalogVersion: DaemonSessionCatalogVersion;
       sessions: DaemonSessionLiveState[];
     }>();
+    expect(typeof Public.DaemonClient.prototype.getSessionsLiveState).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionLiveStateBatchRequest>().toEqualTypeOf<{
+      workspaces: string[];
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchSnapshot>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      v: 1;
+      catalogVersion: DaemonSessionCatalogVersion;
+      sessions: DaemonSessionLiveState[];
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionLiveStateBatchResult>().toEqualTypeOf<{
+      workspaces: Array<
+        DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+      >;
+    }>();
+    expectTypeOf<DaemonClient['getSessionsLiveState']>().toEqualTypeOf<
+      (
+        request: DaemonSessionLiveStateBatchRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionLiveStateBatchResult>
+    >();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

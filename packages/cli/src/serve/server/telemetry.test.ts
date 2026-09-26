@@ -1039,6 +1039,25 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     },
   );
 
+  it.each([
+    '/sessions/live-state',
+    '/sessions/live-state/',
+    '/SESSIONS/LIVE-STATE',
+  ])('labels batch live-state without attributing %s to primary', (path) => {
+    const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
+    const req = mockReq('POST', path);
+    expect(resolveDaemonTelemetryRoute(req)).toEqual({
+      route: 'POST /sessions/live-state',
+      attribution: 'handler_resolved',
+    });
+    daemonTelemetryMiddleware(resolveWorkspaceCwd)(
+      req,
+      mockRes(200),
+      vi.fn() as unknown as NextFunction,
+    );
+    expect(resolveWorkspaceCwd).not.toHaveBeenCalled();
+  });
+
   it('omits workspace hash when a dynamic target is never resolved', () => {
     const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
     const mw = daemonTelemetryMiddleware(resolveWorkspaceCwd);
@@ -1138,17 +1157,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 74 unique routes with the audited 72/2 attribution split', () => {
+  it('contains 75 unique routes with the audited 73/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(74);
-    expect(new Set(keys).size).toBe(74);
+    expect(keys).toHaveLength(75);
+    expect(new Set(keys).size).toBe(75);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(72);
+    ).toHaveLength(73);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
