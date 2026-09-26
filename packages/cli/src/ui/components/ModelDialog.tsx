@@ -94,15 +94,19 @@ function parseModelSelectionKey(key: string): {
 }
 
 /**
- * Encode a dialog selection key into the `authType:modelId` form persisted for
- * the fast/vision auxiliary models (baseUrl discarded), so duplicate model ids
- * across providers stay unambiguous. Handles the three selection-key shapes:
+ * Encode a dialog selection key into the `authType:modelId[\0baseUrl]` form
+ * persisted for the fast/vision auxiliary models. The baseUrl is kept when
+ * the row carries one so same-id endpoints under a single authType stay
+ * unambiguous — the registry keys entries by id+baseUrl and otherwise falls
+ * back to a first-match scan that can bind another provider's key (#12760).
+ * Handles the three selection-key shapes:
  * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
  */
 export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
-    return `${parsed.authType}:${parsed.modelId}`;
+    const selector = `${parsed.authType}:${parsed.modelId}`;
+    return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {
     const parts = selected.split('|');
@@ -900,7 +904,13 @@ export function ModelDialog({
         }
 
         hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
-        const advisorSelector = encodeAuxModelSelector(selected);
+        // encodeAuxModelSelector already keeps the row's baseUrl as the
+        // endpoint disambiguator; strip it here because advisorModel appends
+        // the registry baseUrl itself below.
+        const advisorSelector = encodeAuxModelSelector(selected).split(
+          '\0',
+          1,
+        )[0];
         const advisorModel = selectedEntry.isRuntime
           ? advisorSelector
           : `${advisorSelector}\0${selectedEntry.model.registryBaseUrl ?? ''}`;
@@ -971,10 +981,12 @@ export function ModelDialog({
 
       hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
-      // Fast model mode: save authType:modelId so duplicate model ids across
-      // providers remain unambiguous. baseUrl is intentionally discarded.
+      // Fast model mode: save authType:modelId (plus the baseUrl endpoint
+      // disambiguator when the row carries one) so duplicate model ids
+      // across providers bind the selected provider's credentials.
       if (isFastModelMode) {
         const fastModel = encodeAuxModelSelector(selected);
+        const fastModelDisplay = fastModel.split('\0')[0];
         const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
@@ -987,7 +999,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+          text: `${t('Fast Model')}: ${fastModelDisplay}${scopeSuffix}`,
         });
         onClose();
         return;
@@ -1056,7 +1068,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+          text: `${t('Compaction Model')}: ${compactionModelId.split('\0')[0]}${scopeSuffix}`,
         });
         onClose();
         return;

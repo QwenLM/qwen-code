@@ -6113,9 +6113,15 @@ export class Config {
     }
 
     const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    if (!rawSelector?.authType) return selector.modelId;
+    // Re-attach the persisted `\0<baseUrl>` endpoint disambiguator (dropped
+    // by selector parsing): `resolveForModel` consumes it to hit the exact
+    // registry entry instead of the first same-id provider (#12760).
+    const persisted = this.fastModel ?? '';
+    const endpointIdx = persisted.indexOf('\0');
+    const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
+    const qualified = `${rawSelector.authType}:${selector.modelId}`;
+    return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
   }
 
   /**
@@ -6237,9 +6243,14 @@ export class Config {
         return undefined;
       }
       const rawSelector = resolveModelId(this.compactionModel);
-      return rawSelector?.authType
-        ? `${rawSelector.authType}:${selector.modelId}`
-        : selector.modelId;
+      if (!rawSelector?.authType) return selector.modelId;
+      // Same `\0<baseUrl>` endpoint disambiguator handling as getFastModel
+      // (#12760); runSideQuery's resolveForModel consumes it.
+      const persisted = this.compactionModel ?? '';
+      const endpointIdx = persisted.indexOf('\0');
+      const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
+      const qualified = `${rawSelector.authType}:${selector.modelId}`;
+      return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
     }
     return this.getModel();
   }

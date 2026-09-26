@@ -443,8 +443,9 @@ export async function applyModelSelection(
 
   hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
 
-  // Fast model mode: save authType:modelId so duplicate model ids across
-  // providers remain unambiguous. baseUrl is intentionally discarded.
+  // Fast model mode: save authType:modelId (plus the baseUrl endpoint
+  // disambiguator when the row carries one) so duplicate model ids across
+  // providers bind the selected provider's credentials.
   if (mode === 'fast') {
     const fastModel = encodeAuxModelSelector(selectionKey);
     // Sync the runtime Config so forked agents pick up the change immediately.
@@ -453,7 +454,7 @@ export async function applyModelSelection(
     settings.setValue(scope, 'fastModel', fastModel);
     return {
       ok: true,
-      message: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+      message: `${t('Fast Model')}: ${fastModel.split('\0')[0]}${scopeSuffix}`,
     };
   }
 
@@ -505,7 +506,7 @@ export async function applyModelSelection(
     settings.setValue(scope, 'compactionModel', compactionModelId);
     return {
       ok: true,
-      message: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+      message: `${t('Compaction Model')}: ${compactionModelId.split('\0')[0]}${scopeSuffix}`,
     };
   }
 

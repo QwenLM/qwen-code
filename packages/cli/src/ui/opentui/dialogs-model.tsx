@@ -151,13 +151,15 @@ export function parseModelSelectionKey(key: string): {
 
 /**
  * Parity of `encodeAuxModelSelector` in ModelDialog.tsx: encode a selection
- * key into the `authType:modelId` form persisted for the fast/vision auxiliary
- * models (baseUrl discarded). Handles the three selection-key shapes.
+ * key into the `authType:modelId[\0baseUrl]` form persisted for the
+ * fast/vision auxiliary models, keeping the baseUrl endpoint disambiguator
+ * when the row carries one (#12760). Handles the three selection-key shapes.
  */
 export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
-    return `${parsed.authType}:${parsed.modelId}`;
+    const selector = `${parsed.authType}:${parsed.modelId}`;
+    return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {
     const parts = selected.split('|');

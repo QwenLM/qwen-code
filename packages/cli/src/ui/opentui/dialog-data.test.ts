@@ -563,6 +563,40 @@ describe('applyModelSelection', () => {
       }
     });
 
+    it('fast mode keeps the endpoint disambiguator in the persisted selector (#12760)', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({ id: 'shared-fast', baseUrl: 'https://a.example/v1' }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[1].key,
+      });
+
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://b.example/v1',
+      );
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://b.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toContain('Fast Model: openai:shared-fast');
+        expect(outcome.message).not.toContain('\0');
+      }
+    });
+
     it('vision mode writes visionModel and syncs Config.setVisionModel', async () => {
       const setVisionModel = vi.fn();
       const switchModel = vi.fn(async () => {});
