@@ -11,11 +11,11 @@ import {
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
-  isAutoMemPath,
   isMemoryDocumentFilename,
   isTeamAutoMemPath,
-  isUserAutoMemPath,
+  TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
+import { QWEN_DIR, realpathNearestExisting } from '../utils/paths.js';
 
 export type MemoryChangedScope = 'user' | 'project' | 'team';
 export type MemoryChangedOperation = 'create' | 'update' | 'delete';
@@ -115,30 +115,48 @@ export function describeMemoryFileChange(
   const absolutePath = path.resolve(filePath);
   const candidates: Array<{
     scope: MemoryChangedScope;
-    matches: boolean;
     root: string;
   }> = [
     {
       scope: 'user',
-      matches: isUserAutoMemPath(absolutePath),
       root: getUserAutoMemoryRoot(),
     },
     {
       scope: 'project',
-      matches: isAutoMemPath(absolutePath, projectRoot),
       root: getAutoMemoryRoot(projectRoot),
     },
     {
       scope: 'team',
-      matches: isTeamAutoMemPath(absolutePath, projectRoot),
       root: getTeamAutoMemoryRoot(projectRoot),
     },
   ];
   for (const candidate of candidates) {
-    if (!candidate.matches) continue;
-    const relativePath = relativeInside(candidate.root, absolutePath);
+    const resolvedRoot = realpathNearestExisting(candidate.root);
+    if (candidate.scope === 'team') {
+      const repoRoot = path.dirname(path.dirname(candidate.root));
+      const expectedRoot = path.join(
+        realpathNearestExisting(repoRoot),
+        QWEN_DIR,
+        TEAM_AUTO_MEMORY_DIRNAME,
+      );
+      if (
+        resolvedRoot !== expectedRoot ||
+        !isTeamAutoMemPath(absolutePath, projectRoot)
+      ) {
+        continue;
+      }
+    }
+    const relativePath =
+      relativeInside(candidate.root, absolutePath) ??
+      relativeInside(resolvedRoot, realpathNearestExisting(absolutePath));
     if (!relativePath) continue;
-    return { scope: candidate.scope, filePath: absolutePath, relativePath };
+    // All windows use the canonical root, keeping symlinks below it visible
+    // to isTreeVisible instead of resolving away their lexical path segments.
+    return {
+      scope: candidate.scope,
+      filePath: path.resolve(resolvedRoot, relativePath),
+      relativePath,
+    };
   }
   return undefined;
 }
@@ -164,7 +182,7 @@ async function isTreeVisible(root: string, filePath: string): Promise<boolean> {
   if (leaf !== undefined && (leaf.isSymbolicLink() || !leaf.isFile())) {
     return false;
   }
-  const resolvedRoot = path.resolve(root);
+  const resolvedRoot = realpathNearestExisting(root);
   let current = path.dirname(path.resolve(filePath));
   while (current !== resolvedRoot) {
     const relative = path.relative(resolvedRoot, current);
@@ -385,10 +403,12 @@ function isMemoryOperation(value: unknown): value is MemoryChangedOperation {
   );
 }
 
-function stringList(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === 'string')
-    : [];
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isNonemptyString);
 }
 
 /**
@@ -398,12 +418,13 @@ function stringList(value: unknown): string[] {
 export function memoryChangedNoticeFromHookInput(
   input: Record<string, unknown>,
 ): MemoryChangedNotice | undefined {
+  const workspace = input['workspace'];
   if (typeof input['enabled'] === 'boolean') {
+    if (!isNonemptyString(workspace)) return undefined;
     return {
       paths: [],
       relativePaths: [],
-      workspace:
-        typeof input['workspace'] === 'string' ? input['workspace'] : '',
+      workspace,
       enabled: input['enabled'],
     };
   }
@@ -413,12 +434,22 @@ export function memoryChangedNoticeFromHookInput(
   ) {
     return undefined;
   }
-  const workspace = input['workspace'];
+  const paths = input['paths'];
+  const relativePaths = input['relative_paths'];
+  if (
+    !isStringList(paths) ||
+    !isStringList(relativePaths) ||
+    paths.length === 0 ||
+    paths.length !== relativePaths.length ||
+    (input['memory_scope'] !== 'user' && !isNonemptyString(workspace))
+  ) {
+    return undefined;
+  }
   return {
     scope: input['memory_scope'],
     operation: input['operation'],
-    paths: stringList(input['paths']),
-    relativePaths: stringList(input['relative_paths']),
+    paths: [...paths],
+    relativePaths: [...relativePaths],
     ...(typeof workspace === 'string' ? { workspace } : {}),
   };
 }
@@ -500,7 +531,7 @@ async function readMemoryDocuments(
       getUserAutoMemoryRoot(),
       getAutoMemoryRoot(projectRoot),
       getTeamAutoMemoryRoot(projectRoot),
-    ].map((root) => readMemoryTree(root, snapshot)),
+    ].map((root) => readMemoryTree(realpathNearestExisting(root), snapshot)),
   );
   return snapshot;
 }

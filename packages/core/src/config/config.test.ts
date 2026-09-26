@@ -15643,7 +15643,15 @@ describe('Model Switching and Config Updates', () => {
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName,
-              input: {},
+              input:
+                eventName === HookEventName.MemoryChanged
+                  ? {
+                      memory_scope: 'user',
+                      operation: 'update',
+                      paths: ['/memories/a.md'],
+                      relative_paths: ['a.md'],
+                    }
+                  : {},
             },
             MessageBusType.HOOK_EXECUTION_RESPONSE,
           );
@@ -15681,6 +15689,19 @@ describe('Model Switching and Config Updates', () => {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
     };
+
+    it('rejects malformed MemoryChanged payloads without firing hooks', async () => {
+      const fire = vi.fn().mockResolvedValue(undefined);
+      const response = await dispatch(
+        'fireMemoryChangedEvent',
+        fire,
+        'MemoryChanged',
+        { operation: 'Update' },
+        new AbortController().signal,
+      );
+      expect(fire).not.toHaveBeenCalled();
+      expect(response.success).toBe(false);
+    });
 
     // Events whose fire method returns the hook output itself, or undefined
     // when no hook is configured.

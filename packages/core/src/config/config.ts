@@ -4171,14 +4171,10 @@ export class Config {
                 );
                 break;
               case 'MemoryChanged': {
-                // Empty wire input still enters the fire method. The bridge
-                // test treats a missing fire call as the unknown-event default.
-                const notice = memoryChangedNoticeFromHookInput(input) ?? {
-                  scope: 'user',
-                  operation: 'update',
-                  paths: [],
-                  relativePaths: [],
-                };
+                const notice = memoryChangedNoticeFromHookInput(input);
+                if (!notice) {
+                  throw new Error('Invalid MemoryChanged hook input');
+                }
                 result = (
                   await hookSystem.fireMemoryChangedEvent(notice, signal)
                 ).finalOutput;

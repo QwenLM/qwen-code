@@ -126,7 +126,7 @@ describe('memory file change hook', () => {
     expect(seen[0]).not.toHaveProperty('workspace');
     expect(seen[0]).not.toHaveProperty('enabled');
     expect(seen[0]).toMatchObject({
-      paths: [path.join(tempDir!, 'memories', 'MEMORY.md')],
+      paths: [path.join(await fs.realpath(tempDir!), 'memories', 'MEMORY.md')],
     });
   });
 
@@ -328,6 +328,182 @@ describe('memory file change hook', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    { enabled: true },
+    { enabled: false, workspace: '' },
+    { enabled: true, workspace: '   ' },
+    { memory_scope: 'user', operation: 'update' },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: [],
+      relative_paths: [],
+    },
+    {
+      memory_scope: 'project',
+      operation: 'update',
+      paths: ['/repo/.qwen/memory/a.md'],
+      relative_paths: ['a.md'],
+    },
+    {
+      memory_scope: 'team',
+      operation: 'update',
+      paths: ['/repo/.qwen/team-memory/a.md'],
+      relative_paths: ['a.md'],
+      workspace: '',
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: [''],
+      relative_paths: ['a.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md'],
+      relative_paths: [''],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', '/memories/c.md'],
+      relative_paths: ['a.md', 'b.md', 'c.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', 42, '/memories/c.md'],
+      relative_paths: ['a.md', 'b.md', 'c.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', '/memories/b.md'],
+      relative_paths: ['a.md', 42],
+    },
+  ])('rejects malformed hook input %#', (input) => {
+    expect(memoryChangedNoticeFromHookInput(input)).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32').each([
+    { scope: 'team', canonicalFile: true },
+    { scope: 'team', canonicalFile: false },
+    { scope: 'project', canonicalFile: true },
+    { scope: 'project', canonicalFile: false },
+  ] as const)(
+    'notifies $scope memory across a workspace alias (canonicalFile=$canonicalFile)',
+    async ({ scope, canonicalFile }) => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const realRoot = path.join(realParent, 'repo');
+      const linkedParent = path.join(tempDir!, 'link');
+      const linkedRoot = path.join(linkedParent, 'repo');
+      await fs.mkdir(realRoot, { recursive: true });
+      await fs.symlink(realParent, linkedParent, 'dir');
+      const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      const workspace = canonicalFile ? linkedRoot : realRoot;
+      const fileRoot = canonicalFile ? realRoot : linkedRoot;
+      const file = path.join(
+        fileRoot,
+        '.qwen',
+        scope === 'team' ? 'team-memory' : 'memory',
+        'a.md',
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'new memory');
+        await notifyMemoryFileChange(file, workspace, 'create');
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'create',
+            relativePaths: ['a.md'],
+            workspace,
+          }),
+        ]);
+      } finally {
+        unregister();
+        if (originalLocal === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not classify a team child symlink that escapes its root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const root = getTeamAutoMemoryRoot(workspace);
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(path.join(outsideRoot, 'a.md'), 'outside');
+      await fs.mkdir(root, { recursive: true });
+      await fs.symlink(outsideRoot, path.join(root, 'linked'), 'dir');
+      expect(
+        describeMemoryFileChange(path.join(root, 'linked', 'a.md'), workspace),
+      ).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not classify an outside document through a relocated team root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const file = path.join(outsideRoot, 'a.md');
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(file, 'outside');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideRoot, getTeamAutoMemoryRoot(workspace), 'dir');
+      expect(describeMemoryFileChange(file, workspace)).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'emits a coalesced alias write exactly once with a readable path',
+    async () => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const workspace = path.join(tempDir!, 'link', 'repo');
+      const file = path.join(realParent, 'repo/.qwen/team-memory/a.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await withCoalescedMemoryChanges(workspace, undefined, async () => {
+          await fs.writeFile(file, 'new memory');
+          await notifyMemoryFileChange(file, workspace, 'create');
+          expect(seen).toEqual([]);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope: 'team',
+            operation: 'create',
+            relativePaths: ['a.md'],
+            workspace,
+          }),
+        ]);
+        expect(await fs.readFile(seen[0]!.paths[0]!, 'utf8')).toBe(
+          'new memory',
+        );
+      } finally {
+        unregister();
+      }
+    },
+  );
+
   it('delivers a write to the named registration when several share a workspace', async () => {
     const projectRoot = await setup();
     const first: MemoryChangedNotice[] = [];
@@ -494,6 +670,72 @@ describe('memory file change hook', () => {
     ]);
     expect(windowSeen).toEqual([]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not repeat an alias writer change in a canonical workspace window',
+    async () => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const canonicalWorkspace = path.join(realParent, 'repo');
+      const aliasWorkspace = path.join(tempDir!, 'link', 'repo');
+      const file = path.join(canonicalWorkspace, '.qwen/team-memory/a.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
+      const writer: MemoryChangedNotice[] = [];
+      const windowSeen: MemoryChangedNotice[] = [];
+      const writerRegistration = registerMemoryChangedListener(
+        aliasWorkspace,
+        (change) => {
+          writer.push(change);
+        },
+      );
+      const windowRegistration = registerMemoryChangedListener(
+        canonicalWorkspace,
+        (change) => {
+          windowSeen.push(change);
+        },
+      );
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pending = withCoalescedMemoryChanges(
+        canonicalWorkspace,
+        windowRegistration.id,
+        async () => {
+          open();
+          await gate;
+        },
+      );
+      try {
+        await opened;
+        await fs.writeFile(file, 'outside write');
+        await notifyMemoryFileChange(
+          file,
+          aliasWorkspace,
+          'create',
+          writerRegistration.id,
+        );
+      } finally {
+        release();
+        await pending;
+        writerRegistration();
+        windowRegistration();
+      }
+      expect(writer).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation: 'create',
+          relativePaths: ['a.md'],
+        }),
+      ]);
+      expect(windowSeen).toEqual([]);
+    },
+  );
 
   it('still reports a window change to a path an outside write already reported', async () => {
     const projectRoot = await setup();
