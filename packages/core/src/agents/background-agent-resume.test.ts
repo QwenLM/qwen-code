@@ -1308,7 +1308,11 @@ describe('BackgroundAgentResumeService', () => {
       string,
       { tools?: string[]; disallowedTools?: string[] },
       boolean,
-      { eagerHideSkillUnderCodeMode?: boolean; codeModeOnly?: boolean }?,
+      {
+        eagerHideSkillUnderCodeMode?: boolean;
+        codeModeOnly?: boolean;
+        skillRegistration?: 'deferred' | 'disabled';
+      }?,
     ]
   >([
     ['inherits every tool', {}, true],
@@ -1358,6 +1362,30 @@ describe('BackgroundAgentResumeService', () => {
       { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
       false,
       { codeModeOnly: true },
+    ],
+    // Exercises the THIRD registration verdict. `permissions.deny: ["skill"]`
+    // answers 'disabled', which the predicate refuses before consulting any
+    // declaration shape. Forwarding the probe as a boolean instead
+    // (`=== 'deferred' ? 'deferred' : undefined`) drops that verdict on the
+    // floor and this row goes red while every row above stays green — none of
+    // them stub anything but 'deferred'.
+    [
+      'inherits every tool while a deny rule unregisters the Skill tool',
+      {},
+      false,
+      { skillRegistration: 'disabled' },
+    ],
+    // Witnesses that the shared probe is mode-agnostic. This session stays in
+    // Direct mode, so re-gating `skillRegistrationStatusFor` on CodeModeOnly
+    // (the shape this round replaced) answers 'registered' here and the row
+    // goes red. The definition has to name `skill` WITHOUT either bridge
+    // half: an inheriting definition answers true under the real probe and
+    // under that gate alike, so it would witness nothing.
+    [
+      'lists skill without the bridge while the Skill tool is eager-hidden',
+      { tools: [ToolNames.READ_FILE, ToolNames.SKILL] },
+      false,
+      { skillRegistration: 'deferred' },
     ],
   ])(
     'matches the launch-time skill listing when the definition %s',
@@ -1438,6 +1466,20 @@ describe('BackgroundAgentResumeService', () => {
           }
         ).getToolRegistrationStatus = async (name) =>
           name === ToolNames.SKILL ? 'deferred' : 'registered';
+      }
+      const registrationVerdict = session?.skillRegistration;
+      if (registrationVerdict) {
+        // Registration only — `getToolMode` is deliberately left alone, so
+        // these rows isolate the verdict from the mode the block above couples
+        // it to. Without them nothing distinguishes "the probe is forwarded
+        // verbatim" from "the probe is collapsed to a deferred boolean", and
+        // nothing pins the probe's mode-agnosticism in Direct mode.
+        (
+          permissionManager as unknown as {
+            getToolRegistrationStatus: (name: string) => Promise<string>;
+          }
+        ).getToolRegistrationStatus = async (name) =>
+          name === ToolNames.SKILL ? registrationVerdict : 'registered';
       }
       if (session?.codeModeOnly) {
         // Mode only: no deferral stub, so the registration probe still
