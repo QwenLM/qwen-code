@@ -413,10 +413,12 @@ export function OpenTuiApprovalModeDialog(props: {
   // notice would still overpaint the rows the budget just took back. The
   // refusal is charged first: it is the actionable notice, and a rejected
   // Enter whose explanation paints nothing reads as a dead key, so it keeps
-  // one painted text row whenever the region can pay it — even at the list
-  // floor's expense. The advisory warning takes only what the refusal
-  // leaves; a one-row charge paints its text row with the margin shed, like
-  // the refusal's.
+  // one painted text row whenever the region can pay it — but never past the
+  // cap: a refusal charged the list floor's own row overcommits the region,
+  // and the renderer takes the overdraw out of the mode row, the refusal's
+  // glyphs painting over where the row stood. The advisory warning takes
+  // only what the refusal leaves; a one-row charge paints its text row with
+  // the margin shed, like the refusal's.
   const rowsAfterChrome =
     regionHeight === undefined
       ? Number.POSITIVE_INFINITY
@@ -433,7 +435,7 @@ export function OpenTuiApprovalModeDialog(props: {
   const errorRows = error
     ? Math.max(
         Math.min(noticeRows(error, contentWidth), noticeCap),
-        Math.min(2, rowsAfterChrome),
+        Math.min(2, noticeCap),
       )
     : 0;
   const warningRows = warningText

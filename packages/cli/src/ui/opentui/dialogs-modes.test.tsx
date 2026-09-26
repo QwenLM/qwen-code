@@ -885,9 +885,14 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
   });
 
-  it.each([9, 7])(
+  it.each([
+    // region rows, refusal margin rows — shed where the cap leaves the
+    // refusal exactly one row
+    [9, 1],
+    [7, 0],
+  ])(
     'paints the refusal ahead of the warning at region %i',
-    (height) => {
+    (height, marginTop) => {
       // The warning is advisory and the refusal is what explains a rejected
       // Enter, so the refusal is charged first and keeps one painted text
       // row: at these heights the warning used to take its three-row floor
@@ -899,7 +904,7 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
         /Cannot enable privileged approval modes in an untrusted folder/,
       );
       expect(layoutOf(refusal.parentElement)).toMatchObject({
-        marginTop: 1,
+        marginTop,
         height: 1,
         overflow: 'hidden',
       });
@@ -908,11 +913,13 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     },
   );
 
-  it('paints the refusal on the one row region six can pay, with its margin shed', () => {
-    // Region six leaves one row after the mandatory chrome — not enough for
-    // the refusal's margin plus its text — so the margin sheds and the text
-    // row paints: the base rendered this refusal unconditionally, and a
-    // rejected Enter whose reason paints nothing reads as a dead key.
+  it('carries the refusal in the title at region six, keeping the one mode row the region pays for', () => {
+    // Region six leaves one row after the mandatory chrome, and that row is
+    // the list floor's: charging the refusal it anyway overcommits the region
+    // by a row, and the renderer takes the overdraw out of the mode row — the
+    // measured frame was the refusal's glyphs painted over where the row
+    // stood. The title row — the one row every region paints — carries the
+    // refusal instead, and the list keeps its row.
     const { setValue } = renderUntrusted(6, true);
     press('return');
 
@@ -920,12 +927,10 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     const refusal = screen.getByText(
       /Cannot enable privileged approval modes in an untrusted folder/,
     );
-    expect(layoutOf(refusal.parentElement)).toMatchObject({
-      marginTop: 0,
-      height: 1,
-      overflow: 'hidden',
-    });
-    // The list keeps the one row it borrows from the frame's bottom padding.
+    // The title channel: the refusal shares the title's own row rather than
+    // a clipped notice box of its own.
+    expect(refusal.parentElement?.textContent).toContain('> Approval Mode');
+    // The list keeps the one row the region pays for after the chrome.
     expect(screen.queryAllByText(/^\d+\.$/)).toHaveLength(1);
   });
 
@@ -1979,6 +1984,99 @@ describe('OpenTuiSettingsDialog region budget', () => {
 
     expect(screen.queryByText(/Search settings/)).toBeNull();
     expect(screen.getByText('a')).not.toBeNull();
+  });
+
+  it('refuses the space bar when the region leaves the list no rows', () => {
+    // A real space bar arrives as { name: 'space', sequence: ' ' }: the
+    // sequence is a printable blank, so a type-to-search exemption keyed on
+    // the sequence alone classifies it as search input — while the
+    // commit branch reads the name and toggles the row under the cursor. At
+    // a zero-row window that is a write the user was never shown. The scope
+    // file below holds the key, so a toggle back to the default is still a
+    // real write (a non-default-less stub would make the second toggle a
+    // no-op and the probe blind).
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: { tools: { codeModeOnly: false } } }),
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={17}
+      />,
+    );
+
+    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('return');
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.codeModeOnly',
+      true,
+    );
+    // The restart prompt takes the last list row — the window is now zero.
+    expect(
+      screen.getByText(/To see changes, Qwen Code must be restarted/),
+    ).not.toBeNull();
+
+    // Not press(): its synthesized sequence for 'space' is '', which cannot
+    // reproduce the real key's printable blank.
+    act(() => {
+      for (const handler of [...mocks.state.keyboardHandlers]) {
+        handler({ name: 'space', shift: false, sequence: ' ' });
+      }
+    });
+
+    // No second toggle: the row under the cursor is one nothing paints.
+    expect(setValue).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an in-flight edit when the region collapses under it', () => {
+    // The edit commit path sits above the zero-row guard and never consults
+    // the window: an edit opened while the region still painted rows kept
+    // committing on Escape after the budget collapsed — a write over a frame
+    // that no longer shows the row, its value, or the modified marker. The
+    // collapse drops the edit instead.
+    const setValue = vi.fn();
+    const onSelect = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    const { rerender } = render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={onSelect}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    for (const ch of 'maxpersession') press(ch);
+    press('return'); // search box → list, the numeric row under the cursor
+    press('7'); // opens the inline edit with '7' in its buffer
+    expect(screen.getByText('7')).not.toBeNull();
+
+    rerender(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={onSelect}
+        availableTerminalHeight={16}
+      />,
+    );
+    press('escape');
+
+    expect(setValue).not.toHaveBeenCalled();
+
+    // The edit is really gone: the next Escape reaches the dialog's own
+    // close path, not a stale edit buffer.
+    press('escape');
+    expect(onSelect).toHaveBeenCalledWith(undefined, SettingScope.User);
   });
 
   it('still refuses a digit that would open a blind edit on a numeric row', () => {

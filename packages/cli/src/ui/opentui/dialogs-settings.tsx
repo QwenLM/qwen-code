@@ -392,6 +392,13 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     );
   }, [activeSettingIndexRef, items.length, maxItemsToShow]);
 
+  // A collapse to a zero-row window unpaints the row an in-flight edit is
+  // open on, and the edit's commit path sits above the zero-row guard — left
+  // open it would still write on Escape, a value the frame no longer shows.
+  useEffect(() => {
+    if (maxItemsToShow < 1) setEditingKey(null);
+  }, [maxItemsToShow]);
+
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const showScrollUp = maxItemsToShow > 0 && scrollOffset > 0;
   const showScrollDown =
@@ -656,14 +663,15 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     // nothing paints, so the keys that move or commit it stay refused. The
     // keys that address no row keep working: Tab (handled above), Escape,
     // the restart prompt's `r`, up from the top row into the search box
-    // (thence the tab bar), and type-to-search. Two printable shapes stay
-    // refused because the chain reads them as row keys first: the k/j
-    // highlight aliases, and a digit on a numeric row, which opens an edit
-    // on a row nothing paints.
+    // (thence the tab bar), and type-to-search. Three printable shapes stay
+    // refused because the chain reads them as row keys first: the space bar
+    // (its sequence is a printable blank, but the commit branch reads its
+    // name — hence the strict `> ' '` below), the k/j highlight aliases, and
+    // a digit on a numeric row, which opens an edit on a row nothing paints.
     const typeToSearchKey =
       !ctrl &&
       original.sequence.length === 1 &&
-      original.sequence >= ' ' &&
+      original.sequence > ' ' &&
       !keyMatchers[Command.SELECTION_UP](original) &&
       !keyMatchers[Command.SELECTION_DOWN](original) &&
       !(
