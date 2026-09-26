@@ -785,11 +785,14 @@ export class SessionArtifactStore {
             warnings,
             options.workspaceAccess === 'metadata-only',
           );
-          // Legacy tool-produced `published + file://` marker artifacts fail
-          // the trust check in normalizeRestoredMarkerArtifact; the
-          // helper pushes a `skipped marker artifact` warning. Strip that
-          // specific warning so the cascade (completeness check, restore
-          // rollback, snapshot reclamation block) doesn't fire.
+          // Legacy `published + file://` marker artifacts fail the trust
+          // check in normalizeRestoredMarkerArtifact; the helper pushes a
+          // `skipped marker artifact` warning. Strip that specific warning
+          // so the cascade (completeness check, restore rollback, snapshot
+          // reclamation block) doesn't fire. The gate mirrors the main
+          // loop: source + storage/URL/snapshot shape, no toolName — the
+          // workspace→published upgrade keeps the workspace producer's
+          // name, which would otherwise leave mainstream markers loud.
           if (
             !markerArtifact &&
             artifact.storage === 'published' &&
@@ -797,7 +800,6 @@ export class SessionArtifactStore {
             isFileArtifactUrl(artifact.url) &&
             getWebPreviewSnapshotId(artifact) === undefined &&
             artifact.source === 'tool' &&
-            artifact.toolName === 'artifact' &&
             warnings.at(-1)?.startsWith('skipped marker artifact ') &&
             warnings.at(-1)?.includes('url must use http or https')
           ) {
@@ -892,17 +894,23 @@ export class SessionArtifactStore {
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
-          // Drop legacy tool-produced `published + file:// + restorable`
-          // records quietly: they were written before write-time coercion,
+          // Drop legacy `published + file:// + restorable` records
+          // quietly: they were written before write-time coercion,
           // restore-time trust rejects them, and pushing `skipped …`
           // would (a) trip `isArtifactSnapshotCompletenessWarning`,
           // (b) count toward the `restoredCount === 0` rollback, and
-          // (c) block snapshot reclamation. The full
-          // `getWebPreviewSnapshotId` preconditions (source='tool',
-          // toolName='artifact') are the same shape a legitimate
-          // artifact-tool emit needs to satisfy; tampered records
-          // whose `toolName`/`source` don't match still flow through
-          // the trust check and produce a `skipped ` warning.
+          // (c) block snapshot reclamation. A `published + file://`
+          // record can only exist if a trusted-publisher ingest accepted
+          // it (`normalizeArtifactUrl(url, false)` throws for everyone
+          // else), so the source plus the storage/URL/snapshot shape is
+          // enough; toolName is deliberately NOT part of the gate —
+          // records this store produced itself via the workspace→
+          // published upgrade carry the workspace producer's name
+          // (e.g. `write_file`), and gating on the artifact-tool name
+          // would let exactly the mainstream legacy shape fall back to
+          // the loud path this PR exists to prevent. Non-tool sources
+          // (client, hook) still flow through the trust check and stay
+          // loud.
           const isLegacyFileArtifact =
             error instanceof Error &&
             error.message === 'url must use http or https' &&
@@ -910,8 +918,7 @@ export class SessionArtifactStore {
             typeof artifact.url === 'string' &&
             isFileArtifactUrl(artifact.url) &&
             getWebPreviewSnapshotId(artifact) === undefined &&
-            artifact.source === 'tool' &&
-            artifact.toolName === 'artifact';
+            artifact.source === 'tool';
           if (isLegacyFileArtifact) {
             legacyPublishedFileCount++;
             continue;
@@ -943,15 +950,20 @@ export class SessionArtifactStore {
         restoredCount === 0
       ) {
         // Every snapshot record was a legacy published file:// drop — no
-        // real restore was attempted. Preserve previous state. Emit a
-        // distinct, non-`RESTORE_FAILED` warning so control-plane callers
-        // that key off `isArtifactRestoreFailureWarning` still see that
-        // the snapshot contributed nothing; the prefix deliberately
-        // avoids `skipped ` so it does not trip the completeness check.
+        // real restore was attempted. Preserve previous state and carry
+        // the RESTORE_FAILED prefix so `isArtifactRestoreFailureWarning`
+        // classifies this restore as failed: three control-plane callers
+        // (attach ingest, deferred replay, rewind snapshot) key off that
+        // predicate to decide whether to ingest/replay/record afterwards,
+        // and reporting an empty restore as success silently drops
+        // replay-frame-only artifacts and can overwrite a rewind
+        // target's journal. The text avoids a leading `skipped ` so the
+        // snapshot-completeness channel is not tripped as well — failure
+        // and completeness are independent classifications here.
         this.restoreState(previousState);
         const allLegacyWarnings = [
           ...baselineWarnings,
-          `${snapshot.artifacts.length} snapshot records were all legacy published file:// drops; live state preserved without a restore attempt`,
+          `${RESTORE_FAILED_WARNING_PREFIX}; ${snapshot.artifacts.length} snapshot records were all legacy published file:// drops; live state preserved without a restore attempt`,
         ];
         this.setLastRestoreWarnings(allLegacyWarnings);
         return allLegacyWarnings;
@@ -2342,6 +2354,7 @@ function mergeArtifact(
         ? existing.metadata
         : mergeMetadata(existing, incoming),
     retention: mergeRetention(existing, incoming),
+    retentionExplicit: existing.retentionExplicit || incoming.retentionExplicit,
     restoreState: 'live',
     persistenceWarning:
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
