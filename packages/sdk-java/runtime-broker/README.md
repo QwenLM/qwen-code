@@ -72,3 +72,40 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## Workspace binding
+
+The `com.alibaba.qwen.code.runtimebroker.managedworkspace` package holds the
+W0a Workspace binding contract; see
+[Managed Workspace Binding Contract](../../../docs/design/2026-09-25-managed-workspace-binding-contract.md).
+It defines the Workspace Registry record and an immutable snapshot built from
+deployment configuration, actor-scoped access with an explicit-grant policy,
+a catalog that lists Workspaces and resolves a Session's Workspace selection
+to one resolved Workspace or one typed error, the lexical rule for a
+Session's working directory, and `ContextBinding` with its `contextDigest`.
+The TypeScript implementation in
+`packages/cli/src/serve/managed-workspace-binding.ts` produces the same
+normalized directories and digests; both run the shared fixtures in
+`packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`.
+The fixtures of the `managed-context/1` envelope,
+`packages/cli/src/serve/contracts/managed-context-v1.fixtures.json`, carry
+context digests computed with the same encoding, and
+`ManagedContextEnvelopeConformanceTest` recomputes them; see
+[Managed Context Envelope](../../../docs/design/2026-09-25-managed-context-envelope.md).
+Both fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose,
+so read them with a parser that keeps such escapes, as Jackson does.
+The package uses only the JDK and no other Broker class, and nothing wires
+it into the Broker service yet.
+
+## Tool result contract
+
+`ManagedToolResultConformanceTest` consumes the `managed-tool-result/1`
+contract in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`:
+the result manifest, segment pages, segment publication and the Tool v3
+routes that carry the versioned result envelope. It pins the constants,
+routes, closed key sets and error table, and recomputes every segment, seal
+and prefix digest; see
+[Managed Tool Result Contract](../../../docs/design/2026-09-26-managed-tool-result-contract.md).
+The fixtures carry unpaired surrogates as `\uXXXX` escapes on purpose too.
+No Java transport speaks Tool v3 yet.

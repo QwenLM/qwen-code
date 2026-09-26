@@ -83,6 +83,12 @@ export interface ManagedRuntimeAttestationIdentity {
   readonly isolationClass: 'session' | 'workspace';
 }
 
+/** The boot values that the request headers of every owned route carry. */
+export type ManagedRuntimeRequestIdentity = Pick<
+  ManagedRuntimeAttestationIdentity,
+  'token' | 'leaseId' | 'epoch'
+>;
+
 type ManagedRuntimeAttestationResponse = Omit<
   ManagedRuntimeAttestationIdentity,
   'token'
@@ -162,13 +168,13 @@ function isClosedAttestationRequest(
   );
 }
 
-const noStore: RequestHandler = (_req, res, next) => {
+export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
   res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
   next();
 };
 
-function authorize(
-  identity: ManagedRuntimeAttestationIdentity,
+export function authorizeManagedRuntime(
+  identity: ManagedRuntimeRequestIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
     const authorization = req.get('Authorization');
@@ -246,7 +252,12 @@ function handleAttestation(
   };
 }
 
-const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
+export const handleManagedRuntimeJsonError: ErrorRequestHandler = (
+  error,
+  _req,
+  res,
+  next,
+) => {
   if (res.headersSent) {
     next(error);
     return;
@@ -259,7 +270,7 @@ const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
   ) {
     res.status(413).json({
       code: 'managed_runtime_attestation_too_large',
-      error: 'Managed Runtime attestation request exceeds 16 KiB.',
+      error: 'Managed Runtime request exceeds its body size limit.',
     });
     return;
   }
@@ -291,8 +302,8 @@ export function registerManagedRuntimeAttestationRoute(
   >;
   app[method](
     ATTEST_ROUTE.path,
-    noStore,
-    authorize(identitySnapshot),
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identitySnapshot),
     express.json({
       // Compressed private requests add no value at 16 KiB. Refusing them
       // keeps the limit on wire bytes and makes corrupt streams use the JSON
@@ -303,23 +314,31 @@ export function registerManagedRuntimeAttestationRoute(
       type: 'application/json',
     }),
     handleAttestation(identitySnapshot, responseJson),
-    handleJsonError,
+    handleManagedRuntimeJsonError,
   );
+}
+
+interface DeclaredManagedRuntimeRoute {
+  readonly method: string;
+  readonly path: string;
 }
 
 export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
+  routes: readonly DeclaredManagedRuntimeRoute[] = OWNED_MANAGED_RUNTIME_ROUTES,
 ): boolean {
-  return method === ATTEST_ROUTE.method && url === ATTEST_ROUTE.path;
+  return routes.some((route) => method === route.method && url === route.path);
 }
 
+/** Admits exactly the declared routes, by default those of boot v1. */
 export function ownedManagedRuntimeRouteGate(
   next: RequestListener,
+  routes: readonly DeclaredManagedRuntimeRoute[] = OWNED_MANAGED_RUNTIME_ROUTES,
 ): RequestListener {
   return (req, res): void => {
     res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
-    if (!isOwnedManagedRuntimeRoute(req.method, req.url)) {
+    if (!isOwnedManagedRuntimeRoute(req.method, req.url, routes)) {
       res.writeHead(404);
       res.end();
       return;
