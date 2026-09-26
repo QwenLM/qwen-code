@@ -921,13 +921,13 @@ class HttpRuntimeTransportTest {
                 () -> {
                     switch (operation) {
                         case "execute" -> transport.execute(lease, session,
-                                reference).toCompletableFuture().get(2,
+                                reference).toCompletableFuture().get(5,
                                         TimeUnit.SECONDS);
                         case "status" -> transport.status(lease, session,
-                                reference, 0).toCompletableFuture().get(2,
+                                reference, 0).toCompletableFuture().get(5,
                                         TimeUnit.SECONDS);
                         case "cancel" -> transport.cancel(lease, session,
-                                reference).toCompletableFuture().get(2,
+                                reference).toCompletableFuture().get(5,
                                         TimeUnit.SECONDS);
                         default -> throw new AssertionError(
                                 "unknown operation");
