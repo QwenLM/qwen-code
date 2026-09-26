@@ -47,6 +47,8 @@ Owner 持久化留在包外。#12693 正在引入 reader/writer 基础；最小�
 中对齐。本切片不新建格式，也不要求整个 Stage G 完成。生产启用需要完成 host 接线。
 Legacy host 回执、owner 持久化和冷恢复选择器见 B2a 后续设计
 [双引擎 owner 选择与类型化拒绝](./2026-09-26-paired-engine-owner-selection.zh-CN.md)。
+宿主接线与新会话的选择规则见 B2d 设计
+[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
 
 ### 通道与准入
 
@@ -139,4 +141,5 @@ Managed branch/side-task 在修改历史前拒绝。
 主要风险是清理完成前释放准入，或把一个引擎的 current channel 当作整个工作区。
 测试必须观察真实 factory/connection 调用和未完成清理，而不只检查最终 Session 数量。
 Owner 持久化依赖与生产 host 回执实现仍是 #12380 中待对齐的接线问题；在此期间可通过
-Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器，宿主接线仍待完成。
+Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器；宿主接线已在
+B2d 中设计，尚未实现。

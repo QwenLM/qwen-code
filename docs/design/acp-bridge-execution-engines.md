@@ -59,6 +59,8 @@ require all of Stage G. Production enablement requires that host integration.
 The Legacy host receipt, owner persistence and the cold-restore selector are
 specified in the B2a follow-up,
 [Paired engine owner selection and typed rejections](./2026-09-26-paired-engine-owner-selection.md).
+Host wiring and the selection rules for new sessions are specified in the B2d
+design, [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
 
 ### Channels and admission
 
@@ -185,4 +187,5 @@ factory/connection calls and pending teardown, not only final session counts.
 The owner persistence dependency and production host receipt implementation
 remain the integration questions posted in #12380; the Bridge seam is usable
 for contract tests while those are resolved. The B2a follow-up implements the
-Legacy receipt and the restore selector; host wiring remains open.
+Legacy receipt and the restore selector; host wiring is designed in B2d and
+remains unimplemented.
