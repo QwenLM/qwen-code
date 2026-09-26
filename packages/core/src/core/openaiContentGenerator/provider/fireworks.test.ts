@@ -14,6 +14,7 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { determineProvider } from '../index.js';
 import { OpenAIContentGenerator } from '../openaiContentGenerator.js';
 import { FireworksOpenAICompatibleProvider } from './fireworks.js';
+import { content, userText } from '../../../test-utils/model-fixtures.js';
 
 function createCliConfig(): Config {
   return {
@@ -51,104 +52,74 @@ function createReasoningRequest(): OpenAI.Chat.ChatCompletionCreateParams {
   };
 }
 
+type AssistantOnWire = { reasoning?: string; reasoning_content?: string };
+
+/** Builds `request` through the provider `determineProvider` picks for `overrides`. */
+function buildWithProvider(
+  overrides: Partial<ContentGeneratorConfig>,
+  request = createReasoningRequest(),
+) {
+  const provider = determineProvider(
+    createProviderConfig(overrides),
+    createCliConfig(),
+  );
+  const result = provider.buildRequest(request, 'prompt-123');
+  return { request, assistant: result.messages?.[1] as AssistantOnWire };
+}
+
 describe('Fireworks provider reasoning-mirror suppression (issue #11657)', () => {
   it('drops the mirrored reasoning field for api.fireworks.ai while preserving reasoning_content, without mutating the source history', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.fireworks.ai/inference/v1',
-        model: 'accounts/fireworks/models/qwen3p8-max',
-      }),
-      createCliConfig(),
-    );
+    const { request, assistant } = buildWithProvider({
+      baseUrl: 'https://api.fireworks.ai/inference/v1',
+      model: 'accounts/fireworks/models/qwen3p8-max',
+    });
 
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(result.messages?.[1]).toEqual({
+    expect(assistant).toEqual({
       role: 'assistant',
       content: 'Hey! How can I help?',
       reasoning_content: 'The user said test.',
     });
-    expect(
-      (originalRequest.messages[1] as { reasoning?: string }).reasoning,
-    ).toBeUndefined();
+    expect((request.messages[1] as AssistantOnWire).reasoning).toBeUndefined();
   });
 
   it('drops the mirrored reasoning field for Fireworks subdomains', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://inference.api.fireworks.ai/v1',
-        model: 'accounts/fireworks/models/qwen3p8-max',
-      }),
-      createCliConfig(),
-    );
+    const { assistant } = buildWithProvider({
+      baseUrl: 'https://inference.api.fireworks.ai/v1',
+      model: 'accounts/fireworks/models/qwen3p8-max',
+    });
 
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect(
-      (result.messages?.[1] as { reasoning?: string }).reasoning,
-    ).toBeUndefined();
-    expect(
-      (result.messages?.[1] as { reasoning_content?: string })
-        .reasoning_content,
-    ).toBe('The user said test.');
+    expect(assistant.reasoning).toBeUndefined();
+    expect(assistant.reasoning_content).toBe('The user said test.');
   });
 
   it('does not treat hostile hostnames containing api.fireworks.ai as Fireworks', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.fireworks.ai.evil.example/v1',
-        model: 'accounts/fireworks/models/qwen3p8-max',
-      }),
-      createCliConfig(),
-    );
-
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
+    const { assistant } = buildWithProvider({
+      baseUrl: 'https://api.fireworks.ai.evil.example/v1',
+      model: 'accounts/fireworks/models/qwen3p8-max',
+    });
 
     // Falls through to the default provider, which mirrors reasoning_content
     // into reasoning for qwen3 model names.
-    expect((result.messages?.[1] as { reasoning?: string }).reasoning).toBe(
-      'The user said test.',
-    );
+    expect(assistant.reasoning).toBe('The user said test.');
   });
 
   it('keeps an explicit reasoning field that differs from reasoning_content', () => {
     const request = createReasoningRequest();
-    (request.messages[1] as { reasoning?: string }).reasoning =
+    (request.messages[1] as AssistantOnWire).reasoning =
       'Canonical reasoning field';
-    const provider = determineProvider(
-      createProviderConfig({}),
-      createCliConfig(),
-    );
+    const { assistant } = buildWithProvider({}, request);
 
-    const result = provider.buildRequest(request, 'prompt-123');
-
-    expect((result.messages?.[1] as { reasoning?: string }).reasoning).toBe(
-      'Canonical reasoning field',
-    );
-    expect(
-      (result.messages?.[1] as { reasoning_content?: string })
-        .reasoning_content,
-    ).toBe('The user said test.');
+    expect(assistant.reasoning).toBe('Canonical reasoning field');
+    expect(assistant.reasoning_content).toBe('The user said test.');
   });
 
   it('leaves non-Fireworks qwen3 endpoints mirroring as before', () => {
-    const originalRequest = createReasoningRequest();
-    const provider = determineProvider(
-      createProviderConfig({
-        baseUrl: 'https://api.openai.com/v1',
-        model: 'accounts/other-vendor/models/qwen3-something',
-      }),
-      createCliConfig(),
-    );
+    const { assistant } = buildWithProvider({
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'accounts/other-vendor/models/qwen3-something',
+    });
 
-    const result = provider.buildRequest(originalRequest, 'prompt-123');
-
-    expect((result.messages?.[1] as { reasoning?: string }).reasoning).toBe(
-      'The user said test.',
-    );
+    expect(assistant.reasoning).toBe('The user said test.');
   });
 });
 
@@ -186,43 +157,36 @@ describe('tool-call continuation against a Fireworks-like strict endpoint (issue
           (message) =>
             message['role'] === 'assistant' && 'reasoning' in message,
         );
+        const respond = (status: number, payload: unknown) => {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        };
         if (carriesMirroredReasoning) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              detail: [
-                {
-                  type: 'extra_forbidden',
-                  loc: ['body', 'messages', 2, 'reasoning'],
-                  msg: 'Extra inputs are not permitted',
-                  input: 'The user said test.',
-                },
-              ],
-            }),
-          );
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            id: 'chatcmpl-test',
-            object: 'chat.completion',
-            created: 1757000000,
-            model: body['model'],
-            choices: [
+          return respond(400, {
+            detail: [
               {
-                index: 0,
-                message: { role: 'assistant', content: 'Sure, go ahead.' },
-                finish_reason: 'stop',
+                type: 'extra_forbidden',
+                loc: ['body', 'messages', 2, 'reasoning'],
+                msg: 'Extra inputs are not permitted',
+                input: 'The user said test.',
               },
             ],
-            usage: {
-              prompt_tokens: 10,
-              completion_tokens: 4,
-              total_tokens: 14,
+          });
+        }
+        respond(200, {
+          id: 'chatcmpl-test',
+          object: 'chat.completion',
+          created: 1757000000,
+          model: body['model'],
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'Sure, go ahead.' },
+              finish_reason: 'stop',
             },
-          }),
-        );
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+        });
       });
     });
     await new Promise<void>((resolve) => {
@@ -254,7 +218,7 @@ describe('tool-call continuation against a Fireworks-like strict endpoint (issue
     // Turn 1 — a thinking turn that returns a tool call.
     const turn1: GenerateContentParameters = {
       model: 'accounts/fireworks/models/qwen3p8-max',
-      contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+      contents: [userText('test')],
     };
     const response1 = await generator.generateContent(turn1, 'prompt-1');
     expect(response1.candidates?.[0]?.content?.parts?.[0]).toMatchObject({
@@ -268,15 +232,13 @@ describe('tool-call continuation against a Fireworks-like strict endpoint (issue
     const turn2: GenerateContentParameters = {
       model: 'accounts/fireworks/models/qwen3p8-max',
       contents: [
-        { role: 'user', parts: [{ text: 'test' }] },
-        {
-          role: 'model',
-          parts: [
-            { text: 'The user said test.', thought: true },
-            { text: 'Hey! How can I help?' },
-          ],
-        },
-        { role: 'user', parts: [{ text: 'follow-up question' }] },
+        userText('test'),
+        content(
+          'model',
+          { text: 'The user said test.', thought: true },
+          { text: 'Hey! How can I help?' },
+        ),
+        userText('follow-up question'),
       ],
     };
     const response2 = await generator.generateContent(turn2, 'prompt-2');

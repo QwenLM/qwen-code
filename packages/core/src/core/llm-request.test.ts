@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { partListUnionToString } from './llm-request.js';
 import { partListUnionToString as legacyPartListUnionToString } from './geminiRequest.js';
 import { type Part } from '@google/genai';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 describe('partListUnionToString', () => {
   it('keeps the legacy module path working during the rename window', () => {
@@ -69,9 +70,7 @@ describe('partListUnionToString', () => {
   });
 
   it('should handle functionResponse', () => {
-    const part: Part = {
-      functionResponse: { name: 'myFunction', response: {} },
-    };
+    const part: Part = fnResponse('myFunction', {});
     const result = partListUnionToString(part);
     expect(result).toBe('[Function Response: myFunction]');
   });

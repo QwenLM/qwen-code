@@ -8,13 +8,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIContentGenerator } from '../openaiContentGenerator/openaiContentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from '../openaiContentGenerator/provider/index.js';
 import OpenAI from 'openai';
+import { userText } from '../../test-utils/model-fixtures.js';
 
-// Mock OpenAI
 vi.mock('openai');
 
-// Mock logger modules
 vi.mock('../../telemetry/loggers.js', () => ({
   logApiResponse: vi.fn(),
   logApiError: vi.fn(),
@@ -29,6 +29,35 @@ vi.mock('../../utils/openaiLogger.js', () => ({
   },
 }));
 
+const TIMEOUT_MESSAGE =
+  /Request timeout after \d+s\. Try reducing input length or increasing timeout in config\./;
+
+const cliConfig = (generatorConfig: object) =>
+  ({
+    getContentGeneratorConfig: vi.fn().mockReturnValue(generatorConfig),
+    getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+  }) as unknown as Config;
+
+/** Runs `check` on the thrown message; as in a bare try/catch, nothing is
+ * asserted when `call` resolves. */
+const onError = async (
+  call: Promise<unknown>,
+  check: (message: string) => void,
+) => {
+  try {
+    await call;
+  } catch (error: unknown) {
+    check(error instanceof Error ? error.message : String(error));
+  }
+};
+
+const expectTroubleshootingTips = (message: string) => {
+  expect(message).toContain('Troubleshooting tips:');
+  expect(message).toContain('Reduce input length or complexity');
+  expect(message).toContain('Increase timeout in config');
+  expect(message).toContain('Check network connectivity');
+};
+
 describe('OpenAIContentGenerator Timeout Handling', () => {
   let generator: OpenAIContentGenerator;
   let mockConfig: Config;
@@ -36,55 +65,45 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
   let mockOpenAIClient: any;
   let mockProvider: OpenAICompatibleProvider;
 
-  beforeEach(() => {
-    // Reset mocks
-    vi.clearAllMocks();
+  const makeProvider = (): OpenAICompatibleProvider => ({
+    buildHeaders: vi.fn().mockReturnValue({
+      'User-Agent': 'QwenCode/1.0.0 (test; test)',
+    }),
+    buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
+    buildRequest: vi.fn().mockImplementation((req) => req),
+    getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
+  });
 
-    // Mock environment variables
+  const request = (text = 'Hello') => ({
+    contents: [userText(text)],
+    model: 'gpt-4',
+  });
+  const generate = (text?: string) =>
+    generator.generateContent(request(text), 'test-prompt-id');
+  const generateStream = () =>
+    generator.generateContentStream(request(), 'test-prompt-id');
+  const rejectWith = (error: Error) =>
+    mockOpenAIClient.chat.completions.create.mockRejectedValue(error);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
     vi.stubEnv('OPENAI_BASE_URL', '');
 
-    // Mock config
-    mockConfig = {
-      getContentGeneratorConfig: vi.fn().mockReturnValue({
-        authType: 'openai',
-        enableOpenAILogging: false,
-      }),
-      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-    } as unknown as Config;
-
-    // Mock OpenAI client
+    mockConfig = cliConfig({ authType: 'openai', enableOpenAILogging: false });
     mockOpenAIClient = {
-      chat: {
-        completions: {
-          create: vi.fn(),
-        },
-      },
-      embeddings: {
-        create: vi.fn(),
-      },
+      chat: { completions: { create: vi.fn() } },
+      embeddings: { create: vi.fn() },
     };
-
     vi.mocked(OpenAI).mockImplementation(() => mockOpenAIClient);
+    mockProvider = makeProvider();
 
-    // Create mock provider
-    mockProvider = {
-      buildHeaders: vi.fn().mockReturnValue({
-        'User-Agent': 'QwenCode/1.0.0 (test; test)',
-      }),
-      buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
-      buildRequest: vi.fn().mockImplementation((req) => req),
-      getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
-    };
-
-    // Create generator instance
-    const contentGeneratorConfig = {
-      model: 'gpt-4',
-      apiKey: 'test-key',
-      authType: AuthType.USE_OPENAI,
-      enableOpenAILogging: false,
-    };
     generator = new OpenAIContentGenerator(
-      contentGeneratorConfig,
+      {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
       mockConfig,
       mockProvider,
     );
@@ -107,26 +126,12 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         new Error('deadline exceeded'),
       ];
 
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
       for (const error of timeoutErrors) {
         mockOpenAIClient.chat.completions.create.mockRejectedValueOnce(error);
-
-        try {
-          await generator.generateContent(request, 'test-prompt-id');
-        } catch (thrownError: unknown) {
-          // Should contain timeout-specific messaging and troubleshooting tips
-          const errorMessage =
-            thrownError instanceof Error
-              ? thrownError.message
-              : String(thrownError);
-          expect(errorMessage).toMatch(
-            /timeout after \d+s|Troubleshooting tips:/,
-          );
-        }
+        // Timeout-specific messaging and troubleshooting tips.
+        await onError(generate(), (message) =>
+          expect(message).toMatch(/timeout after \d+s|Troubleshooting tips:/),
+        );
       }
     });
 
@@ -139,229 +144,85 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         Object.assign(new Error('API error'), { type: 'authentication_error' }),
       ];
 
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
       for (const error of nonTimeoutErrors) {
         mockOpenAIClient.chat.completions.create.mockRejectedValueOnce(error);
-
-        try {
-          await generator.generateContent(request, 'test-prompt-id');
-        } catch (thrownError: unknown) {
-          // Should NOT contain timeout-specific messaging
-          const errorMessage =
-            thrownError instanceof Error
-              ? thrownError.message
-              : String(thrownError);
-          expect(errorMessage).not.toMatch(/timeout after \d+s/);
-          expect(errorMessage).not.toMatch(/Troubleshooting tips:/);
-          // Should preserve the original error message
-          expect(errorMessage).toMatch(new RegExp(error.message));
-        }
+        await onError(generate(), (message) => {
+          expect(message).not.toMatch(/timeout after \d+s/);
+          expect(message).not.toMatch(/Troubleshooting tips:/);
+          // The original error message is preserved.
+          expect(message).toMatch(new RegExp(error.message));
+        });
       }
     });
   });
 
   describe('generateContent timeout handling', () => {
     it('should handle timeout errors with helpful message', async () => {
-      // Mock timeout error
-      const timeoutError = new Error('Request timeout');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
-      await expect(
-        generator.generateContent(request, 'test-prompt-id'),
-      ).rejects.toThrow(
-        /Request timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
-      );
+      rejectWith(new Error('Request timeout'));
+      await expect(generate()).rejects.toThrow(TIMEOUT_MESSAGE);
     });
 
     it('should handle non-timeout errors normally', async () => {
-      // Mock non-timeout error
-      const apiError = new Error('Invalid API key');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(apiError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
-      await expect(
-        generator.generateContent(request, 'test-prompt-id'),
-      ).rejects.toThrow('Invalid API key');
+      rejectWith(new Error('Invalid API key'));
+      await expect(generate()).rejects.toThrow('Invalid API key');
     });
 
     it('should include troubleshooting tips for timeout errors', async () => {
-      const timeoutError = new Error('Connection timed out');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
-      try {
-        await generator.generateContent(request, 'test-prompt-id');
-      } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        expect(errorMessage).toContain('Troubleshooting tips:');
-        expect(errorMessage).toContain('Reduce input length or complexity');
-        expect(errorMessage).toContain('Increase timeout in config');
-        expect(errorMessage).toContain('Check network connectivity');
-      }
+      rejectWith(new Error('Connection timed out'));
+      await onError(generate(), expectTroubleshootingTips);
     });
   });
 
   describe('generateContentStream timeout handling', () => {
     it('should handle streaming timeout errors with the shared timeout message', async () => {
-      const timeoutError = new Error('Streaming timeout');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
-      await expect(
-        generator.generateContentStream(request, 'test-prompt-id'),
-      ).rejects.toThrow(
-        /Request timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
-      );
+      rejectWith(new Error('Streaming timeout'));
+      await expect(generateStream()).rejects.toThrow(TIMEOUT_MESSAGE);
     });
 
     it('should include the shared troubleshooting tips for streaming timeouts', async () => {
-      const timeoutError = new Error('request timed out');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello' }] }],
-        model: 'gpt-4',
-      };
-
-      try {
-        await generator.generateContentStream(request, 'test-prompt-id');
-      } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        expect(errorMessage).toContain('Troubleshooting tips:');
-        expect(errorMessage).toContain('Reduce input length or complexity');
-        expect(errorMessage).toContain('Increase timeout in config');
-        expect(errorMessage).toContain('Check network connectivity');
-      }
+      rejectWith(new Error('request timed out'));
+      await onError(generateStream(), expectTroubleshootingTips);
     });
   });
 
   describe('timeout configuration', () => {
-    it('should use default timeout configuration', () => {
-      const contentGeneratorConfig = {
-        model: 'gpt-4',
-        apiKey: 'test-key',
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'http://localhost:8080',
-      };
-      new OpenAIContentGenerator(
-        contentGeneratorConfig,
-        mockConfig,
-        mockProvider,
-      );
+    const baseConfig: ContentGeneratorConfig = {
+      model: 'gpt-4',
+      apiKey: 'test-key',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'http://localhost:8080',
+    };
 
-      // Verify provider buildClient was called
-      expect(mockProvider.buildClient).toHaveBeenCalled();
+    /** Constructs a generator and checks it built its client through the
+     * provider; config and provider default to fresh mocks. */
+    const expectClientBuilt = (
+      generatorConfig: ContentGeneratorConfig,
+      config = cliConfig({ enableOpenAILogging: false }),
+      provider = makeProvider(),
+    ) => {
+      new OpenAIContentGenerator(generatorConfig, config, provider);
+      expect(provider.buildClient).toHaveBeenCalled();
+    };
+
+    it('should use default timeout configuration', () => {
+      expectClientBuilt(baseConfig, mockConfig, mockProvider);
     });
 
     it('should use custom timeout from config', () => {
-      const customConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({
-          enableOpenAILogging: false,
-        }),
-        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-      } as unknown as Config;
-
-      const contentGeneratorConfig = {
-        model: 'gpt-4',
-        apiKey: 'test-key',
-        baseUrl: 'http://localhost:8080',
-        authType: AuthType.USE_OPENAI,
-        timeout: 300000,
-        maxRetries: 5,
-      };
-
-      // Create a custom mock provider for this test
-      const customMockProvider: OpenAICompatibleProvider = {
-        buildHeaders: vi.fn().mockReturnValue({
-          'User-Agent': 'QwenCode/1.0.0 (test; test)',
-        }),
-        buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
-        buildRequest: vi.fn().mockImplementation((req) => req),
-        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
-      };
-
-      new OpenAIContentGenerator(
-        contentGeneratorConfig,
-        customConfig,
-        customMockProvider,
-      );
-
-      // Verify provider buildClient was called
-      expect(customMockProvider.buildClient).toHaveBeenCalled();
+      expectClientBuilt({ ...baseConfig, timeout: 300000, maxRetries: 5 });
     });
 
     it('should handle missing timeout config gracefully', () => {
-      const noTimeoutConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({
-          enableOpenAILogging: false,
-        }),
-        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-      } as unknown as Config;
-
-      const contentGeneratorConfig = {
-        model: 'gpt-4',
-        apiKey: 'test-key',
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'http://localhost:8080',
-      };
-
-      // Create a custom mock provider for this test
-      const noTimeoutMockProvider: OpenAICompatibleProvider = {
-        buildHeaders: vi.fn().mockReturnValue({
-          'User-Agent': 'QwenCode/1.0.0 (test; test)',
-        }),
-        buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
-        buildRequest: vi.fn().mockImplementation((req) => req),
-        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
-      };
-
-      new OpenAIContentGenerator(
-        contentGeneratorConfig,
-        noTimeoutConfig,
-        noTimeoutMockProvider,
-      );
-
-      // Verify provider buildClient was called
-      expect(noTimeoutMockProvider.buildClient).toHaveBeenCalled();
+      expectClientBuilt(baseConfig);
     });
   });
 
   describe('token estimation on timeout', () => {
     it('should surface a clear timeout error when request times out', async () => {
-      const timeoutError = new Error('Request timeout');
-      mockOpenAIClient.chat.completions.create.mockRejectedValue(timeoutError);
-
-      const request = {
-        contents: [{ role: 'user' as const, parts: [{ text: 'Hello world' }] }],
-        model: 'gpt-4',
-      };
-
-      await expect(
-        generator.generateContent(request, 'test-prompt-id'),
-      ).rejects.toThrow(/Request timeout after \d+s/);
+      rejectWith(new Error('Request timeout'));
+      await expect(generate('Hello world')).rejects.toThrow(
+        /Request timeout after \d+s/,
+      );
     });
   });
 });

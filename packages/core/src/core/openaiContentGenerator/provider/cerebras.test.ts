@@ -14,6 +14,7 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { determineProvider } from '../index.js';
 import { OpenAIContentGenerator } from '../openaiContentGenerator.js';
 import { CerebrasOpenAICompatibleProvider } from './cerebras.js';
+import { content } from '../../../test-utils/model-fixtures.js';
 
 function createCliConfig(): Config {
   return {
@@ -236,13 +237,11 @@ describe('multi-turn against a Cerebras-like strict endpoint (issue #11045)', ()
       model: 'qwen-3.8-27b',
       contents: [
         { role: 'user', parts: [{ text: 'test' }] },
-        {
-          role: 'model',
-          parts: [
-            { text: 'The user said test.', thought: true },
-            { text: 'Hey! How can I help?' },
-          ],
-        },
+        content(
+          'model',
+          { text: 'The user said test.', thought: true },
+          { text: 'Hey! How can I help?' },
+        ),
         { role: 'user', parts: [{ text: 'follow-up question' }] },
       ],
     };

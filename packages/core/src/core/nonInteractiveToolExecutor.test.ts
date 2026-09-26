@@ -23,6 +23,7 @@ import {
 } from '../index.js';
 import type { Part } from '@google/genai';
 import { MockTool } from '../test-utils/mock-tool.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 describe('executeToolCall', () => {
   let mockToolRegistry: ToolRegistry;
@@ -80,29 +81,58 @@ describe('executeToolCall', () => {
     abortController = new AbortController();
   });
 
+  const request = (
+    callId: string,
+    prompt_id: string,
+    args: Record<string, unknown> = {},
+    name = 'testTool',
+  ): ToolCallRequestInfo => ({
+    callId,
+    name,
+    args,
+    isClientInitiated: false,
+    prompt_id,
+  });
+
+  /** Registers the mock tool, optionally resolves `execute` with `result`,
+   * and runs the call. */
+  const run = (
+    call: ToolCallRequestInfo,
+    result?: ToolResult,
+    options?: Parameters<typeof executeToolCall>[3],
+  ) => {
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    if (result) executeFn.mockResolvedValue(result);
+    return executeToolCall(mockConfig, call, abortController.signal, options);
+  };
+
+  /** The full response of a call that failed with `message`. */
+  const errorResponse = (
+    call: ToolCallRequestInfo,
+    message: string,
+    errorType: ToolErrorType,
+    executionStatus: 'not_started' | 'error',
+  ) => ({
+    callId: call.callId,
+    error: new Error(message),
+    errorType,
+    executionStatus,
+    resultDisplay: message,
+    contentLength: message.length,
+    responseParts: [fnResponse(call.name, { error: message }, call.callId)],
+  });
+
   it('should execute a tool successfully', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call1',
-      name: 'testTool',
-      args: { param1: 'value1' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-1',
-    };
+    const call = request('call1', 'prompt-id-1', { param1: 'value1' });
     const toolResult: ToolResult = {
       llmContent: 'Tool executed successfully',
       returnDisplay: 'Success!',
     };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue(toolResult);
 
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-    );
+    const response = await run(call, toolResult);
 
     expect(mockToolRegistry.getTool).toHaveBeenCalledWith('testTool');
-    expect(executeFn).toHaveBeenCalledWith(request.args);
+    expect(executeFn).toHaveBeenCalledWith(call.args);
     expect(response).toStrictEqual({
       callId: 'call1',
       error: undefined,
@@ -132,24 +162,14 @@ describe('executeToolCall', () => {
         recordToolResult,
         recordUiTelemetryEvent: vi.fn(),
       }) as unknown as ReturnType<Config['getChatRecordingService']>;
-    const directRequest: ToolCallRequestInfo = {
-      callId: 'direct-call',
-      name: 'testTool',
-      args: { param1: 'value1' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-direct',
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue({
+    const directRequest = request('direct-call', 'prompt-direct', {
+      param1: 'value1',
+    });
+
+    const directResponse = await run(directRequest, {
       llmContent: 'record later',
       returnDisplay: 'record later',
-    } satisfies ToolResult);
-
-    const directResponse = await executeToolCall(
-      mockConfig,
-      directRequest,
-      abortController.signal,
-    );
+    });
 
     expect(recordToolResult).toHaveBeenCalledWith(
       directResponse.responseParts,
@@ -168,13 +188,6 @@ describe('executeToolCall', () => {
   });
 
   it('runs the tool with the requested runtime content generator', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'runtime-call',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'runtime-prompt',
-    };
     const runtimeView = {
       contentGenerator: {},
       contentGeneratorConfig: {
@@ -183,7 +196,6 @@ describe('executeToolCall', () => {
       },
     } as unknown as RuntimeContentGeneratorView;
     let observedRuntime: RuntimeContentGeneratorView | undefined;
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
     executeFn.mockImplementation(() => {
       observedRuntime = getRuntimeContentGenerator();
       return Promise.resolve({
@@ -192,7 +204,7 @@ describe('executeToolCall', () => {
       });
     });
 
-    await executeToolCall(mockConfig, request, abortController.signal, {
+    await run(request('runtime-call', 'runtime-prompt'), undefined, {
       runtimeView,
     });
 
@@ -200,13 +212,7 @@ describe('executeToolCall', () => {
   });
 
   it('should return an error if tool is not found', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call2',
-      name: 'nonexistentTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-2',
-    };
+    const call = request('call2', 'prompt-id-2', {}, 'nonexistentTool');
     vi.mocked(mockToolRegistry.getTool).mockReturnValue(undefined);
     vi.mocked(mockToolRegistry.getAllToolNames).mockReturnValue([
       'testTool',
@@ -215,176 +221,79 @@ describe('executeToolCall', () => {
 
     const response = await executeToolCall(
       mockConfig,
-      request,
+      call,
       abortController.signal,
     );
 
-    const expectedErrorMessage =
-      'Tool "nonexistentTool" not found in registry. Tools must use the exact names that are registered. Did you mean one of: "testTool", "anotherTool"?';
-    expect(response).toStrictEqual({
-      callId: 'call2',
-      error: new Error(expectedErrorMessage),
-      errorType: ToolErrorType.TOOL_NOT_REGISTERED,
-      executionStatus: 'not_started',
-      resultDisplay: expectedErrorMessage,
-      contentLength: expectedErrorMessage.length,
-      responseParts: [
-        {
-          functionResponse: {
-            name: 'nonexistentTool',
-            id: 'call2',
-            response: {
-              error: expectedErrorMessage,
-            },
-          },
-        },
-      ],
-    });
+    expect(response).toStrictEqual(
+      errorResponse(
+        call,
+        'Tool "nonexistentTool" not found in registry. Tools must use the exact names that are registered. Did you mean one of: "testTool", "anotherTool"?',
+        ToolErrorType.TOOL_NOT_REGISTERED,
+        'not_started',
+      ),
+    );
   });
 
   it('should return an error if tool validation fails', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call3',
-      name: 'testTool',
-      args: { param1: 'invalid' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-3',
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    const call = request('call3', 'prompt-id-3', { param1: 'invalid' });
     vi.spyOn(mockTool, 'build').mockImplementation(() => {
       throw new Error('Invalid parameters');
     });
 
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
+    expect(await run(call)).toStrictEqual(
+      errorResponse(
+        call,
+        'Invalid parameters',
+        ToolErrorType.INVALID_TOOL_PARAMS,
+        'not_started',
+      ),
     );
-    expect(response).toStrictEqual({
-      callId: 'call3',
-      error: new Error('Invalid parameters'),
-      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-      executionStatus: 'not_started',
-      responseParts: [
-        {
-          functionResponse: {
-            id: 'call3',
-            name: 'testTool',
-            response: {
-              error: 'Invalid parameters',
-            },
-          },
-        },
-      ],
-      resultDisplay: 'Invalid parameters',
-      contentLength: 'Invalid parameters'.length,
-    });
   });
 
   it('should return an error if tool execution fails', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call4',
-      name: 'testTool',
-      args: { param1: 'value1' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-4',
-    };
-    const executionErrorResult: ToolResult = {
+    const call = request('call4', 'prompt-id-4', { param1: 'value1' });
+    const response = await run(call, {
       llmContent: 'Error: Execution failed',
       returnDisplay: 'Execution failed',
       error: {
         message: 'Execution failed',
         type: ToolErrorType.EXECUTION_FAILED,
       },
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue(executionErrorResult);
-
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-    );
-    expect(response).toStrictEqual({
-      callId: 'call4',
-      error: new Error('Execution failed'),
-      errorType: ToolErrorType.EXECUTION_FAILED,
-      executionStatus: 'error',
-      responseParts: [
-        {
-          functionResponse: {
-            id: 'call4',
-            name: 'testTool',
-            response: {
-              error: 'Execution failed',
-            },
-          },
-        },
-      ],
-      resultDisplay: 'Execution failed',
-      contentLength: 'Execution failed'.length,
     });
+
+    expect(response).toStrictEqual(
+      errorResponse(
+        call,
+        'Execution failed',
+        ToolErrorType.EXECUTION_FAILED,
+        'error',
+      ),
+    );
   });
 
   it('should return an unhandled exception error if execution throws', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call5',
-      name: 'testTool',
-      args: { param1: 'value1' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-5',
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    const call = request('call5', 'prompt-id-5', { param1: 'value1' });
     executeFn.mockRejectedValue(new Error('Something went very wrong'));
 
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
+    expect(await run(call)).toStrictEqual(
+      errorResponse(
+        call,
+        'Something went very wrong',
+        ToolErrorType.UNHANDLED_EXCEPTION,
+        'error',
+      ),
     );
-
-    expect(response).toStrictEqual({
-      callId: 'call5',
-      error: new Error('Something went very wrong'),
-      errorType: ToolErrorType.UNHANDLED_EXCEPTION,
-      executionStatus: 'error',
-      resultDisplay: 'Something went very wrong',
-      contentLength: 'Something went very wrong'.length,
-      responseParts: [
-        {
-          functionResponse: {
-            name: 'testTool',
-            id: 'call5',
-            response: { error: 'Something went very wrong' },
-          },
-        },
-      ],
-    });
   });
 
   it('should correctly format llmContent with inlineData', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call6',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-6',
-    };
     const imageDataPart: Part = {
       inlineData: { mimeType: 'image/png', data: 'base64data' },
     };
-    const toolResult: ToolResult = {
+    const response = await run(request('call6', 'prompt-id-6'), {
       llmContent: [imageDataPart],
       returnDisplay: 'Image processed',
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue(toolResult);
-
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-    );
+    });
 
     expect(response).toStrictEqual({
       callId: 'call6',
@@ -411,25 +320,11 @@ describe('executeToolCall', () => {
   });
 
   it('should calculate contentLength for a string llmContent', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call7',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-7',
-    };
     const toolResult: ToolResult = {
       llmContent: 'This is a test string.',
       returnDisplay: 'String returned',
     };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue(toolResult);
-
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-    );
+    const response = await run(request('call7', 'prompt-id-7'), toolResult);
 
     expect(response.contentLength).toBe(
       typeof toolResult.llmContent === 'string'
@@ -439,25 +334,10 @@ describe('executeToolCall', () => {
   });
 
   it('should have undefined contentLength for array llmContent with no string parts', async () => {
-    const request: ToolCallRequestInfo = {
-      callId: 'call8',
-      name: 'testTool',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-id-8',
-    };
-    const toolResult: ToolResult = {
+    const response = await run(request('call8', 'prompt-id-8'), {
       llmContent: [{ inlineData: { mimeType: 'image/png', data: 'fakedata' } }],
       returnDisplay: 'Image data returned',
-    };
-    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue(toolResult);
-
-    const response = await executeToolCall(
-      mockConfig,
-      request,
-      abortController.signal,
-    );
+    });
 
     expect(response.contentLength).toBeUndefined();
   });

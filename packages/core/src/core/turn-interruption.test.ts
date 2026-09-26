@@ -5,36 +5,53 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import {
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
   effectiveHistoryEnd,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from './turn-interruption.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 const reminder = (text: string) => ({
   text: `<system-reminder>\n${text}\n</system-reminder>`,
 });
 
+const notification = (summary: string) => ({
+  text:
+    `<task-notification><task-id>agent-1</task-id>` +
+    `<status>completed</status><summary>${summary}</summary>` +
+    `</task-notification>`,
+});
+
+// Expected detection results.
+const NONE = { kind: 'none' };
+const interruptedPrompt = (...parts: Part[]) => ({
+  kind: 'interrupted_prompt',
+  parts,
+});
+const interruptedTurn = (
+  ...danglingCalls: Array<{ callId: string; name: string }>
+) => ({ kind: 'interrupted_turn', danglingCalls });
+
 describe('detectTurnInterruption', () => {
   it('recovers only input after a recorded tool boundary', () => {
-    const result: Content = {
-      role: 'user',
-      parts: [
-        {
-          functionResponse: { id: 'ended', name: 'update_goal', response: {} },
-        },
-      ],
-    };
-    expect(detectTurnInterruption([result], ['ended'])).toEqual({
-      kind: 'none',
-    });
-    const input: Content = { role: 'user', parts: [{ text: 'next request' }] };
-    expect(detectTurnInterruption([result, input], ['ended'])).toEqual({
-      kind: 'interrupted_prompt',
-      parts: input.parts,
-    });
+    const result: Content = content(
+      'user',
+      fnResponse('update_goal', {}, 'ended'),
+    );
+    expect(detectTurnInterruption([result], ['ended'])).toEqual(NONE);
+    const input: Content = userText('next request');
+    expect(detectTurnInterruption([result, input], ['ended'])).toEqual(
+      interruptedPrompt(...input.parts!),
+    );
     expect(detectTurnInterruption([result, input], ['missing']).kind).toBe(
       'interrupted_prompt',
     );
@@ -43,54 +60,55 @@ describe('detectTurnInterruption', () => {
     ).toBe('interrupted_prompt');
     expect(
       detectTurnInterruption(
-        [
-          result,
-          {
-            role: 'model',
-            parts: [{ functionCall: { id: 'pending', name: 'read_file' } }],
-          },
-        ],
+        [result, content('model', fnCall('read_file', undefined, 'pending'))],
         ['ended'],
       ),
-    ).toEqual({
-      kind: 'interrupted_turn',
-      danglingCalls: [{ callId: 'pending', name: 'read_file' }],
-    });
+    ).toEqual(interruptedTurn({ callId: 'pending', name: 'read_file' }));
   });
   it('uses a bounded history tail count for continuation detection callers', () => {
     expect(TURN_INTERRUPTION_HISTORY_TAIL_COUNT).toBe(50);
   });
 
-  it('returns none for empty history', () => {
-    expect(detectTurnInterruption([])).toEqual({ kind: 'none' });
-  });
-
-  it('returns none when the last turn is a clean model text response', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'hello' }] },
-      { role: 'model', parts: [{ text: 'hi there' }] },
-    ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
-  });
-
-  it('returns none for a pure system-reminder user tail', () => {
-    const history: Content[] = [
-      { role: 'model', parts: [{ text: 'done' }] },
-      { role: 'user', parts: [reminder('mcp tool added')] },
-    ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  it.each<[string, Content[]]>([
+    ['returns none for empty history', []],
+    [
+      'returns none when the last turn is a clean model text response',
+      [userText('hello'), modelText('hi there')],
+    ],
+    [
+      'returns none for a pure system-reminder user tail',
+      [modelText('done'), content('user', reminder('mcp tool added'))],
+    ],
+    [
+      'ignores functionCalls without an id (unpairable on the wire)',
+      [content('model', fnCall('shell'))],
+    ],
+    [
+      'ignores earlier dangling calls when the final entry is clean',
+      // The mid-history dangling call is covered by the defensive repair
+      // passes in the send path, not by continue detection.
+      [
+        content('model', fnCall('shell', undefined, 'old-call')),
+        userText('never mind'),
+        modelText('ok'),
+      ],
+    ],
+    [
+      'returns none for a user tail with no parts',
+      [{ role: 'user', parts: [] }],
+    ],
+  ])('%s', (_title, history) => {
+    expect(detectTurnInterruption(history)).toEqual(NONE);
   });
 
   it('classifies a trailing user prompt as interrupted_prompt', () => {
     const history: Content[] = [
-      { role: 'model', parts: [{ text: 'earlier answer' }] },
-      { role: 'user', parts: [{ text: 'do the thing' }] },
+      modelText('earlier answer'),
+      userText('do the thing'),
     ];
-    const result = detectTurnInterruption(history);
-    expect(result).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [{ text: 'do the thing' }],
-    });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt({ text: 'do the thing' }),
+    );
   });
 
   it('preserves per-turn reminder parts verbatim in the re-submission', () => {
@@ -98,76 +116,42 @@ describe('detectTurnInterruption', () => {
     // captured entry must keep them — the resumed request has to be
     // complete and belongs to the same logical turn.
     const history: Content[] = [
-      {
-        role: 'user',
-        parts: [reminder('plan mode is on'), { text: 'real prompt' }],
-      },
+      content('user', reminder('plan mode is on'), { text: 'real prompt' }),
     ];
-    const result = detectTurnInterruption(history);
-    expect(result).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [reminder('plan mode is on'), { text: 'real prompt' }],
-    });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt(reminder('plan mode is on'), { text: 'real prompt' }),
+    );
   });
 
   it('classifies a trailing tool_result submission as interrupted_prompt', () => {
-    const frPart = {
-      functionResponse: {
-        id: 'call-1',
-        name: 'read_file',
-        response: { output: 'contents' },
-      },
-    };
+    const frPart = fnResponse('read_file', { output: 'contents' }, 'call-1');
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
-      },
-      { role: 'user', parts: [frPart] },
+      content('model', fnCall('read_file', undefined, 'call-1')),
+      content('user', frPart),
     ];
-    const result = detectTurnInterruption(history);
-    expect(result).toEqual({ kind: 'interrupted_prompt', parts: [frPart] });
+    expect(detectTurnInterruption(history)).toEqual(interruptedPrompt(frPart));
   });
 
   it('captures all consecutive trailing user entries with functionResponses first', () => {
     const history: Content[] = [
-      { role: 'model', parts: [{ text: 'waiting on tool result' }] },
-      { role: 'user', parts: [{ text: 'IDE context' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'read_file',
-              response: { output: 'contents' },
-            },
-          },
-        ],
-      },
+      modelText('waiting on tool result'),
+      userText('IDE context'),
+      content(
+        'user',
+        fnResponse('read_file', { output: 'contents' }, 'call-1'),
+      ),
     ];
 
-    const result = detectTurnInterruption(history);
-
-    expect(result).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [
-        {
-          functionResponse: {
-            id: 'call-1',
-            name: 'read_file',
-            response: { output: 'contents' },
-          },
-        },
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt(
+        fnResponse('read_file', { output: 'contents' }, 'call-1'),
         { text: 'IDE context' },
-      ],
-    });
+      ),
+    );
   });
 
   it('returns cloned parts that do not alias the history entry', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'original' }] },
-    ];
+    const history: Content[] = [userText('original')];
     const result = detectTurnInterruption(history);
     if (result.kind !== 'interrupted_prompt') {
       throw new Error(`expected interrupted_prompt, got ${result.kind}`);
@@ -178,88 +162,48 @@ describe('detectTurnInterruption', () => {
 
   it('classifies a dangling functionCall tail as interrupted_turn', () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'run the tool' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'running…' },
-          { functionCall: { id: 'call-1', name: 'shell' } },
-          { functionCall: { id: 'call-2', name: 'read_file' } },
-        ],
-      },
+      userText('run the tool'),
+      content(
+        'model',
+        { text: 'running…' },
+        fnCall('shell', undefined, 'call-1'),
+        fnCall('read_file', undefined, 'call-2'),
+      ),
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_turn',
-      danglingCalls: [
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedTurn(
         { callId: 'call-1', name: 'shell' },
         { callId: 'call-2', name: 'read_file' },
-      ],
-    });
-  });
-
-  it('ignores functionCalls without an id (unpairable on the wire)', () => {
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [{ functionCall: { name: 'shell' } }],
-      },
-    ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+      ),
+    );
   });
 
   it('falls back to "unknown" for a dangling call without a name', () => {
     const history: Content[] = [
       { role: 'model', parts: [{ functionCall: { id: 'call-9' } }] },
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_turn',
-      danglingCalls: [{ callId: 'call-9', name: 'unknown' }],
-    });
-  });
-
-  it('ignores earlier dangling calls when the final entry is clean', () => {
-    // The mid-history dangling call is covered by the defensive repair
-    // passes in the send path, not by continue detection.
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'old-call', name: 'shell' } }],
-      },
-      { role: 'user', parts: [{ text: 'never mind' }] },
-      { role: 'model', parts: [{ text: 'ok' }] },
-    ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
-  });
-
-  it('returns none for a user tail with no parts', () => {
-    const history: Content[] = [{ role: 'user', parts: [] }];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedTurn({ callId: 'call-9', name: 'unknown' }),
+    );
   });
 });
 
 describe('detectTurnInterruption with background notifications', () => {
-  const notification = (summary: string) => ({
-    text:
-      `<task-notification><task-id>agent-1</task-id>` +
-      `<status>completed</status><summary>${summary}</summary>` +
-      `</task-notification>`,
-  });
-
   it('returns none when an unanswered notification is the whole tail', () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'run it in the background' }] },
-      { role: 'model', parts: [{ text: 'done' }] },
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
-      { role: 'user', parts: [notification('Agent "build" completed.')] },
+      userText('run it in the background'),
+      modelText('done'),
+      content('user', notification('Agent "explore" completed.')),
+      content('user', notification('Agent "build" completed.')),
     ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual(NONE);
   });
 
   it('returns none for a history that is only notifications', () => {
     const history: Content[] = [
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      content('user', notification('Agent "explore" completed.')),
     ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual(NONE);
   });
 
   it('re-submits the orphaned prompt together with the notification after it', () => {
@@ -272,16 +216,15 @@ describe('detectTurnInterruption with background notifications', () => {
     // `persistedBackgroundNotificationTaskIds` is primed from the transcript
     // itself and the queue never re-delivers it.
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'do the thing' }] },
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      userText('do the thing'),
+      content('user', notification('Agent "explore" completed.')),
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt(
         { text: 'do the thing' },
         notification('Agent "explore" completed.'),
-      ],
-    });
+      ),
+    );
   });
 
   it('keeps a delivered notification turn entry (reminders + envelope) interrupted', () => {
@@ -294,17 +237,20 @@ describe('detectTurnInterruption with background notifications', () => {
     // Only the single-part cold projection (a recorded notification whose turn
     // never ran) is structural, so the reminder allowance must not apply.
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'earlier prompt' }] },
-      { role: 'model', parts: [{ text: 'earlier answer' }] },
-      {
-        role: 'user',
-        parts: [reminder('plan mode is active'), notification('Agent done.')],
-      },
+      userText('earlier prompt'),
+      modelText('earlier answer'),
+      content(
+        'user',
+        reminder('plan mode is active'),
+        notification('Agent done.'),
+      ),
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [reminder('plan mode is active'), notification('Agent done.')],
-    });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt(
+        reminder('plan mode is active'),
+        notification('Agent done.'),
+      ),
+    );
   });
 
   it('keeps a user entry that quotes an envelope inside its text', () => {
@@ -315,16 +261,16 @@ describe('detectTurnInterruption with background notifications', () => {
     // banner. One part, so the `every` quantifier cannot carry the assertion.
     const text =
       'what does this mean: <task-notification><status>completed</status></task-notification>';
-    expect(
-      detectTurnInterruption([{ role: 'user', parts: [{ text }] }]),
-    ).toEqual({ kind: 'interrupted_prompt', parts: [{ text }] });
+    expect(detectTurnInterruption([userText(text)])).toEqual(
+      interruptedPrompt({ text }),
+    );
   });
 
   it('keeps a user entry with a leading label before the envelope', () => {
     const text = `Background task update:\n${notification('Agent "explore" completed.').text}`;
-    expect(
-      detectTurnInterruption([{ role: 'user', parts: [{ text }] }]),
-    ).toEqual({ kind: 'interrupted_prompt', parts: [{ text }] });
+    expect(detectTurnInterruption([userText(text)])).toEqual(
+      interruptedPrompt({ text }),
+    );
   });
 
   it('does not trim a MODEL entry whose text is a bare envelope', () => {
@@ -336,77 +282,54 @@ describe('detectTurnInterruption with background notifications', () => {
     // `interrupted_prompt` this trim exists to remove. The role is the
     // provenance signal: real notification records are always user-role.
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'print the notification you got' }] },
-      { role: 'model', parts: [notification('Agent "explore" completed.')] },
+      userText('print the notification you got'),
+      content('model', notification('Agent "explore" completed.')),
     ];
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual(NONE);
   });
 
   it('still classifies a real prompt carrying a merged notification part', () => {
     // A mid-turn drain can merge background parts into a genuine user message.
     // That entry has a non-structural part, so it stays an orphaned prompt.
     const history: Content[] = [
-      {
-        role: 'user',
-        parts: [notification('Agent done.'), { text: 'and now do this' }],
-      },
+      content('user', notification('Agent done.'), { text: 'and now do this' }),
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [notification('Agent done.'), { text: 'and now do this' }],
-    });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedPrompt(notification('Agent done.'), {
+        text: 'and now do this',
+      }),
+    );
   });
 
   it('classifies a dangling tool call under a trailing notification', () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: 'read it' }] },
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
-      },
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      userText('read it'),
+      content('model', fnCall('read_file', undefined, 'call-1')),
+      content('user', notification('Agent "explore" completed.')),
     ];
-    expect(detectTurnInterruption(history)).toEqual({
-      kind: 'interrupted_turn',
-      danglingCalls: [{ callId: 'call-1', name: 'read_file' }],
-    });
+    expect(detectTurnInterruption(history)).toEqual(
+      interruptedTurn({ callId: 'call-1', name: 'read_file' }),
+    );
   });
 
   it('returns none when a completed tool boundary is followed only by notifications', () => {
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [{ functionCall: { id: 'ended', name: 'shell' } }],
-      },
-      {
-        role: 'user',
-        parts: [
-          { functionResponse: { id: 'ended', name: 'shell', response: {} } },
-        ],
-      },
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      content('model', fnCall('shell', undefined, 'ended')),
+      content('user', fnResponse('shell', {}, 'ended')),
+      content('user', notification('Agent "explore" completed.')),
     ];
-    expect(detectTurnInterruption(history, ['ended'])).toEqual({
-      kind: 'none',
-    });
+    expect(detectTurnInterruption(history, ['ended'])).toEqual(NONE);
   });
 });
 
 describe('detectTurnInterruption with authoritative notification provenance', () => {
-  const notification = (summary: string) => ({
-    text:
-      `<task-notification><task-id>agent-1</task-id>` +
-      `<status>completed</status><summary>${summary}</summary>` +
-      `</task-notification>`,
-  });
-
   // A real prompt whose ENTIRE text is a bare envelope satisfies every clause
   // of the shape predicate: user-role, one part, wrapped in the envelope. Only
   // the recorder's `provenance` can tell it from a cold notification record.
   const envelopeTailHistory = (): Content[] => [
-    { role: 'user', parts: [{ text: 'earlier prompt' }] },
-    { role: 'model', parts: [{ text: 'earlier answer' }] },
-    { role: 'user', parts: [notification('Agent "explore" completed.')] },
+    userText('earlier prompt'),
+    modelText('earlier answer'),
+    content('user', notification('Agent "explore" completed.')),
   ];
 
   it('keeps a real user prompt that is a bare envelope interrupted', () => {
@@ -414,18 +337,15 @@ describe('detectTurnInterruption with authoritative notification provenance', ()
     // `trailingSystemNotifications: 0` is what the projection reports when the
     // tail record was stamped `provenance: 'real_user'`.
     expect(effectiveHistoryEnd(history, 0)).toBe(3);
-    expect(detectTurnInterruption(history, undefined, 0)).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [notification('Agent "explore" completed.')],
-    });
+    expect(detectTurnInterruption(history, undefined, 0)).toEqual(
+      interruptedPrompt(notification('Agent "explore" completed.')),
+    );
   });
 
   it('still trims a genuine cold notification when provenance confirms it', () => {
     const history = envelopeTailHistory();
     expect(effectiveHistoryEnd(history, 1)).toBe(2);
-    expect(detectTurnInterruption(history, undefined, 1)).toEqual({
-      kind: 'none',
-    });
+    expect(detectTurnInterruption(history, undefined, 1)).toEqual(NONE);
   });
 
   it('leaves the shape-only contract untouched for one-argument callers', () => {
@@ -435,38 +355,32 @@ describe('detectTurnInterruption with authoritative notification provenance', ()
     const history = envelopeTailHistory();
     expect(effectiveHistoryEnd(history)).toBe(2);
     expect(effectiveHistoryEnd(history, undefined)).toBe(2);
-    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+    expect(detectTurnInterruption(history)).toEqual(NONE);
   });
 
   it('stops the trim at the first entry provenance does not cover', () => {
     // Two envelope-shaped tail entries, only the LAST one authoritative: the
     // real prompt underneath must survive even though its shape matches.
     const history: Content[] = [
-      { role: 'model', parts: [{ text: 'earlier answer' }] },
-      { role: 'user', parts: [notification('Agent "explore" completed.')] },
-      { role: 'user', parts: [notification('Agent "build" completed.')] },
+      modelText('earlier answer'),
+      content('user', notification('Agent "explore" completed.')),
+      content('user', notification('Agent "build" completed.')),
     ];
     expect(effectiveHistoryEnd(history, 1)).toBe(2);
-    expect(detectTurnInterruption(history, undefined, 1)).toEqual({
-      kind: 'interrupted_prompt',
-      parts: [
+    expect(detectTurnInterruption(history, undefined, 1)).toEqual(
+      interruptedPrompt(
         notification('Agent "explore" completed.'),
         notification('Agent "build" completed.'),
-      ],
-    });
+      ),
+    );
   });
 
   it('never trims further than the shape predicate would', () => {
     // A provenance count larger than the envelope-shaped run must not eat a
     // plain model tail: the signal narrows the trim, it never widens it.
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'do the thing' }] },
-      { role: 'model', parts: [{ text: 'done' }] },
-    ];
+    const history: Content[] = [userText('do the thing'), modelText('done')];
     expect(effectiveHistoryEnd(history, 2)).toBe(2);
-    expect(detectTurnInterruption(history, undefined, 2)).toEqual({
-      kind: 'none',
-    });
+    expect(detectTurnInterruption(history, undefined, 2)).toEqual(NONE);
   });
 });
 
@@ -480,20 +394,8 @@ describe('buildSyntheticToolResponseParts', () => {
       'interrupted',
     );
     expect(parts).toEqual([
-      {
-        functionResponse: {
-          id: 'call-1',
-          name: 'shell',
-          response: { error: 'interrupted' },
-        },
-      },
-      {
-        functionResponse: {
-          id: 'call-2',
-          name: 'read_file',
-          response: { error: 'interrupted' },
-        },
-      },
+      fnResponse('shell', { error: 'interrupted' }, 'call-1'),
+      fnResponse('read_file', { error: 'interrupted' }, 'call-2'),
     ]);
   });
 });

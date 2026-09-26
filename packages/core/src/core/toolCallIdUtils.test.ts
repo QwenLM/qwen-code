@@ -18,65 +18,29 @@ import {
   recordHandledToolCall,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 describe('toolCallIdUtils', () => {
   it('suffixes cross-turn duplicate ids and drops same-turn replays', () => {
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'dup_id_0001',
-              name: 'read_file',
-              args: { file_path: 'a.ts' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'dup_id_0001',
-              name: 'read_file',
-              response: { output: 'A' },
-            },
-          },
-        ],
-      },
+      content(
+        'model',
+        fnCall('read_file', { file_path: 'a.ts' }, 'dup_id_0001'),
+      ),
+      content('user', fnResponse('read_file', { output: 'A' }, 'dup_id_0001')),
     ];
     const seenIds = collectToolCallIdsFromHistory(history);
     const turnRawIds = new Set<string>();
     const parts: Part[] = [
-      {
-        functionCall: {
-          id: 'dup_id_0001',
-          name: 'read_file',
-          args: { file_path: 'b.ts' },
-        },
-      },
-      {
-        functionCall: {
-          id: 'dup_id_0001',
-          name: 'read_file',
-          args: { file_path: 'b.ts' },
-        },
-      },
+      fnCall('read_file', { file_path: 'b.ts' }, 'dup_id_0001'),
+      fnCall('read_file', { file_path: 'b.ts' }, 'dup_id_0001'),
       { text: 'done' },
     ];
 
     const normalized = normalizeModelToolCallIds(parts, seenIds, turnRawIds);
 
     expect(normalized).toEqual([
-      {
-        functionCall: {
-          id: 'dup_id_0001__qwen_dup_2',
-          name: 'read_file',
-          args: { file_path: 'b.ts' },
-        },
-      },
+      fnCall('read_file', { file_path: 'b.ts' }, 'dup_id_0001__qwen_dup_2'),
       { text: 'done' },
     ]);
     expect(getProviderToolCallId(normalized[0]!.functionCall!)).toBe(
@@ -135,11 +99,7 @@ describe('toolCallIdUtils', () => {
     const reservedId = reserveModelToolCallId('call-1', usedIds, reservedIds);
 
     const normalized = normalizeModelToolCallIds(
-      [
-        {
-          functionCall: { id: 'call-1', name: 'read_file', args: {} },
-        },
-      ],
+      [fnCall('read_file', {}, 'call-1')],
       usedIds,
       new Set<string>(),
       reservedIds,

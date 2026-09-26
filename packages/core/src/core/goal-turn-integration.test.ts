@@ -14,6 +14,13 @@ import type { ErroredToolCall } from './coreToolScheduler.js';
 import { CoreToolScheduler } from './coreToolScheduler.js';
 import { LlmChat, StreamEventType } from './llm-chat.js';
 import { LlmEventType, Turn } from './turn.js';
+import {
+  collect,
+  drain,
+  fnCall,
+  modelChunk,
+  streamOf,
+} from '../test-utils/model-fixtures.js';
 
 const permit: GoalTurnPermit = {
   goalId: 'goal-1',
@@ -25,16 +32,14 @@ describe('Goal turn evidence propagation', () => {
   it('forwards a defensive permit through Turn and attaches it to tool requests', async () => {
     const inputPermit: GoalTurnPermit = { ...permit };
     const sendMessageStream = vi.fn().mockResolvedValue(
-      (async function* () {
-        yield {
-          type: StreamEventType.CHUNK,
-          value: {
-            functionCalls: [
-              { id: 'goal-tool-call', name: 'read_file', args: {} },
-            ],
-          } as unknown as GenerateContentResponse,
-        };
-      })(),
+      streamOf({
+        type: StreamEventType.CHUNK,
+        value: {
+          functionCalls: [
+            { id: 'goal-tool-call', name: 'read_file', args: {} },
+          ],
+        } as unknown as GenerateContentResponse,
+      }),
     );
     const turn = new Turn(
       { sendMessageStream } as unknown as LlmChat,
@@ -43,14 +48,13 @@ describe('Goal turn evidence propagation', () => {
     );
     inputPermit.revision = 99;
 
-    const events = [];
-    for await (const event of turn.run(
-      'test-model',
-      [{ text: 'continue' }],
-      new AbortController().signal,
-    )) {
-      events.push(event);
-    }
+    const events = await collect(
+      turn.run(
+        'test-model',
+        [{ text: 'continue' }],
+        new AbortController().signal,
+      ),
+    );
 
     expect(sendMessageStream).toHaveBeenCalledWith(
       'test-model',
@@ -89,60 +93,36 @@ describe('Goal turn evidence propagation', () => {
         | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
         | null;
     };
-    const normalStream = (async function* () {
-      yield {
-        candidates: [
-          {
-            content: { role: 'model', parts: [{ text: 'normal result' }] },
-            finishReason: 'STOP',
-          },
-        ],
-      } as GenerateContentResponse;
-    })();
+    const normalStream = streamOf(
+      modelChunk([{ text: 'normal result' }], 'STOP'),
+    );
 
-    for await (const _ of internal.processStreamResponse(
-      'test-model',
-      normalStream,
-      'test-route',
-      permit,
-    )) {
-      // Consume the persisted normal assistant attempt.
-    }
+    await drain(
+      internal.processStreamResponse(
+        'test-model',
+        normalStream,
+        'test-route',
+        permit,
+      ),
+    );
     expect(recordAssistantTurn).toHaveBeenCalledWith(
       expect.objectContaining({ goalContext: permit }),
     );
 
     const partialStream = (async function* () {
-      yield {
-        candidates: [
-          {
-            content: {
-              role: 'model',
-              parts: [
-                {
-                  functionCall: {
-                    id: 'partial-goal-call',
-                    name: 'read_file',
-                    args: {},
-                  },
-                },
-              ],
-            },
-          },
-        ],
-      } as GenerateContentResponse;
+      yield modelChunk([fnCall('read_file', {}, 'partial-goal-call')]);
       throw new Error('partial stream failed');
     })();
     await expect(
       (async () => {
-        for await (const _ of internal.processStreamResponse(
-          'test-model',
-          partialStream,
-          'test-route',
-          permit,
-        )) {
-          // Consume until the deferred partial attempt is staged.
-        }
+        await drain(
+          internal.processStreamResponse(
+            'test-model',
+            partialStream,
+            'test-route',
+            permit,
+          ),
+        );
       })(),
     ).rejects.toThrow('partial stream failed');
     expect(internal.pendingPartialAssistantRecord).toMatchObject({

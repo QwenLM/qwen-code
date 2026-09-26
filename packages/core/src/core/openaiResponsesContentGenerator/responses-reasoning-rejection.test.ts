@@ -34,23 +34,25 @@ function rejection(param: string, message: string): string {
   });
 }
 
+const DIRECT_64 = rejection('input[1].id', MAX_64);
+const MATCH_64 = { namedIndex: 1, maxLength: 64 };
+const parse = (value: unknown) => parseReasoningIdRejection(400, value);
+
 describe('parseReasoningIdRejection', () => {
   it('classifies the direct API shape and trusts an associated maximum', () => {
-    expect(
-      parseReasoningIdRejection(400, rejection('input[1].id', MAX_64)),
-    ).toEqual({ namedIndex: 1, maxLength: 64 });
+    expect(parse(DIRECT_64)).toEqual(MATCH_64);
   });
 
   it('accepts an already-parsed object body', () => {
     expect(
-      parseReasoningIdRejection(400, {
+      parse({
         error: {
           message: MAX_64,
           param: 'input[1].id',
           code: 'string_above_max_length',
         },
       }),
-    ).toEqual({ namedIndex: 1, maxLength: 64 });
+    ).toEqual(MATCH_64);
   });
 
   it('reads a \\u escape in the quoted parameter', () => {
@@ -59,18 +61,13 @@ describe('parseReasoningIdRejection', () => {
       '{"error":{"message":"' +
       MAX_64 +
       '","param":"input[1]\\u002Eid","code":"string_above_max_length"}}';
-    expect(parseReasoningIdRejection(400, escaped)).toEqual({
-      namedIndex: 1,
-      maxLength: 64,
-    });
+    expect(parse(escaped)).toEqual(MATCH_64);
   });
 
   it.each([200, 401, 404, 413, 429, 500, 502, 0, -1])(
     'refuses status %s even with a matching body',
     (status) => {
-      expect(
-        parseReasoningIdRejection(status, rejection('input[1].id', MAX_64)),
-      ).toBeUndefined();
+      expect(parseReasoningIdRejection(status, DIRECT_64)).toBeUndefined();
     },
   );
 
@@ -87,13 +84,13 @@ describe('parseReasoningIdRejection', () => {
     ['an unterminated object', '{"error":{"code":"string_above_max_length"'],
     ['an unterminated string', '{"error":{"code":"string_above_max_length}'],
   ])('returns undefined for %s', (_label, value) => {
-    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
+    expect(parse(value)).toBeUndefined();
   });
 
   it('returns undefined for an object it cannot stringify', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic['self'] = cyclic;
-    expect(parseReasoningIdRejection(400, cyclic)).toBeUndefined();
+    expect(parse(cyclic)).toBeUndefined();
   });
 
   it('returns undefined for a body past the size bound', () => {
@@ -106,7 +103,7 @@ describe('parseReasoningIdRejection', () => {
       },
     });
     expect(padded.length).toBeGreaterThan(64_000);
-    expect(parseReasoningIdRejection(400, padded)).toBeUndefined();
+    expect(parse(padded)).toBeUndefined();
   });
 
   it('returns undefined once the object-candidate budget is exhausted', () => {
@@ -116,11 +113,8 @@ describe('parseReasoningIdRejection', () => {
       )}],"error":{"message":"${MAX_64}","param":"input[1].id","code":"string_above_max_length"}}`;
     // The identical shape under the bound still classifies, so this is the
     // bound firing rather than the shape failing to parse.
-    expect(parseReasoningIdRejection(400, padded(10))).toEqual({
-      namedIndex: 1,
-      maxLength: 64,
-    });
-    expect(parseReasoningIdRejection(400, padded(40))).toBeUndefined();
+    expect(parse(padded(10))).toEqual(MATCH_64);
+    expect(parse(padded(40))).toBeUndefined();
   });
 
   it.each<[string, string]>([
@@ -156,10 +150,7 @@ describe('parseReasoningIdRejection', () => {
     ],
     [
       'the code is a different one',
-      rejection('input[1].id', MAX_64).replace(
-        'string_above_max_length',
-        'string_too_long',
-      ),
+      DIRECT_64.replace('string_above_max_length', 'string_too_long'),
     ],
     ['the param is not an input id', rejection('model', MAX_64)],
     ['the param index is negative', rejection('input[-1].id', MAX_64)],
@@ -169,15 +160,10 @@ describe('parseReasoningIdRejection', () => {
     ],
     ['the param has trailing content', rejection('input[1].id.extra', MAX_64)],
     ['the param has leading content', rejection('body.input[1].id', MAX_64)],
-  ])('returns undefined when %s', (_label, value) => {
-    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
-  });
-
-  // A matching object is only ever read out of the body's own structured
-  // error. Anything the endpoint merely quoted -- in a debug field, past the
-  // envelope, or behind an escape the JSON grammar does not define -- is not
-  // evidence about the request we sent.
-  it.each<[string, string]>([
+    // A matching object is only ever read out of the body's own structured
+    // error. Anything the endpoint merely quoted -- in a debug field, past the
+    // envelope, or behind an escape the JSON grammar does not define -- is not
+    // evidence about the request we sent.
     [
       'a matching object is quoted inside an unrelated debug field',
       JSON.stringify({
@@ -186,12 +172,12 @@ describe('parseReasoningIdRejection', () => {
           param: 'model',
           code: 'model_not_found',
         },
-        debug: `example: ${rejection('input[1].id', MAX_64)}`,
+        debug: `example: ${DIRECT_64}`,
       }),
     ],
     [
       'trailing non-whitespace follows the top-level object',
-      `${rejection('input[1].id', MAX_64)} trailing`,
+      `${DIRECT_64} trailing`,
     ],
     [
       'an unterminated string tail follows a matching object',
@@ -221,16 +207,11 @@ describe('parseReasoningIdRejection', () => {
       '{"error":\u0001{"param":"input[1].id",' +
         '"code":"string_above_max_length"}}',
     ],
-  ])('returns undefined when %s', (_label, value) => {
-    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
-  });
-
-  // Raw control characters are tolerated only where a proxy actually splices
-  // them: a raw newline, tab, or carriage return inside the ONE recognized
-  // `error.message`. Anywhere else -- another field, another control
-  // character, or outside the object entirely -- the body is not one we can
-  // read exactly, so it is not one we act on.
-  it.each<[string, string]>([
+    // Raw control characters are tolerated only where a proxy actually splices
+    // them: a raw newline, tab, or carriage return inside the ONE recognized
+    // `error.message`. Anywhere else -- another field, another control
+    // character, or outside the object entirely -- the body is not one we can
+    // read exactly, so it is not one we act on.
     [
       'a raw newline sits inside an unrelated top-level field',
       `{"error":{"message":"${MAX_64}","param":"input[1].id",` +
@@ -256,41 +237,24 @@ describe('parseReasoningIdRejection', () => {
         '\n\\",\\"param\\":\\"input[1].id\\",\\"code\\":' +
         '\\"string_above_max_length\\"}}","code":"400"}}',
     ],
-    [
-      'a vertical tab follows the top-level object',
-      `${rejection('input[1].id', MAX_64)}\u000b`,
-    ],
-    [
-      'a form feed follows the top-level object',
-      `${rejection('input[1].id', MAX_64)}\u000c`,
-    ],
-    [
-      'a no-break space follows the top-level object',
-      `${rejection('input[1].id', MAX_64)}\u00a0`,
-    ],
-    [
-      'a vertical tab precedes the top-level object',
-      `\u000b${rejection('input[1].id', MAX_64)}`,
-    ],
+    ['a vertical tab follows the top-level object', `${DIRECT_64}\u000b`],
+    ['a form feed follows the top-level object', `${DIRECT_64}\u000c`],
+    ['a no-break space follows the top-level object', `${DIRECT_64}\u00a0`],
+    ['a vertical tab precedes the top-level object', `\u000b${DIRECT_64}`],
   ])('returns undefined when %s', (_label, value) => {
-    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
+    expect(parse(value)).toBeUndefined();
   });
 
-  // The control for the block above: the four characters JSON's own grammar
-  // calls whitespace stay acceptable on both sides of the object.
+  // The control for the control-character rows above: the four characters
+  // JSON's own grammar calls whitespace stay acceptable around the object.
   it('accepts JSON whitespace around the top-level object', () => {
-    expect(
-      parseReasoningIdRejection(
-        400,
-        ` \t\r\n${rejection('input[1].id', MAX_64)} \t\r\n`,
-      ),
-    ).toEqual({ namedIndex: 1, maxLength: 64 });
+    expect(parse(` \t\r\n${DIRECT_64} \t\r\n`)).toEqual(MATCH_64);
   });
 
   it('returns undefined for a revoked proxy rather than throwing', () => {
     const { proxy, revoke } = Proxy.revocable({ error: {} }, {});
     revoke();
-    expect(parseReasoningIdRejection(400, proxy)).toBeUndefined();
+    expect(parse(proxy)).toBeUndefined();
   });
 
   it('preserves the valid JSON escapes the grammar does define', () => {
@@ -298,20 +262,20 @@ describe('parseReasoningIdRejection', () => {
       'Invalid \\"input[1].id\\" \\\\ \\/ \\u2014 string too long. ' +
       'Expected a string with maximum length 64.';
     expect(
-      parseReasoningIdRejection(
-        400,
+      parse(
         `{"error":{"message":"${message}","param":"input[1].id",` +
           '"code":"string_above_max_length"}}',
       ),
-    ).toEqual({ namedIndex: 1, maxLength: 64 });
+    ).toEqual(MATCH_64);
   });
 
   it("never inherits a nested object's fields onto its envelope", () => {
     // The outer object declares neither code nor param; only the inner one
     // matches, so this stays a single match rather than two.
-    expect(
-      parseReasoningIdRejection(400, rejection('input[2].id', MAX_64)),
-    ).toEqual({ namedIndex: 2, maxLength: null });
+    expect(parse(rejection('input[2].id', MAX_64))).toEqual({
+      namedIndex: 2,
+      maxLength: null,
+    });
   });
 
   describe('maximum association', () => {
@@ -339,17 +303,15 @@ describe('parseReasoningIdRejection', () => {
         null,
       ],
     ])('%s', (_label, message, expected) => {
-      expect(
-        parseReasoningIdRejection(400, rejection('input[1].id', message)),
-      ).toEqual({ namedIndex: 1, maxLength: expected });
+      expect(parse(rejection('input[1].id', message))).toEqual({
+        namedIndex: 1,
+        maxLength: expected,
+      });
     });
 
     it('treats a missing message as no maximum', () => {
       expect(
-        parseReasoningIdRejection(
-          400,
-          body({ param: 'input[1].id', code: 'string_above_max_length' }),
-        ),
+        parse(body({ param: 'input[1].id', code: 'string_above_max_length' })),
       ).toEqual({ namedIndex: 1, maxLength: null });
     });
   });
@@ -370,7 +332,7 @@ describe('parseReasoningIdRejection', () => {
     ])(
       'classifies a nested object with %s',
       (_label, control, parsesAsJson) => {
-        const wrapped = proxied(rejection('input[1].id', MAX_64), control);
+        const wrapped = proxied(DIRECT_64, control);
         // A raw control character is precisely why the whole body cannot be
         // read with JSON.parse -- pin that, so a future "just parse it"
         // simplification fails here rather than in production.
@@ -379,17 +341,14 @@ describe('parseReasoningIdRejection', () => {
         } else {
           expect(() => JSON.parse(wrapped)).toThrow(SyntaxError);
         }
-        expect(parseReasoningIdRejection(400, wrapped)).toEqual({
-          namedIndex: 1,
-          maxLength: 64,
-        });
+        expect(parse(wrapped)).toEqual(MATCH_64);
       },
     );
 
     it('does not descend a second nesting level', () => {
-      const once = rejection('input[1].id', MAX_64).replace(/"/g, '\\"');
+      const once = DIRECT_64.replace(/"/g, '\\"');
       const twice = proxied(`{\\"relay\\":\\"${once}\\"}`);
-      expect(parseReasoningIdRejection(400, twice)).toBeUndefined();
+      expect(parse(twice)).toBeUndefined();
     });
   });
 });
@@ -419,107 +378,87 @@ describe('downgradeRejectedReasoningItems', () => {
     }) as ResponsesApiInputItem;
   }
 
-  it('returns the original array by identity when the named item is not reasoning', () => {
-    const items = Object.freeze([
-      userItem('hi'),
-      reasoningItem(LONG, ['thought']),
-    ]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
-    ).toBe(items);
+  const frozen = (...items: ResponsesApiInputItem[]) =>
+    Object.freeze(items) as ResponsesApiInputItem[];
+  const downgrade = (
+    items: ResponsesApiInputItem[],
+    namedIndex: number,
+    maxLength: number | null = 64,
+  ) => downgradeRejectedReasoningItems(items, { namedIndex, maxLength });
+  const assistant = (content: string) => ({
+    type: 'message',
+    role: 'assistant',
+    content,
   });
 
-  it('returns the original array by identity when the named index is out of range', () => {
-    const items = Object.freeze([userItem('hi')]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 9, maxLength: 64 }),
-    ).toBe(items);
-  });
-
-  it('returns the original array by identity when the named id is within the maximum', () => {
-    const items = Object.freeze([
-      reasoningItem('rs_short', ['thought']),
-    ]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
-    ).toBe(items);
-  });
+  it.each<[string, ResponsesApiInputItem[], number]>([
+    [
+      'the named item is not reasoning',
+      frozen(userItem('hi'), reasoningItem(LONG, ['thought'])),
+      0,
+    ],
+    ['the named index is out of range', frozen(userItem('hi')), 9],
+    [
+      'the named id is within the maximum',
+      frozen(reasoningItem('rs_short', ['thought'])),
+      0,
+    ],
+  ])(
+    'returns the original array by identity when %s',
+    (_label, items, namedIndex) => {
+      expect(downgrade(items, namedIndex)).toBe(items);
+    },
+  );
 
   it('preserves every untargeted item by object identity and position', () => {
     const first = userItem('hi');
     const keep = reasoningItem('rs_short', ['kept']);
     const last = userItem('bye');
-    const items = Object.freeze([
-      first,
-      reasoningItem(LONG, ['dropped']),
-      keep,
-      last,
-    ]) as ResponsesApiInputItem[];
+    const items = frozen(first, reasoningItem(LONG, ['dropped']), keep, last);
 
-    const result = downgradeRejectedReasoningItems(items, {
-      namedIndex: 1,
-      maxLength: 64,
-    });
+    const result = downgrade(items, 1);
 
     expect(result).not.toBe(items);
     expect(result[0]).toBe(first);
     expect(result[2]).toBe(keep);
     expect(result[3]).toBe(last);
-    expect(result[1]).toEqual({
-      type: 'message',
-      role: 'assistant',
-      content: 'dropped',
-    });
+    expect(result[1]).toEqual(assistant('dropped'));
   });
 
   it('joins multiple non-empty summary texts with a newline and skips empty ones', () => {
-    const items = Object.freeze([
-      reasoningItem(LONG, ['one', '', 'two']),
-    ]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 }),
-    ).toEqual([{ type: 'message', role: 'assistant', content: 'one\ntwo' }]);
+    const items = frozen(reasoningItem(LONG, ['one', '', 'two']));
+    expect(downgrade(items, 0)).toEqual([assistant('one\ntwo')]);
   });
 
   it('drops a targeted item whose summary carries no text', () => {
     const keep = userItem('hi');
-    const items = Object.freeze([
+    const items = frozen(
       keep,
       reasoningItem(LONG, []),
       reasoningItem(`rs_${'b'.repeat(80)}`, ['']),
-    ]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
-    ).toEqual([keep]);
+    );
+    expect(downgrade(items, 1)).toEqual([keep]);
   });
 
   it('downgrades every reasoning item when no maximum is reported', () => {
-    const items = Object.freeze([
+    const items = frozen(
       reasoningItem(LONG, ['long']),
       reasoningItem('rs_short', ['short']),
       userItem('bye'),
-    ]) as ResponsesApiInputItem[];
-    expect(
-      downgradeRejectedReasoningItems(items, {
-        namedIndex: 0,
-        maxLength: null,
-      }),
-    ).toEqual([
-      { type: 'message', role: 'assistant', content: 'long' },
-      { type: 'message', role: 'assistant', content: 'short' },
+    );
+    expect(downgrade(items, 0, null)).toEqual([
+      assistant('long'),
+      assistant('short'),
       items[2],
     ]);
   });
 
   it('never mutates the input array or its items', () => {
-    const items = Object.freeze([
-      reasoningItem(LONG, ['thought']),
-      userItem('bye'),
-    ]) as ResponsesApiInputItem[];
+    const items = frozen(reasoningItem(LONG, ['thought']), userItem('bye'));
     const snapshot = JSON.stringify(items);
 
-    downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: 64 });
-    downgradeRejectedReasoningItems(items, { namedIndex: 0, maxLength: null });
+    downgrade(items, 0);
+    downgrade(items, 0, null);
 
     expect(JSON.stringify(items)).toBe(snapshot);
     expect(items).toHaveLength(2);
