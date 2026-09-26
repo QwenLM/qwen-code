@@ -2175,6 +2175,98 @@
         }
       }
     },
+    "/workspace/generate": {
+      "post": {
+        "operationId": "generateWorkspaceContent",
+        "tags": ["Generation"],
+        "summary": "Generate stateless workspace content",
+        "description": "Runs a request-scoped, tool-free generation against the primary workspace runtime without creating or selecting a session. The response is an SSE stream containing started, optional thinking, delta, and done events; failures after streaming starts are emitted as error events.",
+        "externalDocs": {
+          "url": "https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol/#post-workspacegenerate"
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-qwen-capability": "workspace_generation",
+        "x-qwen-scope": "legacy-primary",
+        "x-qwen-stability": "stable",
+        "x-qwen-sdk-method": "DaemonClient.generateWorkspaceContent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["prompt"],
+                "additionalProperties": false,
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32768,
+                    "description": "Prompt text, limited to 32 KiB of UTF-8 bytes."
+                  },
+                  "skipOutputLanguagePreference": {
+                    "type": "boolean",
+                    "description": "Omit the configured output-language preference."
+                  },
+                  "outputLanguageFallback": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Trimmed single-line language label; auto is not allowed."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generation SSE stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The prompt or generation options are invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The selected bridge does not support workspace generation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/workspace/tools": {
       "get": {
         "operationId": "getWorkspaceTools",

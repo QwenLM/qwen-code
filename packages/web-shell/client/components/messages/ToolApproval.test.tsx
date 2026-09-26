@@ -535,7 +535,14 @@ describe('ToolApproval accessibility', () => {
   });
 
   it('explains Shell commands through session generation', async () => {
-    const generateContent = vi.fn(async function* () {
+    const generateContent = vi.fn(async function* (
+      _prompt: string,
+      _options?: {
+        signal?: AbortSignal;
+        skipOutputLanguagePreference?: boolean;
+        outputLanguageFallback?: string;
+      },
+    ) {
       yield {
         v: 1 as const,
         type: 'delta' as const,
@@ -565,7 +572,12 @@ describe('ToolApproval accessibility', () => {
       expect.stringContaining('rm -rf /tmp/data'),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(generateContent.mock.calls[0]?.[0]).toContain('Simplified Chinese');
+    expect(generateContent.mock.calls[0]?.[1]).toMatchObject({
+      outputLanguageFallback: 'Simplified Chinese',
+    });
+    expect(
+      generateContent.mock.calls[0]?.[1]?.skipOutputLanguagePreference,
+    ).toBe(undefined);
     expect(document.body.textContent).toContain('该命令会删除临时数据。');
 
     const popover = document.body.querySelector(

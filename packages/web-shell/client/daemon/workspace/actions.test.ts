@@ -36,6 +36,49 @@ describe('workspace actions', () => {
     });
   });
 
+  it('forwards workspace-generation output-language options', async () => {
+    const generateWorkspaceContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+    });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ generateWorkspaceContent }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const controller = new AbortController();
+    const events = [];
+
+    for await (const event of actions.generateContent('Return JSON only.', {
+      signal: controller.signal,
+      skipOutputLanguagePreference: true,
+      outputLanguageFallback: 'English',
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      {
+        v: 1,
+        type: 'done',
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast',
+      },
+    ]);
+    expect(generateWorkspaceContent).toHaveBeenCalledWith('Return JSON only.', {
+      signal: controller.signal,
+      skipOutputLanguagePreference: true,
+      outputLanguageFallback: 'English',
+    });
+  });
+
   it('preheats ACP with the requested timeout', async () => {
     const workspaceAcpPreheat = vi.fn().mockResolvedValue({
       ready: true,

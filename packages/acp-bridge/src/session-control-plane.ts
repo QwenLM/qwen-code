@@ -13425,7 +13425,7 @@ export function createSessionControlPlane(
       };
     },
 
-    generateSessionContent(sessionId, prompt, signal, context) {
+    generateSessionContent(sessionId, prompt, signal, context, options) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
@@ -13468,7 +13468,17 @@ export function createSessionControlPlane(
         withTimeout(
           entry.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
-            { sessionId, requestId, prompt },
+            {
+              sessionId,
+              requestId,
+              prompt,
+              ...(options?.skipOutputLanguagePreference === true && {
+                skipOutputLanguagePreference: true,
+              }),
+              ...(options?.outputLanguageFallback !== undefined && {
+                outputLanguageFallback: options.outputLanguageFallback,
+              }),
+            },
           ),
           SESSION_GENERATION_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
@@ -14688,7 +14698,7 @@ export function createSessionControlPlane(
       );
     },
 
-    generateWorkspaceContent(prompt, signal, _originatorClientId) {
+    generateWorkspaceContent(prompt, signal, _originatorClientId, options) {
       const requestId = randomUUID();
       const queue =
         new GenerationStreamQueue<BridgeWorkspaceGenerationStreamEvent>(
@@ -14734,6 +14744,12 @@ export function createSessionControlPlane(
                     requestId,
                     prompt,
                     purpose: 'text',
+                    ...(options?.skipOutputLanguagePreference === true && {
+                      skipOutputLanguagePreference: true,
+                    }),
+                    ...(options?.outputLanguageFallback !== undefined && {
+                      outputLanguageFallback: options.outputLanguageFallback,
+                    }),
                   },
                 ),
                 SESSION_GENERATION_TIMEOUT_MS,

@@ -571,7 +571,11 @@ export interface DaemonWorkspaceActions {
 
   generateContent(
     prompt: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
 
   // Agents (CRUD)

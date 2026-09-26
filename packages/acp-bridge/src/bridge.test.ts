@@ -2308,6 +2308,57 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  it('forwards the language opt-out on stateless session generation', async () => {
+    const completion = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart) {
+          expect(params).toMatchObject({
+            prompt: 'Translate this reasoning',
+            skipOutputLanguagePreference: true,
+            outputLanguageFallback: 'English',
+          });
+          return await completion.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      channelIdleTimeoutMs: 1,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const stream = bridge.generateSessionContent!(
+        session.sessionId,
+        'Translate this reasoning',
+        new AbortController().signal,
+        undefined,
+        {
+          skipOutputLanguagePreference: true,
+          outputLanguageFallback: 'English',
+        },
+      );
+      const first = stream[Symbol.asyncIterator]().next();
+
+      await vi.waitFor(() =>
+        expect(
+          handle.agent.extMethodCalls.some(
+            (call) =>
+              call.method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+          ),
+        ).toBe(true),
+      );
+      completion.resolve({ model: 'qwen-plus', modelSource: 'fast' });
+      await expect(first).resolves.toMatchObject({
+        value: { type: 'done', requestId: expect.any(String) },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('streams workspace content without requiring a session', async () => {
     const completion = deferred<Record<string, unknown>>();
     const handle = makeChannel({
@@ -2316,6 +2367,8 @@ describe('createAcpSessionBridge', () => {
           expect(params).toMatchObject({
             purpose: 'text',
             prompt: 'say hello',
+            skipOutputLanguagePreference: true,
+            outputLanguageFallback: 'English',
           });
           return await completion.promise;
         }
@@ -2330,6 +2383,10 @@ describe('createAcpSessionBridge', () => {
       'say hello',
       new AbortController().signal,
       undefined,
+      {
+        skipOutputLanguagePreference: true,
+        outputLanguageFallback: 'English',
+      },
     );
     const first = stream[Symbol.asyncIterator]().next();
 

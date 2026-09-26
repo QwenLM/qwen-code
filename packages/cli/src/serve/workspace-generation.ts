@@ -5,6 +5,10 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import {
+  isAutoLanguage,
+  isValidOutputLanguageLabel,
+} from '@qwen-code/qwen-code-core/utils/output-language.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../acp-integration/generation.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
@@ -28,6 +32,8 @@ export function mountWorkspaceGenerationRoutes(
   app.post('/workspace/generate', deps.mutate(), async (req, res) => {
     const body = deps.safeBody(req);
     const prompt = body['prompt'];
+    const skipOutputLanguagePreference = body['skipOutputLanguagePreference'];
+    const outputLanguageFallback = body['outputLanguageFallback'];
     if (
       typeof prompt !== 'string' ||
       prompt.trim().length === 0 ||
@@ -36,6 +42,28 @@ export function mountWorkspaceGenerationRoutes(
       res.status(400).json({
         error: `\`prompt\` must be a non-empty string no larger than ${GENERATION_MAX_PROMPT_BYTES} UTF-8 bytes`,
         code: 'invalid_prompt',
+      });
+      return;
+    }
+    if (
+      skipOutputLanguagePreference !== undefined &&
+      typeof skipOutputLanguagePreference !== 'boolean'
+    ) {
+      res.status(400).json({
+        error: '`skipOutputLanguagePreference` must be a boolean',
+        code: 'invalid_generation_options',
+      });
+      return;
+    }
+    if (
+      outputLanguageFallback !== undefined &&
+      (!isValidOutputLanguageLabel(outputLanguageFallback) ||
+        isAutoLanguage(outputLanguageFallback))
+    ) {
+      res.status(400).json({
+        error:
+          'outputLanguageFallback must be a trimmed language label using letters, marks, numbers, spaces, commas, parentheses, apostrophes, underscores, or hyphens; periods are allowed only inside parentheses, and auto is not allowed',
+        code: 'invalid_generation_options',
       });
       return;
     }
@@ -56,10 +84,23 @@ export function mountWorkspaceGenerationRoutes(
     };
     res.once('close', onClose);
 
+    const generationOptions =
+      skipOutputLanguagePreference === true ||
+      outputLanguageFallback !== undefined
+        ? {
+            ...(skipOutputLanguagePreference === true && {
+              skipOutputLanguagePreference: true,
+            }),
+            ...(outputLanguageFallback !== undefined && {
+              outputLanguageFallback,
+            }),
+          }
+        : undefined;
     const stream = deps.bridge.generateWorkspaceContent(
       prompt.trim(),
       abort.signal,
       clientId,
+      generationOptions,
     );
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream');

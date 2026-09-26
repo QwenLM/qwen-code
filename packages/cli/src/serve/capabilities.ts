@@ -312,11 +312,20 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
   session_recap: { since: 'v1' },
   // `POST /session/:id/generate` streams a stateless, tool-free model call.
+  // It uses the session runtime's output-language preference, including a
+  // project-bound rule resolved from that session's working directory.
   // The ACP child prefers fastModel and falls back to the main session model.
+  // Request callers may also control preference use or provide a validated
+  // language fallback; see the qwen-serve-protocol request contract.
   session_generation: { since: 'v1' },
+  session_generation_options: { since: 'v1' },
   // `POST /workspace/generate` runs the same stateless, tool-free generation
   // protocol against the resolved workspace runtime without a live session.
+  // It reads output language from the primary workspace config, which may
+  // differ from a session's project-bound preference. Its request controls
+  // otherwise match session generation.
   workspace_generation: { since: 'v1' },
+  workspace_generation_options: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
@@ -711,11 +720,19 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
   [
+    'session_generation_options',
+    (toggles) => toggles.sessionGenerationAvailable === true,
+  ],
+  [
     'scheduled_task_session_reuse',
     (toggles) => toggles.currentSessionSchedulingAvailable === true,
   ],
   [
     'workspace_generation',
+    (toggles) => toggles.workspaceGenerationAvailable === true,
+  ],
+  [
+    'workspace_generation_options',
     (toggles) => toggles.workspaceGenerationAvailable === true,
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],

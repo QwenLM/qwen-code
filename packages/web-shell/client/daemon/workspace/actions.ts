@@ -622,6 +622,12 @@ export function createDaemonWorkspaceActions({
       const client = requireClient(getClient, 'Generate content failed');
       yield* client.generateWorkspaceContent(prompt, {
         signal: opts?.signal,
+        ...(opts?.skipOutputLanguagePreference === true && {
+          skipOutputLanguagePreference: true,
+        }),
+        ...(opts?.outputLanguageFallback !== undefined && {
+          outputLanguageFallback: opts.outputLanguageFallback,
+        }),
       });
     },
 

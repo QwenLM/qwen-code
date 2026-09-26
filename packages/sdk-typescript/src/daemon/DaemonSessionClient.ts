@@ -986,10 +986,20 @@ export class DaemonSessionClient {
 
   generateContent(
     prompt: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncGenerator<DaemonSessionGenerationEvent> {
     return this.client.generateSessionContent(this.sessionId, prompt, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.skipOutputLanguagePreference === true && {
+        skipOutputLanguagePreference: true,
+      }),
+      ...(opts?.outputLanguageFallback !== undefined && {
+        outputLanguageFallback: opts.outputLanguageFallback,
+      }),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

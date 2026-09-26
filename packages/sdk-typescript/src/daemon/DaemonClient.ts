@@ -2782,7 +2782,7 @@ export class DaemonClient {
   private async *generateContentEvents<T extends { type: string }>(
     path: string,
     label: string,
-    body: Record<string, string>,
+    body: Record<string, string | boolean>,
     opts: { signal?: AbortSignal; clientId?: string } | undefined,
     parse: (value: unknown) => T | undefined,
     requireTerminal: boolean,
@@ -2817,12 +2817,25 @@ export class DaemonClient {
 
   async *generateWorkspaceContent(
     prompt: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      clientId?: string;
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncGenerator<DaemonWorkspaceGenerationEvent> {
     yield* this.generateContentEvents(
       '/workspace/generate',
       'POST /workspace/generate',
-      { prompt },
+      {
+        prompt,
+        ...(opts?.skipOutputLanguagePreference === true && {
+          skipOutputLanguagePreference: true,
+        }),
+        ...(opts?.outputLanguageFallback !== undefined && {
+          outputLanguageFallback: opts.outputLanguageFallback,
+        }),
+      },
       opts,
       parseSessionGenerationEvent,
       true,
@@ -4325,12 +4338,25 @@ export class DaemonClient {
   async *generateSessionContent(
     sessionId: string,
     prompt: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      clientId?: string;
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncGenerator<DaemonSessionGenerationEvent> {
     yield* this.generateContentEvents(
       `/session/${urlEncode(sessionId)}/generate`,
       'POST /session/:id/generate',
-      { prompt },
+      {
+        prompt,
+        ...(opts?.skipOutputLanguagePreference === true && {
+          skipOutputLanguagePreference: true,
+        }),
+        ...(opts?.outputLanguageFallback !== undefined && {
+          outputLanguageFallback: opts.outputLanguageFallback,
+        }),
+      },
       opts,
       parseSessionGenerationEvent,
       false,
