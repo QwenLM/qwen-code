@@ -16,10 +16,10 @@ import { MockTool } from '../../test-utils/mock-tool.js';
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
 //
-// Declared: `willHaveSkillTool()` reads `toolConfig.tools`, a copy of only the
-// first of `prepareTools`' filters — blind to the `disallowedTools` blocklist,
-// an inline-only declaration set, and a tool the permission layer kept out of
-// the registry. So the gate reads the declarations `prepareTools` produced.
+// Declared: `willHaveSkillTool()` reads only the `toolConfig` — the name list
+// and the `disallowedTools` blocklist — so it is blind to a tool the
+// permission layer kept out of the registry and to an inline declaration. So
+// the gate reads the declarations `prepareTools` produced.
 //
 // Executable: being declared is not sufficient. A fork keeps the parent's
 // declared names for prompt-cache parity while `fork_tools` narrows what may
@@ -136,8 +136,13 @@ describe('AgentCore skill-gate inputs', () => {
     });
 
     it('refuses when executable but not declared', async () => {
-      // The other term. Reverting the gate to `willHaveSkillTool()` — which
-      // reads `toolConfig` and says true here — is caught by this.
+      // The other term: `disallowedTools` removes SKILL at declaration, so
+      // the gate refuses what the registry could still execute. This case no
+      // longer distinguishes the gate from `willHaveSkillTool()` — the shared
+      // predicate reads the blocklist too, so both now answer false for this
+      // input. Snapshot-versus-gate independence is pinned by 'announces at
+      // startup and refuses at the gate' below, which re-points the snapshot
+      // at a registry that never held the tool.
       const core = makeCore({
         tools: ['*'],
         disallowedTools: [ToolNames.SKILL],
@@ -164,13 +169,24 @@ describe('AgentCore skill-gate inputs', () => {
     }
 
     it('announces at startup and refuses at the gate', async () => {
-      // `toolConfig` says the agent inherits everything; the blocklist removes
-      // SKILL from the declarations afterwards.
+      // `toolConfig` names SKILL, but the permission layer kept it out of the
+      // registry, so it is never declared.
+      const core = makeCore({ tools: [ToolNames.READ_FILE, ToolNames.SKILL] }, [
+        ToolNames.READ_FILE,
+      ]);
+      expect(snapshot(core)).toBe(true);
+      expect(gate(core, await declaredNames(core))).toBe(false);
+    });
+
+    it('stays silent at startup when the blocklist removes SKILL (#12424)', async () => {
+      // The snapshot shares its predicate with the SkillManager decision in
+      // SubagentManager, which honours `disallowedTools`; before that it
+      // announced every skill to an agent that could load none of them.
       const core = makeCore({
         tools: ['*'],
         disallowedTools: [ToolNames.SKILL],
       });
-      expect(snapshot(core)).toBe(true);
+      expect(snapshot(core)).toBe(false);
       expect(gate(core, await declaredNames(core))).toBe(false);
     });
 

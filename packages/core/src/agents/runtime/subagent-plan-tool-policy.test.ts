@@ -16,6 +16,7 @@ import {
   shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 describe('subagent plan tool policy', () => {
@@ -216,5 +217,37 @@ describe('subagent plan tool policy', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       `[ExitPlanModeTool] Blocked plan lifecycle tool call from subagent: ${ToolNames.EXIT_PLAN_MODE}`,
     );
+  });
+
+  describe('toolConfigAllowsSkill', () => {
+    it.each([
+      ['no tool config', undefined],
+      ['a wildcard', { tools: ['*'] }],
+      ['an empty list', { tools: [] }],
+      ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
+      [
+        'a blocklist that leaves skill alone',
+        { tools: ['*'], disallowedTools: [ToolNames.SHELL] },
+      ],
+    ])('allows skills for %s', (_label, toolConfig) => {
+      expect(toolConfigAllowsSkill(toolConfig)).toBe(true);
+    });
+
+    it.each([
+      ['an explicit list without skill', { tools: [ToolNames.READ_FILE] }],
+      [
+        'a wildcard with skill disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
+      ],
+      [
+        'an explicit list naming skill and disallowing it',
+        { tools: [ToolNames.SKILL], disallowedTools: [ToolNames.SKILL] },
+      ],
+      // prepareTools declares exactly the inline entries here; nothing is
+      // inherited from the registry.
+      ['an inline-only declaration set', { tools: [{ name: 'custom' }] }],
+    ])('withholds skills for %s', (_label, toolConfig) => {
+      expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
+    });
   });
 });

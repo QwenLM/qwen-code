@@ -73,9 +73,9 @@ import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
   buildInheritedForkExecutionToolNames,
-  EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from './runtime/agent-core.js';
+import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -116,17 +116,21 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
 
 /**
  * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
+ * Skill tool — the same answer `SubagentManager.createAgentHeadless()` reaches
+ * for the agent, so a resumed agent is shown the skill listing exactly when
+ * its Config holds a SkillManager (#12424).
+ *
+ * Names are matched as written. The launch path resolves display names through
+ * `convertToRuntimeConfig` and this helper does not, so a definition that uses
+ * one can still drift — pre-existing, and outside #12424's measured scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
 ): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-  }
-  return tools.includes(ToolNames.SKILL);
+  return toolConfigAllowsSkill({
+    tools: subagentConfig?.tools ?? ['*'],
+    disallowedTools: subagentConfig?.disallowedTools,
+  });
 }
 
 interface TranscriptRecovery {

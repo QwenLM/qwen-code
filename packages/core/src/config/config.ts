@@ -11599,10 +11599,17 @@ export class Config {
       const { SendMessageTool } = await import('../tools/send-message.js');
       return new SendMessageTool(this);
     });
-    await registerLazy(ToolNames.SKILL, async () => {
-      const { SkillTool } = await import('../tools/skill.js');
-      return new SkillTool(this);
-    });
+    // A subagent whose tool policy withholds skills gets a Config with no
+    // SkillManager (#12424, SubagentManager.buildSubagentContextOverride).
+    // SkillTool cannot be constructed without one, and a factory that throws
+    // stays pending, so every warmAll() of that agent's registry would retry
+    // and log it. The agent cannot declare the tool anyway.
+    if (!options?.forSubAgent || this.getSkillManager()) {
+      await registerLazy(ToolNames.SKILL, async () => {
+        const { SkillTool } = await import('../tools/skill.js');
+        return new SkillTool(this);
+      });
+    }
     // list_directory is opt-in (disabled by default): glob covers directory
     // listing in most cases, so the tool only registers when explicitly
     // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.

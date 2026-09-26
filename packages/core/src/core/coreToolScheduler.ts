@@ -1401,20 +1401,21 @@ interface CoreToolSchedulerOptions {
    * Whether the model this scheduler serves was DECLARED the Skill tool.
    *
    * The skill-activation reminder must not announce a skill to a model that
-   * cannot invoke one, and the registry cannot answer that: `SKILL` is
-   * registered unconditionally, including for subagents, while a subagent
-   * running an explicit `tools` list may never have it declared — nor is
-   * being declared sufficient, since a fork can keep a declaration it is
-   * forbidden to execute. An owner that filters either passes its own
+   * cannot invoke one, and the registry cannot answer that: `SKILL` stays
+   * registered while a `tools.eager` allowlist defers its schema, and a
+   * subagent running an explicit `tools` list may never have it declared —
+   * nor is being declared sufficient, since a fork can keep a declaration it
+   * is forbidden to execute. An owner that filters either passes its own
    * predicate here.
    *
    * It is NOT the predicate behind the startup `<available_skills>` snapshot,
    * and the two are independent rather than ordered. The snapshot is decided
    * before any declarations exist, so it answers from configuration; this
    * answers from the declarations that were sent. Either can say yes where
-   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
-   * at startup and is refused here, while a string list carrying an inline
-   * `skill` declaration is the reverse. Do not reason from one to the other.
+   * the other says no: a string list carrying an inline `skill` declaration
+   * is declared here but invisible to the snapshot, and a `skill` the
+   * permission layer kept unregistered is the reverse. Do not reason from one
+   * to the other.
    *
    * Omitted, the scheduler falls back to the registry, which is correct for
    * an owner that declares whatever it registers.

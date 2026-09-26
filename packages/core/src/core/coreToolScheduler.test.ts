@@ -20679,10 +20679,11 @@ describe('CoreToolScheduler activation wiring', () => {
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
     // The defect this gate was written for, and the shape the registry cannot
-    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
-    // so a subagent running an explicit `tools` list that omits it still has
-    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
-    // gate permanently open, and the agent got a reminder naming a tool
+    // see: `getTool(SKILL)` answers for the Config this scheduler holds, which
+    // can carry the tool while this agent's declarations omit it — a
+    // `tools.eager` allowlist defers the schema without unregistering the
+    // tool. Reading the registry therefore held the gate permanently open,
+    // and the agent got a reminder naming a tool
     // absent from its declarations: a wasted turn on `Tool "skill" not
     // found`, and an announcement marked consumed on the shared Config, so
     // the parent that CAN invoke it never learns the skill activated.

@@ -7,6 +7,7 @@
 import { ToolNames } from '../../tools/tool-names.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
+import type { ToolConfig } from './agent-types.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
@@ -77,6 +78,56 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
 ]);
+
+/**
+ * Whether an agent running with `toolConfig` is declared the Skill tool.
+ *
+ * Mirrors the declaration-level filter `AgentCore.prepareTools()` applies to
+ * the Skill tool, so it answers from the `ToolConfig` alone and does not
+ * re-run it. A filter added there propagates here only by hand.
+ *
+ * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
+ * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
+ * (whether the agent's Config holds a `SkillManager`, which decides whether a
+ * bundled reference reaches it as a pointer or inline). One predicate, so the
+ * listing and the pointer cannot disagree about whether a skill can actually
+ * be loaded — the disagreement #12424 reports.
+ *
+ * Session-level reachability is deliberately not this predicate's input: a
+ * `permissions.deny`, `excludeTools`, or a `tools.eager` allowlist deferring
+ * the schema are properties of the registry, and
+ * `resolveBundledReferenceRoute` already answers the route from it. The
+ * per-agent policy is the one input that resolver cannot see (#12424).
+ *
+ * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
+ * configured names to canonical tool names before they reach a `ToolConfig`.
+ *
+ * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
+ * agent cannot follow, a wrong `false` takes skills away from an agent that
+ * could load them.
+ */
+export function toolConfigAllowsSkill(
+  toolConfig: ToolConfig | undefined,
+): boolean {
+  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  // No per-agent config inherits the whole registry.
+  if (!toolConfig) {
+    return true;
+  }
+  if (matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.SKILL)) {
+    return false;
+  }
+  const names = toolConfig.tools.filter(
+    (tool): tool is string => typeof tool === 'string',
+  );
+  // A list holding only inline declarations does NOT inherit the registry:
+  // that is the explicit branch of `prepareTools()`, which declares no
+  // registry tool.
+  const inheritsRegistry = names.includes('*') || toolConfig.tools.length === 0;
+  return inheritsRegistry || names.includes(ToolNames.SKILL);
+}
 
 /**
  * Tools excluded from teammates. Teammates need send_message and the

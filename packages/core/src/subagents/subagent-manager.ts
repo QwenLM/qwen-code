@@ -84,6 +84,8 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
+import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
+import type { SkillManager } from '../skills/skill-manager.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -132,6 +134,26 @@ function recordExecutionRefusal(
   ]) {
     if (name) refusals.set(name.toLowerCase(), error);
   }
+}
+
+/**
+ * The session's own SkillManager, recorded on a subagent Config whose tool
+ * policy withholds it. Symbol-keyed so `sessionSkillManager` reads it through
+ * the prototype chain.
+ */
+const SESSION_SKILL_MANAGER: unique symbol = Symbol.for(
+  'qwen-code.subagent.sessionSkillManager',
+);
+
+/**
+ * The SkillManager the session itself holds, looking past any ancestor
+ * subagent that withheld it from its own Config.
+ */
+function sessionSkillManager(config: Config): SkillManager | null {
+  const recorded = (config as unknown as Record<symbol, unknown>)[
+    SESSION_SKILL_MANAGER
+  ] as SkillManager | null | undefined;
+  return recorded !== undefined ? recorded : config.getSkillManager();
 }
 
 /**
@@ -1168,8 +1190,13 @@ export class SubagentManager {
         modelConfig.reasoningEffort,
       );
 
+      const skillsAvailable = toolConfigAllowsSkill(toolConfig);
       const { context: subagentContext, cleanup } =
-        await this.buildSubagentContextOverride(runtimeContext, config);
+        await this.buildSubagentContextOverride(
+          runtimeContext,
+          config,
+          skillsAvailable,
+        );
       disposeSubagentRegistry = cleanup;
 
       // Register per-agent frontmatter hooks. The returned unregister callback
@@ -1249,12 +1276,13 @@ export class SubagentManager {
 
   /**
    * Build the per-subagent Config override used as the AgentHeadless
-   * runtime context. The override is a thin factory-derived wrapper: no
-   * method changes, but a distinct
-   * instance triggers the lazy own-property init in
+   * runtime context. The override is a thin factory-derived wrapper: a
+   * distinct instance triggers the lazy own-property init in
    * `Config.getFileReadCache()` so the subagent gets its own cache
    * rather than inheriting the parent's recorded reads — which would
    * silently weaken prior-read enforcement on its mutation paths.
+   * Individual getters (`getMcpServers`, `getSkillManager`) are replaced
+   * below where this agent's own policy differs from the session's.
    *
    * The tool registry is also rebuilt on the override so `EditTool` /
    * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
@@ -1272,14 +1300,18 @@ export class SubagentManager {
   private async buildSubagentContextOverride(
     runtimeContext: Config,
     config: SubagentConfig,
+    /** {@link toolConfigAllowsSkill} on the ToolConfig this agent runs with. */
+    skillsAvailable: boolean,
   ): Promise<{
     context: Config;
     /**
-     * Set only when this call force-rebuilt the registry to land per-agent
-     * MCP server connections. The freshly built registry owns stdio child
-     * processes / sockets that the parent's `Config.shutdown` cannot reach,
-     * so the caller (`createAgentHeadless`) carries this callback through
-     * to its `dispose` closure and runs it when the subagent terminates.
+     * Set whenever this call rebuilt the registry — to land per-agent MCP
+     * server connections, to move lazily built tools above a re-anchored
+     * SkillManager, or because `runtimeContext` was unstamped. The freshly
+     * built registry owns stdio child processes / sockets that the parent's
+     * `Config.shutdown` cannot reach, so the caller (`createAgentHeadless`)
+     * carries this callback through to its `dispose` closure and runs it when
+     * the subagent terminates.
      *
      * Field name matches the `cleanup` field on
      * `ApprovalModeOverrideHandle` (the sibling override-builder return
@@ -1330,6 +1362,29 @@ export class SubagentManager {
       subagentContext.getMcpServers = () => merged;
     }
 
+    // A subagent whose tool policy leaves it no Skill tool must not hold a
+    // SkillManager either (#12424): every skill surface keys on the manager,
+    // including the bundled-reference route that was handing such an agent a
+    // pointer to the `agent-delegation` skill it cannot load. Withheld, the
+    // route resolves to `inline` and the guidance travels in the description.
+    //
+    // The session's manager is recorded rather than dropped: a nested agent
+    // derives its Config from this one through the prototype chain, so without
+    // the record an agent whose own policy allows skills would inherit `null`.
+    //
+    // Re-anchor only on a difference, so an unrestricted agent — the common
+    // case — gets exactly the Config it got before.
+    const sessionManager = sessionSkillManager(runtimeContext);
+    const agentManager = skillsAvailable ? sessionManager : null;
+    const reanchorSkillManager =
+      agentManager !== runtimeContext.getSkillManager();
+    if (reanchorSkillManager) {
+      (subagentContext as unknown as Record<symbol, unknown>)[
+        SESSION_SKILL_MANAGER
+      ] = sessionManager;
+      subagentContext.getSkillManager = () => agentManager;
+    }
+
     // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed
     // when per-agent `mcpServers` are present: without a fresh rebuild
     // anchored on `subagentContext`, the existing wrapper-owned registry's
@@ -1338,7 +1393,16 @@ export class SubagentManager {
     // discovery loop below would silently no-op. Forcing a rebuild here
     // ties the manager to `subagentContext`, which is the only config in
     // the chain that knows about the per-agent servers.
-    if (hasAgentMcpServers || !hasRebuiltToolRegistry(runtimeContext)) {
+    //
+    // Also bypassed when the SkillManager was re-anchored: the wrapper's
+    // registry was built on `runtimeContext`, so its lazily constructed tools
+    // — the nested Agent tool among them — would read the inherited manager.
+    // Rebuilding is the only re-anchoring that moves tools above the wrapper.
+    const rebuiltToolRegistry =
+      hasAgentMcpServers ||
+      reanchorSkillManager ||
+      !hasRebuiltToolRegistry(runtimeContext);
+    if (rebuiltToolRegistry) {
       await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
     }
 
@@ -1381,7 +1445,18 @@ export class SubagentManager {
         cleanup: () => subagentRegistry.stop(),
       };
     }
-    return { context: subagentContext };
+    // The cleanup slot follows the rebuild, not the MCP branch: a registry
+    // this call rebuilt is this call's to stop, whichever condition forced
+    // it — its tools are per-subagent instances holding listeners on managers
+    // shared with the session, which nothing else releases. Not rebuilt ⇒ no
+    // cleanup: `getToolRegistry()` would resolve to the parent's registry, and
+    // stopping that would take the session's tools down with this subagent.
+    return {
+      context: subagentContext,
+      cleanup: rebuiltToolRegistry
+        ? () => subagentContext.getToolRegistry().stop()
+        : undefined,
+    };
   }
 
   /**
