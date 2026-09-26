@@ -26,7 +26,7 @@ Managed Runtime Broker 基础能力已经定义 Runtime Binding、Runtime Sessio
 
 ## 依赖边界
 
-JDBC Repository 使用 `javax.sql.DataSource` 访问数据库，并使用 fastjson2（2.0.60）作为 `reference_json`/`result_json` 列的 JSON 编解码。不透明 Tool 载荷会关闭 fastjson2 引用检测，使 `$ref` 与 `@type` 成员保持普通数据；有限 `BigDecimal` 不使用指数形式写出，避免读取时被收窄为 double 或溢出。它们不选择连接池、不要求 Spring、不通过框架管理数据库迁移，也不捆绑生产数据库驱动。测试配置默认提供 H2 来运行 Repository 契约，并为可选的 MySQL 集成测试提供 MySQL Connector/J。
+JDBC Repository 使用 `javax.sql.DataSource` 访问数据库，并使用 fastjson2（2.0.65）作为 `reference_json`/`result_json` 列的 JSON 编解码。不透明 Tool 载荷会关闭 fastjson2 引用检测，使 `$ref` 与 `@type` 成员保持普通数据；有限 `BigDecimal` 不使用指数形式写出，避免读取时被收窄为 double 或溢出。它们不选择连接池、不要求 Spring、不通过框架管理数据库迁移，也不捆绑生产数据库驱动。测试配置默认提供 H2 来运行 Repository 契约，并为可选的 MySQL 集成测试提供 MySQL Connector/J。
 
 ## Schema
 

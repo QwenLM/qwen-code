@@ -141,6 +141,10 @@ class HttpRuntimeTransportTest {
                         "\"protocolVersion\":0.20000000000000000000E+1")
                 .replace("\"epoch\":4",
                         "\"epoch\":0.40000000000000000000E+1");
+        assertTrue(body.contains(
+                "\"protocolVersion\":0.20000000000000000000E+1")
+                && body.contains(
+                        "\"epoch\":0.40000000000000000000E+1"), body);
         reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
 
         RuntimeAttestation proof = attest().toCompletableFuture()
