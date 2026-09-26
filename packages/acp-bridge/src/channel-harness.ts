@@ -72,7 +72,10 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   const defaultEngine = options.executionEngines ? 'legacy' : undefined;
   const channelLifecycle = createChannelLifecycle(defaultEngine);
   let keepAliveUntil = 0;
-  let runtimeOperationReservations = 0;
+  const runtimeOperationReservations = new Map<
+    BridgeExecutionEngine | undefined,
+    number
+  >();
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
   const idleTimers = new Map<HarnessChannel, ReturnType<typeof setTimeout>>();
 
@@ -92,7 +95,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     return (
       ci.workspaceControlInFlight === 0 &&
       hasNoWorkspaceWork(ci) &&
-      runtimeOperationReservations === 0
+      (runtimeOperationReservations.get(ci.executionEngine) ?? 0) === 0
     );
   }
 
@@ -266,13 +269,28 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     }
   }
 
+  function reserveRuntimeOperation(
+    engine: BridgeExecutionEngine | undefined = defaultEngine,
+  ): void {
+    runtimeOperationReservations.set(
+      engine,
+      (runtimeOperationReservations.get(engine) ?? 0) + 1,
+    );
+  }
+
+  function decrementRuntimeOperationReservation(
+    engine: BridgeExecutionEngine | undefined = defaultEngine,
+  ): void {
+    const remaining = (runtimeOperationReservations.get(engine) ?? 0) - 1;
+    if (remaining > 0) runtimeOperationReservations.set(engine, remaining);
+    else runtimeOperationReservations.delete(engine);
+  }
+
   async function releaseRuntimeOperationReservation(
     context: string,
+    engine: BridgeExecutionEngine | undefined = defaultEngine,
   ): Promise<void> {
-    runtimeOperationReservations = Math.max(
-      0,
-      runtimeOperationReservations - 1,
-    );
+    decrementRuntimeOperationReservation(engine);
     await settleReleasedRuntimeWork(context);
   }
 
@@ -317,7 +335,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (isShuttingDown()) {
       throw new Error('AcpSessionBridge is shutting down');
     }
-    runtimeOperationReservations++;
+    reserveRuntimeOperation();
     const rawKeepAliveMs = options?.keepAliveMs;
     const keepAliveMs =
       rawKeepAliveMs !== undefined &&
@@ -349,10 +367,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       if (pendingKeepAliveToken) {
         pendingKeepAliveDeadlines.delete(pendingKeepAliveToken);
       }
-      runtimeOperationReservations = Math.max(
-        0,
-        runtimeOperationReservations - 1,
-      );
+      decrementRuntimeOperationReservation();
       await settleReleasedRuntimeWork(
         'channel preheat',
         resolvedChannelIdleTimeoutMs() > 0,
@@ -388,7 +403,10 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       return channelStartup.epoch;
     },
     get runtimeOperationReservations() {
-      return runtimeOperationReservations;
+      return Array.from(runtimeOperationReservations.values()).reduce(
+        (total, count) => total + count,
+        0,
+      );
     },
     get pendingKeepAliveCount() {
       return pendingKeepAliveDeadlines.size;
@@ -456,9 +474,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     hasNoChannelWork,
     reapPendingEmptyChannel,
     withWorkspaceControl,
-    reserveRuntimeOperation() {
-      runtimeOperationReservations++;
-    },
+    reserveRuntimeOperation,
     releaseRuntimeOperationReservation,
     settleReleasedRuntimeWork,
     preheat,

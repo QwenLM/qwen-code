@@ -69,6 +69,8 @@ selection had not yet bound an owner. An unrelated idle channel must not wait
 for the selected engine's restore RPC or cleanup to finish. Re-evaluation arms
 missing timers without extending another channel's existing idle deadline.
 A late exit from an old generation must not cancel another channel's timer.
+Runtime-operation reservations protect only their engine's channels; workspace
+activity and stop checks still count reservations across both engines.
 Shutdown awaits every engine startup, selection, session operation and owned
 channel; force shutdown reaches all
 tracked children. No failure path switches to the other factory.
@@ -92,7 +94,9 @@ is a backoff policy, not an estimate of when cleanup will complete.
 
 Prompt, cancellation, approvals, model changes and session close use the entry's
 bound connection. Inbound session lookups, restore replay, background admission,
-and generation events must also match the sending channel/connection.
+and generation events must also match the sending channel/connection. Live
+transcript reads, turn-index reads and flushes use that owner as well; only
+persisted reads without a live entry use the Legacy workspace fallback.
 
 Workspace MCP, configuration/status control and preheat use Legacy. Aggregate
 liveness and activity inspect both engines; idle reclamation locates the actual

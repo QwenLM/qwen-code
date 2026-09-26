@@ -7056,11 +7056,21 @@ export function createSessionControlPlane(
     return publicState;
   };
 
+  async function withSessionReadControl<T>(
+    sessionId: string,
+    fn: (ci: ChannelInfo) => Promise<T>,
+  ): Promise<T> {
+    const entry = byId.get(sessionId);
+    if (!entry) return withEnsuredWorkspaceControl(fn);
+    const ci = assertLivePromptEntry(sessionId, entry);
+    return harness.withWorkspaceControl(ci.harness, () => fn(ci));
+  }
+
   async function requestSessionTranscriptPage(
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage> {
     try {
-      const response = await withEnsuredWorkspaceControl((info) =>
+      const response = await withSessionReadControl(req.sessionId, (info) =>
         withTimeout(
           Promise.race([
             info.connection.extMethod(
@@ -7086,7 +7096,7 @@ export function createSessionControlPlane(
     req: BridgeSessionTurnIndexPageRequest,
   ): Promise<BridgeSessionTurnIndexPage> {
     try {
-      const response = await withEnsuredWorkspaceControl((info) =>
+      const response = await withSessionReadControl(req.sessionId, (info) =>
         withTimeout(
           Promise.race([
             info.connection.extMethod(
@@ -11171,7 +11181,7 @@ export function createSessionControlPlane(
           admissionReleased = true;
           releaseFreshSessionReservation(admission);
         };
-        harness.reserveRuntimeOperation();
+        harness.reserveRuntimeOperation(sourceCi.harness.executionEngine);
         try {
           // HAZARD: dispatch the source-session mutation on the entry's
           // OWN connection, not `ci.connection` (the current attach
@@ -11425,7 +11435,10 @@ export function createSessionControlPlane(
           };
         } finally {
           releaseAdmissionOnce();
-          await harness.releaseRuntimeOperationReservation('session branch');
+          await harness.releaseRuntimeOperationReservation(
+            'session branch',
+            sourceCi.harness.executionEngine,
+          );
         }
       });
       if (!concurrentSideTask) {
@@ -11488,7 +11501,7 @@ export function createSessionControlPlane(
       // 2. Subsequent prompts wait for cd to complete (prevents stale config.cwd)
       const cdPromise = entry.promptQueue.then(async () => {
         const ci = assertLivePromptEntry(sessionId, entry);
-        harness.reserveRuntimeOperation();
+        harness.reserveRuntimeOperation(ci.harness.executionEngine);
         try {
           if (entry.promptActive || entry.backgroundTurn) {
             throw new CdWhilePromptActiveError(sessionId);
@@ -11552,6 +11565,7 @@ export function createSessionControlPlane(
         } finally {
           await harness.releaseRuntimeOperationReservation(
             'session cwd change',
+            ci.harness.executionEngine,
           );
         }
       });

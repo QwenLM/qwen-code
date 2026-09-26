@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PROTOCOL_VERSION,
+  RequestError,
   type NewSessionResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeExecutionEngine, BridgeOptions } from './bridgeOptions.js';
@@ -22,7 +23,10 @@ import {
   type FakeAgentOpts,
 } from './internal/testUtils.js';
 import { SessionLimitExceededError } from './bridgeErrors.js';
-import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  SERVE_STATUS_EXT_METHODS,
+} from './status.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -858,6 +862,173 @@ describe('ACP Bridge execution engines', () => {
     expect(legacy.agent.loadSessionCalls).toHaveLength(0);
     expect(p.bridge.sessionCount).toBe(1);
   });
+
+  it.each(['legacy', 'managed'] as const)(
+    'reads and flushes live replay on its %s owner',
+    async (engine) => {
+      const p = paired();
+      p.choose(engine);
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      p.choose(engine === 'legacy' ? 'managed' : 'legacy');
+      await p.bridge.getSessionTranscriptPage({ sessionId: session.sessionId });
+      await p.bridge.getSessionTurnIndexPage({ sessionId: session.sessionId });
+      await p.bridge.flushSessionTranscript!(session.sessionId);
+      expect(p[engine].agent.extMethodCalls).toEqual([
+        {
+          method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          params: { sessionId: session.sessionId, cwd: WS_A },
+        },
+        {
+          method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+          params: { sessionId: session.sessionId, cwd: WS_A },
+        },
+        {
+          method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          params: {
+            sessionId: session.sessionId,
+            cwd: WS_A,
+            direction: 'backward',
+            limit: 1,
+          },
+        },
+      ]);
+      expect(
+        engine === 'managed' ? p.legacyFactory : p.managedFactory,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['getSessionTranscriptPage', 'getSessionTurnIndexPage'] as const)(
+    'propagates a Managed owner failure from %s without falling back',
+    async (method) => {
+      const managed = engineChannel('managed', {
+        extMethodImpl: () => {
+          throw new RequestError(-32603, 'owner read failed');
+        },
+      });
+      const p = paired({}, engineChannel('legacy'), managed);
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        p.bridge[method]({ sessionId: session.sessionId }),
+      ).rejects.toThrow('owner read failed');
+      expect(managed.agent.extMethodCalls).toHaveLength(1);
+      expect(p.legacyFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps cold persisted replay reads on Legacy without selecting an engine', async () => {
+    const p = paired();
+    await p.bridge.getSessionTranscriptPage({ sessionId: 'cold' });
+    await p.bridge.getSessionTurnIndexPage({ sessionId: 'cold' });
+    expect(p.legacy.agent.extMethodCalls.map((call) => call.method)).toEqual([
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+    ]);
+    expect(p.select).not.toHaveBeenCalled();
+    expect(p.managedFactory).not.toHaveBeenCalled();
+  });
+
+  it.each(['legacy', 'managed'] as const)(
+    'recycles an empty timed-out channel while %s holds a runtime operation',
+    async (busyEngine) => {
+      vi.useFakeTimers();
+      const completion = deferred<Record<string, unknown>>();
+      const pendingNew = deferred<NewSessionResponse>();
+      const busy = engineChannel(busyEngine, {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionCd
+            ? completion.promise
+            : { closed: true },
+      });
+      const idleEngine = busyEngine === 'legacy' ? 'managed' : 'legacy';
+      const idle = engineChannel(idleEngine, {
+        newSessionImpl: () => pendingNew.promise,
+      });
+      const replacement = engineChannel(idleEngine);
+      const p = paired(
+        { initializeTimeoutMs: 200 },
+        busyEngine === 'legacy' ? busy : idle,
+        busyEngine === 'managed' ? busy : idle,
+      );
+      const idleFactory =
+        idleEngine === 'managed' ? p.managedFactory : p.legacyFactory;
+      idleFactory
+        .mockResolvedValueOnce(idle.channel)
+        .mockResolvedValue(replacement.channel);
+      let operation: Promise<unknown> | undefined;
+      try {
+        if (busyEngine === 'legacy') {
+          const stream = p.bridge.generateWorkspaceContent!(
+            'held generation',
+            new AbortController().signal,
+            undefined,
+          );
+          operation = (async () => {
+            const events = [];
+            for await (const event of stream) events.push(event);
+            return events;
+          })();
+        } else {
+          const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          operation = p.bridge.changeSessionCwd(session.sessionId, {
+            path: WS_A,
+          });
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(busy.agent.extMethodCalls).toHaveLength(1);
+        p.choose(idleEngine);
+        const spawn = Promise.allSettled([
+          p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ]);
+        await vi.advanceTimersByTimeAsync(200);
+        expect(await spawn).toMatchObject([
+          { status: 'rejected', reason: { name: 'BridgeTimeoutError' } },
+        ]);
+        await vi.advanceTimersByTimeAsync(200);
+        expect(idle.killed).toBe(true);
+        expect(busy.killed).toBe(false);
+        await expect(
+          p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).resolves.toMatchObject({
+          sessionId: `${idleEngine}-1`,
+        });
+        expect(idleFactory).toHaveBeenCalledTimes(2);
+        expect(
+          p.bridge.getWorkspaceRuntimeLifecycleSnapshot!().activeWork,
+        ).toBe(true);
+      } finally {
+        completion.resolve(
+          busyEngine === 'legacy'
+            ? { model: 'test', modelSource: 'main' }
+            : { previousCwd: WS_A, newCwd: WS_A, warnings: [] },
+        );
+        await operation;
+      }
+    },
+  );
+
+  it.each([0, undefined])(
+    'reaps Managed while bare Legacy preheat is pending with idle timeout %s',
+    async (channelIdleTimeoutMs) => {
+      const startup = deferred<ReturnType<typeof engineChannel>['channel']>();
+      const p = paired({ channelIdleTimeoutMs });
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      p.legacyFactory.mockImplementation(() => startup.promise);
+      const preheat = p.bridge.preheat();
+      try {
+        await p.bridge.closeSession(session.sessionId);
+        expect(p.managed.killed).toBe(true);
+        expect(
+          p.bridge.getWorkspaceRuntimeLifecycleSnapshot!().activeWork,
+        ).toBe(true);
+      } finally {
+        startup.resolve(p.legacy.channel);
+        await preheat;
+      }
+      expect(p.legacy.killed).toBe(false);
+    },
+  );
 
   it('keeps both idle timers when the second engine becomes idle', async () => {
     vi.useFakeTimers();
