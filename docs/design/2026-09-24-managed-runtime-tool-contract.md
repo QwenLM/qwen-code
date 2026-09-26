@@ -47,7 +47,9 @@ parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
 request so a tool call's `input` fits; `status` and `cancel` accept up to 16 KiB.
 Every operation answers at most 1 MiB.
 Larger tool outputs travel through the artifact delivery track, never through
-these envelopes.
+these envelopes; its contract is the
+[Managed Tool Result Contract](2026-09-26-managed-tool-result-contract.md),
+which opts in through Tool v3 and leaves these v2 envelopes unchanged.
 
 The fixture header objects are closed to the five protocol headers. This
 constrains fixture declarations, not ordinary HTTP headers added by clients
