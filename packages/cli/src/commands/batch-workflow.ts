@@ -1276,12 +1276,22 @@ export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
 
 /** Local only: reads the task store; no endpoint or credentials needed. */
 export async function listTasks(
-  deps: Pick<WorkflowDeps, 'env' | 'out'>,
+  deps: Pick<WorkflowDeps, 'env' | 'out' | 'err'>,
 ): Promise<void> {
   const store = new BatchTaskStore(batchHomeDir(deps.env));
-  const tasks = store.list();
+  // A record this build cannot parse is skipped, not hidden: it can hold a
+  // paid batch, so name it and the reason instead of listing around it.
+  let unreadable = 0;
+  const tasks = store.list(undefined, (detail) => {
+    unreadable++;
+    deps.err(`[batch] skipping unreadable task record ${detail}`);
+  });
   if (tasks.length === 0) {
-    deps.out(`no batch tasks under ${batchHomeDir(deps.env)}`);
+    deps.out(
+      unreadable > 0
+        ? `no readable batch tasks under ${batchHomeDir(deps.env)} (${unreadable} unreadable)`
+        : `no batch tasks under ${batchHomeDir(deps.env)}`,
+    );
     return;
   }
   for (const task of tasks) {

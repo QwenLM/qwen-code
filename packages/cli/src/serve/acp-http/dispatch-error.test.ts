@@ -140,10 +140,14 @@ describe('paired Bridge rejections', () => {
     ['host selection', new SessionExecutionEngineError('id', 'empty')],
     [
       'the ACP child',
-      new RequestError(-32024, 'belongs to managed', {
-        errorKind: 'session_execution_engine_unavailable',
-        sessionId: 'id',
-      }),
+      {
+        code: -32024,
+        message: 'belongs to managed',
+        data: {
+          errorKind: 'session_execution_engine_unavailable',
+          sessionId: 'id',
+        },
+      },
     ],
   ])('maps an owner rejection from %s to 409', (_source, error) => {
     expect(toRpcError(error)).toEqual({
@@ -167,11 +171,13 @@ describe('transcript snapshot rejections', () => {
     ],
     [
       'the ACP child',
-      new RequestError(-32010, 'Transcript snapshot is unavailable', {
-        errorKind: 'transcript_snapshot_unavailable',
-        sessionId: 'id',
-      }),
-      'Transcript snapshot is unavailable',
+      // What the ACP SDK rejects with: the JSON-RPC error object, not an Error.
+      {
+        code: -32010,
+        message: 'Transcript snapshot is unavailable for session id',
+        data: { errorKind: 'transcript_snapshot_unavailable', sessionId: 'id' },
+      },
+      'Transcript snapshot is unavailable for session id',
     ],
   ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
     expect(toRpcError(error)).toEqual({

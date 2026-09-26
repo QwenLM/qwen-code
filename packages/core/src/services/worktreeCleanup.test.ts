@@ -4,13 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import * as fs from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GitWorktreeService } from './gitWorktreeService.js';
-import { cleanupStaleAgentWorktrees, __test__ } from './worktreeCleanup.js';
+import {
+  GitWorktreeService,
+  worktreeHasWork,
+  writeWorktreeSessionMarker,
+} from './gitWorktreeService.js';
+import {
+  cleanupStaleAgentWorktrees,
+  STALE_WORKTREE_CUTOFF_MS,
+  __test__,
+} from './worktreeCleanup.js';
 
 const { isEphemeralSlug } = __test__;
 
@@ -59,161 +67,177 @@ describe('isEphemeralSlug', () => {
   });
 });
 
-// Real-git integration: the sweep's guards only mean anything when they run
-// against an actual worktree on disk. Mirrors the sibling
-// gitWorktreeService.*.integ.test.ts setup (30s ceilings for slow runners).
-vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+/**
+ * Acceptance coverage for #12758 against the real sweep: a stale agent
+ * worktree whose only content is git-ignored must survive, while one
+ * holding only disposable build output (or only the daemon's session
+ * marker) must stay reaping. Real git fixture — the defect lives in the
+ * exact `git status` argv the sweep runs, which a mocked status cannot
+ * see.
+ */
+describe('cleanupStaleAgentWorktrees', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-const tmpDirs: string[] = [];
+  // Repo sits one level down so the worktrees dir and any siblings stay
+  // inside a per-test parent that afterEach can remove wholesale.
+  let repoParent: string;
+  let repoRoot: string;
 
-afterEach(() => {
-  for (const dir of tmpDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-function initRepo(): string {
-  const repo = fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cleanup-')),
-  );
-  tmpDirs.push(repo);
-  // git < 2.28 has no `init -b`; point HEAD at main via symbolic-ref.
-  execFileSync('git', ['init', '-q'], { cwd: repo });
-  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], {
-    cwd: repo,
+  beforeEach(async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-cleanup-'));
+    // realpath so path comparisons line up with GitWorktreeService on
+    // platforms where the temp dir is a symlink (macOS /var).
+    repoParent = await fs.realpath(dir);
+    repoRoot = path.join(repoParent, 'repo');
+    await fs.mkdir(repoRoot);
+    execFileSync('git', ['init', '-q'], { cwd: repoRoot });
+    // Name the initial branch without `git init -b` (git < 2.28 lacks it).
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], {
+      cwd: repoRoot,
+    });
+    execFileSync('git', ['config', 'user.email', 't@e.com'], {
+      cwd: repoRoot,
+    });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+      cwd: repoRoot,
+    });
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      'secret.env\nnode_modules/\n',
+    );
+    execFileSync('git', ['add', '.'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+      cwd: repoRoot,
+    });
   });
-  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
-  execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
-  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
-  fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
-  execFileSync('git', ['add', '.'], { cwd: repo });
-  execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-    cwd: repo,
-  });
-  return repo;
-}
 
-describe('cleanupStaleAgentWorktrees (real git)', () => {
-  /** Age the worktree root dir past the 30-day sweep cutoff. */
-  function ageBeyondCutoff(worktreePath: string): void {
-    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
-    fs.utimesSync(worktreePath, old, old);
+  afterEach(async () => {
+    await fs.rm(repoParent, { recursive: true, force: true });
+  });
+
+  async function createAgentWorktree(slug: string): Promise<string> {
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(slug, 'main');
+    expect(result.success).toBe(true);
+    return result.worktree!.path;
   }
+
+  // The sweep reads the worktree dir's mtime; writing files inside it
+  // refreshes that mtime, so age the directory only after all writes.
+  async function agePastCutoff(worktreePath: string): Promise<void> {
+    const aged = new Date(
+      Date.now() - STALE_WORKTREE_CUTOFF_MS - 24 * 60 * 60 * 1000,
+    );
+    await fs.utimes(worktreePath, aged, aged);
+  }
+
+  it('preserves a stale worktree whose only content is git-ignored (#12758)', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, 'secret.env'), 'AWS_KEY=x\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'secret.env')),
+    ).resolves.toBeUndefined();
+  });
 
   it('preserves a user-named `agent-<7hex>` worktree holding only untracked files (#12735)', async () => {
-    const repo = initRepo();
-    const service = new GitWorktreeService(repo);
-    // `validateUserWorktreeSlug` deliberately lets the exact ephemeral
-    // shape through so AgentTool isolation can share this code path — a
-    // user may still pick it explicitly, and the sweep cannot tell such a
-    // worktree apart from an agent one by name.
-    const created = await service.createUserWorktree('agent-aabbccd');
-    expect(created.success).toBe(true);
-    const wtPath = service.getUserWorktreePath('agent-aabbccd');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
     // Pin the untracked mode against ambient config. `normal` is git's
     // default, so without this a later refactor that drops the explicit
     // `--untracked-files=normal` from the probe would keep every test green
     // while a user's `status.showUntrackedFiles=no` (in `~/.gitconfig`, or in
     // the repo's `.git/config`, which every linked worktree shares) hides the
-    // sentinel and #12735 returns silently. Same pin the exit-tool probes have
-    // in git-config-exec.canary.test.ts.
+    // sentinel and #12735 returns silently.
     execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
-      cwd: repo,
+      cwd: repoRoot,
     });
-    fs.writeFileSync(path.join(wtPath, 'sentinel.txt'), 'user work\n');
-    ageBeyondCutoff(wtPath);
+    await fs.writeFile(path.join(wtPath, 'sentinel.txt'), 'user work\n');
+    await agePastCutoff(wtPath);
 
-    const removed = await cleanupStaleAgentWorktrees(repo);
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
 
     expect(removed).toBe(0);
-    expect(fs.existsSync(path.join(wtPath, 'sentinel.txt'))).toBe(true);
-    expect(fs.existsSync(wtPath)).toBe(true);
+    await expect(
+      fs.access(path.join(wtPath, 'sentinel.txt')),
+    ).resolves.toBeUndefined();
   });
 
   it('logs a debug breadcrumb naming the entry it deliberately kept', async () => {
-    const repo = initRepo();
-    const service = new GitWorktreeService(repo);
-    const created = await service.createUserWorktree('agent-aabbccd');
-    expect(created.success).toBe(true);
-    const wtPath = service.getUserWorktreePath('agent-aabbccd');
-    fs.writeFileSync(path.join(wtPath, 'sentinel.txt'), 'user work\n');
-    ageBeyondCutoff(wtPath);
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, 'sentinel.txt'), 'user work\n');
+    await agePastCutoff(wtPath);
     cleanupLogger.debug.mockClear();
 
-    const removed = await cleanupStaleAgentWorktrees(repo);
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
 
     expect(removed).toBe(0);
     // The caller logs "nothing to remove" when the sweep returns 0, so a
-    // preserved entry that leaves no line of its own cannot be told apart from
-    // one the sweep never saw.
+    // preserved entry that leaves no line of its own cannot be told apart
+    // from one the sweep never saw.
     expect(cleanupLogger.debug).toHaveBeenCalledWith(
       expect.stringContaining('keeping agent-aabbccd'),
     );
   });
 
   it('still sweeps a clean, commit-free ephemeral worktree past the cutoff', async () => {
-    const repo = initRepo();
-    const service = new GitWorktreeService(repo);
-    const created = await service.createUserWorktree('agent-1234567');
-    expect(created.success).toBe(true);
-    const wtPath = service.getUserWorktreePath('agent-1234567');
-    ageBeyondCutoff(wtPath);
+    const wtPath = await createAgentWorktree('agent-1234567');
+    await agePastCutoff(wtPath);
 
-    const removed = await cleanupStaleAgentWorktrees(repo);
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
 
     expect(removed).toBe(1);
-    expect(fs.existsSync(wtPath)).toBe(false);
+    await expect(fs.access(wtPath)).rejects.toThrow();
   });
-});
 
-describe('hasUncommittedChanges', () => {
-  it('fail-closes to dirty when git state cannot be read', async () => {
-    // A directory that is not a git repository makes `git status` exit 128.
-    // This catch is the only thing between an unreadable worktree (pruned or
-    // corrupt admin dir, EACCES, unmounted volume) and
-    // `git worktree remove --force` plus the `fs.rm(recursive, force)`
-    // fallback, and it is the contract the sweep's docstring states: "Any
-    // error reading git status / log → skip the entry (don't delete)."
-    const notARepo = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-a-repo-')),
-    );
-    try {
-      await expect(__test__.hasUncommittedChanges(notARepo)).resolves.toBe(
-        true,
-      );
-    } finally {
-      fs.rmSync(notARepo, { recursive: true, force: true });
-    }
+  it('still reaps a stale worktree holding only disposable build output', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'node_modules', 'x'), {
+      recursive: true,
+    });
+    await fs.writeFile(path.join(wtPath, 'node_modules', 'x', 'i.js'), '//\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
+  });
+
+  it('still reaps a stale worktree holding only a session marker', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await writeWorktreeSessionMarker(wtPath, 'session-1');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
   });
 
   it('reads a directory with no .git of its own as dirty, not as the enclosing repo', async () => {
-    // `simpleGit(worktreePath)` pins nothing, so without the `.git` check the
-    // probe discovers the enclosing repository — which is exactly where the
-    // sweep lives, under a path the product gitignores for itself — and gets a
-    // clean answer about the wrong tree. Clean is what authorises
-    // `git worktree remove --force`, so this is the one wrong answer in this
-    // file that destroys data instead of mislabelling it.
-    const repo = initRepo();
-    fs.writeFileSync(path.join(repo, '.gitignore'), 'agent-aabbccd/\n');
-    execFileSync('git', ['add', '.gitignore'], { cwd: repo });
-    execFileSync('git', ['commit', '-q', '-m', 'ignore', '--no-verify'], {
-      cwd: repo,
-    });
-    const orphan = path.join(repo, 'agent-aabbccd');
-    fs.mkdirSync(orphan, { recursive: true });
-    fs.writeFileSync(path.join(orphan, 'sentinel.txt'), 'not a worktree\n');
+    // A path inside a valid repo whose own .git is gone (a sweep's rm that
+    // threw partway): without the guard, git's upward discovery answers
+    // about the enclosing repo — which is clean here — and would read as
+    // "no work", authorizing the destructive sinks this predicate gates.
+    const orphan = path.join(repoRoot, 'orphaned-worktree');
+    await fs.mkdir(orphan);
+    await expect(worktreeHasWork(orphan)).resolves.toBe(true);
+  });
+});
 
-    // Sanity: discovery really does read clean from inside it, so the
-    // assertion below is about the guard and not about git happening to find
-    // something. Without this the case would pass with the guard removed on
-    // any machine where the enclosing tree is dirty.
-    const discovered = execFileSync(
-      'git',
-      ['status', '--porcelain', '--untracked-files=normal'],
-      { cwd: orphan, encoding: 'utf8' },
+describe('worktreeHasWork', () => {
+  it('fails closed on a path git cannot read as a worktree', async () => {
+    const dir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-haswork-')),
     );
-    expect(discovered.trim()).toBe('');
-
-    await expect(__test__.hasUncommittedChanges(orphan)).resolves.toBe(true);
+    try {
+      await expect(worktreeHasWork(dir)).resolves.toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

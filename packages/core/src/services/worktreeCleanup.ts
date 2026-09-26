@@ -10,9 +10,9 @@ import {
   AGENT_WORKTREE_SLUG_PATTERN,
   GitWorktreeService,
   worktreeBranchForSlug,
+  worktreeHasWork,
 } from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { loadSimpleGit } from '../utils/load-simple-git.js';
 
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
 
@@ -55,10 +55,10 @@ function isEphemeralSlug(slug: string): boolean {
  * Safety guarantees (fail-closed):
  * - Only touches slugs matching {@link EPHEMERAL_WORKTREE_PATTERNS}.
  * - Skips entries newer than {@link STALE_WORKTREE_CUTOFF_MS} (default 30 days).
- * - Skips entries with any uncommitted changes, tracked or untracked.
- *   Ignore-rule-hidden content is not reported by the probe (no
- *   `--ignored`) and therefore does not preserve an entry; aligning this
- *   guard with the daemon reaper's is tracked in #12758.
+ * - Skips entries with any uncommitted work — tracked, untracked, or
+ *   git-ignored content — via the shared {@link worktreeHasWork}
+ *   predicate the daemon reaper also uses (#12758); only disposable
+ *   build output and the session marker stay exempt.
  * - Skips entries with commits not reachable from the upstream remote.
  * - Any error reading git status / log → skip the entry (don't delete).
  *
@@ -125,7 +125,7 @@ export async function cleanupStaleAgentWorktrees(
     // Run both checks concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      hasUncommittedChanges(worktreePath),
+      worktreeHasWork(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) {
@@ -177,74 +177,4 @@ export async function cleanupStaleAgentWorktrees(
   return removed;
 }
 
-async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
-  try {
-    // Require the path to be its own worktree before trusting any read.
-    // `simpleGit(worktreePath)` pins no repository, so when this `.git` is
-    // absent — an earlier sweep's `fs.rm` that threw partway, a restore that
-    // dropped the link file — git discovers the ENCLOSING repo, which the
-    // product gitignores for itself, and `status` succeeds with an answer
-    // about the wrong tree. That answer is clean, and clean is what
-    // authorises `git worktree remove --force`. A linked worktree's `.git`
-    // is a file and a main checkout's a directory, so `fs.access` accepts
-    // both and throws only for a path that is neither, leaving the catch
-    // below to supply the dirty answer.
-    await fs.access(path.join(worktreePath, '.git'));
-    const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
-    // `git status --porcelain --untracked-files=normal` lists every
-    // tracked change (staged, unstaged, conflicted — `UU` lines) AND
-    // every untracked file not covered by an ignore rule. Untracked
-    // files MUST be visible here: `validateUserWorktreeSlug` lets a
-    // user claim the exact `agent-<7hex>` shape, so the sweep cannot
-    // tell a user-named worktree from an ephemeral agent one by name —
-    // and the removal path (`git worktree remove --force`) destroys
-    // untracked files unrecoverably (issue #12735). This also matches
-    // the dirty guard `exit_worktree action="remove"` has always
-    // applied. What this probe does NOT see, stated so neither this
-    // comment nor docs/users/features/worktree.md over-claims the
-    // guarantee: `--ignored` is not passed, so content the repository's
-    // ignore rules hide (a `.env`, `.qwen/pr-drafts/`) still does not
-    // block the sweep — the sibling daemon reaper `checkoutHasWork`
-    // (packages/cli/src/serve/server/worktree-orphan-cleanup.ts) counts
-    // ignored entries as work minus `DISPOSABLE_IGNORED_ROOTS`, and
-    // aligning the two guards on that one destructive sink is tracked in
-    // #12758. A directory symlinked in by `worktree.symlinkDirectories`
-    // also shows up here as `?? node_modules` when its ignore pattern
-    // carries a trailing slash (git treats the link as a non-directory),
-    // so that configuration pins the worktree. And the `.qwen-session`
-    // marker stays invisible only while `writeWorktreeSessionMarker`'s
-    // exclude rule sits in the common git dir — markers written before
-    // #10643 put it in the per-worktree admin dir, which git does not
-    // read. The untracked walk costs one extra scan per
-    // already-stale candidate at startup; correctness wins over that
-    // micro-optimisation. The previous `--untracked-files=no` form
-    // made a worktree holding only untracked user files look "clean",
-    // and the implementation before it manually enumerated
-    // `status.staged/modified/...` which silently missed
-    // `conflicted[]` (mutually exclusive with the others in
-    // simple-git), so a worktree mid-merge looked "clean" too. Those two
-    // drifts are why this probe names its siblings: a dirty-policy change
-    // made only here leaves `GitWorktreeService.hasWorktreeChanges` and
-    // `countWorktreeChanges` (`--untracked-files=all`, argv transport)
-    // behind, and one made only there leaves this unattended sweep — the
-    // path that runs `git worktree remove --force` at every CLI boot.
-    const out = await wtGit.raw([
-      '--no-optional-locks',
-      'status',
-      '--porcelain',
-      '--untracked-files=normal',
-    ]);
-    return out.trim().length > 0;
-  } catch (error) {
-    // Fail-closed (preserve worktree) and log so a permission error or
-    // unmounted filesystem leaves a breadcrumb instead of being
-    // indistinguishable from "has real changes".
-    debugLogger.warn(
-      `hasUncommittedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
-    );
-    return true;
-  }
-}
-
-export const __test__ = { isEphemeralSlug, hasUncommittedChanges };
+export const __test__ = { isEphemeralSlug };

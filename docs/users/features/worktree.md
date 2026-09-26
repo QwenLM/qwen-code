@@ -188,17 +188,17 @@ Two constraints:
 
 Ephemeral agent worktrees that survived a crash or `--no-cleanup` shutdown are reaped on every CLI startup, with conservative fail-closed rules:
 
-| Guard                                        | Behavior                                                                                                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Slug must match `agent-<7hex>` pattern       | Other names are never touched. A worktree you named exactly `agent-<7hex>` is indistinguishable from an ephemeral agent worktree and **is** a sweep candidate. |
-| Directory `mtime` > 30 days                  | Newer entries are skipped.                                                                                                                                     |
-| Any uncommitted change, tracked or untracked | Skip the entry (don't delete). Content your ignore rules hide does not count — see the note below.                                                             |
-| Any commit not reachable from a remote       | Skip the entry (don't delete).                                                                                                                                 |
-| Any error reading git state                  | Skip the entry (don't delete).                                                                                                                                 |
+| Guard                                                     | Behavior                                                                                                                                                       |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Slug must match `agent-<7hex>` pattern                    | Other names are never touched. A worktree you named exactly `agent-<7hex>` is indistinguishable from an ephemeral agent worktree and **is** a sweep candidate. |
+| Directory `mtime` > 30 days                               | Newer entries are skipped.                                                                                                                                     |
+| Any uncommitted work — tracked, untracked, or git-ignored | Skip the entry (don't delete). Only disposable build output and the session marker are exempt — see the note below.                                            |
+| Any commit not reachable from a remote                    | Skip the entry (don't delete).                                                                                                                                 |
+| Any error reading git state                               | Skip the entry (don't delete).                                                                                                                                 |
 
 Named user worktrees (`enter_worktree` slugs) are never auto-cleaned, with one exception: the reserved `agent-<7hex>` shape, which the sweep cannot tell apart from an ephemeral agent worktree, is reaped after 30 days once it holds no uncommitted content and no unmerged commits. Pick any other name for work you want kept.
 
-The uncommitted-content guard reads `git status --porcelain --untracked-files=normal`, which does not list paths your ignore rules hide. Ignored content — a `.env`, `.qwen/pr-drafts/`, a build tree — therefore does **not** preserve an aged `agent-<7hex>` worktree; commit it or move it out of the worktree if you need it kept. Tracking issue: [#12758](https://github.com/QwenLM/qwen-code/issues/12758).
+The uncommitted-content guard reads `git status --porcelain --untracked-files=normal --ignored=matching`, so even content your ignore rules hide — a `.env`, `.qwen/pr-drafts/` — preserves an aged `agent-<7hex>` worktree. The only exemptions are disposable build output whose first path segment is `node_modules`, `dist`, or `coverage`, and the daemon's `.qwen-session` marker.
 
 ## Safety Guards on `exit_worktree action="remove"`
 
@@ -344,4 +344,4 @@ Check `<chatsDir>/<sessionId>.worktree.json` exists. The CLI deletes the sidecar
 This is the session-ownership guard. Resume the original session and exit from there, or run the suggested `git worktree remove …` command manually.
 
 **Stale `agent-<hex>` worktrees keep piling up.**
-The 30-day cutoff is conservative; sweep manually with `git worktree list && git worktree remove <path>`, or wait — the next CLI startup after the 30-day mark will reap them as long as they hold no uncommitted content (tracked or untracked) and no unmerged commits. Run with `--debug` and grep for `cleanupStaleAgentWorktrees: keeping` to see which entry the sweep refused and why.
+The 30-day cutoff is conservative; sweep manually with `git worktree list && git worktree remove <path>`, or wait — the next CLI startup after the 30-day mark will reap them as long as they hold no uncommitted work (tracked, untracked, or git-ignored beyond disposable build output) and no unmerged commits. Run with `--debug` and grep for `cleanupStaleAgentWorktrees: keeping` to see which entry the sweep refused and why.

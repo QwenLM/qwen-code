@@ -135,7 +135,9 @@ function compileOnce(validator: Ajv, schema: AnySchema): ValidateFunction {
       validate = validator.compile(JSON.parse(key) as AnySchema);
     } catch {
       // Ajv keeps a schema object even when its first compile fails, and
-      // compiles it on a later call, so such schemas keep that behavior.
+      // compiles it on a later call, so such schemas keep that behavior. If
+      // the copy claimed an $id before it failed, the object's first compile
+      // fails as a duplicate of that $id instead, with the same result.
       compiled.failedTexts.add(key);
       compiled.direct.add(schema);
       return validator.compile(schema);
@@ -272,6 +274,9 @@ export class SchemaValidator {
   /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.
+   *
+   * A schema object's validator is compiled once and then reused, so a schema
+   * object must not be changed after it has been passed here.
    */
   static validate(schema: unknown | undefined, data: unknown): string | null {
     if (!schema) {
