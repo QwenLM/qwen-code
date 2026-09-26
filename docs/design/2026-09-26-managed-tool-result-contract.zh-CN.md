@@ -81,8 +81,8 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 | `captureId`         | token:每次执行捕获一个;分段以它为键                                                          |
 | `revision`          | 从 1 开始的 count                                                                            |
 | `executionStatus`   | `success`、`error`、`cancelled` 或 `unknown`                                                 |
-| `exitCode`          | −2^31 到 2^32−1 的整数,或 null                                                               |
-| `signal`            | `SIG` 后接 1 到 16 个 `[A-Z0-9]` 字符,或 null                                                |
+| `exitCode`          | −2^31 到 2^32−1 的整数,或 null;`executionStatus` 为 `unknown` 时为 null                      |
+| `signal`            | `SIG` 后接 1 到 16 个 `[A-Z0-9]` 字符,或 null;`executionStatus` 为 `unknown` 时为 null       |
 | `captureScope`      | `process_pty`、`process_pipes` 或 `tool_native`                                              |
 | `capturePolicy`     | `complete_required` 或 `best_effort`                                                         |
 | `captureStatus`     | `pending`、`complete`、`partial` 或 `unavailable`                                            |
@@ -94,6 +94,7 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 - **执行状态。** 它是物理结果,与捕获的情况无关。从未开始的调用没有可捕获的内容,也没有 manifest,因此这里没有 `not_started`。`unknown` 表示捕获不知道结果,例如进程仍在运行时。
 - **退出。** `tool_native` 没有进程,因此 `exitCode` 和 `signal` 都为 null。两种进程范围下至多设置其中一个:进程要么以退出码结束,要么被信号终止;结果未知时两者都为 null。无符号 32 位退出码是 Windows 的退出状态。
 - **范围。** `captureScope` 说明"完整"承诺的是什么。`process_pty` 是单一顺序的一份 PTY 记录。`process_pipes` 分开保存标准输出和标准错误,各自保持字节顺序,两者之间没有顺序。`tool_native` 是工具自身产生的结果。完整从不承诺上游来源返回了全部内容;`upstreamTruncated` 记录的是来源自己报告了截断,它本身绝不会使捕获变为部分。
+- **没有来源版本。** manifest 没有 `sourceVersion`。生产方如果要保留某个版本(它自己适配器的版本,或 MCP server 等上游来源的版本),就把它写进自己的 `result` 流,而 manifest 已经描述了这个流。manifest 只保存读取方定位字节、判断其完整性所需的内容,因此以后的生产方也不需要为此新增 manifest 键。
 
 ### 内容描述
 
@@ -126,7 +127,7 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 页是 kind 为 `managed-tool-result-page`、schema 版本为 1 的 Session 资源。其内容是一个至多 256 KiB 的 UTF-8 JSON 对象,恰好包含以下键:`toolResult`、`type: "page"`、`captureId`、`streamId`、`firstOrdinal`(count)、`offset`(count)和 `segments`;`segments` 是 1 到 1024 个对象组成的数组,每个对象恰好包含 `byteLength`(1 到 16777216)和 `digest`。页的最后一个序号(`firstOrdinal` 加分段数减一)至多为 65535,`offset` 加上各分段的字节数是一个 count。
 
 - **位置。** 描述的第 `i` 页携带 manifest 的 `captureId` 和描述的 `streamId`。它的 `firstOrdinal` 是之前各页 `segmentCount` 之和,`offset` 是之前各页 `byteLength` 之和,分段数等于其引用的 `segmentCount`,分段长度之和等于其引用的 `byteLength`。读取方在信任一页之前先检查位置,因此放错位置读到的页会被拒绝。
-- **上限。** 数量上限保证每页都在 256 KiB 以内,但不保证每个 manifest 都在 64 KiB 以内:manifest 只能在不超过该上限的前提下填满各列表,可能超出的生产方应改用更大的分段。使用最长 ID 且占满 64 页的单个流仍能放下,容量达到 1 TiB。
+- **上限。** 数量上限保证每页都在 256 KiB 以内,但不保证每个 manifest 都在 64 KiB 以内:manifest 只能在不超过该上限的前提下填满各列表,可能超出的生产方应改用更大的分段。占满 64 页的单个流可达 1 TiB。只要存储分配的页 ID 较短(例如 UUID),无论身份字段取什么值都能放下。JSON 转义可能使 ID 的大小翻倍,因此 64 个带 512 字节 ID 的页引用可能放不下;分配较长资源 ID 的托管存储(O2)需要考虑这一点。
 
 ## 分段发布
 
@@ -228,8 +229,8 @@ Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果
 
 schema 固定每种记录的结构以及它能清晰表达的规则,包括角色的范围规则和内容描述所蕴含的状态。它无法表达 UTF-8 字节上限、NFC、形式良好的 UTF-16、流 ID 唯一、列表求和、依赖另一字段的上限,以及两个字段或两条记录之间的比较;TypeScript 测试列出 schema 与模块意见不一的每个用例。用例和每个摘要由一个独立于两种语言的实现生成。
 
-- **TypeScript。** `packages/core/src/managed-runtime/managed-tool-result.ts` 校验 manifest、页、页位置、修订和结果信封,并包含一个重放发布序列的参考分段账本。在 O1b 之前没有代码导入它。
-- **准入。** 一个 CLI 测试把规范的 v3 请求经已发布的路由闸门发给会记录调用的处理器,检查每个都以空 404 回应,且没有处理器运行。
+- **TypeScript。** `packages/core/src/managed-runtime/managed-tool-result.ts` 校验 manifest、页、页位置、修订和结果信封,并包含一个重放发布序列的参考分段账本。在 O1b 之前没有代码导入它;O1b 会把这个账本保留为其分段存储接口的内存实现,就像 Broker 在 JDBC 仓库之外保留内存仓库一样。
+- **准入。** 一个 CLI 测试把规范的 v3 请求经已发布的路由闸门发给会记录调用的处理器,检查每个都以空 404 回应,且没有处理器运行。它与 Java 测试一样从 core 的源码目录读取 fixtures,使这份文件保持唯一副本。
 - **Java。** `runtime-broker` 中的一致性测试固定 token、kind、上限、路由、封闭键集合和错误表,并根据 fixture 字节重新计算每个分段、封存与前缀摘要。
 
 ## 受影响的文件
@@ -260,12 +261,11 @@ worker、路由清单、存储、provisioner、transport 和 CI workflow 均不�
 ## 开放问题
 
 1. 后台生产方(O4)应当每校验一个分段就发布一个修订,还是合并修订?契约两者都允许;参考设计会合并进度事件。
-2. manifest 是否应携带生产方适配器的版本(参考设计中的 `sourceVersion`)?#12723 没有把它列入 O1a,目前也没有读取方。
-3. Hook 的结果是否应成为一种内容角色?参考设计列出了它,但 O1 没有生产方产生它,因此 v1 未包含。
+2. Hook 的结果是否应成为一种内容角色?参考设计列出了它,但 O1 没有生产方产生它,因此 v1 未包含。
 
 ## 后续工作
 
 | 切片 | 范围                                                                                                                                                                                              |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| O1b  | 在独立接口之后实现本地分段存储:发布、封存、前缀和按区间读取;100 MiB 流的内存有界;隔离损坏或冲突的分段;用 fixture 序列重放验证。                                                                   |
+| O1b  | 在独立接口之后实现本地分段存储,采用账本的操作与结果:发布、封存、前缀和按区间读取;100 MiB 流的内存有界;隔离损坏或冲突的分段;用 fixture 序列重放验证。                                              |
 | O1c  | W0c 之后在 worker 上实现 Tool v3:在截断前把前台 Shell 输出捕获到有界 spool,字节仍可校验时复用 `persistedOutputFiles`;结果信封;确认;Java v3 transport;请求头规范的路由 fixtures;100 MiB 保存测试。 |

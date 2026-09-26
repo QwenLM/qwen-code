@@ -67,33 +67,34 @@ The four questions of #12723 are answered here. The first decides the opt-in and
 
 A manifest is a Session resource of kind `managed-tool-result-manifest` and schema version 1. Its body is one UTF-8 JSON object of at most 64 KiB, the largest resource the durable Session store keeps inline, with exactly these keys.
 
-| Key                 | Rule                                                                                       |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| `toolResult`        | `"managed-tool-result/1"`, the protocol token                                              |
-| `type`              | `"manifest"`                                                                               |
-| `tenantId`          | id                                                                                         |
-| `sessionId`         | id: the Managed Session, not the Runtime Session                                           |
-| `turnId`            | id                                                                                         |
-| `executionCallId`   | id: the `tool.intent` identity that the Session receipt will name                          |
-| `callId`            | id: the model's call ID                                                                    |
-| `invocationDigest`  | id: the `argsDigest` of the original reference, exactly as the Runtime received it         |
-| `bindingGeneration` | generation: the Runtime binding generation that ran the call                               |
-| `captureId`         | token: one per execution capture; segments are keyed under it                              |
-| `revision`          | count from 1                                                                               |
-| `executionStatus`   | `success`, `error`, `cancelled` or `unknown`                                               |
-| `exitCode`          | an integer from −2^31 to 2^32−1, or null                                                   |
-| `signal`            | `SIG` followed by 1 to 16 characters from `[A-Z0-9]`, or null                              |
-| `captureScope`      | `process_pty`, `process_pipes` or `tool_native`                                            |
-| `capturePolicy`     | `complete_required` or `best_effort`                                                       |
-| `captureStatus`     | `pending`, `complete`, `partial` or `unavailable`                                          |
-| `captureReason`     | null, or `quota_exhausted`, `size_limit`, `producer_lost`, `storage_failed` or `cancelled` |
-| `upstreamTruncated` | boolean                                                                                    |
-| `contents`          | an array of at most 32 content descriptors                                                 |
+| Key                 | Rule                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `toolResult`        | `"managed-tool-result/1"`, the protocol token                                                            |
+| `type`              | `"manifest"`                                                                                             |
+| `tenantId`          | id                                                                                                       |
+| `sessionId`         | id: the Managed Session, not the Runtime Session                                                         |
+| `turnId`            | id                                                                                                       |
+| `executionCallId`   | id: the `tool.intent` identity that the Session receipt will name                                        |
+| `callId`            | id: the model's call ID                                                                                  |
+| `invocationDigest`  | id: the `argsDigest` of the original reference, exactly as the Runtime received it                       |
+| `bindingGeneration` | generation: the Runtime binding generation that ran the call                                             |
+| `captureId`         | token: one per execution capture; segments are keyed under it                                            |
+| `revision`          | count from 1                                                                                             |
+| `executionStatus`   | `success`, `error`, `cancelled` or `unknown`                                                             |
+| `exitCode`          | an integer from −2^31 to 2^32−1, or null; null while `executionStatus` is `unknown`                      |
+| `signal`            | `SIG` followed by 1 to 16 characters from `[A-Z0-9]`, or null; null while `executionStatus` is `unknown` |
+| `captureScope`      | `process_pty`, `process_pipes` or `tool_native`                                                          |
+| `capturePolicy`     | `complete_required` or `best_effort`                                                                     |
+| `captureStatus`     | `pending`, `complete`, `partial` or `unavailable`                                                        |
+| `captureReason`     | null, or `quota_exhausted`, `size_limit`, `producer_lost`, `storage_failed` or `cancelled`               |
+| `upstreamTruncated` | boolean                                                                                                  |
+| `contents`          | an array of at most 32 content descriptors                                                               |
 
 - **Identity.** No field alone identifies a result; in particular a `callId` is only unique within its Session. A reader compares the whole identity with the execution it expects, and a mismatch in any field is a conflicting result, never a substitute.
 - **Execution status.** It is the physical outcome, whatever happens to the capture. A call that never started has nothing to capture and no manifest, so `not_started` is not a value here. `unknown` means the capture does not know the outcome, for example while the process still runs.
 - **Exit.** `tool_native` has no process, so both `exitCode` and `signal` are null. For the two process scopes at most one of them is set: a process exits with a code or is ended by a signal, and both are null while the outcome is unknown. Unsigned 32-bit codes are Windows exit statuses.
 - **Scope.** `captureScope` states what "complete" promises. `process_pty` is one PTY transcript in its single order. `process_pipes` keeps standard output and standard error apart, each in its own byte order, with no order between them. `tool_native` is the tool's own result as it produced it. Complete never promises that an upstream source returned everything; `upstreamTruncated` records that the source itself reported truncation, and it never makes a capture partial by itself.
+- **No source version.** The manifest has no `sourceVersion`. A producer that wants to keep a version, of its adapter or of an upstream source such as an MCP server, writes it into its `result` stream, which the manifest already describes. The manifest holds only what a reader needs to find the bytes and judge their completeness, so no later producer needs a new manifest key for it.
 
 ### Content descriptors
 
@@ -126,7 +127,7 @@ Each entry of `contents` is an object with exactly these keys: `streamId` (token
 A page is a Session resource of kind `managed-tool-result-page` and schema version 1. Its body is one UTF-8 JSON object of at most 256 KiB with exactly these keys: `toolResult`, `type: "page"`, `captureId`, `streamId`, `firstOrdinal` (count), `offset` (count) and `segments`, an array of 1 to 1024 objects with exactly `byteLength` (1 to 16777216) and `digest`. Its last ordinal, `firstOrdinal` plus the segment count minus one, is at most 65535, and `offset` plus its segments' bytes is a count.
 
 - **Position.** Page `i` of a descriptor carries the manifest's `captureId` and the descriptor's `streamId`. Its `firstOrdinal` is the sum of the earlier pages' `segmentCount`, its `offset` the sum of their `byteLength`, its segment count equals its reference's `segmentCount`, and its segments' lengths add up to its reference's `byteLength`. A reader checks the position before it trusts a page, so a page read in the wrong place is refused.
-- **Bounds.** The count limits keep every page within 256 KiB. They do not keep every manifest within 64 KiB: a manifest can fill its lists only while it stays within that bound, and a producer that would exceed it uses larger segments. One stream with the longest IDs and all 64 pages fits, and reaches 1 TiB.
+- **Bounds.** The count limits keep every page within 256 KiB. They do not keep every manifest within 64 KiB: a manifest can fill its lists only while it stays within that bound, and a producer that would exceed it uses larger segments. A stream with all 64 pages reaches 1 TiB. It fits when the store assigns short page IDs, such as UUIDs, whatever the identity fields hold. JSON can double an ID's size, so 64 page references with 512-byte IDs may not fit; a hosted store (O2) that assigns long resource IDs must allow for that.
 
 ## Segment publication
 
@@ -228,8 +229,8 @@ The last three are store outcomes; O2 gives them HTTP statuses when segments cro
 
 The schema fixes each record's shape and the rules it can state readably, including the scope rules for roles and the status that descriptors imply. It cannot state UTF-8 byte limits, NFC, well-formed UTF-16, unique stream IDs, sums across a list, a bound that depends on another field, or a comparison between two fields or two records; the TypeScript test lists every case on which the schema and the module disagree. An implementation independent of both languages built the cases and computed every digest.
 
-- **TypeScript.** `packages/core/src/managed-runtime/managed-tool-result.ts` validates manifests, pages, page positions, revisions and result envelopes, and holds a reference segment ledger that replays the publication sequences. Nothing imports it until O1b.
-- **Admission.** A CLI test sends the canonical v3 requests through the shipped route gate to handlers that would record a call, and checks that each answers an empty 404 and that no handler ran.
+- **TypeScript.** `packages/core/src/managed-runtime/managed-tool-result.ts` validates manifests, pages, page positions, revisions and result envelopes, and holds a reference segment ledger that replays the publication sequences. Nothing imports it until O1b, which keeps the ledger as the in-memory implementation of its segment store interface, as the Broker keeps its in-memory repositories beside the JDBC ones.
+- **Admission.** A CLI test sends the canonical v3 requests through the shipped route gate to handlers that would record a call, and checks that each answers an empty 404 and that no handler ran. It reads the fixtures from core's source tree, as the Java test does, so that one file stays the only copy.
 - **Java.** A conformance test in `runtime-broker` pins the token, kinds, limits, routes, closed key sets and error table, and recomputes every segment, seal and prefix digest from the fixture bytes.
 
 ## Files affected
@@ -260,12 +261,11 @@ No worker, route manifest, store, provisioner, transport or CI workflow changes.
 ## Open questions
 
 1. Should a background producer (O4) publish a revision per verified segment, or coalesce revisions? The contract allows either; the reference design coalesces progress events.
-2. Should the manifest carry the producer adapter's version (`sourceVersion` in the reference design)? #12723 does not list it for O1a, and nothing reads it yet.
-3. Should a Hook's outcome become a content role? The reference design lists it, but no O1 producer emits one, so v1 leaves it out.
+2. Should a Hook's outcome become a content role? The reference design lists it, but no O1 producer emits one, so v1 leaves it out.
 
 ## Follow-up work
 
 | Slice | Scope                                                                                                                                                                                                                                                                                                      |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| O1b   | The local segment store behind its own interface: publish, seal, prefix and range read; bounded memory for a 100 MiB stream; quarantine of corrupt or conflicting segments; the fixture sequences replayed against it.                                                                                     |
+| O1b   | The local segment store behind its own interface, with the ledger's operations and outcomes: publish, seal, prefix and range read; bounded memory for a 100 MiB stream; quarantine of corrupt or conflicting segments; the fixture sequences replayed against it.                                          |
 | O1c   | Tool v3 on the worker after W0c: capture of foreground Shell before truncation into a bounded spool, reusing `persistedOutputFiles` when its bytes are still verified; the result envelope; the acknowledgement; a Java v3 transport; route fixtures for the header discipline; the 100 MiB survival test. |

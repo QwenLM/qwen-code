@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -548,7 +548,9 @@ describe('Managed tool result contract', () => {
   });
 
   it('keeps the largest single stream within the manifest limit', () => {
-    const longest = 'x'.repeat(MANAGED_TOOL_RESULT_LIMITS.maxIdBytes);
+    // JSON doubles every quote, so these identity fields take the most bytes
+    // an id can; the store assigns the page IDs.
+    const longest = '"'.repeat(MANAGED_TOOL_RESULT_LIMITS.maxIdBytes);
     const segmentBytes = MANAGED_TOOL_RESULT_LIMITS.maxSegmentBytes;
     const pageBytes =
       segmentBytes * MANAGED_TOOL_RESULT_LIMITS.maxSegmentsPerPage;
@@ -556,7 +558,7 @@ describe('Managed tool result contract', () => {
       { length: MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream },
       () => ({
         ref: {
-          resourceId: longest,
+          resourceId: randomUUID(),
           kind: MANAGED_TOOL_RESULT_KINDS.page,
           schemaVersion: 1,
           byteLength: MANAGED_TOOL_RESULT_LIMITS.maxPageBytes,
@@ -582,7 +584,7 @@ describe('Managed tool result contract', () => {
         {
           streamId: 's'.repeat(128),
           role: 'stdout',
-          mimeType: `application/${'x'.repeat(243)}`,
+          mimeType: `a/b;${'"'.repeat(251)}`,
           state: 'sealed',
           byteLength: pageBytes * pages.length,
           digest: 'f'.repeat(64),
@@ -604,6 +606,20 @@ describe('Managed tool result contract', () => {
     };
     const manifestBytes = Buffer.from(JSON.stringify(manifest), 'utf8');
     const pageBytesOnWire = Buffer.from(JSON.stringify(largestPage), 'utf8');
+    const withLongPageIds = {
+      ...manifest,
+      contents: [
+        {
+          ...manifest.contents[0],
+          body: {
+            pages: pages.map((page) => ({
+              ...page,
+              ref: { ...page.ref, resourceId: longest },
+            })),
+          },
+        },
+      ],
+    };
 
     expect(parseToolResultManifestBytes(manifestBytes).contents).toHaveLength(
       1,
@@ -617,6 +633,14 @@ describe('Managed tool result contract', () => {
     expect(pageBytesOnWire.byteLength).toBeLessThanOrEqual(
       MANAGED_TOOL_RESULT_LIMITS.maxPageBytes,
     );
+    // Page IDs as long as the identity fields do not fit.
+    expect(
+      throwsContractError(() =>
+        parseToolResultManifestBytes(
+          Buffer.from(JSON.stringify(withLongPageIds), 'utf8'),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('reads each manifest field once, so the checked value is kept', () => {

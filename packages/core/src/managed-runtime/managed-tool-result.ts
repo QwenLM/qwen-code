@@ -570,14 +570,20 @@ export function parseToolResultManifest(value: unknown): ToolResultManifest {
     CAPTURE_SCOPES,
     'manifest.captureScope',
   );
+  const executionStatus = oneOf(
+    manifest.executionStatus,
+    EXECUTION_STATUSES,
+    'manifest.executionStatus',
+  );
   const exitCode = nullable(manifest.exitCode, parseExitCode);
   const signal = nullable(manifest.signal, parseSignal);
+  // Without a process, or before its outcome is known, neither is recorded.
   if (
-    captureScope === 'tool_native'
+    captureScope === 'tool_native' || executionStatus === 'unknown'
       ? exitCode !== null || signal !== null
       : exitCode !== null && signal !== null
   ) {
-    fail('manifest.exitCode and manifest.signal do not fit the scope.');
+    fail('manifest.exitCode and manifest.signal do not fit the outcome.');
   }
   const contents = Object.freeze(
     list(manifest.contents, 'manifest.contents', LIMITS.maxContents).map(
@@ -620,11 +626,7 @@ export function parseToolResultManifest(value: unknown): ToolResultManifest {
     ),
     captureId: token(manifest.captureId, 'manifest.captureId'),
     revision: count(manifest.revision, 'manifest.revision', 1),
-    executionStatus: oneOf(
-      manifest.executionStatus,
-      EXECUTION_STATUSES,
-      'manifest.executionStatus',
-    ),
+    executionStatus,
     exitCode,
     signal,
     captureScope,

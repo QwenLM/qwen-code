@@ -1312,6 +1312,28 @@
           "if": {
             "type": "object",
             "properties": {
+              "executionStatus": {
+                "const": "unknown"
+              }
+            },
+            "required": ["executionStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "exitCode": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
               "captureScope": {
                 "const": "tool_native"
               }

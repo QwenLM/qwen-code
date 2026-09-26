@@ -13155,6 +13155,302 @@
       "valid": false
     },
     {
+      "id": "unknown-outcome-without-exit-information",
+      "manifest": {
+        "toolResult": "managed-tool-result/1",
+        "type": "manifest",
+        "tenantId": "tenant-a",
+        "sessionId": "session-a",
+        "turnId": "turn-1",
+        "executionCallId": "exec-1",
+        "callId": "call-01",
+        "invocationDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "bindingGeneration": "3",
+        "captureId": "capture-01",
+        "revision": 2,
+        "executionStatus": "unknown",
+        "exitCode": null,
+        "signal": null,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "captureStatus": "complete",
+        "captureReason": null,
+        "upstreamTruncated": false,
+        "contents": [
+          {
+            "streamId": "stdout",
+            "role": "stdout",
+            "mimeType": "application/octet-stream",
+            "state": "sealed",
+            "byteLength": 9,
+            "digest": "9ee7681721dfd79009750646d559084b758f44ad23ad44c5d54e15dd5fcfd37b",
+            "missingRanges": [],
+            "body": {
+              "pages": [
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-0",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 324,
+                    "digest": "adfd35832c458641134fe04080c8f54637632d6a3dc44ebdbe457283901f06c2"
+                  },
+                  "segmentCount": 2,
+                  "byteLength": 5
+                },
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-1",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 231,
+                    "digest": "d5d82511cbbfcba31c9e0d9b2fc1c368a75c7a206b4cae7c3237ca64f4f84f34"
+                  },
+                  "segmentCount": 1,
+                  "byteLength": 4
+                }
+              ]
+            }
+          },
+          {
+            "streamId": "stderr",
+            "role": "stderr",
+            "mimeType": "text/plain; charset=utf-8",
+            "state": "sealed",
+            "byteLength": 0,
+            "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "missingRanges": [],
+            "body": {
+              "pages": []
+            }
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "id": "unknown-outcome-with-an-exit-code",
+      "manifest": {
+        "toolResult": "managed-tool-result/1",
+        "type": "manifest",
+        "tenantId": "tenant-a",
+        "sessionId": "session-a",
+        "turnId": "turn-1",
+        "executionCallId": "exec-1",
+        "callId": "call-01",
+        "invocationDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "bindingGeneration": "3",
+        "captureId": "capture-01",
+        "revision": 2,
+        "executionStatus": "unknown",
+        "exitCode": 137,
+        "signal": null,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "captureStatus": "complete",
+        "captureReason": null,
+        "upstreamTruncated": false,
+        "contents": [
+          {
+            "streamId": "stdout",
+            "role": "stdout",
+            "mimeType": "application/octet-stream",
+            "state": "sealed",
+            "byteLength": 9,
+            "digest": "9ee7681721dfd79009750646d559084b758f44ad23ad44c5d54e15dd5fcfd37b",
+            "missingRanges": [],
+            "body": {
+              "pages": [
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-0",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 324,
+                    "digest": "adfd35832c458641134fe04080c8f54637632d6a3dc44ebdbe457283901f06c2"
+                  },
+                  "segmentCount": 2,
+                  "byteLength": 5
+                },
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-1",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 231,
+                    "digest": "d5d82511cbbfcba31c9e0d9b2fc1c368a75c7a206b4cae7c3237ca64f4f84f34"
+                  },
+                  "segmentCount": 1,
+                  "byteLength": 4
+                }
+              ]
+            }
+          },
+          {
+            "streamId": "stderr",
+            "role": "stderr",
+            "mimeType": "text/plain; charset=utf-8",
+            "state": "sealed",
+            "byteLength": 0,
+            "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "missingRanges": [],
+            "body": {
+              "pages": []
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "id": "unknown-outcome-with-a-signal",
+      "manifest": {
+        "toolResult": "managed-tool-result/1",
+        "type": "manifest",
+        "tenantId": "tenant-a",
+        "sessionId": "session-a",
+        "turnId": "turn-1",
+        "executionCallId": "exec-1",
+        "callId": "call-01",
+        "invocationDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "bindingGeneration": "3",
+        "captureId": "capture-01",
+        "revision": 2,
+        "executionStatus": "unknown",
+        "exitCode": null,
+        "signal": "SIGKILL",
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "captureStatus": "complete",
+        "captureReason": null,
+        "upstreamTruncated": false,
+        "contents": [
+          {
+            "streamId": "stdout",
+            "role": "stdout",
+            "mimeType": "application/octet-stream",
+            "state": "sealed",
+            "byteLength": 9,
+            "digest": "9ee7681721dfd79009750646d559084b758f44ad23ad44c5d54e15dd5fcfd37b",
+            "missingRanges": [],
+            "body": {
+              "pages": [
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-0",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 324,
+                    "digest": "adfd35832c458641134fe04080c8f54637632d6a3dc44ebdbe457283901f06c2"
+                  },
+                  "segmentCount": 2,
+                  "byteLength": 5
+                },
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-1",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 231,
+                    "digest": "d5d82511cbbfcba31c9e0d9b2fc1c368a75c7a206b4cae7c3237ca64f4f84f34"
+                  },
+                  "segmentCount": 1,
+                  "byteLength": 4
+                }
+              ]
+            }
+          },
+          {
+            "streamId": "stderr",
+            "role": "stderr",
+            "mimeType": "text/plain; charset=utf-8",
+            "state": "sealed",
+            "byteLength": 0,
+            "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "missingRanges": [],
+            "body": {
+              "pages": []
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "id": "unknown-outcome-with-an-exit-code-under-best-effort",
+      "manifest": {
+        "toolResult": "managed-tool-result/1",
+        "type": "manifest",
+        "tenantId": "tenant-a",
+        "sessionId": "session-a",
+        "turnId": "turn-1",
+        "executionCallId": "exec-1",
+        "callId": "call-01",
+        "invocationDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "bindingGeneration": "3",
+        "captureId": "capture-01",
+        "revision": 2,
+        "executionStatus": "unknown",
+        "exitCode": 0,
+        "signal": null,
+        "captureScope": "process_pipes",
+        "capturePolicy": "best_effort",
+        "captureStatus": "complete",
+        "captureReason": null,
+        "upstreamTruncated": false,
+        "contents": [
+          {
+            "streamId": "stdout",
+            "role": "stdout",
+            "mimeType": "application/octet-stream",
+            "state": "sealed",
+            "byteLength": 9,
+            "digest": "9ee7681721dfd79009750646d559084b758f44ad23ad44c5d54e15dd5fcfd37b",
+            "missingRanges": [],
+            "body": {
+              "pages": [
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-0",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 324,
+                    "digest": "adfd35832c458641134fe04080c8f54637632d6a3dc44ebdbe457283901f06c2"
+                  },
+                  "segmentCount": 2,
+                  "byteLength": 5
+                },
+                {
+                  "ref": {
+                    "resourceId": "page-stdout-1",
+                    "kind": "managed-tool-result-page",
+                    "schemaVersion": 1,
+                    "byteLength": 231,
+                    "digest": "d5d82511cbbfcba31c9e0d9b2fc1c368a75c7a206b4cae7c3237ca64f4f84f34"
+                  },
+                  "segmentCount": 1,
+                  "byteLength": 4
+                }
+              ]
+            }
+          },
+          {
+            "streamId": "stderr",
+            "role": "stderr",
+            "mimeType": "text/plain; charset=utf-8",
+            "state": "sealed",
+            "byteLength": 0,
+            "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "missingRanges": [],
+            "body": {
+              "pages": []
+            }
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
       "id": "tool-native-with-an-exit-code",
       "manifest": {
         "toolResult": "managed-tool-result/1",
@@ -35503,7 +35799,7 @@
         "captureId": "capture-01",
         "revision": 2,
         "executionStatus": "unknown",
-        "exitCode": 0,
+        "exitCode": null,
         "signal": null,
         "captureScope": "process_pipes",
         "capturePolicy": "complete_required",
