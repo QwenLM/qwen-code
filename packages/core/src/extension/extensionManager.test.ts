@@ -4284,6 +4284,28 @@ describe('extension tests', () => {
       expect(config.getUsageStatisticsEnabled()).toBe(true);
       expect(config.getProxy()).toBeUndefined();
     });
+
+    it('does not abort the mutation when the proxy is a value a session Config would reject', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      // normalizeProxyUrl throws for SOCKS proxies; that throw must not
+      // escape the throwaway telemetry Config and fail the extension
+      // command, so the upload falls back to a direct connection.
+      const manager = createExtensionManager({
+        proxy: 'socks5h://127.0.0.1:1080',
+      });
+      await manager.refreshCache();
+
+      await manager.disableExtension('ext1', SettingScope.User);
+      expect(manager.isEnabled('ext1')).toBe(false);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getProxy()).toBeUndefined();
+    });
   });
 
   describe('preference-only operations', () => {

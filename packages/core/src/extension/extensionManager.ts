@@ -35,6 +35,7 @@ import {
   performVariableReplacement,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
@@ -570,10 +571,21 @@ export class ExtensionManager {
    * always opens and uploads bypass the configured proxy (#12770).
    */
   private getTelemetryConfig(cwd: string): Config {
+    // The Config constructor normalizes the proxy eagerly and throws for
+    // values a session would reject at startup (e.g. SOCKS). Telemetry must
+    // never abort the extension mutation this throwaway is built for, so
+    // drop an unsupported proxy and let the upload fall back to a direct
+    // connection — the pre-#12789 behavior for that case.
+    let proxy: string | undefined;
+    try {
+      proxy = normalizeProxyUrl(this.proxy);
+    } catch {
+      proxy = undefined;
+    }
     return new Config({
       telemetry: this.telemetrySettings,
       usageStatisticsEnabled: this.usageStatisticsEnabled,
-      proxy: this.proxy,
+      proxy,
       interactive: false,
       targetDir: cwd,
       cwd,
