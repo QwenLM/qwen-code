@@ -12,6 +12,7 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   isAutoMemPath,
+  isMemoryDocumentFilename,
   isTeamAutoMemPath,
   isUserAutoMemPath,
 } from './paths.js';
@@ -50,6 +51,7 @@ export type MemoryChangedNotice = MemoryDocumentChange | MemoryEnabledChange;
 
 type MemoryChangedListener = (
   change: MemoryChangedNotice,
+  signal?: AbortSignal,
 ) => void | Promise<void>;
 
 interface MemoryChangedRegistration {
@@ -149,21 +151,60 @@ const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
  */
 const outsideWindowEmits = new Set<Map<string, string | null>>();
 
+/**
+ * True when the tree walk can observe `filePath` under `root`: every ancestor
+ * below the root is a real directory and the leaf, when it exists, is a
+ * regular file. `readdir({ withFileTypes: true })` recursion is blind to a
+ * symlinked ancestor (Dirent.isDirectory() is false for a link) and a
+ * symlinked leaf is invisible to its isFile() check, so neither can ever
+ * appear in a coalesced window's snapshot diff.
+ */
+async function isTreeVisible(root: string, filePath: string): Promise<boolean> {
+  const leaf = await fs.lstat(filePath).catch(() => undefined);
+  if (leaf !== undefined && (leaf.isSymbolicLink() || !leaf.isFile())) {
+    return false;
+  }
+  const resolvedRoot = path.resolve(root);
+  let current = path.dirname(path.resolve(filePath));
+  while (current !== resolvedRoot) {
+    const relative = path.relative(resolvedRoot, current);
+    // '' is a case-divergent spelling of the root itself.
+    if (relative === '') return true;
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      return false;
+    }
+    const stat = await fs.lstat(current).catch(() => undefined);
+    if (stat === undefined || stat.isSymbolicLink() || !stat.isDirectory()) {
+      return false;
+    }
+    current = path.dirname(current);
+  }
+  return true;
+}
+
 async function rememberOutsideEmit(
   filePaths: readonly string[],
 ): Promise<void> {
   if (outsideWindowEmits.size === 0) return;
   const ownBucket = suppressDelivery.getStore();
   for (const filePath of filePaths) {
+    const stat = await fs
+      .lstat(filePath)
+      .catch((err: unknown) =>
+        (err as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined,
+      );
+    // A non-ENOENT lstat failure means 'unknown', not 'absent': recording
+    // null would poison every other open window's baseline with a delete
+    // marker for a file that may still exist.
+    if (stat === undefined) continue;
     // A symlinked document reads fine here but is invisible to the tree walk
     // (Dirent.isFile() is false for links): recording it would let a closing
     // window report a `delete` for a file that is still on disk.
-    const stat = await fs.lstat(filePath).catch(() => undefined);
-    if (stat?.isSymbolicLink()) continue;
+    if (stat !== null && stat.isSymbolicLink()) continue;
     // `null` encodes 'reported while absent' (a delete). A present but
     // unreadable file is unknown, not absent: keep the snapshot baseline.
     const content =
-      stat === undefined
+      stat === null
         ? null
         : await fs.readFile(filePath, 'utf-8').catch(() => undefined);
     if (content === undefined) continue;
@@ -201,6 +242,7 @@ async function emit(
   sourceWorkspace: string,
   changes: readonly MemoryChangedNotice[],
   deliveryId?: symbol,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (changes.length === 0 || listeners.size === 0) return;
   const workspace = path.resolve(sourceWorkspace);
@@ -209,7 +251,7 @@ async function emit(
     matched.map(async (registration) => {
       for (const change of changes) {
         try {
-          await registration.listener(change);
+          await registration.listener(change, signal);
         } catch {
           // The change is already on disk. A listener must not roll it back.
         }
@@ -228,6 +270,7 @@ export async function notifyMemoryFileChange(
   projectRoot: string,
   operation: MemoryChangedOperation,
   deliveryId?: symbol,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (listeners.size === 0) return;
   const filePaths = typeof filePath === 'string' ? [filePath] : filePath;
@@ -263,22 +306,65 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
+  const inWindow = suppressDelivery.getStore() !== undefined;
+  let baselinePaths = emittedPaths;
+  // Inside a window the closing diff owns walk-visible paths; only paths the
+  // walk can never observe are delivered immediately.
+  const deliverable: MemoryDocumentChange[] = inWindow ? [] : [...changes];
+  if (inWindow || outsideWindowEmits.size > 0) {
+    // A window's closing diff can only report paths the tree walk observes.
+    // A path behind a symlinked ancestor (or a symlinked leaf) is invisible
+    // to it: recording one as another window's baseline would fabricate a
+    // `delete` for a live file, and suppressing an in-window write to one
+    // would swallow the change entirely. Keep such paths out of every
+    // window's baseline and deliver them directly instead.
+    const rootForScope = (scope: MemoryChangedScope): string =>
+      scope === 'user'
+        ? getUserAutoMemoryRoot()
+        : scope === 'project'
+          ? getAutoMemoryRoot(projectRoot)
+          : getTeamAutoMemoryRoot(projectRoot);
+    const invisible = new Set<string>();
+    for (const change of changes) {
+      for (const candidate of change.paths) {
+        if (!(await isTreeVisible(rootForScope(change.scope), candidate))) {
+          invisible.add(candidate);
+        }
+      }
+    }
+    if (invisible.size > 0) {
+      baselinePaths = emittedPaths.filter((p) => !invisible.has(p));
+      if (inWindow) {
+        for (const change of changes) {
+          const kept = change.paths
+            .map((p, i) => (invisible.has(p) ? i : -1))
+            .filter((i) => i >= 0);
+          if (kept.length === 0) continue;
+          deliverable.push({
+            ...change,
+            paths: kept.map((i) => change.paths[i]!),
+            relativePaths: kept.map((i) => change.relativePaths[i]!),
+          });
+        }
+      }
+    }
+  }
   // Record even when delivery is suppressed inside a coalesced window, so a
   // sibling window does not re-report the write under its own attribution.
-  await rememberOutsideEmit(emittedPaths);
-  if (suppressDelivery.getStore()) return;
-  await emit(projectRoot, changes, deliveryId);
+  await rememberOutsideEmit(baselinePaths);
+  if (inWindow) {
+    if (deliverable.length > 0) {
+      await emit(projectRoot, deliverable, deliveryId, signal);
+    }
+    return;
+  }
+  await emit(projectRoot, deliverable, deliveryId, signal);
 }
 
 /**
  * Notify listeners after managed auto-memory is enabled or disabled.
  * The setting write has already landed. `paths` is empty.
  */
-const MEMORY_SCOPES: readonly MemoryChangedScope[] = [
-  'user',
-  'project',
-  'team',
-];
 const MEMORY_OPERATIONS: readonly MemoryChangedOperation[] = [
   'create',
   'update',
@@ -288,7 +374,7 @@ const MEMORY_OPERATIONS: readonly MemoryChangedOperation[] = [
 function isMemoryScope(value: unknown): value is MemoryChangedScope {
   return (
     typeof value === 'string' &&
-    (MEMORY_SCOPES as readonly string[]).includes(value)
+    (SCOPE_ORDER as readonly string[]).includes(value)
   );
 }
 
@@ -341,6 +427,7 @@ export async function notifyMemoryEnabledChange(
   workspace: string,
   enabled: boolean,
   deliveryId?: symbol,
+  signal?: AbortSignal,
 ): Promise<void> {
   const change: MemoryEnabledChange = {
     paths: [],
@@ -348,12 +435,17 @@ export async function notifyMemoryEnabledChange(
     workspace: path.resolve(workspace),
     enabled,
   };
-  await emit(workspace, [change], deliveryId);
+  await emit(workspace, [change], deliveryId, signal);
 }
 
 interface MemoryTreeSnapshot {
   documents: Map<string, string>;
-  /** Paths the walk saw but could not read: 'unknown', never a difference. */
+  /**
+   * Paths the walk saw but could not read: 'unknown'. Unknown is never a
+   * content difference — a before-side unknown relabels a would-be 'create'
+   * as 'update' (the document already existed) and joins the delete
+   * candidates; an after-side unknown blocks a 'delete'.
+   */
   unreadable: Set<string>;
   /**
    * False when a directory could not be enumerated. 'Could not enumerate' is
@@ -379,7 +471,10 @@ async function readMemoryTree(
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       await readMemoryTree(full, snapshot);
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() && isMemoryDocumentFilename(entry.name)) {
+      // Only memory documents enter the diff: an atomicWriteFile
+      // `*.md.<hex>.tmp` sibling, an editor swap file, or a `.DS_Store` in a
+      // walked root must never be announced as a create/update/delete.
       // One unreadable or vanished file must not reject the whole snapshot
       // (the same tolerance scan.ts applies): record it as unknown instead.
       const content = await fs.readFile(full, 'utf-8').catch(() => undefined);
@@ -420,6 +515,7 @@ export async function withCoalescedMemoryChanges<T>(
   projectRoot: string,
   deliveryId: symbol | undefined,
   fn: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const outside = new Map<string, string | null>();
   outsideWindowEmits.add(outside);
@@ -447,13 +543,19 @@ export async function withCoalescedMemoryChanges<T>(
         for (const [filePath, content] of after.documents) {
           const reported = baseline(filePath);
           if (reported === undefined) {
-            created.push(filePath);
+            // Unknown-before is not absent-before: a document the opening
+            // walk saw but could not read already existed, so a now-readable
+            // one is an update, not a create.
+            (before.unreadable.has(filePath) ? updated : created).push(
+              filePath,
+            );
           } else if (reported !== content) {
             updated.push(filePath);
           }
         }
         for (const filePath of new Set([
           ...before.documents.keys(),
+          ...before.unreadable,
           ...outside.keys(),
         ])) {
           // Present-or-unknown is not a delete: a path that was only
@@ -461,7 +563,12 @@ export async function withCoalescedMemoryChanges<T>(
           if (after.documents.has(filePath) || after.unreadable.has(filePath)) {
             continue;
           }
-          if (baseline(filePath) !== undefined) {
+          // A before-side unreadable entry has no content baseline, but the
+          // opening walk SAW it on disk — present then, gone now is a delete.
+          if (
+            baseline(filePath) !== undefined ||
+            before.unreadable.has(filePath)
+          ) {
             deleted.push(filePath);
           }
         }
@@ -470,18 +577,21 @@ export async function withCoalescedMemoryChanges<T>(
           projectRoot,
           'delete',
           deliveryId,
+          signal,
         );
         await notifyMemoryFileChange(
           updated,
           projectRoot,
           'update',
           deliveryId,
+          signal,
         );
         await notifyMemoryFileChange(
           created,
           projectRoot,
           'create',
           deliveryId,
+          signal,
         );
       }
     }

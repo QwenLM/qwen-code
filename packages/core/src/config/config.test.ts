@@ -114,6 +114,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import {
   notifyMemoryEnabledChange,
+  notifyMemoryFileChange,
   registerMemoryChangedListener,
   type MemoryChangedNotice,
 } from '../memory/memory-file-change.js';
@@ -1313,6 +1314,36 @@ describe('Server Config (config.ts)', () => {
       } finally {
         unregister();
       }
+    });
+
+    it('forwards the caller abort signal to the MemoryChanged hook firing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hookSystem = config.getHookSystem();
+      expect(hookSystem).toBeDefined();
+      vi.mocked(hookSystem!.hasHooksForEvent).mockReturnValue(true);
+      const fireMemoryChangedEvent = vi.fn().mockResolvedValue({});
+      (hookSystem as unknown as Record<string, unknown>)[
+        'fireMemoryChangedEvent'
+      ] = fireMemoryChangedEvent;
+
+      const signal = AbortSignal.abort();
+      await notifyMemoryFileChange(
+        path.join(config.getProjectRoot(), '.qwen', 'memory', 'MEMORY.md'),
+        config.getProjectRoot(),
+        'update',
+        config.getMemoryHookDeliveryId(),
+        signal,
+      );
+
+      // The caller's signal must reach the hook firing unchanged: an aborted
+      // caller (a finished /forget, a torn-down session) must not run the
+      // hook to completion — executeHook returns 'cancelled' for an
+      // already-aborted signal (covered in hookRunner tests).
+      expect(fireMemoryChangedEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ scope: 'project', operation: 'update' }),
+        signal,
+      );
     });
   });
 

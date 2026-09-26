@@ -3916,12 +3916,12 @@ export class Config {
       this.unregisterMemoryChanged?.();
       const memoryHookRegistration = registerMemoryChangedListener(
         this.getProjectRoot(),
-        async (change) => {
+        async (change, signal) => {
           const hookSystem = this.hookSystem;
           if (!hookSystem?.hasHooksForEvent('MemoryChanged')) {
             return;
           }
-          await hookSystem.fireMemoryChangedEvent(change);
+          await hookSystem.fireMemoryChangedEvent(change, signal);
         },
       );
       this.memoryHookDeliveryId = memoryHookRegistration.id;
@@ -4943,7 +4943,7 @@ export class Config {
         try {
           teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
             teamProjectRoot,
-            { deliveryId: this.getMemoryHookDeliveryId() },
+            { deliveryId: this.getMemoryHookDeliveryId(), signal },
           );
         } catch (err) {
           if (err instanceof TeamMemoryRootSecurityError) {
@@ -4978,7 +4978,7 @@ export class Config {
           if (syncResult?.pulled) {
             teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
               teamProjectRoot,
-              { deliveryId: this.getMemoryHookDeliveryId() },
+              { deliveryId: this.getMemoryHookDeliveryId(), signal },
             ).catch(() => teamAutoMemoryIndex);
           }
         }

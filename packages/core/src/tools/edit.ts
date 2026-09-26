@@ -749,6 +749,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config.getProjectRoot(),
           editData.isNewFile ? 'create' : 'update',
           this.config.getMemoryHookDeliveryId?.(),
+          signal,
         );
       } catch {
         // The edit already landed. Notification must not fail the tool.

@@ -360,3 +360,15 @@ export function isAnyAutoMemPath(
     isAutoMemPath(absolutePath, projectRoot) || isUserAutoMemPath(absolutePath)
   );
 }
+
+/**
+ * True for the files the memory layer treats as documents: Markdown files,
+ * including the MEMORY.md index itself. This excludes atomic-write temp
+ * siblings (`MEMORY.md.<hex>.tmp`), editor swap files, `.DS_Store`, and any
+ * other non-document that can appear inside a memory root. The topic scanner
+ * (scan.ts) additionally excludes the index; the change-diff walk
+ * (memory-file-change.ts) must keep it, so both share only this suffix test.
+ */
+export function isMemoryDocumentFilename(name: string): boolean {
+  return name.endsWith('.md');
+}

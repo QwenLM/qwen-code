@@ -667,6 +667,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           this.config.getProjectRoot(),
           operation === FileOperation.CREATE ? 'create' : 'update',
           this.config.getMemoryHookDeliveryId?.(),
+          abortSignal,
         );
       } catch {
         // The write already landed. Notification must not fail the tool.

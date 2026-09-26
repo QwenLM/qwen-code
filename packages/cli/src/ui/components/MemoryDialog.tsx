@@ -322,18 +322,29 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
 
   const handleToggleAutoMemory = useCallback(() => {
     const newValue = !autoMemoryOn;
+    // setValue recomputes the merged view synchronously, so read the
+    // effective value back from it: a System-scope override (or an untrusted
+    // workspace, whose settings are stripped from the merge) can mask a
+    // Workspace-scope write, and announcing the requested value would
+    // announce a change that did not take effect.
+    const previousEffective =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
     loadedSettings.setValue(
       SettingScope.Workspace,
       'memory.enableManagedAutoMemory',
       newValue,
     );
-    setAutoMemoryOn(newValue);
-    void notifyMemoryEnabledChange(
-      config.getProjectRoot(),
-      newValue,
-      config.getMemoryHookDeliveryId(),
-    );
-  }, [autoMemoryOn, config, loadedSettings]);
+    const effectiveValue =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    setAutoMemoryOn(!bareMode && !safeMode && effectiveValue);
+    if (effectiveValue !== previousEffective) {
+      void notifyMemoryEnabledChange(
+        config.getProjectRoot(),
+        effectiveValue,
+        config.getMemoryHookDeliveryId(),
+      );
+    }
+  }, [autoMemoryOn, bareMode, safeMode, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {
     const newValue = !autoDreamOn;

@@ -192,7 +192,7 @@ export async function refreshMemoryAfterManagedWrite(
 
     await rebuildWrittenMemoryIndexes(candidates, projectRoot, {
       ...options,
-      deliveryId: config.getMemoryHookDeliveryId?.(),
+      deliveryId: options.deliveryId ?? config.getMemoryHookDeliveryId?.(),
     });
 
     await refreshMemoryInstruction(config, options);

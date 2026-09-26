@@ -99,6 +99,7 @@ export async function runManagedAutoMemoryDream(
       }
       return result;
     },
+    abortSignal,
   );
   // Scheduler-gating metadata (`lastDreamAt`, `lastDreamSessionId`,
   // `lastDreamTouchedTopics`, `lastDreamStatus`) is intentionally NOT

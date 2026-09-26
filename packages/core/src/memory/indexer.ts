@@ -297,7 +297,7 @@ export class TeamMemoryRootSecurityError extends Error {
  */
 export async function rebuildTeamAutoMemoryIndex(
   projectRoot: string,
-  options: { deliveryId?: symbol } = {},
+  options: { deliveryId?: symbol; signal?: AbortSignal } = {},
 ): Promise<string | null> {
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   if (!existsSync(teamRoot)) {
@@ -352,6 +352,7 @@ export async function rebuildTeamAutoMemoryIndex(
   await writeMemoryIndex(projectRoot, indexPath, content, {
     noFollow: true,
     deliveryId: options.deliveryId,
+    signal: options.signal,
   });
   return content;
 }
@@ -360,7 +361,11 @@ async function writeMemoryIndex(
   projectRoot: string,
   indexPath: string,
   content: string,
-  options: { noFollow?: boolean; deliveryId?: symbol } = {},
+  options: {
+    noFollow?: boolean;
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<void> {
   // Skip a byte-identical rewrite: regenerating MEMORY.md every run would
   // churn its mtime and, for the committed team index, produce no-op commits
@@ -382,7 +387,12 @@ async function writeMemoryIndex(
   await notifyMemoryFileChange(
     indexPath,
     projectRoot,
-    existing === undefined ? 'create' : 'update',
+    // The scaffold plants an EMPTY index (createDefaultAutoMemoryIndex)
+    // without notifying, so '' is 'absent' for the label: the first notice a
+    // consumer receives for the index must not be an update for a document
+    // it was never told was created.
+    existing === undefined || existing === '' ? 'create' : 'update',
     options.deliveryId,
+    options.signal,
   );
 }

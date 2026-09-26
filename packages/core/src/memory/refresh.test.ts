@@ -318,6 +318,36 @@ describe('managed memory refresh helper', () => {
     );
   });
 
+  it('honors a caller-supplied delivery id for the rebuild notices', async () => {
+    const callerId = Symbol('caller-registration');
+    const config = createConfig(projectRoot);
+    (config as unknown as Record<string, unknown>)['getMemoryHookDeliveryId'] =
+      vi.fn().mockReturnValue(Symbol('config-registration'));
+
+    await expect(
+      refreshMemoryAfterManagedWrite(
+        config,
+        [
+          {
+            toolName: 'write_file',
+            args: {
+              file_path: path.join(getAutoMemoryRoot(projectRoot), 'x.md'),
+            },
+            status: 'success',
+          },
+        ],
+        { deliveryId: callerId },
+      ),
+    ).resolves.toBe(true);
+
+    // The exported option must not be a dead switch: a caller-supplied id
+    // wins over the ambient config's.
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+      projectRoot,
+      callerId,
+    );
+  });
+
   it('keeps refreshing when index rebuild fails', async () => {
     vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
       new Error('index failed'),

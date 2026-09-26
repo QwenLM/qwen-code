@@ -13,6 +13,7 @@ import {
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
+  isMemoryDocumentFilename,
 } from './paths.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
@@ -92,7 +93,7 @@ async function listMarkdownFiles(root: string): Promise<string[]> {
         .filter(
           (entry): entry is string =>
             typeof entry === 'string' &&
-            entry.endsWith('.md') &&
+            isMemoryDocumentFilename(entry) &&
             path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
         )
         // Normalize to forward slashes so relative paths are valid URL segments
