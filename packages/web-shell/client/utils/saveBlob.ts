@@ -42,11 +42,12 @@ export async function saveBlob(
       const link = document.createElement('a');
       link.href = url;
       link.download = filename;
+      link.addEventListener('click', (event) => event.stopPropagation());
       document.body.appendChild(link);
       link.click();
       link.remove();
     } finally {
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
     return;
   }
@@ -156,7 +157,7 @@ export async function saveBlob(
           v: 1,
           id,
           op: 'begin',
-          name: filename.slice(0, 255),
+          name: Array.from(filename).slice(0, 255).join(''),
           mime: blob.type.slice(0, 127),
           size: blob.size,
         }),
