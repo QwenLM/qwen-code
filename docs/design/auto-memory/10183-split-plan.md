@@ -17,7 +17,7 @@ capabilities and their correctness dependencies.
    legacy parser, recall, forget and index candidate universe stay intact.
    The engine is callable and independently testable; model registration and
    default activation belong to PR 3. No session-token saving is claimed.
-2. **New PR — migration and writer compatibility.** Body-preserving atomic
+2. **#12757 — migration and writer compatibility.** Body-preserving atomic
    metadata migration, corpus readiness, writer vocabulary, and necessary
    Remember/Extraction/Dream adapters. Depends on PR 1. Preserve legacy
    recall until activation. Background scheduling and protocol switching
