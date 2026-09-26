@@ -9,6 +9,8 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Toggle the Superfast decision gate (local System One model)':
+    '切換 Superfast 決策閘（本地 System One 模型）',
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',

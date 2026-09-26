@@ -295,6 +295,16 @@ export function setResolvedProxyUrlForRuntimeFetch(
 }
 
 /**
+ * Read back the explicit proxy URL recorded by
+ * {@link setResolvedProxyUrlForRuntimeFetch}. Paths without a Config reference
+ * use this to tell whether a proxy is in play before deciding to bypass it for a
+ * local (loopback) endpoint.
+ */
+export function getResolvedProxyUrlForRuntimeFetch(): string | undefined {
+  return resolvedProxyUrlForRuntimeFetch;
+}
+
+/**
  * Cached dispatcher for the MCP streamable HTTP fetch (#7147/#7195): the MCP
  * transport pins undici's own fetch with a dedicated dispatcher (Node's
  * bundled fetch stalls same-origin POSTs behind the transport's standalone

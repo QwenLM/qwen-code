@@ -3542,6 +3542,68 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  superfast: {
+    type: 'object',
+    label: 'Superfast (Decision Gate)',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Optional System One decision gate. When enabled, a small local decision ' +
+      'model (Von) classifies each turn in a single forward pass. This release ' +
+      'runs in shadow mode only: it records the routing recommendation but does ' +
+      'not change how the turn is handled, so it never skips work yet. Acting on ' +
+      'the recommendation is a later phase. Off by default; fails open to normal ' +
+      'behaviour whenever the model is unsure or unavailable. Run `von-install` ' +
+      'to set up the backend, then `/superfast on` to enable (restart required).',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Superfast',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Master switch for the Superfast decision gate. Off by default. Changing it requires a restart to take effect.',
+        showInDialog: false,
+      },
+      endpoint: {
+        type: 'string',
+        label: 'Decision Endpoint',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Full URL of the Jev-compatible /v1/systemone endpoint (default ' +
+          'http://localhost:8000/v1/systemone).',
+        showInDialog: false,
+      },
+      model: {
+        type: 'string',
+        label: 'Decision Model',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description: 'Model id sent to the decision endpoint (e.g. von-1.2.0).',
+        showInDialog: false,
+      },
+      timeoutMs: {
+        type: 'integer',
+        label: 'Decision Timeout (ms)',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 1,
+        maximum: 2147483647,
+        description:
+          'Hard timeout for a single decision call. On timeout the gate fails ' +
+          'open. Default 150ms. Must be an integer between 1 and 2147483647.',
+        showInDialog: false,
+      },
+    },
+  },
+
   advanced: {
     type: 'object',
     label: 'Advanced',
