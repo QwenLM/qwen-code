@@ -4,7 +4,7 @@
 
 ## Problem and current state
 
-The Web Shell already captures microphone audio with `getUserMedia`, converts it to PCM and sends it through its authenticated voice WebSocket. The native shell currently denies WebView permission requests and declares no recording permission. This slice enables that existing path; it does not implement another recorder or transcription service. It builds on the isolated connection-profile development shell.
+The Web Shell already captures microphone audio with `getUserMedia`, converts it to PCM and sends it through its authenticated voice WebSocket. The native shell currently denies WebView permission requests and declares no recording permission. Qwen Live also uses browser `getUserMedia` in `live/useLiveBrowserHost.ts` for its `/live/web` audio path. This slice enables both existing capture paths; it does not implement another recorder or transcription service. It builds on the isolated connection-profile development shell.
 
 ## Design
 
@@ -14,7 +14,7 @@ A native dialog names the connection origin and asks the user to enable its micr
 
 One pending request owns the consent dialog and any outstanding system result. Navigation, connection failure, backgrounding, switching profiles and destruction cancel the pending request. A cancelled system request retains its result slot until the OS responds; a new document cannot adopt the old result. Recreation persists only that in-flight flag, not the WebView request. WebView cancellation hides the dialog without responding again to its cancelled request.
 
-WebView's permission grant can last for the lifetime of the view, and its native API does not report reliably when individual audio tracks stop. Therefore a connection which has been granted microphone access is closed when the Activity stops. The native UI explains this before consent and offers a manual reconnection afterward. This also applies if dictation already ended or another fullscreen Activity is opened. Unsent in-page state may be lost. Text-only connections are unaffected. This deliberate development-client tradeoff guarantees that background capture is not enabled by this slice; no background recorder or foreground service is introduced. A future coordinated H5/native capture lifecycle may improve this behavior.
+WebView's permission grant can last for the lifetime of the view, and its native API does not report reliably when individual audio tracks stop. Therefore a connection which has been granted microphone access is closed when the Activity stops. The native UI explains this before consent and offers a manual reconnection afterward. This applies to dictation and Qwen Live browser audio, including an active Live call, even if dictation already ended or another fullscreen Activity is opened. Returning does not automatically resume a Live call. Unsent in-page state may be lost. Text-only connections are unaffected. This deliberate development-client tradeoff guarantees that background capture is not enabled by this slice; no background recorder or foreground service is introduced. A future coordinated H5/native capture lifecycle may improve this behavior.
 
 System document Open/Save needs a preflight because launching a picker would stop the Activity and destroy the page before it receives the result. For a microphone-authorized connection, the Activity intercepts `ACTION_OPEN_DOCUMENT` and `ACTION_CREATE_DOCUMENT` before launch and asynchronously returns the normal cancelled result to its launcher. It then offers **Keep editing** (retain the current page) or **Reconnect** (explicitly discard transient page state and stop microphone access). The user retries the file operation after reconnecting. No document destination is created by a blocked request. The guard lives in the microphone slice's Activity so the independent picker and download slices use it without acquiring each other's implementations. It does not resume a cancelled file operation or claim seamless microphone/file interoperability.
 
@@ -33,12 +33,13 @@ This is permission integration for a development client, not production mobile r
 - Check explicit native denial, OS denial and grant, already-granted OS permission, wrong origin, unknown/mixed resources and concurrent requests.
 - Verify cancelled or restored OS results cannot authorize a replacement request; navigation and destruction invalidate pending consent.
 - On a supported emulator, activate actual `getUserMedia` from a synthetic local page, accept/deny the native and OS prompts and check a live audio track only after consent. No host microphone input or actual speech is required.
+- Exercise dictation and Qwen Live browser audio separately against a configured daemon; grant/deny consent, background an active capture and verify returning requires explicit reconnect without automatically resuming a Live call. These are daemon/device acceptance checks, not established by permission-controller tests.
 - Background a microphone-enabled connection and verify its WebView is destroyed and manual reconnect UI appears. Verify a text-only connection survives the same transition. Record device/provider versions and actual gaps rather than claiming physical-device or daemon verification.
 - In a combined picker/download build, try Open and Save after native microphone consent. Verify the system chooser never opens, the request is cancelled exactly once, Keep editing retains the same page/draft, and a second request is not stuck busy. Reconnect explicitly, retry Open/Save and verify actual bytes. No empty destination should be created by the blocked Save. Background an actively recording page and confirm the existing teardown remains effective.
 
 ## Open follow-ups
 
-Maintainer review should confirm the explicit close-on-background tradeoff before merging. Improve voice/page-state preservation in a separately designed follow-up, and test real HTTPS daemons and physical devices before an official mobile release. Server-side device credentials remain a maintainer-owned prerequisite.
+Maintainer review should confirm the explicit close-on-background tradeoff before merging. Improve voice/page-state preservation in a separately designed follow-up, and test real HTTPS daemons and physical devices before an official mobile release. Per-device revocable daemon credentials remain a maintainer-owned prerequisite.
 
 ## References
 
