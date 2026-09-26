@@ -376,7 +376,7 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
     },
     { key: 'responses', label: t('Responses'), value: 'responses' },
   ];
-  const [cursor, setCursor] = useState(
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor(
     flow.state.wireApi === 'responses' ? 1 : 0,
   );
   useKeyboard((key) => {
@@ -384,7 +384,7 @@ function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
     if (o.name === 'up') setCursor(0);
     else if (o.name === 'down') setCursor(1);
     else if (o.name === 'return')
-      flow.selectWireApi(items[cursor]!.value as ModelWireApi);
+      flow.selectWireApi(items[cursorRef.current]!.value as ModelWireApi);
   });
   return (
     <>

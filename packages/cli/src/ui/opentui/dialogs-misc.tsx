@@ -77,6 +77,12 @@ export function Shell({
   borderStyle?: 'rounded' | 'single';
 }) {
   return (
+    // ink's dialogs open flush with the region's top row (no top margin) and
+    // shrink when the region is shorter than the content. A fixed,
+    // unshrinkable box is not pressed down: it keeps its full height and
+    // paints past the region's bottom edge rather than being cut by it, so a
+    // taller region budget is not what removes the overpainted row (Decision
+    // 67's rule applied to this frame too).
     <box
       flexDirection="column"
       borderStyle={borderStyle}
@@ -85,8 +91,7 @@ export function Shell({
       paddingRight={1}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       <text fg={C.text} attributes={1}>
         {title}

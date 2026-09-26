@@ -174,9 +174,36 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 });
 
 /**
+ * The first `maxWidth` display columns of `text`, with no ellipsis.
+ * Grapheme- and width-aware (via `getCachedStringWidth`) so CJK text — two
+ * cells per character — is bounded correctly, and a double-width cell that
+ * would straddle the budget is dropped whole. For the case where the clipped
+ * text is followed by something that owns the next column.
+ */
+export function clipToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return result;
+}
+
+/**
  * Truncate text to a display width (terminal cells), appending an ellipsis
- * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
- * text — two cells per character — is bounded correctly. Returns an empty
+ * when clipped. The clip is `clipToWidth` against the budget the ellipsis
+ * leaves, so the boundary rule lives in exactly one place. Returns an empty
  * string when even the ellipsis would overflow the budget.
  */
 export function truncateToWidth(text: string, maxWidth: number): string {
@@ -188,17 +215,7 @@ export function truncateToWidth(text: string, maxWidth: number): string {
   }
   const ellipsis = '…';
   const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
-  let width = 0;
-  let result = '';
-  for (const { segment } of graphemeSegmenter.segment(text)) {
-    const segmentWidth = getCachedStringWidth(segment);
-    if (width + segmentWidth > budget) {
-      break;
-    }
-    result += segment;
-    width += segmentWidth;
-  }
-  return `${result}${ellipsis}`;
+  return `${clipToWidth(text, budget)}${ellipsis}`;
 }
 
 export interface VisualHeightSlice {

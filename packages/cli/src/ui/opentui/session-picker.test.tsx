@@ -45,9 +45,26 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // Layout props are what the structural test reads, and the DOM nodes
+        // this mock maps to would drop them: keep the primitives as an
+        // attribute.
+        const captured = JSON.stringify(
+          Object.fromEntries(
+            Object.entries(config ?? {}).filter(
+              ([k, v]) =>
+                k !== 'children' &&
+                (typeof v === 'string' ||
+                  typeof v === 'number' ||
+                  typeof v === 'boolean'),
+            ),
+          ),
+        );
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+          },
           children,
         );
       }
@@ -100,6 +117,7 @@ vi.mock('./key-map.js', () => ({
 }));
 
 import { OpenTuiSessionPicker } from './session-picker.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 
 function press(key: RawKey) {
   if (mocks.state.keyboardHandlers.length === 0) {
@@ -153,7 +171,9 @@ function renderPicker(
   const onSelect = vi.fn();
   const onCancel = vi.fn();
   const onConfirmMulti = vi.fn();
-  render(
+  // Built fresh on every call so a rerender is a real re-render, not the same
+  // element object handed back.
+  const build = () => (
     <OpenTuiSessionPicker
       // A null service renders ink's loading notice, so the list needs one.
       sessionService={{ listSessions: vi.fn() } as never}
@@ -162,9 +182,16 @@ function renderPicker(
       onCancel={onCancel}
       onConfirmMulti={onConfirmMulti}
       {...props}
-    />,
+    />
   );
-  return { onSelect, onCancel, onConfirmMulti };
+  const view = render(build());
+  return {
+    onSelect,
+    onCancel,
+    onConfirmMulti,
+    container: view.container,
+    rerender: () => view.rerender(build()),
+  };
 }
 
 /** The marker/checkbox line and the dim metadata line of one session row. */
@@ -624,5 +651,129 @@ describe('OpenTuiSessionPicker under one stdin read', () => {
     burst([SPACE, DOWN, RETURN]);
 
     expect(onSelect).toHaveBeenCalledWith('id-01');
+  });
+});
+
+describe('OpenTuiSessionPicker inside the popup region', () => {
+  const layoutOf = (node: Element | null): Record<string, unknown> =>
+    JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<string, unknown>;
+
+  it('caps the box at the region width on wide terminals', () => {
+    // The popup region is dialogAreaWidth wide and clips what overruns it.
+    // Sizing the box from the raw terminal width instead (width - 4) asks for
+    // 116 columns on a 120-column terminal, and the region's clip cuts the
+    // right border and the tail of every row — invisible to the parity matrix,
+    // whose widest arm is the 100 columns both formulas agree on.
+    mocks.state.width = 120;
+    const { container } = renderPicker([session(1), session(2)]);
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('lets the region press the box down instead of pushing the composer out', () => {
+    // ink asks for `height - 1` too and lets its fixed-height popup wrapper
+    // compress the box, because ink's Box defaults to flexShrink 1. @opentui
+    // resolves flexShrink to 0 whenever a size is set explicitly, so the shrink
+    // has to be asked for: without it a 40-row terminal drew the 39-row box
+    // from above the region and squeezed the transcript into one garbled row.
+    const { container } = renderPicker([session(1), session(2)]);
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+    // ink's picker has no top margin; one row of it would be absorbed out of
+    // the border box, rendering the list one row lower than ink's.
+    expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('holds the preview to the region too, with no top margin', async () => {
+    // Same root cause as the list: an explicit size makes @opentui resolve
+    // flexShrink to 0. ink's `SessionPreview` has no margin and no size of its
+    // own, so its title starts on the region's first row.
+    const { container } = renderPicker([session(1), session(2)], {
+      enablePreview: true,
+      sessionService: serviceWith(vi.fn().mockResolvedValue(loadedSession([]))),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+    expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('rebuilds the box on a terminal resize so the shrink survives it', () => {
+    // The renderer's width/height setters clear an explicit flexShrink back to
+    // 0 and its reconciler only re-applies props whose value changed, so after
+    // a resize the shrink is lost unless the host node is rebuilt — which is
+    // what folding the size into the branch key forces. A reused node here
+    // means the picker goes back to holding its full height inside a shorter
+    // region, squeezing the transcript beside it into one garbled row, until
+    // it is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.height = 37;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      height: 36,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('rebuilds the box on a width-only resize, so the shrink survives it too', () => {
+    // The renderer's width setter clears an explicit flexShrink exactly the
+    // way its height setter does, so a width-only resize needs the remount
+    // just as much — and the folded key only turns over through boxWidth
+    // there. A reused node would keep its old width and its cleared shrink
+    // inside the region until the picker is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('rebuilds the preview box on a width-only resize too', async () => {
+    // The preview branch folds the same two values into its own key for the
+    // same reason; a width-only resize has to rebuild it as well.
+    const { container, rerender } = renderPicker([session(1), session(2)], {
+      enablePreview: true,
+      sessionService: serviceWith(vi.fn().mockResolvedValue(loadedSession([]))),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      flexShrink: 1,
+    });
   });
 });

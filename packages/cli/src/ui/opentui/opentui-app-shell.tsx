@@ -101,6 +101,10 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../utils/layoutUtils.js';
 
 export interface OpenTuiAppProps {
   config: Config;
@@ -166,7 +170,6 @@ export interface OpenTuiAppProps {
    * transcript region.
    */
   exitHint?: string | null;
-  availableTerminalHeight?: number;
 
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
@@ -271,6 +274,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  // ink renders every dialog inside a region of exactly this height, clipped,
+  // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
+  // ink's default state: its show-more-lines key lifts `constrainHeight`, which
+  // drops both the height and the clip, while this port keeps the region fixed
+  // in every state (recorded as a divergence in the parity design doc). The
+  // clip reaches content that shrinks with the region; a child that holds its
+  // own size paints past the bottom edge instead of being cut. A
+  // content-height region bottom-anchors the popup instead: the transcript
+  // keeps the free rows above it, so the box sits lower than ink's and a
+  // dialog ink stretches to fill the viewport stays short.
+  const dialogRegionHeight = getDialogMaxHeight(
+    terminalHeight,
+    STATIC_EXTRA_HEIGHT,
+  );
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
     [],
@@ -1030,8 +1047,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             // the previous branch's layout stuck on the node.
             <box
               key="dialog-area"
+              flexDirection="column"
               marginLeft={2}
               width={dialogAreaWidth(terminalWidth)}
+              height={dialogRegionHeight}
+              overflow="hidden"
             >
               <OpenTuiDialogMount
                 key={dialog.dialog}
@@ -1045,7 +1065,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}
                 onApprovalModeChanged={adoptApprovalMode}
-                availableTerminalHeight={props.availableTerminalHeight}
+                availableTerminalHeight={dialogRegionHeight}
               />
             </box>
           ) : (

@@ -45,6 +45,7 @@ import {
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { resumeEventsFromSession } from './resume-session.js';
 import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
@@ -127,7 +128,11 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   } = props;
 
   const { width, height } = useTerminalDimensions();
-  const boxWidth = Math.max(0, width - 4);
+  // The popup region is dialogAreaWidth wide (capped at 100 columns) and
+  // clips what overruns it, so the box must size from the same cap — the raw
+  // terminal width would lose the right border and every row's tail on a
+  // terminal wider than 104 columns.
+  const boxWidth = Math.max(0, dialogAreaWidth(width));
   const maxVisibleItems = Math.max(
     1,
     Math.floor((height - RESERVED_LINES) / ITEM_HEIGHT),
@@ -521,19 +526,18 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   }${t('↑↓ to navigate · Type to search · Esc to cancel')}`;
 
   // ink returns a separate `SessionPreview` tree here rather than swapping the
-  // body of the list: the preview has no border and its transcript spans the
-  // full inner width. All picker state lives above, so the list comes back with
-  // the cursor, the checks and the query untouched.
+  // body of the list: the preview has no border, no top margin, and its
+  // transcript spans the full inner width. All picker state lives above, so the
+  // list comes back with the cursor, the checks and the query untouched.
   if (previewSessionId !== null) {
     return (
       <box
-        key="preview"
+        key={`preview-${boxWidth}-${height}`}
         flexDirection="column"
         width={boxWidth}
         height={Math.max(0, height - 1)}
         overflow="hidden"
-        marginTop={1}
-        flexShrink={0}
+        flexShrink={1}
       >
         <box paddingLeft={1} paddingRight={1}>
           <text fg={C.text} attributes={1}>
@@ -576,16 +580,24 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   const headerTitle = title ?? t('Resume Session');
 
   return (
+    // ink asks for `height - 1` here too and lets the popup region's fixed
+    // height press the box down. @opentui resolves flexShrink to 0 whenever a
+    // size is set explicitly (ink's Box always defaults to 1), so the shrink
+    // has to be asked for: refusing it pushes the composer out of the viewport
+    // instead of clipping the list. The size is folded into the key because
+    // the renderer's width/height setters clear an explicit flexShrink back
+    // to 0 and its reconciler never re-applies an unchanged prop — a resize
+    // would otherwise disable the shrink until the picker was reopened. The
+    // remount loses nothing: all picker state lives in the hooks above.
     <box
-      key="list"
+      key={`list-${boxWidth}-${height}`}
       flexDirection="column"
       borderStyle="rounded"
       borderColor={C.borderDefault}
       width={boxWidth}
       height={Math.max(0, height - 1)}
       overflow="hidden"
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         <text fg={C.text} attributes={1}>

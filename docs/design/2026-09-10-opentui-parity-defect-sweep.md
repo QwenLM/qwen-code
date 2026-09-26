@@ -2158,7 +2158,7 @@ keys are dropped.
 
 The machine leg was re-run at this head, widened by five scenarios first: the stamp
 with the collapsed card, the `@` categories, the away recap, the editor dialog, and
-the session picker's Space preview. The matrix now holds forty-three scenarios and
+the session picker's Space preview. The matrix then held forty-three scenarios and
 eighty-six runs — thirty-eight at 100×40, the three transcript arms at 100×30, the
 narrow boot at 60×24 and the chip row at 58×40 — and not one run errored. Nine ended
 on an idle timeout instead of a settled frame, and all nine are legs that have always
@@ -2172,12 +2172,19 @@ different columns, and nearly every frame that shows the notice shows it differe
 Dropping the notice and the path fragments it wraps into from both legs leaves
 seventy-three identical and fifty-eight divergent, two of them the sampled checkpoints
 — the spinner's phrase rotation and the mid-stream indicator. Counting those two
-apart, the rest carry 258 rows only ink draws and 288 only this port draws.
+apart, the rest carry 258 rows only ink draws and 288 only this port draws. The
+seventy-three/fifty-eight split those counts were taken over is the one Coverage
+boundary withdraws: it does not reproduce from these frames, and the row counts
+fall with it. The census below counts
+from it, and stands as that pass's own reading rather than as a live tally; the
+tally above is untouched by the withdrawal — removing exactly those rows leaves
+it unchanged — and is superseded instead, with every per-pass re-run paragraph
+above, by the widened re-run the Coverage boundary records.
 
-Those fifty-six fall in eleven families by primary cause, four of them new to this
-pass. Nine are non-deterministic and no fix can close them: the two sampled
-checkpoints, the two single-frame spinner phrases, the three stamp frames where the
-clock moved on its own, and the elapsed milliseconds on the two sub-agent frames.
+Those fifty-six fall in eleven families by primary cause, four of them new to that
+pass. Seven are non-deterministic and no fix can close them: the two single-frame
+spinner phrases, the three stamp frames where the clock moved on its own, and the
+elapsed milliseconds on the two sub-agent frames.
 Nineteen are Decision 26 — this port still shows the banner ink has scrolled off, so
 identical content sits at different rows. Ten carry a defect no earlier pass had
 shown: the notice row keeps glyphs from the banner row it displaced, because the
@@ -2208,7 +2215,7 @@ The dialog drew a title row of its own above the two columns, and its bottom hin
 
 Delete also lacked ink's bulk path. It now mounts the picker with multi-select on and reuses ink's own delete command for both the single and the batch case, so the guard against deleting the live session, the mutex and every outcome message are shared rather than re-worded. Enter commits the checked set ordered by the full list and filtered to the enabled rows, so a search that narrows the view never silently drops a check made before typing; the live session is disabled in place rather than filtered out, matching ink. Resume keeps the single-select picker, with the command's pre-filtered list when `/resume <title>` matched more than one session. The cursor and the checked set both sit behind ref mirrors, so a burst of Space and arrow keys inside one read commits the set the user actually ticked rather than the one the last render drew.
 
-The structure and the batch path are pinned by tests over the rendered rows — the two-line shape, the unknown-count case, the checkbox commit, the disabled live session, the checks hidden while multi-select is off, the window's edge markers and pagination — each shown to fail against the previous hand-drawn rows. The picker's own height is still fixed rather than content-sized; that is recorded under Follow-ups rather than changed here, since it belongs to the spacing family Decision 16 describes.
+The structure and the batch path are pinned by tests over the rendered rows — the two-line shape, the unknown-count case, the checkbox commit, the disabled live session, the checks hidden while multi-select is off, the window's edge markers and pagination — each shown to fail against the previous hand-drawn rows. The picker's own height is fixed rather than content-sized, which Decision 67 establishes is what ink does too: the box asks for `height − 1` and the popup region's fixed height presses it down.
 
 ## Decision 53 — the auth wizard's model step focuses by colour and windows to eight rows, inside ink's square frame
 
@@ -2360,17 +2367,100 @@ The dialog now keeps the highlighted mode the way ink does, takes it from the li
 
 One case walks the mode list down a row, takes the scope step to Workspace and comes back, then asserts the cursor is on the row the arrows reached. Seeding from the config instead of from the highlight fails it. The case looked green under that mutation at first, and the reason is worth keeping: Enter on the scope step without moving the scope cursor writes the scope it already had, so the key the list re-syncs on never changes, the list is never re-seeded, and the cursor sits where the arrows left it under either version. Moving the scope cursor before Enter is what makes the case discriminate. A re-sync keyed on a value has to see that value actually change, and a case that exercises it has to change it.
 
+## Decision 66 — the popup slot is ink's fixed, clipped region, and only ink's stretching dialogs fill it
+
+ink does not overlay a popup on the composer: it swaps the composer out for a region of exactly `rows − staticExtraHeight − MAIN_CONTENT_HEIGHT_RESERVATION` rows, top-aligned and clipped, and every dialog is laid out inside that. The two constants are ink's — the first is the `3` its container passes for the rows the popup cannot use, the second the `2` its layout reserves for the main content — so the budget a forty-row terminal gives is thirty-five rows. The height and the clip are ink's default state, not its only one: both are gated on its `constrainHeight`, its show-more-lines key lifts them, and its dialog manager then hands the dialogs no height at all. This port has no lift — the region stays fixed in every state — and the difference is recorded under Follow-ups.
+
+Here the slot was content-height. Two things followed, and they looked unrelated. A dialog ink stretches to fill the region stayed short and sat low, because the transcript kept the free rows above the slot and a content-height box lands after them; the approval-mode dialog drew thirteen rows where ink draws thirty-five, with its footer hint just under the list rather than at the bottom of the viewport. And a picker taller than the region pushed the composer off the screen instead of being clipped by it.
+
+The shell now computes the budget once, from the terminal height it already owns, and gives the slot that height with `overflow="hidden"` in a column. The same number goes to the dialogs as their available height, which is what ink's dialog manager hands them, so a list that sized its window to the full terminal no longer pushes its footer hint out of the clipped region. The shell's own prop for that height is gone: the shell reads the terminal size, so a caller-supplied height could only ever disagree with it, and the one call site that passed it was passing the raw height.
+
+Only three of ink's dialogs stretch to the height they are given, and only the one that sits in this slot is reachable here, so only it fills. The shared frame grew a flag for it, wired to `flexGrow`, and the approval-mode dialog sets it. The flag is on the frame, so both of that dialog's branches draw their border across the whole region; what differs is the content inside. The mode branch alone wraps its content in a second growing box, which pushes the footer hint down to row thirty-eight, while the scope branch leaves its content at its own height, so its hint stays on row thirteen with the rows below it blank. Both placements match ink's row for row on the frames. The effort and output-style dialogs do not set the flag, because ink does not stretch them either. The flag is written as a ternary rather than a conditional prop for the reason Decision 11 gives: this renderer's setters ignore the `null` its reconciler passes for a removed prop, so a prop that appears and disappears leaves its old value on the node.
+
+Two scenarios carry the evidence. A new one opens the approval-mode dialog and tabs to its scope step, because that dialog is the only one in the slot that ink stretches, so it tests both halves — the region's fixed height and the box filling it. On a hundred-column, forty-row terminal both legs draw the border from row six to row forty, the five modes on rows ten to fourteen and the hint on row thirty-eight; the one row that still differs in each of the two frames is the composer's, and it differs in the cursor artifact both legs' frames carry. The frame after Esc matches exactly. Two existing scenarios open the same dialog and give the before-and-after: the box occupied rows twenty-eight to forty, and now occupies rows six to forty, with the frames' differing rows down from twenty-seven to three. The editor dialog, which ink leaves content-height, moved from rows twenty-three to forty up to rows six to twenty-three and now matches ink too, with its unused rows blank below it.
+
+## Decision 67 — a box that asks for a size has to ask to shrink as well
+
+ink's `Box` always defaults `flexShrink` to 1. This renderer defaults it to 1 only when neither width nor height was set explicitly, and to 0 otherwise — so on a sized box, deleting a `flexShrink={0}` changes nothing at all. The first attempt at the picker fix did exactly that, and the frames came back byte-identical to the pre-fix run; reading both libraries' defaults is what found the divergence.
+
+ink's session picker asks for `height − 1` and lets the fixed-height region press it down. This port asks for the same size, which under this renderer's rule also meant refusing the press, so a thirty-nine-row box started above a thirty-five-row region and squeezed the transcript into one garbled row. Both of its branches now ask for the shrink explicitly.
+
+The list branch also loses a top margin ink's picker does not have, and the preview branch loses the one ink's preview tree does not have — ink returns that tree straight into the region, with no margin, no size and no clipping of its own, so its title starts on the region's first row. Two structural cases pin the pair: one asserts the list box asks for a thirty-nine-row height, the shrink and the clipping, the other asserts the same of the preview and that no margin survives on it. Dropping the shrink fails the first; putting either the margin or the shrink back fails the second, on its own clause each time.
+
+On the real terminal the picker scenario's eight list frames came down from eight differing rows each — twelve on the two that carry the multi-select footer — to three and six. What is left is the banner's row-count difference, the cursor artifact both legs' frames carry, and, on the two footer frames, ink's own footer wrapping: ink loses the spaces between its three segments and breaks two of them internally, which is recorded as an ink-side defect rather than matched. The two frames taken after the picker closed match ink exactly, before and after. The preview frame could not be compared at all: ink's capture there is three non-blank rows with the picker gone, and it is still three rows after a longer settle, which is the benign divergence already recorded — so this branch rests on the source reading and the structural case, not on a frame.
+
+## Decision 68 — the completion row's tail is truncated in proportion, because this renderer has no truncate wrap
+
+ink sets `wrap="truncate-end"` on a completion row's argument hint and its source badge, inside the columns the label column leaves after the label. This renderer's text has three wrap modes — none, char and word — and none of them truncates, so an over-long hint wrapped onto a second row and doubled the row's height. The truncation moves into the row's own arithmetic.
+
+The tail is split the way ink's own layout splits it, which is not the proportion one would write down first. Yoga measures each sibling against the column, so each shrinks from a basis already capped at the column's width rather than from its full text width — a 61-column hint inside a 39-column column shrinks from 39 — and the overflow divides between those two bases. Both resulting widths stay fractional, and ink's renderer floors the badge's start column, which lands the badge over the column where the hint drew its own ellipsis: with a badge present the hint survives as ceil(width − 1) plain columns and no ellipsis, and with no badge there is nothing to cover it, so the ellipsis is the hint's last column. The badge keeps ceil of its own share, ellipsis included. Handing the tail to the hint first and the badge whatever is left looks simpler and is wrong — the badge vanishes outright on exactly the rows that carry one, which are the `@` completions. Shrinking from the uncapped text width is wrong in the other direction: it hands the hint a larger share and eats two columns off the badge.
+
+What ink does here was measured rather than inferred. Its own `SuggestionsDisplay`, rendered through ink-testing-library, gave the truncated row for 23 hint, badge and column combinations, and the arithmetic above reproduces all 23. Two of those combinations are pinned as jsdom cases, one with a hint alone and one with a hint and a badge together, and both were run against the pre-fix code, where the row wraps instead.
+
+The row is on a real terminal too, because a shipped command does overflow the column. `/output-style` carries a 57-column hint, and the half-width cap sizes the column at 49 on a hundred-column terminal, so the completion scenario's dropdown has had this row in it all along: the basis caps at 49, the 12-column overflow leaves the hint a share of 37, and 37 columns of ` [Concise|Proactive|Explanatory|Lear…` is what both renderers draw. Before the fix this port wrapped it instead — `[Concise|Proactive|Explanatory|Learn` with `ing|<custom>|default]` on the row underneath — which pushed every row below it down one and left the checkpoint differing from ink on seven of its twenty content rows. After it, all twenty match byte for byte.
+
+## Decision 69 — the wire-API step is the mirror call site Decision 64 missed
+
+Decision 64 generalised the cursor mirror and moved the wizard's focus onto it. The step that picks between the Chat Completions and Responses wire APIs keeps a cursor of its own and was not among the call sites — it reached this tree from main after that pass — so its Enter still read the cursor off the render that armed the handler. An arrow and an Enter inside one stdin read saved the wire API the arrow had not reached.
+
+It now takes the numeric half of the same mirror, and its Enter reads the ref. One case walks the wizard to that step, sends the arrow and the Enter inside a single handler invocation, and asserts the saved plan carries the Responses wire API; against the pre-fix code it saves Chat Completions.
+
+## Decision 70 — the row budget pays for the rows a notice actually paints, and the Tab step sheds what ink's clip would have hidden
+
+Decision 66 gave the approval-mode dialog ink's region height and ink's derivation for what fits inside it. Three things that derivation assumed were still wrong on this side, and a fourth step never got the derivation at all.
+
+The row width. ink gives the mode labels, the title run and the footer hint `wrap="truncate"`, and its row constants count one physical row for each. This port rendered all three with the renderer's default word wrap and no width clip, so on a narrow terminal each took more rows than its constant budgets and the list slid out of the frame. Decision 68 already established that this renderer has no truncate wrap, so the clipping moves into the arithmetic the same way: a label gets the content width minus its row's two-column indicator and, when the list is numbered, the `N.` column and its space, the column sized from the list's length so a tenth row costs its label one more column; the title run `> Title ` is clipped to the content width and the dim subtitle then gets whatever that run left, which is how ink's single truncated Text composes the two; the footer hint gets the content width. The warning is not clipped, because ink wraps it.
+
+The row count of a wrapped notice. ink budgets its workspace warning at a flat three rows. At a hundred columns the text — ninety-one columns of it inside a ninety-two-column content width — fits one wrapped row, so the flat count over-pays by one; at forty columns it needs three rows, so the flat count under-pays by one and the list paints over the last of them. The count is now derived: one margin row plus the rows the text occupies once word-wrapped at the content width, with a word wider than the row broken across rows. ink's flat three stays as the floor the derivation starts from — paying fewer rows than ink would put a mode row on screen that ink does not show, and the derivation only ever adds to it — but the floor holds only where the region can pay it: both notices are capped at what the region leaves after the mandatory chrome and the one-row list floor, so below a ten-row region the warning's charge falls under ink's three, and at six rows or below the cap reaches zero and the notice box is not painted at all.
+
+The trust-gate refusal. This port draws a refusal below the same list when the folder is untrusted or a write throws; ink has no counterpart in this dialog, so the budget carried no term for it, and the errorless budget has no slack at exactly the heights where the gate fires. The refusal takes the same derivation, and it is charged ahead of the warning: it is the actionable notice, and a refusal that painted nothing would read as a dead Enter, so it keeps a floor of one painted text row whenever the region can pay it — even at the list floor's expense — and the advisory warning takes only what the refusal leaves. A region that can pay exactly one row charges the text row with its margin shed; a region too short for even that carries the refusal in the title's subtitle run — the one row every region paints — rather than charging a row that paints nothing, because a rejected Enter whose reason is nowhere on screen reads as a dead key. Its term stays out of the `MIN_HEIGHT_*` thresholds, which are ink's.
+
+The Tab step. It shares the frame and the region with the mode step but had no budget of its own, so it kept the spacer row the mode step had just shed and an unwindowed list. **This is a deliberate divergence.** ink's `ScopeSelector` keeps both and gets away with it because ink's frame carries `overflow="hidden"` and absorbs the overrun; this frame does not clip, and without the budget the same rows here overpaint each other on a short region — the title and the first list row were measured sharing one row at region heights three and four — while Enter commits a scope the user could not read. The step now runs the same derivation and sheds the spacer and windows its list, where ink keeps them; at four rows or below the derivation leaves no list row at all — at five, the row the region cannot pay borrows the frame's blank bottom padding row, which ink and the pre-budget code both paint there — so the step paints its title only, and the keys refuse to move as well as to commit a row nothing painted: a highlight move fires onHighlight, and on this highlight-driven step that alone would retarget the next write. The rows ink loses to its clip are rows nobody could read either way, but the divergence is recorded rather than matched, because matching it would mean giving this frame a clip it does not have. The footer hint reads the budget of the step on screen rather than the mode step's, so the two steps can disagree about it — at a region of eleven rows with the warning up, the mode step hides it and the scope step shows it — and a test walks that split.
+
+Each case pins its own arithmetic against the mutation that undoes it: dropping the label clip, the subtitle clip or the hint clip fails exactly the case that measures that run; replacing the warning's derivation with ink's flat three fails only the narrow-terminal case; charging the refusal nothing fails the trust-gate case; dropping either half of the Tab step's pass-through fails the Tab case; and taking the floor away fails the case that pins it. Two further cases pin the cap: letting a notice charge more than the region leaves after the chrome and the list floor fails the warning's cap case and the refusal's alike. The charge order the cap makes load-bearing has its own pins — at regions nine and seven the refusal keeps one painted text row ahead of the warning, and at region six, which can pay exactly one row, the refusal keeps its text row with the margin shed; below it the title's subtitle carries the reason, with the warning's own zero end pinned beside them. Two tables then walk the budget across eight region heights without the warning and four with it, down to the heights where no list row paints at all, asserting the spacer, the footer hint, the arrows and the number of rendered rows at each, which is what pins both the spacer and the warning footer-hint thresholds and the guard that keeps the hint on screen when dropping it would only buy room for arrows. No new frames this round: the harness reads strings and declared layout props, and what changed is row arithmetic at widths the matrix's hundred-column arm does not reach.
+
+## Decision 71 — the help overlay budgets from the region, and the frames beside it open flush and let the region clip
+
+The popup slot is a fixed height that already accounts for the banner, the status
+bar and the composer, so the ten rows the help overlay reserved for that same
+chrome were reserved twice: the overlay left five blank rows inside the slot at
+every terminal height, and windowed its command list at sixteen rows on a
+forty-row terminal where ink shows a fixed eighteen. It now reads the region
+budget the mount is already handed and subtracts only its own chrome, so the list
+reaches ink's eighteen and, up to a thirty-seven-row terminal, the slot keeps no
+unused rows. The cap stays — the
+window never exceeds the eighteen rows ink hard-codes, so past a thirty-seven-row
+terminal the region outgrows the window and the rows below it stay blank, three of
+them on a forty-row terminal — and at a region of fourteen rows or below the
+overlay still cannot fit, which Follow-ups records.
+
+The same pass also reaches the four sibling frames beside it — the memory,
+statusline, stats and skills frames and the arena's — which each opened one row
+below the region's top, so their bottom borders were measured painting past it.
+They now open flush with it, and they stay unshrinkable: the renderer defaults an
+unsized box to shrinkable, and a shrunk frame squeezes its text rows to zero
+height and paints them over each other — measured on /stats and /statusline at
+80×24 and on /skills at 100×20 — so each root box refuses the shrink explicitly
+and lets the region's clip cut whatever does not fit, the way ink's stats dialog
+clips. A structural test pins each frame's flush opening and its refusal to
+shrink. The sized bodies inside the frames are not covered by this change;
+Follow-ups records them.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:
 
 - **Geometry, row content, row order, row count and glyph identity**, on a
-  reconstructed screen, for forty-three scenarios — thirty-eight at 100×40, the
+  reconstructed screen, for forty-four scenarios — thirty-nine at 100×40, the
   three transcript arms at 100×30, the narrow boot at 60×24 and the chip row at
-  58×40 — one hundred thirty-one checkpoints in all, of which thirty-three match
-  on their non-blank rows as captured, and seventy-three match once the
-  context-file notice and the path fragments it wraps into are dropped from both
-  legs. Both legs from one bundle and one set of boot arguments.
+  58×40 — one hundred thirty-three checkpoints in all, of which thirty-five match
+  on their non-blank rows as captured. The comparison tool reports two more,
+  because it also picks up the sampled sidecars two scenarios write beside their
+  frames; those are timing dumps rather than screens and are counted apart. Of the
+  ninety-eight that do not match, fifty-six carry the context-file notice among
+  their differing rows: that row holds an absolute path under the harness's scratch
+  directory, so it wraps at different points on the two legs and its continuation
+  rows differ with it. Both legs from one bundle and one set of boot arguments.
 - **Colour was read on three row families, in two terminal modes, and is unread
   elsewhere.** The reconstruction is text; colour comes from the styled capture
   beside it, which the harness writes for every checkpoint but the one taken
@@ -2575,17 +2665,58 @@ What was verified, and how far the verification reaches:
   rest are source-verified against ink. A screen-reader session never reaches the
   OpenTUI leg at all, since Decision 58 keeps it on ink, so that path has no
   frame the matrix could compare.
-- **The machine leg was re-run at this head and reproduced the run before it.**
-  All eighty-six runs finished and none errored, and the nine idle timeouts land on
-  the same three ink legs in the same counts as that run. Compared capture by
-  capture, 243 of the 258 are byte-identical to it and three differ only in a
-  spinner glyph or an elapsed figure. The twelve that differ in content differ on
-  both arms at once and in the same way — the spinner's random phrase at two
-  checkpoints, the session identifier at one, and the wall clock at three — so no
-  capture attributes a change to this pass. The comparison tool's own tally
-  reproduces exactly, at thirty-three identical checkpoints of one hundred
-  thirty-one. The split that drops the context-file notice was not recomputed this
-  round; it is a figure from the run whose frames these are.
+- **The machine leg was re-run at this head over the whole matrix.** All
+  eighty-eight runs finished and none errored, and they wrote two hundred
+  sixty-six captures. The nine idle timeouts land on the same three ink legs as
+  the run before it, in the same counts: four on the caret-edit arm, three on the
+  auth wizard's model list, whose spinner never goes idle, and two on the
+  multi-question arm. Thirty-five of the one hundred thirty-three checkpoints have
+  identical non-blank content rows, and fifty-six of the ninety-eight that do not
+  match carry the context-file notice among their differing rows.
+- **The split that dropped the context-file notice is withdrawn.** It reported
+  seventy-three checkpoints identical once the notice and the path fragments it
+  wraps into were removed from both legs, but it does not reproduce from the frames
+  it was taken from: removing exactly those rows leaves the tally where it was,
+  because no checkpoint in that run differs only in the notice — the smallest
+  whole-matrix difference there is twelve rows. The figure is dropped rather than
+  carried forward, and the tally above is the only split this document now claims.
+- **The whole matrix was run twice on the pre-merge tree, once with the change
+  and once without, and every movement this pass claims is on the OpenTUI leg.**
+  Both arms
+  are eighty-eight runs and two hundred sixty-six captures with no errors, and the
+  same nine idle timeouts on the same three ink legs in the same counts. Between
+  the arms, two hundred fifteen captures are byte-identical and four differ only in
+  a spinner glyph or a duration. Of the forty-seven that differ substantively, six
+  are ink legs, and each of those moves only on a spinner phrase, a session id, a
+  wall time or a wall-clock stamp — nothing on an ink leg moved for any other
+  reason, which is what makes the remaining forty-one attributable to this pass.
+  Scored by the size of the line diff against the ink leg at the same checkpoint —
+  the rows only ink drew plus the rows only this port drew — thirty-six of the one
+  hundred thirty-three OpenTUI checkpoints improved, ninety-seven did not move, and
+  none got worse.
+- **The tally above moves by one, and the reason it moves by only one is the
+  cursor artifact.** Thirty-four checkpoints were identical before the change and
+  thirty-five after; the one that crossed is the completion row of Decision 68.
+  The other thirty-five improvements are real but stop short of exact, because the
+  harness writes the pty cursor into the reconstructed frame beyond the terminal's
+  last column, and that artifact lands on different rows in the two arms: before
+  the change it fell on rows that already differed, and after it falls on two rows
+  that otherwise match ink exactly. Counting the artifact as a difference makes
+  eleven checkpoints look two rows worse than they were; stripping the trailing
+  block glyphs before the comparison is what turns those eleven into the zero
+  regressions reported above, and each of the eleven then keeps one differing row
+  instead of three — the banner's row count, which the fixed region also cropped
+  closer to ink's.
+- **Those two arms ran on the tree before it merged main; the after arm has been
+  re-run on the tree after it.** The merge moved main into this branch, so its
+  frames are not the ones the comparison above measured. Re-running the whole
+  matrix on the merged tree yields the same eighty-eight legs, the same two
+  hundred sixty-six captures, the same two empty ones, the same nine idle
+  timeouts on the same three ink legs, and a verdict for every one of the one
+  hundred thirty-five checkpoints that matches the earlier after arm exactly —
+  except the timed spinner sample, which counts phrases and so moves between any
+  two runs. The counts this section states therefore hold on the merged tree, not
+  only on the one the two arms were cut from.
 - **Decisions 62 through 65 have no frame behind them.** The palette revision,
   the two mirror reads and the approval dialog's remembered row were all read off
   the source against ink's, pinned by a unit case each and shown to discriminate
@@ -2635,9 +2766,15 @@ What was verified, and how far the verification reaches:
   The diagnostics are not lost, but they are unreachable here because this
   renderer never binds the library's console toggle. Whether to expose that
   console is an open question.
-- The help dialog's reserved-row constant does not describe the rows actually
-  observed on screen, and the window height this renderer shows below a 42-row
-  terminal is bounded rather than matched.
+- The help overlay's body budget comes from the popup region rather than the raw
+  terminal height, so its command list windows at ink's fixed eighteen rows on a
+  forty-row terminal instead of sixteen and, up to a thirty-seven-row terminal,
+  leaves no unused rows in the slot — above it the eighteen-row cap leaves the
+  extra region rows blank. At a region of fourteen rows or below the body still
+  budgets fewer rows than the commands tab's own chrome needs, and the window's
+  one-row floor then leaves the intro and the hint clipped under a live header
+  and footer. ink has no counterpart to compare against: it never derives that
+  window from the height.
 - The two reserves that size the conversation around an expanded confirmation
   are hand-derived from a row inventory. The long-confirmation scenario shows
   the shipped value green and zero timing out, but a value four rows smaller
@@ -2645,15 +2782,6 @@ What was verified, and how far the verification reaches:
   tests — which asserts the constants' own sums rather than the screen. A change
   to the confirmation's geometry will therefore not fail on its own; re-deriving
   them belongs with that change.
-- The session picker's dialog does not shrink to its content. Its box is sized
-  to a fixed height — the viewport less one row — and the list's scroll window is
-  derived from that, so a short list still fills the full height, pushing the
-  composer down and leaving blank rows below the last session. Decision 52 reused
-  ink's row shape and window arithmetic but left this height fixed on purpose: it
-  is the content-sizing half of the spacing family Decision 16 describes, and
-  shrinking it means deriving the box from the rows shown rather than from the
-  viewport, then re-deriving the reserved-row constant and row height the window
-  is computed from.
 - The loading indicator has no subagent token rollup and no tokens-per-second
   segment, both of which ink shows. Its elapsed counter also restarts after a
   parked call in the shell, for the reason Decision 28 records: the row is
@@ -2960,22 +3088,42 @@ What was verified, and how far the verification reaches:
   the renderer library's native layer, so there is no site here to fix; recorded
   because it is visible garbage on a real terminal, and because a workaround
   would have to force a full repaint whenever the viewport scrolls.
-- A modal dialog is sized to its content here and to the rest of the viewport
-  under ink. ink's approval-mode box runs from the row after the command to the
-  bottom of the screen — thirty-five rows, twenty-two of them blank inside the
-  box, with the key hint near the bottom — where this port draws thirteen rows and
-  leaves the space above the box empty. Every row inside the two boxes is word for
-  word the same, including the selected mark, so this is the box's height alone.
-  It is the same family as the session picker's box not shrinking, and it is
-  recorded rather than fixed for the same reason: sizing a dialog to the viewport
-  is a layout decision that reaches every dialog at once.
-- Two rows truncate under ink and wrap or overflow here. The completion list's
-  argument hint is clipped to an ellipsis in its own column under ink, and wraps
-  to a second row aligned under the column's start here. The chip row on a narrow
-  terminal clips each chip's label to an ellipsis under ink and prints the labels
-  whole here, which costs the gaps between them. Neither row was compared against
-  ink's truncation site, so whether the budget is a shared constant or two is not
-  established.
+- ink's popup region is gated on its `constrainHeight`: the show-more-lines
+  key lifts both the fixed height and the clip, and its dialog manager then
+  hands the dialogs no budget at all. This port maps that key only inside the
+  tool-confirmation bodies, so the region keeps one fixed height in every
+  state. The clip that goes with that height is not the same guarantee: it
+  reaches content that shrinks with the region, while a child that holds its
+  own size paints past the region's bottom edge rather than being cut, and its
+  border lands off the terminal's last row or over the row below when one
+  exists. Either way a tail the region cannot show — an unwindowed list such as
+  `/mcp` on a short terminal, footer hint included — has no reveal path.
+  Recorded rather than matched: this renderer owns the whole viewport and
+  cannot let content grow past it, so the fix is windowing those lists from the
+  region budget, the way the theme and model dialogs already do.
+- ink's `useSelectionList` bounds numeric quick-select by the list length
+  alone, so on a short terminal a digit commits a row the window does not
+  paint — at region twelve the approval-mode list shows two rows and `5` still
+  writes YOLO. This port refuses a completed number that addresses an
+  unpainted row, in every numbered dialog; a still-extendable prefix keeps its
+  buffer and waits, since the completing digit may land inside the window.
+  Recorded rather than matched: committing a row the user was never shown
+  persists a choice they could not read.
+- The MCP approval, shell gate and action confirmation still render outside
+  the dialog region, sized to their content and unclipped, where ink draws its
+  ShellConfirmationDialog and ConsentPrompt inside the same region, stretched
+  and clipped — capping the command preview and printing "shell commands
+  hidden - resize terminal to review". A custom command that requests more
+  shell commands than the viewport holds still grows the confirmation box past
+  the last row on a short terminal, hiding the outcome rows and the footer
+  hint the user is being asked to act on. Recorded rather than fixed: moving
+  the confirmations into the region is Decision 66's layout decision applied
+  to a slot whose body reads the terminal width to estimate line wrapping.
+- The chip row on a narrow terminal clips each chip's label to an ellipsis under
+  ink and prints the labels whole here, which costs the gaps between them. It was
+  not compared against ink's truncation site, so whether the budget is a shared
+  constant or its own is not established. It is the same shape as the completion
+  row's argument hint, which Decision 68 closed.
 - The gated-server dialog's body paragraph indents its continuation row by one
   column. Both legs agree on the first row of the paragraph and on the eighty-eight
   columns of text the row carries; only the row after a break gains a leading space
@@ -2988,13 +3136,27 @@ What was verified, and how far the verification reaches:
   dialogs, at one column less indent, closes on both legs. This port draws a closed
   box one column narrower, so on this row the port is the one that is right, and
   the divergence is recorded rather than matched.
-- ink has a frame where the session picker is almost entirely absent. Pressing the
-  preview key unmounts the list, and the capture taken before the preview body is
-  drawn holds three rows — the banner's last row, the notice and the command — with
-  no list, no preview and no composer. The next checkpoint is the list again, so it
-  is one frame of transition rather than a missing feature, and this port draws the
-  full preview body at the same checkpoint. Recorded so the empty frame is not
-  re-reported as a porting gap.
+- ink is almost entirely absent at the session picker's preview checkpoint.
+  Pressing the preview key unmounts the list, and the capture taken before the
+  preview body is drawn holds three rows — the banner's last row, the notice and
+  the command — with no list, no preview and no composer. Decision 67 added a
+  second capture after a longer settle for this frame, and three seconds later it
+  still held those three rows, so within what this harness can reach it is not one
+  frame of transition: the picker does not come back. The next checkpoint is the
+  list again, and this port draws the full preview body at both. The consequence
+  is that the preview branch has no frame-level reference to compare against, so
+  Decision 67's judgement on it rests on source reading and structural tests
+  alone. Recorded so the empty frame is not re-reported as a porting gap, and not
+  taken for a usable control either.
+- The session picker's window is derived from the raw terminal height — seven
+  reserved rows, three rows per item — while its box is sized by the fixed
+  region, so on a short terminal the row the clip takes is the last windowed
+  item's metadata line: every session's title and marker still paint, the
+  down-scroll marker with them, and the cursor can reach a session whose
+  second line was never drawn. ink's picker derives the identical window from
+  the same raw rows inside an equally fixed and clipped region, so this is
+  parity with an ink-side limitation, recorded the way Decision 67 records
+  ink's footer wrapping rather than fixed on one leg.
 - The stats dialog carries its own copy of the ref mirror rather than calling the
   shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
   performs the same double write, and nothing memoises on the writer's identity. It
@@ -3022,3 +3184,29 @@ What was verified, and how far the verification reaches:
   24-hour bracketed time inline, with an identical locale call. Pointing ink at the
   shared one would edit the very file the frame evidence was captured against, so
   the second copy stays and the two are only kept equal by hand.
+- Three sized bodies inside the dialog frames still hold their own height: the
+  diff dialog's fourteen-row scroll region, the subagents dialog's twelve-row
+  one, and the skills dialog's twelve-row one. The first two sit in the shared
+  dialog chrome, which shrinks with the region, and a frame that shrinks around a
+  body that does not overpaints its own bottom border — measured at a region of
+  seventeen rows and below for the fourteen-row body and of fifteen rows and
+  below for the twelve-row one, where the last body row lands on the border,
+  while the two region heights above each boundary are absorbed silently into the
+  frame's inner spacing. Windowing those two heights from the region budget is
+  the fix — it closes the overpaint and the absorption band together — and the
+  height has to be folded into the body's key the way the session picker folds
+  its own, because the renderer clears the shrink on an explicitly sized node and
+  never re-applies a prop whose value did not change. The skills body needs no
+  such windowing: its frame keeps its natural height and the region clips it, the
+  way ink clips /stats.
+- Decision 68's shrink emulation still sits inline in the completion row's map
+  body, so the twenty-three measured combinations cannot live in the repo as a
+  test, and two of the four numbers the arithmetic reads — the non-shared column
+  budget and the dropdown's side margins — can move with the suite green. Lifting
+  it into an exported pure function beside the truncation helpers and table-driving
+  the combinations against it is the fix.
+- Nothing executable verifies that the renderer resolves the shrink the session
+  picker's remount depends on: its three tests read declared props through the
+  element mock. A real-reconciler case cannot run under the unit suite, where the
+  native layer throws, so the vehicle is a bun script under the package's scripts
+  directory, wired into the component-parity runner.
