@@ -24077,6 +24077,251 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    function recordChannelExitTelemetry(): {
+      telemetry: BridgeTelemetry;
+      event: ReturnType<typeof vi.fn>;
+    } {
+      const event = vi.fn();
+      return {
+        event,
+        telemetry: {
+          captureContext: () => undefined,
+          runWithContext: async (_captured, fn) => await fn(),
+          withSpan: async (_operation, _attributes, fn) => await fn(),
+          event,
+          injectPromptContext: (request) => request,
+          metrics: {
+            sessionLifecycle: vi.fn(),
+            channelLifecycle: vi.fn(),
+            promptQueueWait: vi.fn(),
+            promptDuration: vi.fn(),
+            cancelled: vi.fn(),
+          },
+        },
+      };
+    }
+
+    it('counts only the sessions actually torn down when a failed restore is mid-cleanup', async () => {
+      // A restore that fails after its entry exists (here: the child rejects
+      // the requested approval mode) leaves byId without the id while the
+      // channel still lists it, until attachment cleanup ends.
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            throw new Error('approval mode rejected');
+          }
+          return {};
+        },
+      });
+      const { telemetry, event } = recordChannelExitTelemetry();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 60_000,
+        telemetry,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const heldClose = deferred<void>();
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const close = vi
+          .spyOn(SessionAttachmentStore.prototype, 'close')
+          .mockImplementationOnce(() => heldClose.promise);
+        const restore = bridge
+          .loadSession({
+            sessionId: 'failed-restore',
+            workspaceCwd: WS_A,
+            approvalMode: ApprovalMode.YOLO,
+          })
+          .catch((error: unknown) => error);
+        await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+
+        handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+
+        await vi.waitFor(() =>
+          expect(event).toHaveBeenCalledWith(
+            'channel.exited',
+            expect.objectContaining({
+              'qwen-code.daemon.channel.session_count': 2,
+            }),
+          ),
+        );
+        expect(diagnostics).toContainEqual({
+          line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+          level: 'warn',
+        });
+        heldClose.resolve();
+        await restore;
+      } finally {
+        heldClose.resolve();
+        vi.mocked(SessionAttachmentStore.prototype.close).mockRestore();
+        stderr.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
+    it('reports a planned retirement whose transport then fails at warn', async () => {
+      // The daemon starts the retirement first, so the later transport
+      // failure does not count as initiating the teardown and the exit
+      // stays "expected" for telemetry.
+      const failure = deferred<unknown>();
+      const handle = makeChannel();
+      const kill = vi.fn(() => deferred<never>().promise);
+      handle.channel = {
+        ...handle.channel,
+        transportFailed: failure.promise,
+        kill,
+      };
+      const { telemetry, event } = recordChannelExitTelemetry();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        telemetry,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const retiring = bridge
+          .killSession(session.sessionId)
+          .catch((error: unknown) => error);
+        await vi.waitFor(() => expect(kill).toHaveBeenCalled());
+
+        failure.resolve(
+          Object.assign(new Error('frame failed'), {
+            code: 'ndjson_frame_too_large',
+          }),
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        handle.crash({ exitCode: null, signalCode: 'SIGTERM' });
+
+        await vi.waitFor(() =>
+          expect(event).toHaveBeenCalledWith(
+            'channel.exited',
+            expect.objectContaining({
+              'qwen-code.daemon.channel.transport_failed': true,
+              'qwen-code.daemon.channel.transport_failure_initiated_teardown': false,
+            }),
+          ),
+        );
+        expect(diagnostics).toContainEqual({
+          line: expect.stringContaining(
+            'qwen serve: channel exited (code=none, signal=SIGTERM, transport=ndjson_frame_too_large',
+          ),
+          level: 'warn',
+        });
+        // The hung kill never settles; shutdown below owns its cleanup.
+        void retiring;
+      } finally {
+        stderr.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
+    it('reports a channel reaped with an unsettled abandoned restore at warn', async () => {
+      vi.useFakeTimers();
+      const lateRestore = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        loadSessionImpl: () => lateRestore.promise,
+      });
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        maxSessions: 3,
+        sessionRestoreTimeoutMs: 20,
+        channelIdleTimeoutMs: 60_000,
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const timedOut = bridge
+          .loadSession({ sessionId: 'still-hung', workspaceCwd: WS_A })
+          .catch((error: unknown) => error);
+        await advanceRestoreDeadline(20);
+        expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+        // Reap inside the settlement grace, so the restore is unsettled but
+        // not yet overdue and the channel is not condemned.
+        await bridge.closeSession(sibling.sessionId);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(handle.killed).toBe(true);
+
+        expect(
+          diagnostics.filter((d) => d.line.includes('channel exited')),
+        ).toEqual([
+          {
+            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+            level: 'warn',
+          },
+        ]);
+      } finally {
+        lateRestore.reject(new Error('channel torn down'));
+        stderr.mockRestore();
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a channel reaped with an unsettled abandoned newSession at warn', async () => {
+      vi.useFakeTimers();
+      const handle = makeChannel({
+        newSessionImpl: (_params, agent) =>
+          agent.newSessionCalls.length === 2
+            ? new Promise<NewSessionResponse>(() => {})
+            : { sessionId: `visible-${agent.newSessionCalls.length}` },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+      });
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+        sessionScope: 'thread',
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const timedOut = bridge
+          .spawnOrAttach({ workspaceCwd: WS_A })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(await timedOut).toBeInstanceOf(BridgeTimeoutError);
+
+        // Reap inside the settlement grace (it equals the 20ms init
+        // timeout), so the abandonment is unsettled but not yet overdue.
+        await bridge.closeSession(sibling.sessionId);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(handle.killed).toBe(true);
+
+        expect(
+          diagnostics.filter((d) => d.line.includes('channel exited')),
+        ).toEqual([
+          {
+            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+            level: 'warn',
+          },
+        ]);
+      } finally {
+        stderr.mockRestore();
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
