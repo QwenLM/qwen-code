@@ -537,7 +537,7 @@ function checkDeferredSwap(standaloneDir: string): void {
       // A torn marker is no liveness proof either.
       throw pendingSwapError(standaloneDir);
     }
-    if (isProcessAlive(batPid)) {
+    if (!isProcessProvablyGone(batPid)) {
       throw new Error(
         'A previous update is still being applied. Please wait a moment and try again.',
       );
@@ -691,6 +691,21 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+// Unlike isProcessAlive, this treats "cannot tell" as "not gone": EPERM means
+// the process exists but is not ours to signal (an elevated bat probed from an
+// unelevated shell), which is no proof of death. Only ESRCH is. Callers that
+// decide whether a lock is stealable keep using isProcessAlive — being
+// conservative there would re-block updates forever. This is for the one gate
+// that authorizes deleting a staged install.
+function isProcessProvablyGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH';
   }
 }
 
