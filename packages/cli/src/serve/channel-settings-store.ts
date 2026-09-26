@@ -18,6 +18,7 @@ import {
 import {
   multiSessionCompatibilityError,
   parseMessageRoutingConfig,
+  parseSessionRotationConfig,
 } from '../commands/channel/config-utils.js';
 import {
   loadSettings,
@@ -143,6 +144,16 @@ function assertSharedField(
   if (key === 'multiSession') {
     if (typeof value !== 'boolean') {
       throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
+  if (key === 'sessionRotation') {
+    try {
+      parseSessionRotationConfig('settings', value);
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
     }
     return true;
   }
@@ -654,6 +665,10 @@ export class WorkspaceChannelSettingsStore {
     );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
+      sessionRotation: parseSessionRotationConfig(
+        name,
+        nextConfig['sessionRotation'],
+      ),
       sessionScope:
         (nextConfig['sessionScope'] as
           | 'user'
