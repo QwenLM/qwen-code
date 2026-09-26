@@ -289,6 +289,17 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 }>;
 
 /**
+ * The root-level half of the restriction above: top-level settings that have
+ * no section to name in the `{ section, key }` shape. Its consumers — the
+ * Workspace strip, the "ignored" warning, and the daemon route that refuses
+ * the write — read it beside `WORKSPACE_RESTRICTED_SETTINGS`.
+ */
+export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
+  'advisorModel',
+  'advisorMaxUses',
+] as const;
+
+/**
  * Settings a Workspace may only make stricter.
  *
  * A cloned repository must not loosen a boundary the operator set — open
