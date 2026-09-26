@@ -277,6 +277,38 @@ export function startPostRenderPrefetches(
     runDeferredTask('telemetry_init', () => initializeTelemetry(config));
   }
 
+  if (
+    config.isInteractive() &&
+    settings.merged.general?.batchAutoCollect !== false
+  ) {
+    // Collects `/batch-api` tasks of this project as they finish (and any
+    // that finished while no session was open). HTTP only, no model call;
+    // results arrive as info notices through the update-notice channel,
+    // which defers them while a response is streaming.
+    runDeferredTask('batch_auto_collect', async () => {
+      const [
+        { startBatchAutoCollect },
+        { resolveEndpoint },
+        { updateEventEmitter },
+      ] = await Promise.all([
+        import('../commands/batch-auto-collect.js'),
+        import('../commands/batch.js'),
+        import('../utils/updateEventEmitter.js'),
+      ]);
+      startBatchAutoCollect({
+        projectRoot: config.getWorkingDir(),
+        notify: (message) =>
+          updateEventEmitter.emit('update-info', { message }),
+        resolveEndpoint: () =>
+          resolveEndpoint(process.env, {
+            settings: settings.merged,
+            warn: (message) => debugLogger.debug(message),
+          }),
+        log: (message) => debugLogger.debug(message),
+      });
+    });
+  }
+
   if (config.isInteractive()) {
     runDeferredTask('background_housekeeping', async () => {
       const { startBackgroundHousekeeping } = await import(

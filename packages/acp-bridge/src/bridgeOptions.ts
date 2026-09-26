@@ -23,6 +23,26 @@ import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 import type { PromptLedgerRecord } from './prompt-ledger.js';
+import type {
+  BridgeSpawnRequest,
+  BridgeRestoreSessionRequest,
+} from './bridgeTypes.js';
+
+export type BridgeExecutionEngine = 'legacy' | 'managed';
+export const SESSION_EXECUTION_ENGINE_META_KEY = 'qwen.session.executionEngine';
+
+export type BridgeExecutionSelection = {
+  readonly daemonOwnedStandalone: boolean;
+} & (
+  | {
+      readonly operation: 'spawn';
+      readonly request: Readonly<BridgeSpawnRequest>;
+    }
+  | {
+      readonly operation: 'load' | 'resume';
+      readonly request: Readonly<BridgeRestoreSessionRequest>;
+    }
+);
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -261,6 +281,14 @@ export interface BridgeOptions {
   sessionScope?: 'single' | 'thread';
   /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
   channelFactory?: ChannelFactory;
+  /** Server-owned selection; restore must use verified durable ownership. */
+  executionEngines?: {
+    legacy: ChannelFactory;
+    managed: ChannelFactory;
+    select(
+      context: BridgeExecutionSelection,
+    ): BridgeExecutionEngine | Promise<BridgeExecutionEngine>;
+  };
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** Daemon-global admission for the process-wide MCP OAuth callback port. */
