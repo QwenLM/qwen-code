@@ -1740,6 +1740,39 @@ describe('llm.tsx main function', () => {
       expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
     });
 
+    it('keeps the config receiver when reinitializing LSP', async () => {
+      class RuntimeConfig {
+        reinitializeCount = 0;
+
+        isLspEnabled() {
+          return true;
+        }
+
+        getLspClient() {
+          return { reinitialize: vi.fn() };
+        }
+
+        getProjectRoot() {
+          return '/workspace';
+        }
+
+        async reinitializeLsp() {
+          this.reinitializeCount += 1;
+          return undefined;
+        }
+      }
+      const config = new RuntimeConfig();
+
+      registerLspHotReload(config as unknown as Config, vi.fn());
+
+      await lspConfigWatcherMock.instances[0]?.listener?.({
+        path: '/workspace/.lsp.json',
+        changeType: 'modified',
+      });
+
+      expect(config.reinitializeCount).toBe(1);
+    });
+
     it('emits an LSP status update when reload is skipped by the config', async () => {
       const reinitializeLsp = vi.fn(async () => undefined);
 

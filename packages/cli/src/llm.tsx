@@ -1682,7 +1682,7 @@ export function registerLspHotReload(
     | (ReturnType<Config['getLspClient']> & RuntimeLspClient)
     | undefined;
   const runtimeConfig = config as Config & RuntimeLspConfig;
-  const reinitializeLsp = runtimeConfig.reinitializeLsp;
+  const reinitializeLsp = runtimeConfig.reinitializeLsp?.bind(runtimeConfig);
   if (
     config.isLspEnabled?.() !== true ||
     !lspClient?.reinitialize ||
