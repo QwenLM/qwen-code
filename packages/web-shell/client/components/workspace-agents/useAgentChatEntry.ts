@@ -187,7 +187,12 @@ export function useAgentChatEntry({
               (token) =>
                 agents
                   .filter(
+                    // Same addressability predicate as the picker above:
+                    // interception must not fire for an agent admission
+                    // would skip.
                     (agent) =>
+                      agent.enabled &&
+                      !agent.retiredAt &&
                       token.startsWith(agent.name.toLowerCase()) &&
                       !/^[a-z0-9_-]/.test(token.slice(agent.name.length)),
                   )

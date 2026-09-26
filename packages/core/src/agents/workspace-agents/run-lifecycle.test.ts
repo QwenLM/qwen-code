@@ -161,6 +161,26 @@ describe('agent run lifecycle', () => {
     ).rejects.toThrow(RunCloseRejectedError);
   });
 
+  it('refuses a wait whose only live peer is already finishing', async () => {
+    // A finishing run already executed its close tool — its discharge of
+    // waiters happened at that moment, so a wait admitted against it could
+    // never be discharged and would strand the thread as blocked.
+    const thread = await seed({
+      runs: [run(), run({ id: 'rn_bob', agentId: BOB.id, queueSequence: 101 })],
+    });
+    await closeRun(PROJECT_ROOT, {
+      context: context(thread.id, { agentId: BOB.id, runId: 'rn_bob' }),
+      request: { kind: 'review', summary: 'bob is done' },
+    });
+
+    await expect(
+      closeRun(PROJECT_ROOT, {
+        context: context(thread.id),
+        request: { kind: 'waiting' },
+      }),
+    ).rejects.toThrow(RunCloseRejectedError);
+  });
+
   it('allows a wait once a sub-thread is open, and not for a mere sibling', async () => {
     const parent = await seed();
     // Assigned and posted to, not merely created: an `open` child with no run

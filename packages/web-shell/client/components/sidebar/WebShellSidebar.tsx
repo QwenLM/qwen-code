@@ -3856,6 +3856,9 @@ export function WebShellSidebar({
 
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
+    // Keep the daemon catalog order: the organized bucketing below relies on
+    // it (pinned rows sort first there). Collaboration sessions append after
+    // it; the flat view re-sorts by recency on its own, so no sort here.
     const sourceScopedSessions = [
       ...sessions
         .map(applyOptimisticPin)
@@ -3865,11 +3868,7 @@ export function WebShellSidebar({
       ...collaborationSessions.filter(
         (session) => session.workspaceCwd === primaryWorkspaceCwd,
       ),
-    ].sort(
-      (a, b) =>
-        Date.parse(b.updatedAt ?? b.createdAt ?? '') -
-        Date.parse(a.updatedAt ?? a.createdAt ?? ''),
-    );
+    ];
     if (!query) return sourceScopedSessions;
     const localMatches = sourceScopedSessions.filter((session) => {
       const label = getSessionLabel(session).toLowerCase();

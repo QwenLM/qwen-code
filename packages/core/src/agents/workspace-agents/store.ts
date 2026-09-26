@@ -35,6 +35,7 @@ import {
   type ThreadStatus,
   type ThreadPriority,
   THREAD_PRIORITY_ORDER,
+  isThreadTerminal,
   DEFAULT_THREAD_PRIORITY,
 } from './types.js';
 
@@ -54,6 +55,18 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   },
   stale: 10_000,
 };
+
+// Thread files hold full transcripts and the roster holds persona prompts.
+// Without an explicit mode a new file lands at 0666 & ~umask (0644 on most
+// hosts), readable by any local account; forceMode also heals files written
+// before this was set. Directories get 0700 so the files are not traversable
+// either.
+const STORE_FILE_OPTIONS = {
+  noFollow: true,
+  mode: 0o600,
+  forceMode: true,
+} as const;
+const STORE_DIR_MODE = 0o700;
 
 const workspaceMutexes = new Map<string, Mutex>();
 const workspaceTransaction = new AsyncLocalStorage<boolean>();
@@ -465,7 +478,7 @@ async function withWorkspaceLock<T>(
   }
   const agentsDir = getAgentsDir(projectRoot);
   return workspaceMutex(agentsDir).runExclusive(async () => {
-    await fs.mkdir(agentsDir, { recursive: true });
+    await fs.mkdir(agentsDir, { recursive: true, mode: STORE_DIR_MODE });
     const release = await lockfile.lock(
       getWorkspaceFilePath(projectRoot),
       LOCK_OPTIONS,
@@ -488,7 +501,7 @@ async function writeBackup(filePath: string, value: unknown): Promise<void> {
     await fs.access(target);
   } catch (error) {
     if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
-    await atomicWriteJSON(target, value, { noFollow: true });
+    await atomicWriteJSON(target, value, STORE_FILE_OPTIONS);
   }
 }
 
@@ -499,7 +512,7 @@ async function replaceMigratedFile<T>(
   validate: (value: unknown) => value is T,
 ): Promise<void> {
   await writeBackup(filePath, legacy);
-  await atomicWriteJSON(filePath, migrated, { noFollow: true });
+  await atomicWriteJSON(filePath, migrated, STORE_FILE_OPTIONS);
   const reread = await readJsonFile(filePath);
   if (!validate(reread)) {
     throw new Error(`Migrated agent record failed validation: ${filePath}.`);
@@ -736,7 +749,7 @@ async function ensureMigratedUnlocked(
         schemaVersion: AGENTS_SCHEMA_VERSION,
         agents,
       } satisfies WorkspaceAgentsFile,
-      { noFollow: true },
+      STORE_FILE_OPTIONS,
     );
   } else if (agentsFileIsValid(rawAgents)) {
     agents = rawAgents.agents;
@@ -824,7 +837,7 @@ async function ensureMigratedUnlocked(
     nextRunSequence,
     ...(hostSessionId ? { hostSessionId } : {}),
   };
-  await atomicWriteJSON(workspacePath, workspace, { noFollow: true });
+  await atomicWriteJSON(workspacePath, workspace, STORE_FILE_OPTIONS);
   const reread = await readJsonFile(workspacePath);
   if (!isValidWorkspace(reread)) {
     throw new Error(
@@ -866,9 +879,11 @@ async function writeAgentsUnlocked(
   if (!agentsFileIsValid(record)) {
     throw new Error('Refusing to write malformed workspace agents.');
   }
-  await atomicWriteJSON(getAgentsFilePath(projectRoot), record, {
-    noFollow: true,
-  });
+  await atomicWriteJSON(
+    getAgentsFilePath(projectRoot),
+    record,
+    STORE_FILE_OPTIONS,
+  );
 }
 
 async function readThreadUnlocked(
@@ -960,8 +975,11 @@ async function writeThreadUnlocked(
     );
   }
   const filePath = getThreadPath(projectRoot, next.id);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await atomicWriteJSON(filePath, next, { noFollow: true });
+  await fs.mkdir(path.dirname(filePath), {
+    recursive: true,
+    mode: STORE_DIR_MODE,
+  });
+  await atomicWriteJSON(filePath, next, STORE_FILE_OPTIONS);
   return next;
 }
 
@@ -992,9 +1010,11 @@ function makeTransaction(
     allocateRunSequence: async () => {
       const sequence = workspace.nextRunSequence;
       workspace = { ...workspace, nextRunSequence: sequence + 1 };
-      await atomicWriteJSON(getWorkspaceFilePath(projectRoot), workspace, {
-        noFollow: true,
-      });
+      await atomicWriteJSON(
+        getWorkspaceFilePath(projectRoot),
+        workspace,
+        STORE_FILE_OPTIONS,
+      );
       return sequence;
     },
   };
@@ -1037,7 +1057,7 @@ export async function claimAgentHostSession(
     await atomicWriteJSON(
       getWorkspaceFilePath(projectRoot),
       { ...workspace, hostSessionId: candidateSessionId },
-      { noFollow: true },
+      STORE_FILE_OPTIONS,
     );
     return candidateSessionId;
   });
@@ -1057,7 +1077,7 @@ export async function releaseAgentHostSession(
         workspaceId: workspace.workspaceId,
         nextRunSequence: workspace.nextRunSequence,
       },
-      { noFollow: true },
+      STORE_FILE_OPTIONS,
     );
     return true;
   });
@@ -1130,6 +1150,39 @@ export async function setWorkspaceAgentEnabled(
         candidate.id === agentId ? { ...candidate, enabled } : candidate,
       ),
     );
+    if (!enabled) {
+      // A disabled agent's queued runs can never start — candidate selection
+      // skips non-addressable agents — but `queued` counts as live for
+      // thread status and for `agentHasLiveWork`, so leaving one behind
+      // pins its thread in `in_progress` and blocks retirement with no
+      // in-band explanation. Settle those runs here, in the roster change's
+      // own transaction; running work is left to finish.
+      const { threads, unreadable } = await transaction.listThreads();
+      if (unreadable.length > 0) {
+        throw new Error(
+          `Cannot change the agent roster while thread records are unreadable: ${unreadable.join(', ')}.`,
+        );
+      }
+      const now = Date.now();
+      for (const thread of threads) {
+        if (isThreadTerminal(thread.status)) continue;
+        if (
+          !thread.runs.some(
+            (run) => run.agentId === agentId && run.status === 'queued',
+          )
+        ) {
+          continue;
+        }
+        await transaction.writeThread({
+          ...thread,
+          runs: thread.runs.map((run) =>
+            run.agentId === agentId && run.status === 'queued'
+              ? { ...run, status: 'cancelled', endedAt: now }
+              : run,
+          ),
+        });
+      }
+    }
     return 'updated';
   });
 }
