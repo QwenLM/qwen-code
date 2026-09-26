@@ -11,7 +11,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import { stat } from 'node:fs/promises';
-import { isSupportedArchiveUrl, parseGitHubRepoForReleases } from './github.js';
+import {
+  isArchiveShapedUrl,
+  isSupportedArchiveUrl,
+  parseGitHubRepoForReleases,
+} from './github.js';
 import { isScopedNpmPackage } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
@@ -407,6 +411,13 @@ export async function loadMarketplaceConfigFromSource(
   return null;
 }
 
+/**
+ * Thrown by {@link parseInstallSource} when an archive URL is served over an
+ * insecure scheme. Typed so consumers (e.g. `ExtensionManager.addSource`) can
+ * rethrow the policy reason without pattern-matching the message text.
+ */
+export class InsecureArchiveUrlError extends Error {}
+
 export async function parseInstallSource(
   source: string,
   options: {
@@ -448,6 +459,27 @@ export async function parseInstallSource(
     };
   } else if (isGitUrl(repo)) {
     // Priority 2: Git URL (http://, https://, git@, sso://)
+    //
+    // Archive downloads are restricted to https:// (see isSupportedArchiveUrl),
+    // but isGitUrl also accepts plain http://. Without this guard an archive
+    // link served over http:// falls through to the git path and later fails
+    // with a confusing "Failed to clone Git repository" error for what is a
+    // plain archive file (see #10741/#10742).
+    if (repo.toLowerCase().startsWith('http://') && isArchiveShapedUrl(repo)) {
+      // isArchiveShapedUrl parses defensively (returns false on unparseable
+      // URLs) and shares its URL→pathname derivation with isSupportedArchiveUrl
+      // above, so the archive-vs-git classification and the insecure-scheme
+      // rejection can never drift apart. A genuine Git remote whose name ends
+      // in an archive extension also lands here — the error names the git@
+      // remote / local-path remedies for that case.
+      throw new InsecureArchiveUrlError(
+        `Archive URLs must use https:// (got ${redactUrlCredentials(repo)}). ` +
+          `Re-download the archive from an HTTPS URL — or, if this is a Git ` +
+          `repository whose name ends in an archive extension, use its ` +
+          `git@/SSH remote, or clone it into a directory whose name does not end ` +
+          `in .zip or .tar.gz and install from that local path.`,
+      );
+    }
     installMetadata = {
       source: repoSource,
       type: 'git',
