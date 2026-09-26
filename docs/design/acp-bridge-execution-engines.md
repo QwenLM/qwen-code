@@ -56,6 +56,9 @@ reader and writer foundations; the issue discussion must still settle the
 minimal dependency and the relationship between `session_execution_engine`
 and `managed_session_header_v1`. This slice does not create another format or
 require all of Stage G. Production enablement requires that host integration.
+The Legacy host receipt, owner persistence and the cold-restore selector are
+specified in the B2a follow-up,
+[Paired engine owner selection and typed rejections](./2026-09-26-paired-engine-owner-selection.md).
 
 ### Channels and admission
 
@@ -84,7 +87,8 @@ tracked children. No failure path switches to the other factory.
 ### Registration and cleanup
 
 Before dispatch, reject an unaddressable caller-supplied ID or an ID already
-owned by a live session. Before registration, check the actual engine receipt
+owned by a live session, using the typed rejection defined in the B2a
+follow-up. Before registration, check the actual engine receipt
 and the returned session ID. Invalid, conflicting or missing receipts reject
 registration. Close a safely addressable unregistered session on its original connection. If its ID
 cannot be safely addressed, quarantine the original channel, let other sessions
@@ -137,12 +141,14 @@ Production paired-host wiring is also blocked on these workspace contracts:
   rule must not silently leave existing Managed sessions on old permissions.
 
 These are acceptance gates for #12380 host integration, not capabilities supplied
-by the current Legacy-only workspace-control implementation.
+by the current Legacy-only workspace-control implementation. The B2b follow-up,
+[Paired engine workspace runtime identity](./2026-09-26-paired-engine-workspace-runtime-identity.md),
+specifies the first two gates; the third remains open.
 
-The existing workspace-stop receipt addresses one physical channel, so stopping
-multiple live channels is explicitly blocked until that receipt is extended.
-A single live channel remains stoppable. Managed branch/side-task requests reject
-before mutating history.
+This slice's workspace-stop receipt addresses one physical channel, so stopping
+multiple live channels is blocked; a single live channel remains stoppable. The
+B2b follow-up extends the receipt to every live channel. Managed
+branch/side-task requests reject before mutating history.
 
 ## Files and consumers
 
@@ -180,4 +186,5 @@ engine's current channel as the entire workspace. Tests must observe actual
 factory/connection calls and pending teardown, not only final session counts.
 The owner persistence dependency and production host receipt implementation
 remain the integration questions posted in #12380; the Bridge seam is usable
-for contract tests while those are resolved.
+for contract tests while those are resolved. The B2a follow-up implements the
+Legacy receipt and the restore selector; host wiring remains open.

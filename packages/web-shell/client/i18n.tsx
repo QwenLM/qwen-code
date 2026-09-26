@@ -57,8 +57,6 @@ const EN: Messages = {
   'capacityChoice.resume': 'Resume conversation',
   'capacityChoice.blocked.stopping': 'Stopping',
   'capacityChoice.blocked.not_live': 'No live ACP',
-  'capacityChoice.blocked.multiple_engine_channels':
-    'Multiple execution engines are running',
   'capacityChoice.blocked.release_unavailable':
     'Owned process release cannot be observed',
   'capacityChoice.blocked.session_start_pending':
@@ -1877,6 +1875,12 @@ const EN: Messages = {
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
   'sidebar.settings': 'Settings',
+  'update.button': 'Update',
+  'update.restarting': 'Restarting…',
+  'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.failed':
+    'Update could not finish. Check the service connection and retry.',
+
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
@@ -4176,7 +4180,6 @@ const ZH: Messages = {
   'capacityChoice.resume': '恢复会话',
   'capacityChoice.blocked.stopping': '正在停止',
   'capacityChoice.blocked.not_live': '没有运行中的 ACP',
-  'capacityChoice.blocked.multiple_engine_channels': '多个执行引擎正在运行',
   'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
   'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
   'capacityChoice.blocked.workspace_control_pending':
@@ -5943,6 +5946,11 @@ const ZH: Messages = {
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
   'sidebar.settings': '设置',
+  'update.button': '更新',
+  'update.restarting': '重启中…',
+  'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.failed': '未能完成更新，请检查服务连接后重试。',
+
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',

@@ -228,7 +228,11 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
-import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import {
+  SESSION_EXECUTION_ENGINE_META_KEY,
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+} from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -1079,6 +1083,36 @@ async function resolvePersistedSessionIdForRestore(
     }
     throw error;
   }
+}
+
+/**
+ * A paired Bridge names the engine it selected; this host only executes
+ * Legacy sessions, so any other selection is refused before session work.
+ */
+function requestedExecutionEngine(
+  meta: Record<string, unknown> | null | undefined,
+  sessionId: string | undefined,
+): SessionExecutionEngine | undefined {
+  const engine = meta?.[SESSION_EXECUTION_ENGINE_META_KEY];
+  if (engine === undefined || engine === 'legacy') return engine;
+  throw new RequestError(
+    -32024,
+    'This ACP host only executes legacy sessions.',
+    {
+      errorKind: 'session_execution_engine_unavailable',
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    },
+  );
+}
+
+function withExecutionEngineReceipt<
+  T extends { _meta?: Record<string, unknown> | null },
+>(response: T, engine: SessionExecutionEngine | undefined): T {
+  if (engine === undefined) return response;
+  return {
+    ...response,
+    _meta: { ...response._meta, [SESSION_EXECUTION_ENGINE_META_KEY]: engine },
+  };
 }
 
 function mapSessionRestoreRequestError(
@@ -5555,6 +5589,10 @@ class QwenAgent implements Agent {
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      requestedSessionId,
+    );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
@@ -5615,6 +5653,9 @@ class QwenAgent implements Agent {
                     ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
                   }
                 : undefined,
+              undefined,
+              undefined,
+              executionEngine,
             ),
           );
           let session: Session;
@@ -5650,15 +5691,20 @@ class QwenAgent implements Agent {
             });
           }
           profiler.setSessionId(session.getId());
-          return profiler.timeSync('response_build', () => ({
-            sessionId: session.getId(),
-            models: this.buildAvailableModels(config),
-            modes: this.buildModesData(config),
-            configOptions: this.buildConfigOptions(
-              config,
-              session.getDefaultReasoningConfig(),
+          return profiler.timeSync('response_build', () =>
+            withExecutionEngineReceipt<NewSessionResponse>(
+              {
+                sessionId: session.getId(),
+                models: this.buildAvailableModels(config),
+                modes: this.buildModesData(config),
+                configOptions: this.buildConfigOptions(
+                  config,
+                  session.getDefaultReasoningConfig(),
+                ),
+              },
+              executionEngine,
             ),
-          }));
+          );
         },
         parentContext ? { parentContext } : {},
       );
@@ -5670,21 +5716,26 @@ class QwenAgent implements Agent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
     const parentContext = extractDaemonTraceContext(params);
-    return await withDaemonSpan(
-      'qwen-code.daemon.session_restore',
-      {
-        'qwen-code.daemon.operation': 'acp_session_load',
-        'qwen-code.daemon.session_restore.action': 'load',
-        'session.id': sessionId,
-      },
-      async (span) =>
-        this.loadSessionWithProfiler(
-          params,
-          sessionId,
-          createAcpSessionRestoreProfiler(span),
-        ),
-      parentContext ? { parentContext } : {},
+    return withExecutionEngineReceipt(
+      await withDaemonSpan(
+        'qwen-code.daemon.session_restore',
+        {
+          'qwen-code.daemon.operation': 'acp_session_load',
+          'qwen-code.daemon.session_restore.action': 'load',
+          'session.id': sessionId,
+        },
+        async (span) =>
+          this.loadSessionWithProfiler(
+            params,
+            sessionId,
+            createAcpSessionRestoreProfiler(span),
+            executionEngine,
+          ),
+        parentContext ? { parentContext } : {},
+      ),
+      executionEngine,
     );
   }
 
@@ -5692,6 +5743,7 @@ class QwenAgent implements Agent {
     params: LoadSessionRequest,
     initialSessionId: string,
     profiler: AcpSessionRestoreProfiler,
+    executionEngine: SessionExecutionEngine | undefined,
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
@@ -5930,6 +5982,7 @@ class QwenAgent implements Agent {
           { skipLlmInitialization: true },
           undefined,
           restoreOptions,
+          executionEngine,
         ),
       );
       if (suppressRestoreAskUserQuestion) {
@@ -6212,21 +6265,26 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
     const parentContext = extractDaemonTraceContext(params);
-    return await withDaemonSpan(
-      'qwen-code.daemon.session_restore',
-      {
-        'qwen-code.daemon.operation': 'acp_session_resume',
-        'qwen-code.daemon.session_restore.action': 'resume',
-        'session.id': sessionId,
-      },
-      async (span) =>
-        this.resumeSessionWithProfiler(
-          params,
-          sessionId,
-          createAcpSessionRestoreProfiler(span),
-        ),
-      parentContext ? { parentContext } : {},
+    return withExecutionEngineReceipt(
+      await withDaemonSpan(
+        'qwen-code.daemon.session_restore',
+        {
+          'qwen-code.daemon.operation': 'acp_session_resume',
+          'qwen-code.daemon.session_restore.action': 'resume',
+          'session.id': sessionId,
+        },
+        async (span) =>
+          this.resumeSessionWithProfiler(
+            params,
+            sessionId,
+            createAcpSessionRestoreProfiler(span),
+            executionEngine,
+          ),
+        parentContext ? { parentContext } : {},
+      ),
+      executionEngine,
     );
   }
 
@@ -6234,6 +6292,7 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
     initialSessionId: string,
     profiler: AcpSessionRestoreProfiler,
+    executionEngine: SessionExecutionEngine | undefined,
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
@@ -6338,6 +6397,7 @@ class QwenAgent implements Agent {
           { skipLlmInitialization: true },
           undefined,
           RESUME_RESTORE_OPTIONS,
+          executionEngine,
         ),
       );
       if (suppressRestoreAskUserQuestion) {
@@ -14880,6 +14940,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    executionEngine?: SessionExecutionEngine,
   ): Promise<Config> {
     // Transcript replay is the only recording-disabled Config and must remain
     // id-less; it borrows the validated target session context from extMethod.
@@ -14916,6 +14977,7 @@ class QwenAgent implements Agent {
             chatRecording,
             restoreOptions,
             sessionIdGenerated,
+            executionEngine,
           );
         }),
       );
@@ -14949,6 +15011,7 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
     sessionIdGenerated?: boolean,
+    executionEngine?: SessionExecutionEngine,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -15070,11 +15133,15 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard || restoreOptions || provisionalWorkspace
+      this.managedToolInvocationGuard ||
+        restoreOptions ||
+        provisionalWorkspace ||
+        executionEngine
         ? {
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),
+            ...(executionEngine ? { executionEngine } : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),

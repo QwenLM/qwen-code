@@ -118,6 +118,7 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 import {
   printRemoteQuickstart,
   tokenQrNoEffectReason,
@@ -2091,6 +2092,8 @@ function buildProviderSetupInputs(
 }
 
 export interface RunQwenServeDeps {
+  /** Only CLI entrypoints opt into replacing their own daemon process. */
+  updateRestartArgv?: readonly string[];
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /** Test/embed override for the plain HTTP server constructor. */
@@ -4664,6 +4667,16 @@ async function runQwenServeImpl(
   // collapses to "did we resolve real assets".
   const webShellMounted = !!webShellDir;
   const serveAppLifecycle = new ServeAppLifecycleController();
+  const restartForUpdate = deps.updateRestartArgv
+    ? createDaemonUpdateRestarter({
+        argv: deps.updateRestartArgv,
+        env: daemonRuntimeBaseEnv,
+        token,
+        externalToolGuardToken: optsIn.externalToolGuard?.token,
+        getPort: () => actualPort,
+        close: () => serveAppLifecycle.close(),
+      })
+    : undefined;
   const liveDiscoveryStableBaseDir = path.resolve(
     deps.liveDiscoveryStableBaseDir ?? path.join(os.homedir(), '.qwen'),
   );
@@ -6285,7 +6298,8 @@ async function runQwenServeImpl(
       workspaceSkillsStatusProvider,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
@@ -6790,7 +6804,9 @@ async function runQwenServeImpl(
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
-        isChannelLive: () => secondaryBridge.isChannelLive(),
+        isChannelLive: () =>
+          secondaryBridge.isWorkspaceControlLive?.() ??
+          secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
@@ -7503,7 +7519,8 @@ async function runQwenServeImpl(
           ...(buildOptions?.primary === true
             ? {}
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
-          isChannelLive: () => wsBridge.isChannelLive(),
+          isChannelLive: () =>
+            wsBridge.isWorkspaceControlLive?.() ?? wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
@@ -8190,6 +8207,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      restartForUpdate,
       maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
       liveDiscoveryStableBaseDir,
@@ -10160,6 +10178,11 @@ async function runQwenServeImpl(
                   daemonLog,
                 );
                 const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
+                await (
+                  appForCleanup?.locals?.['cleanupDaemonUpdate'] as
+                    | (() => Promise<void>)
+                    | undefined
+                )?.();
                 const workspaceManagementHandle = appForCleanup?.locals?.[
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;

@@ -16,6 +16,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { isPidAlive } from '@qwen-code/qwen-code-core/utils/process-liveness.js';
+import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
 import type { FrozenRequest } from './batch-docs.js';
 
 export const BATCH_TASK_SCHEMA_VERSION = 1;
@@ -279,6 +280,10 @@ export const PRIVATE_FILE_MODE = 0o600;
 export class BatchTaskStore {
   constructor(private readonly homeDir: string) {}
 
+  /** Records `list` has already reported unreadable, so a caller that
+   * re-scans every minute says so once instead of on every pass. */
+  private readonly reportedUnreadable = new Set<string>();
+
   private dirOf(id: string): string {
     // The id becomes a directory name verbatim; refuse anything that could
     // walk out of the store, however it got into a task file.
@@ -453,6 +458,25 @@ export class BatchTaskStore {
           `this build understands ${BATCH_TASK_SCHEMA_VERSION}; not touching it`,
       );
     }
+    // The version stamp is all a hand-edited or half-written record is
+    // guaranteed to carry, and every caller dereferences these four with no
+    // guard of its own: list() sorts on createdAt, refreshTaskStatus maps
+    // items, and the collector's isOpen filters on attempts. Reject here so
+    // such a record reaches list()'s unreadable path — named once, with the
+    // rest of the store still listed — instead of throwing out of a caller
+    // that has no per-record guard at all.
+    const required: ReadonlyArray<readonly [string, boolean]> = [
+      ['id', typeof task.id === 'string'],
+      ['createdAt', typeof task.createdAt === 'string'],
+      ['items', Array.isArray(task.items)],
+      ['attempts', Array.isArray(task.attempts)],
+    ];
+    const missing = required.find(([, present]) => !present)?.[0];
+    if (missing) {
+      throw new Error(
+        `cannot load task "${id}" from ${file}: record is missing ${missing}`,
+      );
+    }
     return task;
   }
 
@@ -475,8 +499,18 @@ export class BatchTaskStore {
    * Every readable task, newest first. With `cache`, a task file whose mtime
    * and size are unchanged is not re-read — the session's auto-collector
    * scans every minute, and most records are long settled.
+   *
+   * A record this build cannot read is skipped rather than allowed to hide
+   * the rest, and named through `onUnreadable` — once per id, with the slot
+   * freed as soon as that id reads again: it can hold a paid batch, so it must
+   * stay discoverable instead of vanishing. A directory holding no task.json
+   * is a normal store shape rather than an unreadable record, and is passed
+   * over silently.
    */
-  list(cache?: Map<string, { stamp: string; task: BatchTask }>): BatchTask[] {
+  list(
+    cache?: Map<string, { stamp: string; task: BatchTask }>,
+    onUnreadable?: (detail: string) => void,
+  ): BatchTask[] {
     const root = path.join(this.homeDir, 'tasks');
     if (!fs.existsSync(root)) return [];
     const tasks: BatchTask[] = [];
@@ -485,18 +519,40 @@ export class BatchTaskStore {
       try {
         if (!cache) {
           tasks.push(this.load(entry.name));
-          continue;
+        } else {
+          const stat = fs.statSync(this.fileOf(entry.name));
+          const stamp = `${stat.mtimeMs}:${stat.size}`;
+          let hit = cache.get(entry.name);
+          if (hit?.stamp !== stamp) {
+            hit = { stamp, task: this.load(entry.name) };
+            cache.set(entry.name, hit);
+          }
+          tasks.push(hit.task);
         }
-        const stat = fs.statSync(this.fileOf(entry.name));
-        const stamp = `${stat.mtimeMs}:${stat.size}`;
-        let hit = cache.get(entry.name);
-        if (hit?.stamp !== stamp) {
-          hit = { stamp, task: this.load(entry.name) };
-          cache.set(entry.name, hit);
-        }
-        tasks.push(hit.task);
-      } catch {
+        // It reads again, so free the slot: a later failure on this id is a
+        // new fact and deserves its one report.
+        this.reportedUnreadable.delete(entry.name);
+      } catch (error) {
         // A task another version cannot read must not hide the rest.
+        if (!onUnreadable || this.reportedUnreadable.has(entry.name)) continue;
+        // A directory holding no task.json is not a record this build failed
+        // to read: create() mkdirs before save() renames and remove() rms
+        // recursively, so a live store really does contain these. Reporting
+        // one would warn on a normal store shape. Spelled out rather than
+        // going through fileOf(), which validates the id and so would throw
+        // from inside this catch.
+        if (!fs.existsSync(path.join(root, entry.name, 'task.json'))) continue;
+        this.reportedUnreadable.add(entry.name);
+        // entry.name is readdirSync output and the load error quotes it a
+        // second time, so strip the whole detail: it is echoed verbatim to the
+        // terminal and to the collector's debug log.
+        onUnreadable(
+          stripTerminalControlSequences(
+            `${entry.name}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
       }
     }
     return tasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

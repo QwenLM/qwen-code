@@ -45,6 +45,8 @@ canonical workspace 和已确认的 standalone 用途，只能返回 `legacy` �
 Owner 持久化留在包外。#12693 正在引入 reader/writer 基础；最小依赖以及
 `session_execution_engine` 与 `managed_session_header_v1` 的关系仍需在 issue
 中对齐。本切片不新建格式，也不要求整个 Stage G 完成。生产启用需要完成 host 接线。
+Legacy host 回执、owner 持久化和冷恢复选择器见 B2a 后续设计
+[双引擎 owner 选择与类型化拒绝](./2026-09-26-paired-engine-owner-selection.zh-CN.md)。
 
 ### 通道与准入
 
@@ -64,7 +66,7 @@ Shutdown 等待所有引擎启动、选择、会话操作和物理通道，强�
 
 ### 注册与清理
 
-派发前拒绝无法寻址或已被活跃会话占用的调用方指定 ID。注册前核验实际引擎回执和
+派发前以 B2a 后续设计定义的类型化拒绝，拒绝无法寻址或已被活跃会话占用的调用方指定 ID。注册前核验实际引擎回执和
 返回的 Session ID。缺失、非法或冲突回执拒绝注册。可安全寻址的未注册 Session 在原 connection 上关闭；ID 无法安全寻址时隔离原通道，等待
 其他会话排空，并保持准入到物理退出。不能因异常响应返回了其他 Session 的 ID 就关闭它。
 
@@ -103,9 +105,11 @@ keepalive。子进程资源采样与用户语言下发也仍只覆盖 Legacy。�
   悄悄让已有 Managed 会话继续使用旧权限。
 
 这些是 #12380 host 集成的验收门槛，当前仅走 Legacy 的工作区控制实现尚不提供这些能力。
+B2b 后续设计[双引擎工作区 runtime 身份](./2026-09-26-paired-engine-workspace-runtime-identity.zh-CN.md)
+给出了前两项门槛的方案；第三项仍待完成。
 
-现有工作区 stop 回执只表示一个物理通道，因此多个通道存活时明确拒绝 stop，直到
-回执扩展；只有一个通道时仍可停止。
+本切片的工作区 stop 回执只表示一个物理通道，因此多个通道存活时拒绝 stop；只有一个
+通道时仍可停止。B2b 后续设计把回执扩展到所有存活通道。
 Managed branch/side-task 在修改历史前拒绝。
 
 ## 文件与消费者
@@ -137,4 +141,4 @@ Managed branch/side-task 在修改历史前拒绝。
 主要风险是清理完成前释放准入，或把一个引擎的 current channel 当作整个工作区。
 测试必须观察真实 factory/connection 调用和未完成清理，而不只检查最终 Session 数量。
 Owner 持久化依赖与生产 host 回执实现仍是 #12380 中待对齐的接线问题；在此期间可通过
-Bridge 注入接口验证契约。
+Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器，宿主接线仍待完成。

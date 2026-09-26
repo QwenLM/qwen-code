@@ -229,25 +229,26 @@ function copyValidCachedArchive(
 function stageNodePty(desktopTarget) {
   const prebuildPackage = NODE_PTY_PREBUILD_PACKAGE.get(desktopTarget);
   const packageNames = ['@lydell/node-pty', prebuildPackage];
-  const specs = nodePtyPackageSpecs(packageNames);
-  if (!specs) {
+  const packageSpecResult = nodePtyPackageSpecs(packageNames);
+  if (packageSpecResult.missing) {
     // Degrade when the source root leaves either name in the pair unpinned —
     // the wrapper or this target's prebuild. desktopTarget() throws for any
     // target outside the five it allows and NODE_PTY_PREBUILD_PACKAGE maps
     // exactly those five, so prebuildPackage is always a real name: reaching
     // this arm means the source root's optionalDependencies dropped a pin, not
-    // that the target is unknown. The warning below names the prebuild package
-    // whichever of the two is missing. Degrading still beats failing — a
+    // that the target is unknown. The warning names the first missing package.
+    // Degrading still beats failing — a
     // checkout missing one pin would otherwise trade a missing Web Terminal for
     // no app at all. The release job still refuses to publish such a runtime —
     // smoke-runtime.js's PTY round-trip hard-fails.
     console.warn(
-      `[desktop] ${prebuildPackage} is not pinned in ` +
+      `[desktop] ${packageSpecResult.missing} is not pinned in ` +
         `${path.join(sourceRoot, 'package.json')}; bundling ${desktopTarget} ` +
         'without PTY support (web terminal will report "PTY not available").',
     );
     return;
   }
+  const { specs } = packageSpecResult;
   const installDir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'qwen-desktop-node-pty-'),
   );
@@ -319,7 +320,7 @@ function nodePtyPackageSpecs(packageNames) {
   const specs = [];
   for (const packageName of packageNames) {
     const version = pinned[packageName];
-    if (!version) return null;
+    if (!version) return { missing: packageName };
     if (
       !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)
     ) {
@@ -329,7 +330,7 @@ function nodePtyPackageSpecs(packageNames) {
     }
     specs.push(`${packageName}@${version}`);
   }
-  return specs;
+  return { specs };
 }
 
 function desktopTarget() {

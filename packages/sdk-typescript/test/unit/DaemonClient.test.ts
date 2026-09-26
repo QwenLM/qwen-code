@@ -13,6 +13,7 @@ import {
   composeAbortSignals,
   isStaleBranchPointError,
   normalizePendingPromptLimit,
+  type RestoreSessionRequest,
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
@@ -4706,12 +4707,14 @@ describe('DaemonClient', () => {
         }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      // Untyped (plain-JS) callers can still pass the load-shaped request;
+      // the wire builder keeps dropping the load-only fields on resume.
       await client.resumeSession('s-1', {
         workspaceCwd: '/w',
         historyPageSize: 100,
         liveReplayMode: 'summary',
         compactedReplayMode: 'summary',
-      });
+      } as RestoreSessionRequest);
 
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/resume');
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/w' });
