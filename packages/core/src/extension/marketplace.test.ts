@@ -276,16 +276,16 @@ describe('parseInstallSource', () => {
     it('should mention the git-remote reading for http URLs that end in an archive extension', async () => {
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
-      // Only the git@/SSH remote (or a local clone) actually reaches the git
-      // path — an https:// URL with an archive pathname is classified as an
-      // archive download first — so the message must not recommend it. The
-      // positive assertion pins the remedy clause verbatim, so any rewording
-      // of the message (including one that re-adds an https:// recommendation)
-      // goes red here.
+      // Only the git@/SSH remote (or a local clone into a non-archive-named
+      // directory) actually reaches the git path — an https:// URL with an
+      // archive pathname is classified as an archive download first — so the
+      // message must not recommend it. The assertion pins the message
+      // end-to-end (^…$): appends (M10), mid-message insertions and any
+      // rewording that re-adds an https:// recommendation all go red here.
       await expect(
         parseInstallSource('http://example.com:8080/team/tools.zip'),
       ).rejects.toThrow(
-        /if this is a Git repository whose name ends in an archive extension, use its git@\/SSH remote, or clone it yourself and install from the local path/,
+        /^Archive URLs must use https:\/\/ \(got [^)]*\)\. Re-download the archive from an HTTPS URL — or, if this is a Git repository whose name ends in an archive extension, use its git@\/SSH remote, or clone it into a directory whose name does not end in \.zip or \.tar\.gz and install from that local path\.$/,
       );
     });
   });

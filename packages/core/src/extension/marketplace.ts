@@ -476,7 +476,8 @@ export async function parseInstallSource(
         `Archive URLs must use https:// (got ${redactUrlCredentials(repo)}). ` +
           `Re-download the archive from an HTTPS URL — or, if this is a Git ` +
           `repository whose name ends in an archive extension, use its ` +
-          `git@/SSH remote, or clone it yourself and install from the local path.`,
+          `git@/SSH remote, or clone it into a directory whose name does not end ` +
+          `in .zip or .tar.gz and install from that local path.`,
       );
     }
     installMetadata = {
