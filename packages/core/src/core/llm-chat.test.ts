@@ -22280,6 +22280,35 @@ describe('LlmChat', async () => {
       expect(
         uiTelemetryService.setLastCachedContentTokenCount,
       ).toHaveBeenLastCalledWith(0);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 65_267,
+        totalTokenCount: 65_267,
+        cachedContentTokenCount: 64_653,
+      });
+      expect(chat.getLastCachedContentTokenCount()).toBe(64_653);
+      // Resume seeds prompt and output from ResumeTokenCounts that carry no
+      // cached figure. Both finite and non-finite inputs replace the prompt
+      // slot, so the per-chat slot and the telemetry mirror must clear.
+      chat.seedResumeTokenCounts(Number.NaN, Number.NaN, false);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenLastCalledWith(0);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 80_000,
+        totalTokenCount: 80_000,
+        cachedContentTokenCount: 64_653,
+      });
+      chat.seedResumeTokenCounts(12_000, 30, false);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenLastCalledWith(0);
+      expect(chat.getLastPromptTokenCount()).toBe(12_000);
+      expect(chat.getLastOutputTokenCount()).toBe(30);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
     });
 
     it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
