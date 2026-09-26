@@ -74,13 +74,14 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * as work, except disposable build output ({@link DISPOSABLE_IGNORED_ROOTS}),
  * symlinks (removing the checkout only unlinks them; the target lives
  * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
- * reapable), and the session marker ({@link WORKTREE_SESSION_FILE}) —
- * git-excluded in production but possibly untracked in hand-built
- * fixtures. The argv tokens added for this probe are literals placed
- * after the `status` subcommand and are never caller-derived (see
- * `load-simple-git.ts`), and `runGit` scrubs the environment (`gitEnv`)
- * so an inherited `GIT_DIR` or `status.showUntrackedFiles=no` cannot
- * make a dirty checkout read clean.
+ * reapable, nested values included, which git reports as a collapsed parent
+ * holding nothing but links), and the session marker
+ * ({@link WORKTREE_SESSION_FILE}) — git-excluded in production but
+ * possibly untracked in hand-built fixtures. The argv tokens added for
+ * this probe are literals placed after the `status` subcommand and are
+ * never caller-derived (see `load-simple-git.ts`), and `runGit` scrubs the
+ * environment (`gitEnv`) so an inherited `GIT_DIR` or
+ * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
  *
  * Fail-closed: any read error counts as work, preserving the checkout.
  * The `.git` access check exists because `runGit` does not pin the
@@ -104,16 +105,27 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
     for (const line of stdout.split('\n')) {
       if (line.trim().length === 0) continue;
       const entry = line.slice(3);
-      if (entry === WORKTREE_SESSION_FILE) continue;
       const status = line.slice(0, 2);
-      if (status === '!!' && isDisposableIgnoredEntry(entry)) continue;
-      if (
+      let waived: string | null = null;
+      if (entry === WORKTREE_SESSION_FILE) {
+        waived = 'session-marker';
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+        waived = 'disposable-output';
+      } else if (
         (status === '!!' || status === '??') &&
         (await isSymlinkEntry(worktreePath, entry))
       ) {
-        continue;
+        waived = 'symlink';
       }
-      return true;
+      if (waived === null) return true;
+      // A waiver authorizes `git worktree remove --force` plus a branch
+      // delete, and it destroys the very state that authorized it — so name
+      // the entry while it can still be read. Stays at `debug` for the
+      // reason the sweep's own breadcrumb records: `info` on every CLI start
+      // that has any dirty worktree is log noise.
+      debugLogger.debug(
+        `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
+      );
     }
     return false;
   } catch (error) {
@@ -142,16 +154,36 @@ function isDisposableIgnoredEntry(entry: string): boolean {
  * A symlink holds no data in this checkout: `worktree.symlinkDirectories`
  * links e.g. `node_modules` from the main repo, and git lists such a link as
  * an untracked file when the ignore rule is directory-only
- * (`node_modules/`). Removing the worktree unlinks it and never touches the
- * target. Quoted (special-character) paths are not resolved and count as work.
+ * (`node_modules/`) or as an ignored one when the rule is bare (`.turbo`).
+ * Removing the worktree unlinks it and never touches the target.
+ *
+ * A *nested* configured value (`tools/cache`) is reported differently:
+ * `symlinkConfiguredDirectories` has to `fs.mkdir` the untracked parent
+ * because `git worktree add` does not create it, and nothing writes an
+ * exclude rule for linked paths, so git collapses the whole subtree to a
+ * single `?? tools/` entry that never names the link. Such a collapsed
+ * directory is exempt only when every entry inside it is itself a symlink —
+ * a real file or directory beside the links is work, and any read error
+ * fails closed exactly like the status probe does.
+ *
+ * Quoted (special-character) paths are not resolved and count as work.
  */
 async function isSymlinkEntry(
   worktreePath: string,
   entry: string,
 ): Promise<boolean> {
-  if (entry.endsWith('/') || entry.startsWith('"')) return false;
+  if (entry.startsWith('"')) return false;
+  const absolute = path.join(worktreePath, entry.replace(/\/$/, ''));
   try {
-    return (await fs.lstat(path.join(worktreePath, entry))).isSymbolicLink();
+    const stats = await fs.lstat(absolute);
+    if (stats.isSymbolicLink()) return true;
+    if (!stats.isDirectory()) return false;
+    // Dirents from `readdir` do not follow links, so a real subdirectory —
+    // which may hold work one level down — fails this check.
+    for (const child of await fs.readdir(absolute, { withFileTypes: true })) {
+      if (!child.isSymbolicLink()) return false;
+    }
+    return true;
   } catch {
     return false;
   }

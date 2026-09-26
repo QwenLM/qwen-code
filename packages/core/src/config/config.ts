@@ -4498,10 +4498,11 @@ export class Config {
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
     // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
     // removal on worktreeHasWork — tracked, untracked and ignored content
-    // (minus disposable build output) all preserve the worktree, and any
-    // probe error fails closed — so running it on every startup cannot
-    // destroy user work. We do not await this: it is a hygiene task
-    // that must never delay the first model turn.
+    // (minus disposable build output, symlinks whose targets live outside
+    // the checkout, and the session marker) all preserve the worktree, and
+    // any probe error fails closed — so running it on every startup cannot
+    // destroy user work in the checkout. We do not await this: it is a
+    // hygiene task that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and

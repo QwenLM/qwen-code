@@ -30,17 +30,28 @@ const cleanupLogger = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
-// Intercept only the sweep's own tag; every other module in this file's import
-// graph (gitWorktreeService, storage, telemetry) keeps the real logger.
+// The shared predicate logs under its own tag, so capturing the waiver
+// breadcrumbs it writes needs a second spy.
+const worktreeServiceLogger = vi.hoisted(() => ({
+  isEnabled: () => true,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+// Intercept the sweep's tag and the predicate's; every other module in this
+// file's import graph (storage, telemetry) keeps the real logger.
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/debugLogger.js')>();
   return {
     ...actual,
-    createDebugLogger: (tag?: string) =>
-      tag === 'WORKTREE_CLEANUP'
-        ? cleanupLogger
-        : actual.createDebugLogger(tag),
+    createDebugLogger: (tag?: string) => {
+      if (tag === 'WORKTREE_CLEANUP') return cleanupLogger;
+      if (tag === 'GIT_WORKTREE_SERVICE') return worktreeServiceLogger;
+      return actual.createDebugLogger(tag);
+    },
   };
 });
 
@@ -130,6 +141,22 @@ describe('cleanupStaleAgentWorktrees', () => {
       Date.now() - STALE_WORKTREE_CUTOFF_MS - 24 * 60 * 60 * 1000,
     );
     await fs.utimes(worktreePath, aged, aged);
+  }
+
+  // Add a bare (slashless) ignore rule to the fixture repo and commit it, so
+  // a worktree created afterwards branches off a `main` that carries the same
+  // rules the probe will see. The shared `.gitignore` stays untouched for the
+  // cases that depend on `node_modules/` being directory-only.
+  async function addIgnoreRule(rule: string): Promise<void> {
+    await fs.appendFile(path.join(repoRoot, '.gitignore'), `${rule}\n`);
+    execFileSync('git', ['add', '.gitignore'], { cwd: repoRoot });
+    execFileSync(
+      'git',
+      ['commit', '-q', '-m', `ignore ${rule}`, '--no-verify'],
+      {
+        cwd: repoRoot,
+      },
+    );
   }
 
   it('preserves a stale worktree whose only content is git-ignored (#12758)', async () => {
@@ -231,12 +258,19 @@ describe('cleanupStaleAgentWorktrees', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
 
     const removed = await cleanupStaleAgentWorktrees(repoRoot);
 
     expect(removed).toBe(1);
     // Reaping unlinks the symlink; the shared target must survive.
     await expect(fs.access(path.join(target, 'i.js'))).resolves.toBeUndefined();
+    // The waiver authorized an irreversible removal plus a branch delete and
+    // destroyed the checkout that was its only evidence, so it has to name
+    // the entry and the reason while they can still be read.
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('waiving ?? node_modules (symlink)'),
+    );
   });
 
   it('still reaps a stale worktree holding only a workspace package install', async () => {
@@ -276,6 +310,109 @@ describe('cleanupStaleAgentWorktrees', () => {
     expect(removed).toBe(0);
     await expect(
       fs.access(path.join(wtPath, 'packages', 'app', 'secret.env')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still reaps a stale worktree whose only content is an ignored .turbo symlink', async () => {
+    // A bare (slashless) rule matches a symlink, so git reports `!! .turbo`:
+    // the ignored arm of the exemption, with a name DISPOSABLE_IGNORED_ROOTS
+    // does not cover. The shared fixture's `node_modules/` rule is
+    // directory-only and yields `?? node_modules` instead, so without this
+    // case narrowing the guard to `status === '??'` — or restricting the
+    // exemption to disposable names — leaves the whole suite green.
+    await addIgnoreRule('.turbo');
+    const cacheTarget = path.join(repoParent, 'turbo-cache');
+    await fs.mkdir(cacheTarget);
+    await fs.writeFile(path.join(cacheTarget, 't.json'), '{}\n');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.symlink(
+      cacheTarget,
+      path.join(wtPath, '.turbo'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(
+      fs.access(path.join(cacheTarget, 't.json')),
+    ).resolves.toBeUndefined();
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('waiving !! .turbo (symlink)'),
+    );
+  });
+
+  it('preserves a stale worktree whose only content is a nested ignored file named coverage', async () => {
+    // A slashless rule matches at any depth and git lists an ignored FILE
+    // individually with no trailing slash (`!! packages/app/coverage`), so a
+    // basename match alone must not class it as regenerable output —
+    // `go test -coverprofile=coverage` writes exactly this. It has to be
+    // nested: the root-level branch of isDisposableIgnoredEntry already
+    // exempts `coverage` with or without a slash.
+    await addIgnoreRule('coverage');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'packages', 'app'), { recursive: true });
+    await fs.writeFile(
+      path.join(wtPath, 'packages', 'app', 'coverage'),
+      'mode: set\n',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'packages', 'app', 'coverage')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still reaps a stale worktree whose nested symlinkDirectories parent holds only links', async () => {
+    // `symlinkConfiguredDirectories` accepts nested values and has to mkdir
+    // the untracked parent (`git worktree add` does not create it), and
+    // nothing writes an exclude rule for linked paths — so git collapses the
+    // whole subtree to a single `?? tools/` that never names the link.
+    const cacheTarget = path.join(repoParent, 'tools-cache');
+    await fs.mkdir(cacheTarget);
+    await fs.writeFile(path.join(cacheTarget, 'f.txt'), 'x\n');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'tools'));
+    await fs.symlink(
+      cacheTarget,
+      path.join(wtPath, 'tools', 'cache'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(
+      fs.access(path.join(cacheTarget, 'f.txt')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('preserves a stale worktree holding a real file beside a nested symlink', async () => {
+    // The collapsed-directory waiver has to stay symlink-only: one real file
+    // beside the link is untracked work and must pin the checkout.
+    const cacheTarget = path.join(repoParent, 'tools-cache');
+    await fs.mkdir(cacheTarget);
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'tools'));
+    await fs.symlink(
+      cacheTarget,
+      path.join(wtPath, 'tools', 'cache'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fs.writeFile(path.join(wtPath, 'tools', 'notes.md'), 'keep\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'tools', 'notes.md')),
     ).resolves.toBeUndefined();
   });
 
