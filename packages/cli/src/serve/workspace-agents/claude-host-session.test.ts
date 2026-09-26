@@ -56,7 +56,7 @@ connection = new AgentSideConnection(() => ({
 const command = (scenario: string) =>
   [process.execPath, '--input-type=module', '-e', fixture, scenario] as const;
 
-describe('runClaudeHostTurn', () => {
+describe.skipIf(process.platform === 'win32')('runClaudeHostTurn', () => {
   it('runs in plan mode, refuses every permission, and returns the reply', async () => {
     const updates: AgentTurnUpdate[] = [];
     const reply = await runClaudeHostTurn({
