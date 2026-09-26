@@ -217,6 +217,7 @@ export interface WorkerLogStream {
 }
 
 export interface CreateChannelWorkerSupervisorOptions {
+  managedExtensions?: string;
   cliEntryPath: string;
   daemonUrl: string;
   daemonToken?: string;
@@ -1056,6 +1057,9 @@ export function createChannelWorkerSupervisor(
       opts.cliEntryPath,
       'channel',
       'daemon-worker',
+      ...(opts.managedExtensions
+        ? ['--managed-extensions', opts.managedExtensions]
+        : []),
       ...selectionChannelArgs(opts.selection),
     ];
     const env = createWorkerEnv({

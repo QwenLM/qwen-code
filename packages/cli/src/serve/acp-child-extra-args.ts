@@ -9,10 +9,14 @@
  * (injected channel factory) and `createServeApp`'s default bridge spawn.
  */
 export function acpChildExtraArgs(opts: {
+  managedExtensions?: string;
   experimentalLsp?: boolean;
   restoreAskUserQuestion?: boolean;
 }): string[] | undefined {
   const extraArgs = [
+    ...(opts.managedExtensions !== undefined
+      ? ['--managed-extensions', opts.managedExtensions]
+      : []),
     ...(opts.experimentalLsp === true ? ['--experimental-lsp'] : []),
     ...(opts.restoreAskUserQuestion === true
       ? ['--restore-ask-user-question']

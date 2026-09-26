@@ -568,6 +568,7 @@ export async function checkForExtensionUpdate(
   signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
   signal?.throwIfAborted();
+  if (extension.source === 'managed') return ExtensionUpdateState.NOT_UPDATABLE;
   const installMetadata = extension.installMetadata;
   if (installMetadata?.type === 'local') {
     if (installMetadata.source.startsWith('upload:')) {

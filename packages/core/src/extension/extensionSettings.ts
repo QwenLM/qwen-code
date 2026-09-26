@@ -155,10 +155,11 @@ const getKeychainStorageName = (
   extensionName: string,
   extensionId: string,
   scope: ExtensionSettingScope,
+  cwd: string = process.cwd(),
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${process.cwd()}`;
+    return `${base} ${cwd}`;
   }
   return base;
 };
@@ -528,7 +529,111 @@ export async function updateSetting(
   }
 
   const newEnvContent = formatEnvContent(nonSensitiveSettings);
+  await fs.mkdir(path.dirname(envFilePath), { recursive: true, mode: 0o700 });
   await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
+}
+
+/**
+ * Whether the secret backend holds any values for the given extension
+ * identity, in either scope. The adoption gate in the extension store uses
+ * this because `updateSetting` stores sensitive values without writing
+ * selector metadata, so a settings-only directory can still be
+ * secret-bearing. The workspace-scope service name folds the writing
+ * process's cwd, and the probing process (e.g. a daemon route) is not
+ * necessarily it: `workspaceCwds` names every workspace spelling the caller
+ * can vouch for — the probe must never cover a narrower cwd set than
+ * `clearStoredExtensionSecrets` clears. A probe that finds nothing can never
+ * prove another workspace holds none, so the gate stays fail-closed on any
+ * hit it can see (and a probe error aborts the commit rather than being
+ * swallowed).
+ */
+export async function hasStoredExtensionSecrets(
+  extensionName: string,
+  extensionId: string,
+  workspaceCwds: readonly string[] = [],
+): Promise<boolean> {
+  for (const scope of [
+    ExtensionSettingScope.USER,
+    ExtensionSettingScope.WORKSPACE,
+  ]) {
+    const cwds =
+      scope === ExtensionSettingScope.WORKSPACE
+        ? new Set([process.cwd(), ...workspaceCwds])
+        : new Set<string>([process.cwd()]);
+    for (const cwd of cwds) {
+      const serviceName = getKeychainStorageName(
+        extensionName,
+        extensionId,
+        scope,
+        cwd,
+      );
+      // Probe both backends: which one HybridTokenStorage would pick depends
+      // on this process's keychain availability, not on where the value was
+      // written, so a single-backend probe can miss a value that exists.
+      for (const storage of [
+        new KeychainTokenStorage(serviceName),
+        new FileTokenStorage(serviceName),
+      ]) {
+        if (!(await storage.isAvailable())) continue;
+        let keys: string[];
+        try {
+          keys = await storage.listSecrets();
+        } catch (error) {
+          // An available-but-unenumerable backend is treated as
+          // secret-bearing: a gate that cannot prove the negative must fail
+          // closed.
+          debugLogger.warn(
+            `Could not enumerate stored secrets for extension "${extensionName}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return true;
+        }
+        if (keys.length > 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Deletes every stored secret for the given extension identity in both
+ * scopes. Used when a retained managed policy is explicitly uninstalled after
+ * its package left the deployment root, so the managed identity's values do
+ * not sit orphaned in the backend forever.
+ */
+export async function clearStoredExtensionSecrets(
+  extensionName: string,
+  extensionId: string,
+  workspaceCwds: readonly string[] = [],
+): Promise<void> {
+  for (const scope of [
+    ExtensionSettingScope.USER,
+    ExtensionSettingScope.WORKSPACE,
+  ]) {
+    // The workspace-scope service name folds the writing process's cwd, and
+    // the releasing process (a daemon route) is not necessarily it: clear
+    // every workspace spelling the caller can name.
+    const cwds =
+      scope === ExtensionSettingScope.WORKSPACE
+        ? new Set([process.cwd(), ...workspaceCwds])
+        : new Set<string>([process.cwd()]);
+    for (const cwd of cwds) {
+      const serviceName = getKeychainStorageName(
+        extensionName,
+        extensionId,
+        scope,
+        cwd,
+      );
+      // Clear in both backends: which one HybridTokenStorage picked at write
+      // time depended on that process's keychain availability, not this
+      // one's.
+      for (const storage of [
+        new KeychainTokenStorage(serviceName),
+        new FileTokenStorage(serviceName),
+      ]) {
+        await clearKeychainSettings(storage);
+      }
+    }
+  }
 }
 
 interface settingsChanges {
@@ -565,7 +670,7 @@ function getSettingsChanges(
   };
 }
 
-async function clearKeychainSettings(keychain: HybridTokenStorage) {
+async function clearKeychainSettings(keychain: SecretStorage) {
   if (!(await keychain.isAvailable())) {
     return;
   }

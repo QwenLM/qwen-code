@@ -208,6 +208,7 @@ export type ReserveRuntimeReconciliation =
   () => RuntimeReconciliationReservation;
 
 export interface CreateExtensionsControllerDeps {
+  managedExtensionsDir?: string;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
@@ -313,6 +314,7 @@ export function createExtensionsController(
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
     return new ExtensionManager({
+      managedExtensionsDir: deps.managedExtensionsDir,
       workspaceDir,
       locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
@@ -1064,6 +1066,7 @@ export function createExtensionsController(
           version: ext.version,
           isActive: ext.isActive,
           path: ext.path,
+          extensionSource: ext.source ?? 'user',
           ...(ext.installMetadata?.source &&
           ext.installMetadata.type !== 'snapshot'
             ? {

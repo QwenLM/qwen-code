@@ -82,6 +82,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import { resolvePath } from '../utils/resolvePath.js';
 import {
   TOP_LEVEL_GLOBAL_OPTIONS,
@@ -213,6 +214,7 @@ export interface CliArgs {
   experimentalLsp: boolean | undefined;
   restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
+  managedExtensions?: string;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
@@ -621,6 +623,10 @@ export async function parseArguments(): Promise<CliArgs> {
       TOP_LEVEL_GLOBAL_OPTIONS['telemetry-log-prompts'],
     )
     .option('telemetry-outfile', TOP_LEVEL_GLOBAL_OPTIONS['telemetry-outfile'])
+    .option('managed-extensions', {
+      ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+      coerce: resolveManagedExtensionsDir,
+    })
     .option('debug', TOP_LEVEL_GLOBAL_OPTIONS.debug)
     .option('bare', TOP_LEVEL_GLOBAL_OPTIONS.bare)
     .option('safe-mode', TOP_LEVEL_GLOBAL_OPTIONS['safe-mode'])
@@ -2674,6 +2680,7 @@ export async function loadCliConfig(
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
+    managedExtensionsDir: argv.managedExtensions,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: resolvedCliConfig.authType,
     inputFormat,

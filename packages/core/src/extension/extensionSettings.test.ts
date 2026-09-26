@@ -9,6 +9,8 @@ import {
   updateSetting,
   ExtensionSettingScope,
   getScopedEnvContents,
+  hasStoredExtensionSecrets,
+  clearStoredExtensionSecrets,
 } from './extensionSettings.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import { ExtensionStorage } from './storage.js';
@@ -16,6 +18,7 @@ import prompts from 'prompts';
 import * as fsPromises from 'node:fs/promises';
 import * as fs from 'node:fs';
 import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
+import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
 
 vi.mock('prompts');
@@ -1009,6 +1012,36 @@ describe('extensionSettings', () => {
       );
     });
 
+    it('creates user settings storage before the first managed setting write', async () => {
+      await fsPromises.rm(extensionDir, { recursive: true, force: true });
+      const managedDir = path.join(
+        tempHomeDir,
+        'managed-packages',
+        config.name,
+      );
+      await fsPromises.mkdir(managedDir, { recursive: true });
+      const manifestPath = path.join(managedDir, 'qwen-extension.json');
+      const manifest = JSON.stringify(config);
+      await fsPromises.writeFile(manifestPath, manifest);
+      mockRequestSetting.mockResolvedValue('first-value');
+
+      await updateSetting(
+        config,
+        'managed-id',
+        'VAR1',
+        mockRequestSetting,
+        ExtensionSettingScope.USER,
+      );
+
+      expect(
+        await fsPromises.readFile(path.join(extensionDir, '.env'), 'utf-8'),
+      ).toContain('VAR1=first-value');
+      expect(await fsPromises.readdir(managedDir)).toEqual([
+        'qwen-extension.json',
+      ]);
+      expect(await fsPromises.readFile(manifestPath, 'utf-8')).toBe(manifest);
+    });
+
     it('should update a non-sensitive setting in WORKSPACE scope', async () => {
       mockRequestSetting.mockResolvedValue('new-workspace-value');
 
@@ -1080,6 +1113,54 @@ describe('extensionSettings', () => {
         VAR1: 'initial-value2',
         VAR2: 'new-value2',
       });
+    });
+
+    it('probes and clears both secret backends, not only the one HybridTokenStorage would pick', async () => {
+      const fileConfig: ExtensionConfig = {
+        name: 'file-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'FILE_TOKEN',
+            sensitive: true,
+          },
+        ],
+      };
+      // Seed through the file backend while it is forced, then unforce: the
+      // (mocked) keychain is available again, so a Hybrid-only probe looks at
+      // the wrong backend and misses the value the file store still holds.
+      const previousStorageOverride =
+        process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = 'true';
+      try {
+        await updateSetting(
+          fileConfig,
+          'f1d',
+          'FILE_TOKEN',
+          async () => 'file-stored-secret',
+          ExtensionSettingScope.USER,
+        );
+      } finally {
+        if (previousStorageOverride === undefined) {
+          delete process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+        } else {
+          process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = previousStorageOverride;
+        }
+      }
+
+      await expect(hasStoredExtensionSecrets('file-ext', 'f1d')).resolves.toBe(
+        true,
+      );
+      await clearStoredExtensionSecrets('file-ext', 'f1d');
+      await expect(hasStoredExtensionSecrets('file-ext', 'f1d')).resolves.toBe(
+        false,
+      );
+      const fileStorage = new FileTokenStorage(
+        'Qwen Code Extensions file-ext f1d',
+      );
+      await expect(fileStorage.listSecrets()).resolves.toEqual([]);
     });
 
     it('should update a sensitive setting in WORKSPACE scope', async () => {

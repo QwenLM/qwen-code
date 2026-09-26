@@ -10,6 +10,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import {
+  type Config,
   FatalSandboxError,
   PRIVATE_ACP_CAPABILITY_ENV,
   QWEN_DIR,
@@ -106,6 +107,330 @@ describe('start_sandbox', () => {
         }),
       }),
     );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('mounts the managed extensions root read-only for a container sandbox', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const managedRoot = path.resolve('/opt/qwen-managed');
+    const cliConfig = {
+      getManagedExtensionsDir: () => managedRoot,
+    } as unknown as Config;
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      cliConfig,
+      [
+        process.execPath,
+        '/path/to/cli.js',
+        '--managed-extensions',
+        managedRoot,
+      ],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    // The root reaches the container read-only at its (translated) path.
+    // Compare on the host side of the spec, which is never translated: a
+    // host:host literal only holds where getContainerPath is identity.
+    const volumes = args.filter((_, index) => args[index - 1] === '--volume');
+    expect(
+      volumes.some(
+        (spec) => spec.startsWith(`${managedRoot}:`) && spec.endsWith(':ro'),
+      ),
+    ).toBe(true);
+    // ...and the forwarded flag still names that path, so the child's
+    // parse-time validation sees a directory that exists.
+    const entrypointCommand = args[args.length - 1];
+    expect(entrypointCommand).toContain('--managed-extensions');
+    expect(entrypointCommand).toContain(managedRoot);
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('keeps a lookalike --managed-extensions token in a value position untouched', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const managedRoot = path.resolve('/opt/qwen-managed');
+    const cliConfig = {
+      getManagedExtensionsDir: () => managedRoot,
+    } as unknown as Config;
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    // A piped prompt equal to the flag name lands in a value position; the
+    // forwarded argv must reach the child byte-for-byte, or the flag after
+    // the lookalike is destroyed with it.
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      cliConfig,
+      [
+        process.execPath,
+        '/path/to/cli.js',
+        '--managed-extensions',
+        managedRoot,
+        '--prompt',
+        '--managed-extensions',
+        '--sandbox-session-id',
+        'abc123',
+      ],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const entrypointCommand = args[args.length - 1];
+    expect(entrypointCommand).toContain('--managed-extensions');
+    expect(entrypointCommand).toContain(managedRoot);
+    expect(entrypointCommand).toContain('--sandbox-session-id');
+    expect(entrypointCommand).toContain('abc123');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'mounts the managed root read-only at the launch spelling when a parent is a symlink',
+    async () => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      // macOS hands out exactly this shape by default: os.tmpdir() and
+      // /var sit behind a symlink, so the spelling the flag carried at
+      // launch diverges from the pinned canonical root.
+      const base = fs.realpathSync.native(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sandbox-managed-')),
+      );
+      try {
+        const realRoot = path.join(base, 'real');
+        const linkRoot = path.join(base, 'link');
+        const canonical = path.join(realRoot, 'deploy', 'managed');
+        fs.mkdirSync(canonical, { recursive: true });
+        fs.symlinkSync(realRoot, linkRoot, 'dir');
+        const launchSpelling = path.join(linkRoot, 'deploy', 'managed');
+
+        const cliConfig = {
+          getManagedExtensionsDir: () => canonical,
+        } as unknown as Config;
+
+        const imageCheck = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+        });
+        const child = new EventEmitter();
+        spawnMock
+          .mockImplementationOnce(() => {
+            queueMicrotask(() => {
+              imageCheck.stdout.emit('data', Buffer.from('image-id'));
+              imageCheck.emit('close', 0);
+            });
+            return imageCheck;
+          })
+          .mockReturnValueOnce(child);
+
+        const result = start_sandbox(
+          { command: 'docker', image: 'example.com/qwen-code:latest' },
+          [],
+          cliConfig,
+          [
+            process.execPath,
+            '/path/to/cli.js',
+            '--managed-extensions',
+            launchSpelling,
+            // A lookalike in a value position: it resolves away from the
+            // managed root, so it must not gain a mount.
+            '--prompt',
+            '--managed-extensions',
+            os.tmpdir(),
+          ],
+        );
+
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+        const args = spawnMock.mock.calls[1]?.[1] as string[];
+        const volumes = args.filter(
+          (_, index) => args[index - 1] === '--volume',
+        );
+        // The canonical mount stays, and the spelling the child actually
+        // receives is covered read-only as well: without it the spelling
+        // resolves through the read-write tmpdir mount inside the container.
+        expect(volumes).toContain(`${canonical}:${canonical}:ro`);
+        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+        expect(
+          volumes.filter((spec) => spec.startsWith(`${canonical}:`)),
+        ).toHaveLength(2);
+        expect(
+          volumes.some((spec) => spec.endsWith(`:${os.tmpdir()}:ro`)),
+        ).toBe(false);
+
+        child.emit('close', 0);
+        await expect(result).resolves.toBe(0);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'covers the camelCase flag spelling of the managed root read-only',
+    async () => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      const base = fs.realpathSync.native(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sandbox-managed-')),
+      );
+      try {
+        const realRoot = path.join(base, 'real');
+        const linkRoot = path.join(base, 'link');
+        const canonical = path.join(realRoot, 'deploy', 'managed');
+        fs.mkdirSync(canonical, { recursive: true });
+        fs.symlinkSync(realRoot, linkRoot, 'dir');
+        const launchSpelling = path.join(linkRoot, 'deploy', 'managed');
+
+        const cliConfig = {
+          getManagedExtensionsDir: () => canonical,
+        } as unknown as Config;
+
+        const imageCheck = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+        });
+        const child = new EventEmitter();
+        spawnMock
+          .mockImplementationOnce(() => {
+            queueMicrotask(() => {
+              imageCheck.stdout.emit('data', Buffer.from('image-id'));
+              imageCheck.emit('close', 0);
+            });
+            return imageCheck;
+          })
+          .mockReturnValueOnce(child);
+
+        // yargs' camel-case-expansion accepts --managedExtensions for the
+        // reserved flag, so the child honors this spelling too; a mount
+        // keyed on the dashed spelling alone would leave the launch
+        // spelling resolving through a read-write mount.
+        const result = start_sandbox(
+          { command: 'docker', image: 'example.com/qwen-code:latest' },
+          [],
+          cliConfig,
+          [
+            process.execPath,
+            '/path/to/cli.js',
+            '--managedExtensions',
+            launchSpelling,
+          ],
+        );
+
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+        const args = spawnMock.mock.calls[1]?.[1] as string[];
+        const volumes = args.filter(
+          (_, index) => args[index - 1] === '--volume',
+        );
+        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+
+        child.emit('close', 0);
+        await expect(result).resolves.toBe(0);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not mount the managed extensions root twice when it is the workspace', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const managedRoot = path.resolve(process.cwd());
+    const cliConfig = {
+      getManagedExtensionsDir: () => managedRoot,
+    } as unknown as Config;
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      cliConfig,
+      [
+        process.execPath,
+        '/path/to/cli.js',
+        '--managed-extensions',
+        managedRoot,
+      ],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    // The workspace mount already places the root at its container path, so
+    // the read-only mount must be skipped: the daemon rejects two --volume
+    // flags with one destination. Compare on the host side of the spec,
+    // which is never translated.
+    const volumes = args.filter((_, index) => args[index - 1] === '--volume');
+    expect(
+      volumes.filter((spec) => spec.startsWith(`${managedRoot}:`)),
+    ).toHaveLength(1);
+    // The forwarded flag still rewrites to the container path, which the
+    // workspace mount covers.
+    const entrypointCommand = args[args.length - 1];
+    expect(entrypointCommand).toContain('--managed-extensions');
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);

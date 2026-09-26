@@ -3992,6 +3992,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('adds the deployment-managed extension root to ACP file system fallback roots', async () => {
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    delete process.env[acpLocalReadRootsEnv];
+
+    try {
+      const managedRoot = path.resolve('/deployment/prepared-extensions');
+      // The managed root is not a canonicalized localReadRoots entry; the
+      // helper asserts it arrives as the sole lexicalLocalReadRoots entry.
+      const expected = expectedDefaultAcpLocalReadRoots();
+      await expectAcpLocalReadRoots(
+        'session-with-fs-managed',
+        expected,
+        '/runtime-a',
+        managedRoot,
+      );
+    } finally {
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
+  });
+
+  it('keeps the deployment extension root when a new session changes cwd', async () => {
+    await setupSessionMocks('managed-session');
+    const managedExtensions = '/deployment/prepared extensions';
+    const agentPromise = runAcpAgent(mockConfig, makeSessionSettings(), {
+      ...mockArgv,
+      managedExtensions,
+    });
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike) as AgentLike;
+    await agent.newSession({ cwd: '/another-workspace', mcpServers: [] });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+      managedExtensions,
+    });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+      '/another-workspace',
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('passes each concurrent newSession its own workspace settings instance', async () => {
     const settingsA = makeSessionSettings();
     const settingsB = makeSessionSettings();
@@ -5007,6 +5051,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasSessionWriteOwnership: vi.fn().mockReturnValue(false),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue('/runtime-a'),
       getPlansDir: vi.fn().mockReturnValue('/home/test/.qwen/plans'),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(undefined),
       activateProvisionalWorkspace: vi.fn().mockResolvedValue(undefined),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -5050,6 +5095,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     sessionId: string,
     expectedLocalReadRoots: string[],
     runtimeBaseDir = '/runtime-a',
+    managedExtensionsDir?: string,
   ): Promise<void> {
     const fsCapabilities = { readTextFile: true, writeTextFile: true };
     const fallbackFileSystem: Record<string, never> = {};
@@ -5058,6 +5104,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/project'),
       getSessionId: vi.fn().mockReturnValue(sessionId),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue(runtimeBaseDir),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(managedExtensionsDir),
       getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
       setFileSystemService: vi.fn(),
       storage: {
@@ -5113,6 +5160,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         fallbackFileSystem,
         {
           localReadRoots: expectedLocalReadRoots,
+          // The managed root is pinned lexically so the read fallback never
+          // re-resolves it (a mid-session relink must not relocate reads).
+          lexicalLocalReadRoots: managedExtensionsDir
+            ? [managedExtensionsDir]
+            : [],
         },
       );
       expect(innerConfig.setFileSystemService).toHaveBeenCalled();
@@ -27692,6 +27744,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     }
     return { agent, agentPromise };
   }
+
+  it.each(['load', 'resume'] as const)(
+    '%s preserves the deployment extension root across workspace restore',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      mockArgv.managedExtensions = '/deployment/prepared extensions';
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const params = {
+          cwd: '/restored-workspace',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: { managedExtensions: '/request-must-not-override' },
+        };
+        if (action === 'load') await agent.loadSession(params);
+        else await agent.unstable_resumeSession(params);
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+          managedExtensions: '/deployment/prepared extensions',
+        });
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+          '/restored-workspace',
+        );
+      } finally {
+        mockArgv.managedExtensions = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('loadSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });

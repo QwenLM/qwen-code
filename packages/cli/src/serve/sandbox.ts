@@ -481,8 +481,14 @@ export async function start_sandbox(
   // allow access to host.docker.internal
   args.push('--add-host', 'host.docker.internal:host-gateway');
 
+  // Track every container-side mount destination so the managed root mount
+  // below can skip a destination that is already covered: the daemon rejects
+  // two --volume flags with one destination.
+  const mountedDestinations = new Set<string>();
+
   // mount current directory as working directory in sandbox (set via --workdir)
   args.push('--volume', `${workdir}:${containerWorkdir}`);
+  mountedDestinations.add(containerWorkdir);
 
   // Mount user settings at /home/node/.qwen and at the canonical host path
   // used by QWEN_HOME, unless that host path is already covered by a broader
@@ -516,6 +522,7 @@ export async function start_sandbox(
     '--volume',
     `${userSettingsDirRealPath}:${userSettingsDirInSandbox}`,
   );
+  mountedDestinations.add(userSettingsDirInSandbox);
   if (
     (!userSettingsCoveredByRuntime || runtimeSameAsUserSettings) &&
     userSettingsDirInSandbox !== userSettingsDirContainerPath
@@ -524,6 +531,7 @@ export async function start_sandbox(
       '--volume',
       `${userSettingsDirRealPath}:${userSettingsDirContainerPath}`,
     );
+    mountedDestinations.add(userSettingsDirContainerPath);
   }
 
   // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
@@ -539,32 +547,33 @@ export async function start_sandbox(
       '--volume',
       `${runtimeBaseDirRealPath}:${runtimeBaseDirContainerPath}`,
     );
+    mountedDestinations.add(runtimeBaseDirContainerPath);
   }
   if (!runtimeSameAsUserSettings) {
     args.push('--env', `QWEN_RUNTIME_DIR=${runtimeBaseDirContainerPath}`);
   }
 
   // mount os.tmpdir() as os.tmpdir() inside container
-  args.push('--volume', `${os.tmpdir()}:${getContainerPath(os.tmpdir())}`);
+  const containerTmpdir = getContainerPath(os.tmpdir());
+  args.push('--volume', `${os.tmpdir()}:${containerTmpdir}`);
+  mountedDestinations.add(containerTmpdir);
 
   // mount gcloud config directory if it exists
   const gcloudConfigDir = path.join(os.homedir(), '.config', 'gcloud');
   if (fs.existsSync(gcloudConfigDir)) {
-    args.push(
-      '--volume',
-      `${gcloudConfigDir}:${getContainerPath(gcloudConfigDir)}:ro`,
-    );
+    const containerGcloudConfigDir = getContainerPath(gcloudConfigDir);
+    args.push('--volume', `${gcloudConfigDir}:${containerGcloudConfigDir}:ro`);
+    mountedDestinations.add(containerGcloudConfigDir);
   }
 
   // mount ADC file if GOOGLE_APPLICATION_CREDENTIALS is set
   if (process.env['GOOGLE_APPLICATION_CREDENTIALS']) {
     const adcFile = process.env['GOOGLE_APPLICATION_CREDENTIALS'];
     if (fs.existsSync(adcFile)) {
-      args.push('--volume', `${adcFile}:${getContainerPath(adcFile)}:ro`);
-      args.push(
-        '--env',
-        `GOOGLE_APPLICATION_CREDENTIALS=${getContainerPath(adcFile)}`,
-      );
+      const containerAdcFile = getContainerPath(adcFile);
+      args.push('--volume', `${adcFile}:${containerAdcFile}:ro`);
+      mountedDestinations.add(containerAdcFile);
+      args.push('--env', `GOOGLE_APPLICATION_CREDENTIALS=${containerAdcFile}`);
     }
   }
 
@@ -589,6 +598,67 @@ export async function start_sandbox(
         }
         writeStderrLine(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
         args.push('--volume', mount);
+        mountedDestinations.add(to);
+      }
+    }
+  }
+
+  // Mount the deployment-managed extension root read-only at its translated
+  // container path; no default mount covers an out-of-workspace root. The
+  // forwarded flag keeps its launch spelling: raw argv also carries user
+  // content in value positions (a piped prompt is pushed verbatim), so no
+  // argv edit can tell the flag apart from a lookalike token. The child's
+  // parse-time validation applies the same container translation to the
+  // flag value instead (managed-extension-dir.ts). A root that coincides
+  // with a mount pushed above (the workspace, the tmpdir, a SANDBOX_MOUNTS
+  // entry) keeps that mount instead of failing the container start with a
+  // duplicate destination.
+  const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
+  if (managedExtensionsDir) {
+    const containerManagedDir = getContainerPath(managedExtensionsDir);
+    if (!mountedDestinations.has(containerManagedDir)) {
+      args.push(
+        '--volume',
+        `${managedExtensionsDir}:${containerManagedDir}:ro`,
+      );
+      mountedDestinations.add(containerManagedDir);
+    }
+    // The forwarded flag keeps its launch spelling (see above), and the
+    // child canonicalizes it against the container's filesystem. When a
+    // parent component of that spelling is a symlink — macOS resolves /var
+    // and /tmp this way by default — the spelling diverges from the pinned
+    // canonical path above: inside the container it then resolves through a
+    // read-write mount (voiding the :ro guard) or fails to resolve at all.
+    // Cover every argv token that resolves to this same root with its own
+    // read-only mount. No flag grammar is parsed: yargs accepts more
+    // spellings than the two dashed ones (--managedExtensions included), and
+    // raw argv carries user content in value positions, so a hand-listed
+    // flag name both misses real spellings and misreads value-position
+    // tokens. A token that resolves somewhere else is skipped, so it can
+    // neither shadow container paths nor widen what the container sees.
+    for (const token of cliArgs) {
+      if (!token) continue;
+      // A `--flag=value` token carries the path in its value half; the
+      // separate-token form carries it as a token of its own.
+      const candidates = token.includes('=')
+        ? [token, token.slice(token.indexOf('=') + 1)]
+        : [token];
+      for (const candidate of candidates) {
+        const resolvedCandidate = path.resolve(workdir, candidate);
+        let resolved: string;
+        try {
+          resolved = fs.realpathSync.native(resolvedCandidate);
+        } catch {
+          continue;
+        }
+        if (resolved !== managedExtensionsDir) continue;
+        const containerSpelling = getContainerPath(resolvedCandidate);
+        if (mountedDestinations.has(containerSpelling)) continue;
+        args.push(
+          '--volume',
+          `${managedExtensionsDir}:${containerSpelling}:ro`,
+        );
+        mountedDestinations.add(containerSpelling);
       }
     }
   }

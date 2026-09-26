@@ -99,6 +99,7 @@ import {
   type ServeModelProviderRuntimeSyncResult,
   type ServeOptions,
 } from './types.js';
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   mountWebShellAssets,
@@ -856,7 +857,11 @@ export function createServeApp(
     opts.maxRegisteredWorkspaces,
     daemonEnvAtBoot,
   );
-  opts = { ...opts, maxRegisteredWorkspaces };
+  opts = {
+    ...opts,
+    managedExtensions: resolveManagedExtensionsDir(opts.managedExtensions),
+    maxRegisteredWorkspaces,
+  };
   if (
     deps.workspaceRegistry &&
     deps.workspaceRegistry.listAllEntries().filter((entry) => !entry.internal)
@@ -1045,9 +1050,11 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    managedExtensionsDir: opts.managedExtensions,
     workspaceTrusted: true,
   });
   const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
+    managedExtensionsDir: opts.managedExtensions,
     workspaceTrusted: false,
     includeUntrustedSkills: true,
   });
@@ -1411,6 +1418,7 @@ export function createServeApp(
         workspaceTrusted: isPrimaryWorkspaceTrusted(),
       }),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
+        managedExtensionsDir: opts.managedExtensions,
         workspaceTrusted: isPrimaryWorkspaceTrusted(),
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
@@ -2794,6 +2802,7 @@ export function createServeApp(
   });
 
   registerWorkspaceExtensionRoutes(app, {
+    managedExtensionsDir: opts.managedExtensions,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,

@@ -108,6 +108,75 @@ describe('handleInstall', () => {
     processSpy.mockRestore();
   });
 
+  it('reports the retained disabled activation after a managed-policy adoption', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockParseInstallSource.mockResolvedValue({
+      type: 'http',
+      url: 'http://google.com',
+    });
+    // An install adopting a retained managed policy commits the managed-era
+    // activation, which can be disabled; the success line must not claim the
+    // opposite of the state that was just committed.
+    mockInstallExtension.mockResolvedValue({
+      name: 'adopted-extension',
+      isActive: false,
+    });
+
+    await handleInstall({
+      source: 'http://google.com',
+    });
+
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'Extension "adopted-extension" installed successfully and enabled.',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Extension "adopted-extension" installed successfully; it remains disabled by the retained activation preference.',
+    );
+
+    processSpy.mockRestore();
+  });
+
+  it.each(['user', 'project'] as const)(
+    'reports the retained disabled activation after a managed-policy adoption with explicit --scope %s',
+    async (scope) => {
+      const processSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(() => undefined as never);
+
+      mockParseInstallSource.mockResolvedValue({
+        type: 'http',
+        url: 'http://google.com',
+      });
+      // Adoption commits the retained policy's activation as-is — an
+      // explicit --scope re-bases only the scope preference, not the
+      // activation — so the message must not claim "enabled".
+      mockInstallExtension.mockResolvedValue({
+        name: 'adopted-extension',
+        isActive: false,
+      });
+
+      await handleInstall({
+        source: 'http://google.com',
+        scope,
+      });
+
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'Extension "adopted-extension" installed successfully and enabled.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'Extension "adopted-extension" installed successfully and enabled for the current workspace.',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        'Extension "adopted-extension" installed successfully; it remains disabled by the retained activation preference.',
+      );
+
+      processSpy.mockRestore();
+    },
+  );
+
   it('should install an extension from a https source', async () => {
     const processSpy = vi
       .spyOn(process, 'exit')

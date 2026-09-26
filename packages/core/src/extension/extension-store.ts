@@ -11,17 +11,72 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
-import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
+import {
+  atomicWriteFile,
+  atomicWriteJSON,
+  renameWithRetry,
+} from '../utils/atomicFileWrite.js';
+import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
+import { hasStoredExtensionSecrets } from './extensionSettings.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 
 const debugLogger = createDebugLogger('EXTENSION_STORE');
+
+// Rules can also reach an already-managed policy after the claim-time stash
+// ran (a legacy re-import at refresh, or the in-call import inside a batch
+// mutation), so the managed clear itself stashes what it is about to delete;
+// the hand-back restores the rules when the policy returns to a user
+// identity.
+function stashLegacyPathRulesForManaged(policy: ExtensionPolicy): void {
+  if (
+    policy.managed &&
+    policy.legacyPathRules &&
+    !policy.preservedLegacyPathRules
+  ) {
+    policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+  }
+}
+
+// The pre-managed stash is authoritative for the whole activation surface at
+// the refresh-time hand-back: activation changes made during the managed
+// episode belong to the managed package, so a stash never yields to an
+// episode-era write. (The install-time adoption deliberately keeps the
+// retained managed-era activation instead — the package is an explicit
+// takeover, not the user's own package returning.)
+function restorePreservedActivationSurface(policy: ExtensionPolicy): void {
+  if (policy.preservedLegacyPathRules) {
+    policy.legacyPathRules = [...policy.preservedLegacyPathRules];
+    delete policy.preservedLegacyPathRules;
+  }
+  if (policy.preservedDefaultActivation !== undefined) {
+    policy.defaultActivation = policy.preservedDefaultActivation;
+    delete policy.preservedDefaultActivation;
+  }
+  if (policy.preservedWorkspaceOverrides) {
+    policy.workspaceOverrides = { ...policy.preservedWorkspaceOverrides };
+    delete policy.preservedWorkspaceOverrides;
+    // Skill states ride the same surface: when the claim-time baseline holds
+    // none, episode-era skill toggles leave with the episode.
+    if (policy.preservedSkillWorkspaceOverrides) {
+      policy.skillWorkspaceOverrides = Object.fromEntries(
+        Object.entries(policy.preservedSkillWorkspaceOverrides).map(
+          ([workspace, states]) => [workspace, { ...states }],
+        ),
+      );
+      delete policy.preservedSkillWorkspaceOverrides;
+    } else {
+      delete policy.skillWorkspaceOverrides;
+    }
+  }
+}
 
 export type ExtensionActivation = 'enabled' | 'disabled';
 export type WorkspaceActivation = ExtensionActivation | 'inherit';
 
 export interface ExtensionPolicy {
   name: string;
+  managed?: true;
   artifactDirectory?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
@@ -30,6 +85,23 @@ export interface ExtensionPolicy {
   workspaceOverrides: Record<string, WorkspaceActivation>;
   skillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
   legacyPathRules?: string[];
+  // Home-path rules a managed identity inherited when it claimed a user
+  // policy by name. The managed activation clear deletes legacyPathRules,
+  // so the user's rules wait here until the policy returns to a user
+  // identity; without the stash the clear would erase them permanently.
+  preservedLegacyPathRules?: string[];
+  // The user package's default activation when a managed identity claimed
+  // the policy. Managed-era activation changes belong to the managed
+  // episode, so the hand-back restores this snapshot; without it, enabling
+  // and later withdrawing a managed package would permanently re-enable a
+  // package the user explicitly disabled.
+  preservedDefaultActivation?: ExtensionActivation;
+  // The workspace-scoped half of the same hold: getActivation consults
+  // workspaceOverrides before the default, and the skill states ride with
+  // them, so restoring only the default would let an episode-era toggle
+  // survive onto the user's own package.
+  preservedWorkspaceOverrides?: Record<string, WorkspaceActivation>;
+  preservedSkillWorkspaceOverrides?: Record<string, Record<string, boolean>>;
 }
 
 export interface ExtensionStoreSnapshot {
@@ -40,6 +112,17 @@ export interface ExtensionStoreSnapshot {
   extensions: Record<string, ExtensionPolicy>;
 }
 
+interface ManagedHandBackOptions {
+  managedAbsenceProven?: boolean;
+  // Fired once per policy whose managed marker the proven-withdrawal
+  // hand-back deletes. Secrets written during the managed episode live
+  // under the managed identity and every cleanup path keys on the marker
+  // being present, so the caller must finish the transition (the store
+  // itself cannot: it knows neither the managed id formula nor the
+  // workspace cwds the clear must cover).
+  onManagedHandBack?: (name: string) => void;
+}
+
 export interface ExtensionStoreBatchMutationOutcome {
   snapshot: ExtensionStoreSnapshot;
   updated: boolean;
@@ -48,6 +131,7 @@ export interface ExtensionStoreBatchMutationOutcome {
 export interface ExtensionIdentity {
   id: string;
   name: string;
+  source?: 'managed' | 'user';
 }
 
 export interface ExtensionActivationResult {
@@ -78,6 +162,15 @@ export interface CommitExtensionArtifactInput {
   stagingDirectory?: string;
   initialActivation?: InitialExtensionActivation;
   expectedArtifactGeneration?: number;
+  /** The caller verified that no same-name managed source is currently available. */
+  allowManagedPolicyAdoption?: boolean;
+  /**
+   * Workspace cwds the adoption gate must probe for stored workspace-scope
+   * secrets. The service name folds the writing process's cwd, and the
+   * committing process (e.g. a daemon) is not necessarily it — the probe
+   * must never cover a narrower cwd set than the release path's clear.
+   */
+  adoptionProbeWorkspaceCwds?: readonly string[];
 }
 
 interface ExtensionTransactionJournal {
@@ -281,6 +374,7 @@ function parseState(
     return (
       typeof parsed.name === 'string' &&
       /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
+      (parsed.managed === undefined || parsed.managed === true) &&
       (parsed.artifactDirectory === undefined ||
         (typeof parsed.artifactDirectory === 'string' &&
           /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
@@ -319,7 +413,38 @@ function parseState(
           ))) &&
       (parsed.legacyPathRules === undefined ||
         (Array.isArray(parsed.legacyPathRules) &&
-          parsed.legacyPathRules.every((rule) => typeof rule === 'string')))
+          parsed.legacyPathRules.every((rule) => typeof rule === 'string'))) &&
+      (parsed.preservedLegacyPathRules === undefined ||
+        (Array.isArray(parsed.preservedLegacyPathRules) &&
+          parsed.preservedLegacyPathRules.every(
+            (rule) => typeof rule === 'string',
+          ))) &&
+      (parsed.preservedDefaultActivation === undefined ||
+        parsed.preservedDefaultActivation === 'enabled' ||
+        parsed.preservedDefaultActivation === 'disabled') &&
+      (parsed.preservedWorkspaceOverrides === undefined ||
+        (!!parsed.preservedWorkspaceOverrides &&
+          typeof parsed.preservedWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.preservedWorkspaceOverrides) &&
+          Object.values(parsed.preservedWorkspaceOverrides).every(
+            (activation) =>
+              activation === 'enabled' ||
+              activation === 'disabled' ||
+              activation === 'inherit',
+          ))) &&
+      (parsed.preservedSkillWorkspaceOverrides === undefined ||
+        (!!parsed.preservedSkillWorkspaceOverrides &&
+          typeof parsed.preservedSkillWorkspaceOverrides === 'object' &&
+          !Array.isArray(parsed.preservedSkillWorkspaceOverrides) &&
+          Object.values(parsed.preservedSkillWorkspaceOverrides).every(
+            (states) =>
+              states !== null &&
+              typeof states === 'object' &&
+              !Array.isArray(states) &&
+              Object.values(states).every(
+                (enabled) => typeof enabled === 'boolean',
+              ),
+          )))
     );
   };
   if (
@@ -382,9 +507,10 @@ export class ExtensionStore {
 
   async ensureInitialized(
     extensions: readonly ExtensionIdentity[],
+    options: ManagedHandBackOptions = {},
   ): Promise<ExtensionStoreSnapshot> {
     return await this.withLock(
-      async () => await this.ensureInitializedUnlocked(extensions),
+      async () => await this.ensureInitializedUnlocked(extensions, options),
     );
   }
 
@@ -392,18 +518,29 @@ export class ExtensionStore {
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
+      managedAbsenceProven?: boolean;
     }>,
+    options: ManagedHandBackOptions = {},
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions } = await readArtifacts();
-      const snapshot = await this.ensureInitializedUnlocked(extensions);
+      const { value, extensions, managedAbsenceProven } = await readArtifacts();
+      const snapshot = await this.ensureInitializedUnlocked(extensions, {
+        ...options,
+        managedAbsenceProven,
+      });
       return { value, snapshot };
     });
   }
 
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
+    options: ManagedHandBackOptions = {},
   ): Promise<ExtensionStoreSnapshot> {
+    // Fail closed: only a caller that can see the deployment root may treat
+    // an absent managed identity as a withdrawal. Handing back on an
+    // unknown root spends the pre-managed stash and irreversibly discards
+    // the managed episode's activation.
+    const managedAbsenceProven = options.managedAbsenceProven ?? false;
     const loadedNames = new Map<string, ExtensionIdentity>();
     for (const identity of extensions) {
       assertIdentity(identity);
@@ -453,7 +590,7 @@ export class ExtensionStore {
                 `Extension name "${identity.name}" conflicts with an installed extension.`,
               );
             }
-            if (!directPolicy.declarationOnly) {
+            if (!directPolicy.declarationOnly && !directPolicy.managed) {
               directPolicy.artifactDirectory ??= directPolicy.name;
             }
             if (
@@ -480,8 +617,10 @@ export class ExtensionStore {
           }
           if (directPolicy.declarationOnly) {
             delete directPolicy.declarationOnly;
-            directPolicy.artifactGeneration = existing.generation + 1;
-            directPolicy.preserveActivationOnNextInstall = true;
+            if (identity.source !== 'managed') {
+              directPolicy.artifactGeneration = existing.generation + 1;
+              directPolicy.preserveActivationOnNextInstall = true;
+            }
             changed = true;
           }
           continue;
@@ -493,13 +632,19 @@ export class ExtensionStore {
         );
         if (staleEntry) {
           const [staleId, policy] = staleEntry;
-          if (!policy.declarationOnly && policy.name !== identity.name) {
+          if (
+            !policy.declarationOnly &&
+            !policy.managed &&
+            policy.name !== identity.name
+          ) {
             policy.artifactDirectory ??= policy.name;
           }
           if (policy.declarationOnly) {
             delete policy.declarationOnly;
-            policy.artifactGeneration = existing.generation + 1;
-            policy.preserveActivationOnNextInstall = true;
+            if (identity.source !== 'managed') {
+              policy.artifactGeneration = existing.generation + 1;
+              policy.preserveActivationOnNextInstall = true;
+            }
           }
           delete existing.extensions[staleId];
           policy.name = identity.name;
@@ -593,6 +738,51 @@ export class ExtensionStore {
           changed = true;
         }
       }
+      for (const identity of extensions) {
+        const policy = existing.extensions[identity.id];
+        const managed = identity.source === 'managed';
+        if (managed === (policy.managed === true)) continue;
+        if (managed) {
+          policy.managed = true;
+          // The record the name-keyed migration just handed to this managed
+          // identity may still carry the user package's home-path rules.
+          // The managed activation clear deletes legacyPathRules outright,
+          // so stash them for the hand-back below; otherwise enabling and
+          // later withdrawing a managed package would permanently re-enable
+          // a package the user explicitly disabled.
+          if (policy.legacyPathRules && !policy.preservedLegacyPathRules) {
+            policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+          }
+          // The default toggle needs the same hold: activation changes made
+          // during the managed episode belong to the managed package, not to
+          // the user package this policy returns to.
+          policy.preservedDefaultActivation ??= policy.defaultActivation;
+          policy.preservedWorkspaceOverrides ??= {
+            ...policy.workspaceOverrides,
+          };
+          if (
+            policy.skillWorkspaceOverrides &&
+            !policy.preservedSkillWorkspaceOverrides
+          ) {
+            policy.preservedSkillWorkspaceOverrides = Object.fromEntries(
+              Object.entries(policy.skillWorkspaceOverrides).map(
+                ([workspace, states]) => [workspace, { ...states }],
+              ),
+            );
+          }
+          changed = true;
+        } else if (managedAbsenceProven) {
+          delete policy.managed;
+          restorePreservedActivationSurface(policy);
+          options.onManagedHandBack?.(policy.name);
+          changed = true;
+        }
+        // Absence unproven: the policy keeps its managed marker and stash so
+        // a later run that can see the root resumes the managed episode. The
+        // stale-entry migration above may already have re-keyed the policy
+        // onto the same-name user identity; that is in-place bookkeeping,
+        // not a hand-back.
+      }
       let remainderSource = legacyProjectionIsNewer
         ? legacy
         : importUnmappedLegacy
@@ -618,12 +808,25 @@ export class ExtensionStore {
     for (const identity of extensions) {
       assertIdentity(identity);
       const rules = findLegacyRules(legacy, identity.name);
-      policies[identity.id] = {
+      const policy: ExtensionPolicy = {
         name: identity.name,
         defaultActivation: 'enabled',
         workspaceOverrides: {},
         ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
       };
+      if (identity.source === 'managed') {
+        policy.managed = true;
+        // A policy born managed never passes the claim-time stash, so stamp
+        // the pre-managed baseline here: the birth default with no workspace
+        // state. Without it a managed-era disable would become the user
+        // package's own default at hand-back — and stick through a re-claim.
+        policy.preservedDefaultActivation = policy.defaultActivation;
+        policy.preservedWorkspaceOverrides = {};
+        if (policy.legacyPathRules) {
+          policy.preservedLegacyPathRules = [...policy.legacyPathRules];
+        }
+      }
+      policies[identity.id] = policy;
     }
     const snapshot: ExtensionStoreSnapshot = {
       version: 2,
@@ -660,13 +863,89 @@ export class ExtensionStore {
       );
       const journalPath = path.join(transactionsDir, `${transactionId}.json`);
       const currentPolicy = snapshot.extensions[input.identity.id];
+      const nameConflict = Object.entries(snapshot.extensions).find(
+        ([extensionId, policy]) =>
+          extensionId !== input.identity.id &&
+          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
+      );
       const destinationDirectory =
         input.operation !== 'install' && currentPolicy?.artifactDirectory
           ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
           : input.destinationDirectory;
       this.assertArtifactDestination(destinationDirectory);
       const destinationExists = await this.pathExists(destinationDirectory);
-      if (input.operation === 'install' && destinationExists) {
+      const retainedPolicy = currentPolicy ?? nameConflict?.[1];
+      let adoptManagedSettingsDirectory = false;
+      let retainedEnv: string | undefined;
+      if (
+        input.operation === 'install' &&
+        input.allowManagedPolicyAdoption &&
+        retainedPolicy?.managed
+      ) {
+        // A managed package's sensitive settings live in the secret backend
+        // under the managed identity and leave no selector metadata behind
+        // (`settings set` never writes one), so a retained policy can be
+        // secret-bearing with no directory under extensionsDir at all.
+        // Stored secrets stay a conflict regardless of whether a settings
+        // directory survives, instead of being silently orphaned by the
+        // adoption.
+        const retainedIdentityId = currentPolicy
+          ? input.identity.id
+          : nameConflict![0];
+        if (
+          await hasStoredExtensionSecrets(
+            retainedPolicy.name,
+            retainedIdentityId,
+            input.adoptionProbeWorkspaceCwds,
+          )
+        ) {
+          throw new ExtensionConflictError(
+            `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
+          );
+        }
+        const stats = await fsp
+          .lstat(destinationDirectory)
+          .catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+              return undefined;
+            throw error;
+          });
+        if (stats && !stats.isDirectory()) {
+          throw new ExtensionConflictError(
+            `Extension "${input.identity.name}" has a non-directory installation path.`,
+          );
+        }
+        if (
+          stats &&
+          // Case-folded like the sibling name/artifact lookups in this
+          // transaction.
+          path
+            .resolve(
+              this.extensionsDir,
+              retainedPolicy.artifactDirectory ?? retainedPolicy.name,
+            )
+            .toLowerCase() === path.resolve(destinationDirectory).toLowerCase()
+        ) {
+          const entries = await fsp.readdir(destinationDirectory, {
+            withFileTypes: true,
+          });
+          adoptManagedSettingsDirectory = entries.every(
+            (entry) =>
+              entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
+          );
+          if (adoptManagedSettingsDirectory && entries.length > 0) {
+            retainedEnv = await fsp.readFile(
+              path.join(destinationDirectory, EXTENSION_SETTINGS_FILENAME),
+              'utf8',
+            );
+          }
+        }
+      }
+      if (
+        input.operation === 'install' &&
+        destinationExists &&
+        !adoptManagedSettingsDirectory
+      ) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is installed.`,
         );
@@ -679,24 +958,23 @@ export class ExtensionStore {
       if (input.operation === 'install' && !input.initialActivation) {
         throw new Error('Install requires an initial activation.');
       }
-      const nameConflict = Object.entries(snapshot.extensions).find(
-        ([extensionId, policy]) =>
-          extensionId !== input.identity.id &&
-          policy.name.toLowerCase() === input.identity.name.toLowerCase(),
-      );
       const currentPolicyIsAdoptable =
         input.operation === 'install' &&
         !!currentPolicy &&
         (currentPolicy.declarationOnly ||
-          (currentPolicy.preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(currentPolicy))));
+          ((currentPolicy.preserveActivationOnNextInstall ||
+            (input.allowManagedPolicyAdoption && currentPolicy.managed)) &&
+            (adoptManagedSettingsDirectory ||
+              !(await this.extensionArtifactExists(currentPolicy)))));
       const nameConflictIsAdoptable =
         input.operation === 'install' &&
         !currentPolicy &&
         !!nameConflict &&
         (nameConflict[1].declarationOnly ||
-          (nameConflict[1].preserveActivationOnNextInstall &&
-            !(await this.extensionArtifactExists(nameConflict[1]))));
+          ((nameConflict[1].preserveActivationOnNextInstall ||
+            (input.allowManagedPolicyAdoption && nameConflict[1].managed)) &&
+            (adoptManagedSettingsDirectory ||
+              !(await this.extensionArtifactExists(nameConflict[1])))));
       if (
         input.operation !== 'uninstall' &&
         nameConflict &&
@@ -799,10 +1077,48 @@ export class ExtensionStore {
         targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
           targetSnapshot.generation + 1;
       }
+      if (input.operation !== 'uninstall') {
+        // Adopting a managed policy (or completing an install/update) hands
+        // it to the user identity. Unlike the refresh-time hand-back — which
+        // returns the user's own still-installed package — an explicit
+        // install adopts the retained managed activation as-is, so the
+        // pre-managed stash is spent: drop it rather than restore it.
+        const committed = targetSnapshot.extensions[input.identity.id];
+        delete committed.managed;
+        delete committed.preservedLegacyPathRules;
+        delete committed.preservedDefaultActivation;
+        delete committed.preservedWorkspaceOverrides;
+        delete committed.preservedSkillWorkspaceOverrides;
+      }
       targetSnapshot.generation = snapshot.generation + 1;
       targetSnapshot.legacyProjectionHash = projectionHash(
         this.buildLegacyProjection(targetSnapshot),
       );
+
+      if (retainedEnv !== undefined) {
+        const stagedEnvPath = path.join(
+          input.stagingDirectory!,
+          EXTENSION_SETTINGS_FILENAME,
+        );
+        let stagedEnv = '';
+        try {
+          if (!(await fsp.lstat(stagedEnvPath)).isFile()) {
+            throw new ExtensionConflictError(
+              'Prepared extension settings must be a regular file.',
+            );
+          }
+          stagedEnv = await fsp.readFile(stagedEnvPath, 'utf8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        // dotenv uses the last value for duplicate keys. Keep retained bytes
+        // while giving explicitly prepared settings precedence.
+        await atomicWriteFile(stagedEnvPath, `${retainedEnv}\n${stagedEnv}`, {
+          mode: 0o600,
+          forceMode: true,
+          noFollow: true,
+        });
+      }
 
       const journal: ExtensionTransactionJournal = {
         version: 1,
@@ -891,6 +1207,18 @@ export class ExtensionStore {
     });
   }
 
+  /**
+   * Lock-free, write-free snapshot read for read-only status probes:
+   * `readSnapshot` takes the store lock, and acquiring it materializes the
+   * store directories — a write a status GET must not perform (and cannot,
+   * on a read-only home). Snapshots are written atomically, so a concurrent
+   * writer cannot tear this read; a corrupt state.json still surfaces as
+   * ExtensionStoreCorruptError.
+   */
+  async peekSnapshot(): Promise<ExtensionStoreSnapshot | null> {
+    return await this.readSnapshotUnlocked();
+  }
+
   getActivation(
     snapshot: ExtensionStoreSnapshot,
     extensionId: string,
@@ -951,18 +1279,28 @@ export class ExtensionStore {
   async setDefaultActivation(
     identity: ExtensionIdentity,
     activation: ExtensionActivation,
+    options: { clearLegacyPathRules?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
       policy.defaultActivation = activation;
+      if (options.clearLegacyPathRules) {
+        stashLegacyPathRulesForManaged(policy);
+        delete policy.legacyPathRules;
+      }
     });
   }
 
   async setDefaultActivations(
     identities: readonly ExtensionIdentity[],
     activation: ExtensionActivation,
+    options: { clearLegacyPathRulesForManaged?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
     const outcome = await this.mutateMany(identities, (policy) => {
       policy.defaultActivation = activation;
+      if (options.clearLegacyPathRulesForManaged && policy.managed) {
+        stashLegacyPathRulesForManaged(policy);
+        delete policy.legacyPathRules;
+      }
     });
     return outcome.snapshot;
   }
@@ -980,7 +1318,19 @@ export class ExtensionStore {
               [canonicalizeWorkspacePath(activation.workspacePath)]: 'enabled',
             }
           : {};
+      // An explicit scope decision re-bases the policy's activation, so the
+      // pre-managed snapshot no longer applies: keeping the stash would
+      // resurrect the replaced rules and default at the next hand-back.
+      // A scope change made *while managed* re-bases only the managed-era
+      // surface — the stash is the user package's pre-claim baseline, and
+      // the hand-back (its only consumer) must still find it intact.
       delete policy.legacyPathRules;
+      if (!policy.managed) {
+        delete policy.preservedLegacyPathRules;
+        delete policy.preservedDefaultActivation;
+        delete policy.preservedWorkspaceOverrides;
+        delete policy.preservedSkillWorkspaceOverrides;
+      }
     });
   }
 
@@ -1069,6 +1419,29 @@ export class ExtensionStore {
     );
   }
 
+  /**
+   * Removes a policy outright. The managed hand-back keeps a withdrawn
+   * package's policy so activation survives a re-claim; an explicit uninstall
+   * of that absent package releases it here instead. Idempotent for a missing
+   * or name-mismatched record, and never called by ensureInitialized — the
+   * hand-back would lose its state otherwise.
+   */
+  async removePolicy(
+    identity: ExtensionIdentity,
+  ): Promise<ExtensionStoreSnapshot> {
+    assertIdentity(identity);
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const policy = snapshot.extensions[identity.id];
+      if (!policy || policy.name !== identity.name) return snapshot;
+      delete snapshot.extensions[identity.id];
+      snapshot.generation += 1;
+      await this.writeSnapshotUnlocked(snapshot);
+      return snapshot;
+    });
+  }
+
   async setLegacyPathActivation(
     identity: ExtensionIdentity,
     scopePath: string,
@@ -1113,7 +1486,7 @@ export class ExtensionStore {
 
   private async mutateMany(
     identities: readonly ExtensionIdentity[],
-    update: (policy: ExtensionPolicy) => void,
+    update: (policy: ExtensionPolicy, identity: ExtensionIdentity) => void,
     declareUnknown = true,
   ): Promise<ExtensionStoreBatchMutationOutcome> {
     identities.forEach(assertIdentity);
@@ -1148,7 +1521,10 @@ export class ExtensionStore {
           legacyForRemainder = snapshot.legacyProjectionRemainder ?? {};
         }
       }
-      const policies: ExtensionPolicy[] = [];
+      const policies: Array<{
+        policy: ExtensionPolicy;
+        identity: ExtensionIdentity;
+      }> = [];
       for (const identity of identities) {
         let policy = snapshot.extensions[identity.id];
         if (!policy) {
@@ -1173,6 +1549,7 @@ export class ExtensionStore {
           }
         }
         if (
+          !policy.managed &&
           !policy.declarationOnly &&
           policy.artifactGeneration !== undefined &&
           !(await this.extensionArtifactExists(policy))
@@ -1186,12 +1563,12 @@ export class ExtensionStore {
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );
         }
-        policies.push(policy);
+        policies.push({ policy, identity });
       }
       if (policies.length === 0) {
         return { snapshot, updated: false };
       }
-      for (const policy of policies) update(policy);
+      for (const { policy, identity } of policies) update(policy, identity);
       this.updateLegacyProjectionRemainder(snapshot, legacyForRemainder);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);

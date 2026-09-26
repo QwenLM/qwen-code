@@ -499,6 +499,7 @@ const buildExtensionSkillStates = (
 };
 
 interface RegisterWorkspaceExtensionRoutesDeps {
+  managedExtensionsDir?: string;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
@@ -551,6 +552,7 @@ export function registerWorkspaceExtensionRoutes(
           : undefined;
     return {
       boundWorkspace: ws,
+      managedExtensionsDir: deps.managedExtensionsDir,
       bridge: wsBridge,
       workspace: wsService,
       ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
@@ -1868,6 +1870,7 @@ export function registerWorkspaceExtensionRoutes(
             id: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
@@ -2318,6 +2321,14 @@ export function registerWorkspaceExtensionRoutes(
         );
         const snapshot = await manager.getExtensionStoreSnapshot();
         const policy = snapshot.extensions[extensionId];
+        // The per-request manager starts with an empty cache, so refresh
+        // before the uninstall can tell a still-deployed package (read-only,
+        // rejected by the manager) from a withdrawn one (whose retained
+        // policy the uninstall releases). Managed policies are the rare
+        // case.
+        if (policy?.managed === true && !policy.declarationOnly) {
+          await manager.refreshCacheWithSnapshot();
+        }
         if (!policy || policy.declarationOnly) {
           res.status(204).end();
           return;
@@ -2377,6 +2388,7 @@ export function registerWorkspaceExtensionRoutes(
             extensionId: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             defaultActivation: activation.default,
             workspaceActivation:
               activation.workspace === 'inherit' ? null : activation.workspace,

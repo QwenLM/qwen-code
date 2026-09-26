@@ -77,8 +77,12 @@ export const ActionSelectionStep = ({
         value: 'uninstall' as const,
       },
     ];
-    return allActions;
-  }, [hasUpdateAvailable, isActive]);
+    return selectedExtension?.source === 'managed'
+      ? allActions.filter(
+          (item) => !['update', 'uninstall'].includes(item.value),
+        )
+      : allActions;
+  }, [hasUpdateAvailable, isActive, selectedExtension?.source]);
 
   const handleActionSelect = (value: ExtensionAction) => {
     setSelectedAction(value);

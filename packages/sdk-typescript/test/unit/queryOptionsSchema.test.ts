@@ -90,6 +90,11 @@ describe('QueryOptionsSchema', () => {
     '--add-dir',
     '--extensions',
     '-e',
+    '--managed-extensions',
+    '--managedExtensions',
+    '--managed--extensions',
+    '-e/tmp/attached-value',
+    '--allowedMcpServerNames',
     '--sandbox',
     '-s',
     '--no-sandbox',
@@ -196,6 +201,15 @@ describe('QueryOptionsSchema', () => {
     '--approval-mode=yolo',
     '--insecure=true',
     '--proxy=http://localhost:8080',
+    '--managed-extensions=/tmp/attacker',
+    '--managedExtensions=/tmp/attacker',
+    '--managed--extensions=/tmp/attacker',
+    // yargs camel-case-expansion also splits on underscores, and
+    // dot-notation binds the first segment (which alias-propagates) — all
+    // three spellings bind a reserved option under the real parser.
+    '--_managed-extensions=/tmp/attacker',
+    '--allowed_mcp-server-names=evil',
+    '--m.naged-extensions=/tmp/attacker',
   ])('rejects extraArgs with --flag=value syntax: %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);

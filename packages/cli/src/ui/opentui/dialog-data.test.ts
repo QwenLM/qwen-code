@@ -1036,6 +1036,28 @@ describe('mcp and extension feeds', () => {
     ]);
   });
 
+  it('identifies managed extension rows without install metadata', () => {
+    const rows = buildExtensionRows(
+      stubConfig({
+        getExtensions: (() => [
+          {
+            name: 'managed',
+            path: '/deployment/extensions/managed',
+            isActive: true,
+            source: 'managed',
+            version: '1.0.0',
+          },
+        ]) as unknown as Config['getExtensions'],
+      } as Partial<Config>),
+    );
+    expect(rows[0]).toMatchObject({
+      key: 'managed',
+      extensionSource: 'managed',
+      source: 'managed',
+      version: '1.0.0',
+    });
+  });
+
   it('enriches extension rows with favorites, scopes and components', () => {
     const manager = {
       getFavorites: () => ['fav-ext'],

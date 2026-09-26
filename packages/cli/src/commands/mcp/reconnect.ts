@@ -23,11 +23,13 @@ import { getCurrentLanguage } from '../../i18n/index.js';
 
 async function getMcpServersFromConfig(
   extensionManager?: ExtensionManager,
+  managedExtensionsDir?: string,
 ): Promise<Record<string, MCPServerConfig>> {
   const settings = loadSettings();
   const extManager =
     extensionManager ??
     new ExtensionManager({
+      managedExtensionsDir,
       isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
       telemetrySettings: settings.merged.telemetry,
       locale: getCurrentLanguage(),
@@ -59,7 +61,9 @@ async function getMcpServersFromConfig(
   return mcpServers;
 }
 
-async function createMinimalConfig(): Promise<Config> {
+async function createMinimalConfig(
+  managedExtensionsDir?: string,
+): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
   const fileFiltering = settings.merged.context?.fileFiltering;
@@ -67,7 +71,10 @@ async function createMinimalConfig(): Promise<Config> {
     cwd,
     fileFiltering?.customIgnoreFiles,
   );
-  const mcpServers = await getMcpServersFromConfig();
+  const mcpServers = await getMcpServersFromConfig(
+    undefined,
+    managedExtensionsDir,
+  );
 
   // Mirror the real session's allow/exclude gates (see loadCliConfig in
   // config.ts, which reads the same settings.mcp source): without them this
@@ -82,6 +89,7 @@ async function createMinimalConfig(): Promise<Config> {
     : undefined;
 
   const config = new Config({
+    managedExtensionsDir,
     sessionId: 'mcp-reconnect',
     targetDir: cwd,
     cwd,
@@ -228,8 +236,14 @@ async function discoverAndVerifyConnection(
   }
 }
 
-async function reconnectMcpServer(serverName: string): Promise<void> {
-  const mcpServers = await getMcpServersFromConfig();
+async function reconnectMcpServer(
+  serverName: string,
+  managedExtensionsDir?: string,
+): Promise<void> {
+  const mcpServers = await getMcpServersFromConfig(
+    undefined,
+    managedExtensionsDir,
+  );
 
   if (!mcpServers[serverName]) {
     throw createReconnectError(
@@ -246,7 +260,7 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
   // `--all` try/finally structure (issue #9944).
   let config: Config | undefined;
   try {
-    config = await createMinimalConfig();
+    config = await createMinimalConfig(managedExtensionsDir);
     await discoverAndVerifyConnection(config, serverName);
     writeStdoutLine(`Successfully reconnected to server "${serverName}".`);
     writeStdoutLine(SESSION_SCOPE_NOTE);
@@ -267,9 +281,12 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
   }
 }
 
-async function reconnectAllMcpServers(): Promise<void> {
+async function reconnectAllMcpServers(
+  managedExtensionsDir?: string,
+): Promise<void> {
   const settings = loadSettings();
   const extensionManager = new ExtensionManager({
+    managedExtensionsDir,
     isWorkspaceTrusted: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
     telemetrySettings: settings.merged.telemetry,
     locale: getCurrentLanguage(),
@@ -289,7 +306,7 @@ async function reconnectAllMcpServers(): Promise<void> {
   let config: Config | undefined;
   let failedCount = 0;
   try {
-    config = await createMinimalConfig();
+    config = await createMinimalConfig(managedExtensionsDir);
 
     for (const serverName of serverNames) {
       try {
@@ -360,12 +377,15 @@ export const reconnectCommand: CommandModule = {
   handler: async (argv) => {
     const serverName = argv['server-name'] as string | undefined;
     const all = argv['all'] as boolean;
+    const managedExtensionsDir = argv['managed-extensions'] as
+      | string
+      | undefined;
 
     try {
       if (all) {
-        await reconnectAllMcpServers();
+        await reconnectAllMcpServers(managedExtensionsDir);
       } else if (serverName) {
-        await reconnectMcpServer(serverName);
+        await reconnectMcpServer(serverName, managedExtensionsDir);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

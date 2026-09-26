@@ -1,0 +1,1371 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// ESM namespaces cannot be spied on, and chmod 000 neither works on win32 nor
+// binds root: register absolute paths that must fail lstatSync with EACCES.
+// Every other call passes through to the real implementation.
+const lstatEaccesPaths = vi.hoisted(() => new Set<string>());
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    lstatSync(target: fs.PathLike, options?: fs.StatOptions) {
+      if (typeof target === 'string' && lstatEaccesPaths.has(target)) {
+        const error = new Error(
+          `EACCES: permission denied, lstat '${target}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = 'EACCES';
+        throw error;
+      }
+      return actual.lstatSync(target, options as never);
+    },
+  };
+});
+import {
+  ManagedExtensionReadOnlyError,
+  ExtensionManager,
+  ExtensionUpdateState,
+  type ExtensionConfig,
+  type ExtensionManagerOptions,
+} from './extensionManager.js';
+import { ExtensionStore } from './extension-store.js';
+import { Config } from '../config/config.js';
+import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import type { SubagentConfig, SubagentError } from '../subagents/types.js';
+import { resolveManagedExtensionsDir } from './managed-extension-dir.js';
+import { checkForExtensionUpdate } from './github.js';
+import {
+  EXTENSIONS_CONFIG_FILENAME,
+  INSTALL_METADATA_FILENAME,
+  recursivelyHydrateStrings,
+  type JsonValue,
+} from './variables.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+} from './agent-plugins-v1/index.js';
+
+function inventory(root: string): Record<string, string> {
+  return Object.fromEntries(
+    fs
+      .readdirSync(root, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => {
+        const file = path.join(entry.parentPath, entry.name);
+        return [path.relative(root, file), fs.readFileSync(file, 'base64')];
+      }),
+  );
+}
+
+describe('managed extensions', () => {
+  let temporary: string;
+  let managed: string;
+  let user: string;
+  let workspace: string;
+  let store: ExtensionStore;
+
+  function writeExtension(
+    root: string,
+    directory: string,
+    config: Partial<ExtensionConfig> = {},
+  ): string {
+    const extensionPath = path.join(root, directory);
+    fs.mkdirSync(extensionPath, { recursive: true });
+    fs.writeFileSync(
+      path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify({
+        name: directory,
+        version: '1.0.0',
+        ...config,
+      }),
+    );
+    return extensionPath;
+  }
+
+  function manager(
+    options: Partial<ExtensionManagerOptions> = {},
+  ): ExtensionManager {
+    return new ExtensionManager({
+      workspaceDir: workspace,
+      extensionStore: store,
+      managedExtensionsDir: managed,
+      isWorkspaceTrusted: true,
+      ...options,
+    });
+  }
+
+  beforeEach(() => {
+    // realpath the base: resolveManagedExtensionsDir now pins the canonical
+    // root, and os.tmpdir() sits behind a symlink on some platforms (macOS
+    // /var), so lexical tmp paths would no longer compare equal.
+    temporary = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-')),
+    );
+    managed = path.join(temporary, 'managed');
+    workspace = path.join(temporary, 'workspace');
+    user = path.join(temporary, 'home', 'extensions');
+    fs.mkdirSync(managed);
+    fs.mkdirSync(workspace);
+    vi.stubEnv('QWEN_HOME', path.join(temporary, 'home'));
+    vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+    store = new ExtensionStore({
+      extensionsDir: user,
+      storeDir: path.join(temporary, 'home', 'extension-store'),
+    });
+  });
+
+  afterEach(() => {
+    lstatEaccesPaths.clear();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+
+  it('loads a read-only collection without installation and keeps all writes in user state', async () => {
+    const extensionPath = writeExtension(managed, 'package-folder', {
+      name: 'portable',
+      mcpServers: {
+        test: {
+          command: '${extensionPath}/server',
+          args: ['${CLAUDE_PLUGIN_ROOT}'],
+        },
+      },
+    });
+    fs.mkdirSync(path.join(extensionPath, 'skills', 'test'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(extensionPath, 'skills', 'test', 'SKILL.md'),
+      '---\nname: test\ndescription: Inspect ${CLAUDE_PLUGIN_ROOT}/data\n---\nRead ${extensionPath}/data and ${CLAUDE_PLUGIN_ROOT}/bin.',
+    );
+    fs.writeFileSync(path.join(extensionPath, 'QWEN.md'), 'Extension context');
+    const before = inventory(managed);
+    fs.chmodSync(extensionPath, 0o555);
+    fs.chmodSync(managed, 0o555);
+    try {
+      const subject = manager();
+      await subject.refreshCache();
+      const [extension] = subject.getLoadedExtensions();
+      expect(extension).toMatchObject({
+        name: 'portable',
+        source: 'managed',
+        version: '1.0.0',
+        isActive: true,
+        path: extensionPath,
+      });
+      expect(extension.installMetadata).toBeUndefined();
+      expect(extension.mcpServers?.['test']).toMatchObject({
+        command: `${extensionPath}/server`,
+        args: [extensionPath],
+      });
+      expect(extension.contextFiles).toEqual([
+        path.join(extensionPath, 'QWEN.md'),
+      ]);
+      expect(extension.skills?.[0].description).toBe(
+        `Inspect ${extensionPath}/data`,
+      );
+      expect(extension.skills?.[0].body).toBe(
+        `Read ${extensionPath}/data and ${extensionPath}/bin.`,
+      );
+      await subject.setExtensionDefaultActivation(extension.id, 'disabled');
+      await subject.refreshCache();
+      expect(subject.getLoadedExtensions()[0].isActive).toBe(false);
+      expect(inventory(managed)).toEqual(before);
+      expect(
+        fs.existsSync(path.join(user, 'portable', INSTALL_METADATA_FILENAME)),
+      ).toBe(false);
+    } finally {
+      fs.chmodSync(managed, 0o755);
+      fs.chmodSync(extensionPath, 0o755);
+    }
+  });
+
+  it.each([
+    String.raw`C:\Users\Tester\extensions`,
+    String.raw`C:\extensions\example`,
+    `/prepared/double"and'single`,
+  ])(
+    'hydrates parsed subagent values without interpreting root characters as YAML: %s',
+    async (extensionRoot) => {
+      const agents = path.join(managed, '${extensionPath}', 'agents');
+      fs.mkdirSync(agents, { recursive: true });
+      const markdown = [
+        '---',
+        'name: portable-agent',
+        'description: "Helper from ${CLAUDE_PLUGIN_ROOT}"',
+        'executor:',
+        '  kind: acp',
+        '  command: "${CLAUDE_PLUGIN_ROOT}/runner"',
+        '  args: ["${extensionPath}/argument"]',
+        'mcpServers:',
+        '  helper:',
+        '    command: "${extensionPath}/server"',
+        'hooks:',
+        '  SessionStart:',
+        '    - hooks:',
+        '        - type: command',
+        '          command: "${CLAUDE_PLUGIN_ROOT}/hook"',
+        '---',
+        'Read ${extensionPath}/data.',
+      ].join('\n');
+      const file = path.join(agents, 'portable.md');
+      fs.writeFileSync(file, markdown);
+      const refusals = new Map<string, SubagentError>();
+      const loaded = await loadSubagentFromDir(
+        agents,
+        refusals,
+        (config) =>
+          recursivelyHydrateStrings(config as unknown as JsonValue, {
+            extensionPath: extensionRoot,
+            CLAUDE_PLUGIN_ROOT: extensionRoot,
+          }) as unknown as SubagentConfig,
+      );
+      expect(refusals.size).toBe(0);
+      expect(loaded).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          level: 'extension',
+          description: `Helper from ${extensionRoot}`,
+          systemPrompt: `Read ${extensionRoot}/data.`,
+          executor: {
+            kind: 'acp',
+            command: `${extensionRoot}/runner`,
+            args: [`${extensionRoot}/argument`],
+          },
+          mcpServers: { helper: { command: `${extensionRoot}/server` } },
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [{ type: 'command', command: `${extensionRoot}/hook` }],
+              },
+            ],
+          },
+        }),
+      ]);
+      expect(fs.readFileSync(file, 'utf8')).toBe(markdown);
+    },
+  );
+
+  it('hydrates managed subagent markdown and workflow declaration paths in memory', async () => {
+    const extensionPath = writeExtension(managed, 'portable', {
+      workflows: '${extensionPath}/actions/review.js',
+    });
+    fs.mkdirSync(path.join(extensionPath, 'agents'));
+    fs.mkdirSync(path.join(extensionPath, 'actions'));
+    fs.writeFileSync(
+      path.join(extensionPath, 'agents', 'helper.md'),
+      [
+        '---',
+        'name: helper',
+        'description: Helper from ${CLAUDE_PLUGIN_ROOT}',
+        'mcpServers:',
+        '  helper:',
+        '    command: "${CLAUDE_PLUGIN_ROOT}/server"',
+        'hooks:',
+        '  SessionStart:',
+        '    - hooks:',
+        '        - type: command',
+        '          command: "${extensionPath}/hook"',
+        '---',
+        'Read ${extensionPath}/data and ${CLAUDE_PLUGIN_ROOT}/guide.',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(extensionPath, 'agents', 'runner.md'),
+      [
+        '---',
+        'name: runner',
+        'description: External runner',
+        'executor:',
+        '  kind: acp',
+        '  command: "${CLAUDE_PLUGIN_ROOT}/runner"',
+        '  args: ["${extensionPath}/argument"]',
+        '---',
+        'Use the configured executor.',
+      ].join('\n'),
+    );
+    const workflow = path.join(extensionPath, 'actions', 'review.js');
+    fs.writeFileSync(
+      workflow,
+      "export const meta = { name: 'review', description: 'Review work' };\nreturn 1;\n",
+    );
+    const before = inventory(managed);
+    const subject = manager();
+    await subject.refreshCache();
+    const [extension] = subject.getLoadedExtensions();
+    expect(extension.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'helper',
+          description: `Helper from ${extensionPath}`,
+          systemPrompt: `Read ${extensionPath}/data and ${extensionPath}/guide.`,
+          mcpServers: { helper: { command: `${extensionPath}/server` } },
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [{ type: 'command', command: `${extensionPath}/hook` }],
+              },
+            ],
+          },
+        }),
+        expect.objectContaining({
+          name: 'runner',
+          executor: {
+            kind: 'acp',
+            command: `${extensionPath}/runner`,
+            args: [`${extensionPath}/argument`],
+          },
+        }),
+      ]),
+    );
+    expect(extension.workflows).toEqual([
+      expect.objectContaining({
+        name: 'portable:review',
+        scriptPath: fs.realpathSync(workflow),
+      }),
+    ]);
+    expect(inventory(managed)).toEqual(before);
+  });
+
+  it('resolves ownership before activation and preserves preferences across version and root changes', async () => {
+    writeExtension(user, 'old-user', { name: 'PORTABLE', version: 'user' });
+    const extensionPath = writeExtension(managed, 'deployed', {
+      name: 'portable',
+    });
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toHaveLength(1);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('shadowed'));
+    const first = subject.getLoadedExtensions()[0];
+    await subject.setExtensionDefaultActivation(first.id, 'disabled');
+    expect(await subject.loadExtensionByName('PORTABLE')).toMatchObject({
+      source: 'managed',
+      isActive: false,
+    });
+    await subject.refreshCache({ names: ['PORTABLE'] });
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({
+        id: first.id,
+        isActive: false,
+        source: 'managed',
+      }),
+    ]);
+    writeExtension(managed, 'deployed', { name: 'portable', version: '2.0.0' });
+    const relocated = path.join(temporary, 'relocated');
+    fs.renameSync(managed, relocated);
+    const restarted = manager({ managedExtensionsDir: relocated });
+    await restarted.refreshCache();
+    expect(restarted.getLoadedExtensions()[0]).toMatchObject({
+      id: first.id,
+      version: '2.0.0',
+      isActive: false,
+    });
+    await restarted.setExtensionDefaultActivation(first.id, 'enabled');
+    expect(restarted.getLoadedExtensions()[0].isActive).toBe(true);
+    expect(fs.existsSync(extensionPath)).toBe(false);
+    expect(
+      fs.existsSync(path.join(user, 'old-user', EXTENSIONS_CONFIG_FILENAME)),
+    ).toBe(true);
+  });
+
+  it('reserves the name of a managed package that fails to load and warns', async () => {
+    writeExtension(user, 'example', { name: 'example', version: 'user' });
+    const broken = path.join(managed, 'example');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(path.join(broken, EXTENSIONS_CONFIG_FILENAME), '{');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    // The broken deployment package still claims its name: the user copy
+    // must not silently take its place.
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const catalog = await subject.refreshCatalogSnapshot();
+    expect(catalog.extensions).toEqual([]);
+    // The management gate honors the same reservation: a user install of
+    // the reserved name is refused even though the managed package never
+    // loaded.
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'example',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('reserves the declared manifest name of a managed package that fails after parsing', async () => {
+    writeExtension(user, 'user-portable', {
+      name: 'portable',
+      version: 'user',
+    });
+    // The directory name differs from the declared name, and the load fails
+    // after the manifest parsed: the declared name is what the user copy
+    // collides with, so reserving only the basename would admit it.
+    const broken = path.join(managed, 'package-folder');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(
+      path.join(broken, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable',
+        version: 42,
+      }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    // The management gate honors the same declared-name reservation.
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('reserves the declared manifest name of a qwen-format managed package that fails validation', async () => {
+    writeExtension(user, 'user-portable', {
+      name: 'portable',
+      version: 'user',
+    });
+    // Same declared-name reservation on the qwen manifest path: the manifest
+    // parses (the name is known) but fails validation afterwards.
+    const broken = path.join(managed, 'package-folder');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(
+      path.join(broken, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify({
+        name: 'portable',
+        version: '2.0.0',
+        settings: [
+          { name: 'Token', description: 'token', envVar: 'not an env var!' },
+        ],
+      }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('reserves the name of a managed package whose manifest probe fails with a non-absence error', async () => {
+    writeExtension(user, 'user-deployed', {
+      name: 'deployed',
+      version: 'user',
+    });
+    const broken = writeExtension(managed, 'deployed', {
+      name: 'deployed',
+      version: 'managed',
+    });
+    // A listable but unsearchable package directory (mode 0700 owned by the
+    // installer, a root-squash NFS mount) fails the manifest probe with
+    // EACCES — a failing package, not a missing manifest.
+    lstatEaccesPaths.add(path.join(broken, EXTENSIONS_CONFIG_FILENAME));
+    lstatEaccesPaths.add(path.join(broken, AGENT_PLUGIN_MANIFEST));
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    // The package keeps its basename reservation and warning instead of
+    // silently releasing the name to the same-name user copy.
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(broken);
+    expect(writes).toContain('shadowed');
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'deployed',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'reserves the name of a dangling managed symlink entry and warns',
+    async () => {
+      writeExtension(user, 'dangling', { name: 'dangling', version: 'user' });
+      const entry = path.join(managed, 'dangling');
+      fs.symlinkSync(path.join(managed, 'missing-target'), entry, 'dir');
+      const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const subject = manager();
+      await subject.refreshCache();
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      const writes = warning.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(writes).toContain(entry);
+      expect(writes).toContain('shadowed');
+    },
+  );
+
+  it('does not reserve the name of a managed directory whose only manifest is an unrelated plugin.json', async () => {
+    writeExtension(user, 'staging', { name: 'staging', version: 'user' });
+    // A plugin.json without the agent-plugins $schema is unrelated: the
+    // loader reads qwen-extension.json for this directory, so the managed
+    // probe must answer from the same governing manifest instead of the
+    // filename alone.
+    const entry = path.join(managed, 'staging');
+    fs.mkdirSync(entry);
+    fs.writeFileSync(
+      path.join(entry, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({ name: 'staging', version: '1.0.0' }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({
+        name: 'staging',
+        source: 'user',
+        version: 'user',
+      }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).not.toContain('shadowed');
+    expect(writes).not.toContain(entry);
+  });
+
+  it('treats an unparseable agent-plugins manifest as a failing managed package', async () => {
+    // A plugin.json that exists but cannot be parsed is a failing package,
+    // not an unrelated directory: the refresh must warn and keep the name
+    // reservation, exactly like a corrupt qwen-extension.json.
+    const userPath = writeExtension(user, 'portable', { version: 'user' });
+    const entry = path.join(managed, 'portable');
+    fs.mkdirSync(entry);
+    fs.writeFileSync(
+      path.join(entry, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({ $schema: AGENT_PLUGIN_SCHEMA, name: 'portable' }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'portable', source: 'managed' }),
+    ]);
+    const managedId = subject.getLoadedExtensions()[0].id;
+
+    // Truncate the manifest mid-string: the declared name is no longer
+    // recoverable, but the entry must still fail loudly and reserve its
+    // basename rather than be skipped as an asset directory.
+    fs.writeFileSync(path.join(entry, AGENT_PLUGIN_MANIFEST), '{"name": "por');
+    await subject.refreshCache();
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(entry);
+    expect(writes).toContain('failed to load');
+    expect(subject.getLoadedExtensions()).toEqual([]);
+
+    // The retained managed policy stays authoritative: by-name and by-id
+    // uninstall both refuse instead of releasing or touching the user copy.
+    await expect(
+      subject.uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      subject.uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
+      true,
+    );
+  });
+
+  // Windows cannot create directory symlinks without extra privileges.
+  it.skipIf(process.platform === 'win32')(
+    'moves the source fingerprint when a name-reserving managed entry is removed',
+    async () => {
+      writeExtension(user, 'dangling', { name: 'dangling', version: 'user' });
+      const entry = path.join(managed, 'dangling');
+      fs.symlinkSync(path.join(managed, 'missing-target'), entry, 'dir');
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const subject = manager();
+      await subject.refreshCache();
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+      // Removing the broken entry withdraws the reservation: the same-name
+      // user extension must come back on the next source check.
+      fs.rmSync(entry);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(subject.getLoadedExtensions()).toEqual([
+        expect.objectContaining({ name: 'dangling', source: 'user' }),
+      ]);
+    },
+  );
+
+  it('does not reserve the name of a managed directory that holds no manifest', async () => {
+    writeExtension(user, 'mine', { name: 'docs', version: 'user' });
+    // An asset-only directory in the managed root — a staging dir, a .git
+    // checkout — is not an extension at all, so it must not claim a name:
+    // reporting it through onLoadFailure would reserve "docs" as a FAILED
+    // package and shadow the user's working extension.
+    const assets = path.join(managed, 'docs');
+    fs.mkdirSync(assets);
+    fs.writeFileSync(path.join(assets, 'README.txt'), 'deployment assets');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const loaded = subject.getLoadedExtensions();
+    expect(loaded).toEqual([
+      expect.objectContaining({ name: 'docs', source: 'user' }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).not.toContain('shadowed');
+    await subject.uninstallExtensionById(loaded[0]!.id, false);
+    expect(
+      fs.existsSync(path.join(user, 'mine', EXTENSIONS_CONFIG_FILENAME)),
+    ).toBe(false);
+  });
+
+  it('catalog discovery keeps managed ownership and full-cache contents without loading subresources', async () => {
+    writeExtension(user, 'shadowed', { name: 'PORTABLE', version: 'user' });
+    writeExtension(user, 'user-only');
+    const extensionPath = writeExtension(managed, 'deployed', {
+      name: 'portable',
+      version: 'managed',
+    });
+    const skillFile = path.join(extensionPath, 'skills', 'helper', 'SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.writeFileSync(
+      skillFile,
+      '---\nname: helper\ndescription: Helper\n---\nSkill body',
+    );
+    fs.writeFileSync(path.join(extensionPath, 'QWEN.md'), 'Managed context');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    const first = await subject.refreshCatalogSnapshot();
+    expect(
+      first.extensions.map(({ name, source }) => ({ name, source })),
+    ).toEqual([
+      { name: 'portable', source: 'managed' },
+      { name: 'user-only', source: 'user' },
+    ]);
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    const full = subject.getLoadedExtensions();
+    const managedExtension = full.find(
+      (extension) => extension.source === 'managed',
+    )!;
+    expect(managedExtension.skills?.[0].body).toBe('Skill body');
+    await subject.setExtensionDefaultActivation(
+      managedExtension.id,
+      'disabled',
+    );
+    const before = await subject.getExtensionStoreSnapshot();
+    const readFile = vi.spyOn(fs.promises, 'readFile');
+    const catalog = await subject.refreshCatalogSnapshot({
+      names: ['PORTABLE'],
+    });
+    expect(catalog.extensions).toEqual([
+      expect.objectContaining({
+        id: managedExtension.id,
+        name: 'portable',
+        source: 'managed',
+        version: 'managed',
+      }),
+    ]);
+    expect(catalog.extensions[0].skills).toBeUndefined();
+    expect(catalog.extensions[0].contextFiles).toEqual([]);
+    expect(
+      readFile.mock.calls.some(([file]) => String(file) === skillFile),
+    ).toBe(false);
+    expect(catalog.snapshot).toEqual(before);
+    expect(subject.getLoadedExtensions()).toEqual(full);
+    const filtered = await subject.refreshCatalogSnapshot({
+      names: ['user-only'],
+    });
+    expect(filtered.snapshot).toEqual(before);
+    expect(filtered.snapshot.extensions[managedExtension.id].managed).toBe(
+      true,
+    );
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('rejects duplicate managed names on full, filtered and by-name discovery', async () => {
+    writeExtension(managed, 'first', { name: 'duplicate' });
+    writeExtension(managed, 'second', { name: 'DUPLICATE' });
+    const subject = manager();
+    await expect(subject.refreshCache()).rejects.toThrow(
+      /Duplicate managed extension name.*(?:first.*second|second.*first)/,
+    );
+    await expect(
+      subject.refreshCache({ names: ['unrelated'] }),
+    ).rejects.toThrow('Duplicate managed extension name');
+    await expect(subject.loadExtensionByName('unrelated')).rejects.toThrow(
+      'Duplicate managed extension name',
+    );
+    await expect(
+      subject.refreshCatalogSnapshot({ names: ['unrelated'] }),
+    ).rejects.toThrow('Duplicate managed extension name');
+  });
+
+  it('ignores managed install sidecars and resolves external hook file variables in memory', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    const redirect = writeExtension(temporary, 'redirect', {
+      name: 'unexpected',
+    });
+    fs.writeFileSync(
+      path.join(extensionPath, INSTALL_METADATA_FILENAME),
+      JSON.stringify({ type: 'link', source: redirect }),
+    );
+    fs.mkdirSync(path.join(extensionPath, 'hooks'));
+    fs.writeFileSync(
+      path.join(extensionPath, 'hooks', 'hooks.json'),
+      JSON.stringify({
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: '${extensionPath}/hook ${CLAUDE_PLUGIN_ROOT}',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const before = inventory(managed);
+    const subject = manager();
+    await subject.refreshCache();
+    const [extension] = subject.getLoadedExtensions();
+    expect(extension).toMatchObject({
+      name: 'portable',
+      path: extensionPath,
+      source: 'managed',
+    });
+    expect(extension.hooks?.SessionStart?.[0].hooks[0]).toMatchObject({
+      command: `${extensionPath}/hook ${extensionPath}`,
+    });
+    expect(await checkForExtensionUpdate(extension, subject)).toBe(
+      ExtensionUpdateState.NOT_UPDATABLE,
+    );
+    expect(inventory(managed)).toEqual(before);
+  });
+
+  it('fingerprints additions, version changes and removals without duplicate contributions', async () => {
+    fs.mkdirSync(user, { recursive: true });
+    const subject = manager();
+    await subject.refreshCache();
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+    const extensionPath = writeExtension(managed, 'portable');
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+    writeExtension(managed, 'portable', { version: '2.0.0-expanded' });
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ version: '2.0.0-expanded' }),
+    ]);
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toHaveLength(1);
+    fs.rmSync(extensionPath, { recursive: true });
+    expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+    expect(subject.getLoadedExtensions()).toEqual([]);
+  });
+
+  it('re-reads managed skill content and removes deleted contributions during explicit refresh', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    const skillDirectory = path.join(extensionPath, 'skills', 'test');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    const skillFile = path.join(skillDirectory, 'SKILL.md');
+    const writeSkill = (body: string) =>
+      fs.writeFileSync(
+        skillFile,
+        `---\nname: test\ndescription: Test skill\n---\n${body}`,
+      );
+    writeSkill('First content');
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()[0].skills?.[0].body).toBe(
+      'First content',
+    );
+    writeSkill('Updated content');
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()[0].skills).toEqual([
+      expect.objectContaining({ body: 'Updated content' }),
+    ]);
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()[0].skills).toHaveLength(1);
+    fs.rmSync(skillDirectory, { recursive: true });
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()[0].skills).toEqual([]);
+  });
+
+  it('uses existing invalid-manifest diagnostics without dropping valid managed packages', async () => {
+    writeExtension(managed, 'valid');
+    const invalid = writeExtension(managed, 'invalid');
+    fs.writeFileSync(path.join(invalid, EXTENSIONS_CONFIG_FILENAME), '{');
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      subject.getLoadedExtensions().map((extension) => extension.name),
+    ).toEqual(['valid']);
+  });
+
+  it('rejects every managed artifact mutation and keeps shadowed user files unchanged', async () => {
+    writeExtension(managed, 'portable');
+    writeExtension(user, 'portable', { version: 'user' });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const [extension] = subject.getLoadedExtensions();
+    const before = inventory(managed);
+    const userBefore = inventory(path.join(user, 'portable'));
+    await expect(
+      subject.uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      subject.uninstallExtensionById(extension.id, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      manager().uninstallExtensionById(extension.id, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      subject.prepareExtensionUpdate({ extension }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      subject.updateExtension(
+        extension,
+        ExtensionUpdateState.UPDATE_AVAILABLE,
+        vi.fn(),
+      ),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    const replacement = writeExtension(temporary, 'replacement', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: replacement }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(inventory(managed)).toEqual(before);
+    expect(inventory(path.join(user, 'portable'))).toEqual(userBefore);
+  });
+
+  it('never deletes a shadowed user artifact through a stale managed id after the managed disappears', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    const userPath = writeExtension(user, 'portable', { version: 'user' });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]?.managed).toBe(true);
+    fs.rmSync(extensionPath, { recursive: true });
+    // The managed package is gone: an explicit uninstall releases the
+    // retained policy so the name stops blocking a user install, and it can
+    // never reach the shadowed user artifact on disk.
+    const after = await manager().uninstallExtensionById(managedId, false);
+    expect(after.extensions[managedId]).toBeUndefined();
+    expect(after.generation).toBeGreaterThan(before.generation);
+    // Releasing is idempotent: a second uninstall changes nothing further.
+    const repeated = await manager({
+      managedExtensionsDir: undefined,
+    }).uninstallExtensionById(managedId, false);
+    expect(repeated).toEqual(after);
+    expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
+      true,
+    );
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(after);
+  });
+
+  it('releases a withdrawn managed policy by name when nothing is loaded', async () => {
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]?.managed).toBe(true);
+
+    // Still deployed: the name-based path must keep refusing. The fresh
+    // manager never refreshed, so nothing is loaded and the fallback into
+    // the guarded release branch is what answers.
+    await expect(
+      manager().uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+
+    // Withdrawn: the name-based path releases the retained policy through
+    // the same fail-closed guards as the by-id path instead of reporting
+    // "Extension not found." while the name stays reserved.
+    fs.rmSync(path.join(managed, 'portable'), { recursive: true });
+    const after = await manager().uninstallExtension('portable', false);
+    expect(after.extensions[managedId]).toBeUndefined();
+  });
+
+  it('refuses to release a retained managed policy when this process has no managed root', async () => {
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    // The package is still deployed; a process that cannot see the root at
+    // all reads the same empty listing as a genuine withdrawal would, so the
+    // destructive release must fail closed instead of assuming absence.
+    await expect(
+      manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
+        managedId,
+        false,
+      ),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('refuses to release a retained managed policy whose package is still deployed but fails to load', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    // The package is still deployed, just broken: discovery reserves the
+    // failing entry's name, so uninstalling the stale managed id rejects
+    // exactly like uninstalling a loaded managed package.
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await expect(
+      manager().uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('refuses to release a retained managed policy while an unnamed failing entry could still be that package', async () => {
+    // The deployed directory name differs from the declared name, so the
+    // basename reservation cannot cover it; once the manifest is corrupted
+    // the failing entry cannot be proven not to be the retained package.
+    const extensionPath = writeExtension(managed, 'acme-toolkit-1.4.0', {
+      name: 'acme-toolkit',
+    });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    const managedId = subject.getLoadedExtensions()[0].id;
+    const before = await subject.getExtensionStoreSnapshot();
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await expect(
+      manager().uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+    // Once the deployment is genuinely cleaned up, the release proceeds.
+    fs.rmSync(extensionPath, { recursive: true });
+    await manager().uninstallExtensionById(managedId, false);
+    expect(
+      (await subject.getExtensionStoreSnapshot()).extensions[managedId],
+    ).toBeUndefined();
+  });
+
+  it('keeps the managed marker and stash while an unnamed managed entry fails to load', async () => {
+    // The deployed directory name differs from the declared name, so once
+    // the manifest is corrupted the failing entry cannot be proven not to
+    // be the deployed package: absence is not proven, and the refresh must
+    // not hand the retained policy back to the same-name user copy.
+    const userPath = writeExtension(user, 'mine', {
+      name: 'portable',
+      version: 'user',
+    });
+    const extensionPath = writeExtension(managed, 'portable-1.4.0', {
+      name: 'portable',
+    });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0].id;
+    await deployed.setExtensionDefaultActivation(managedId, 'disabled');
+    const before = await deployed.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await deployed.refreshCache();
+    const userExtension = deployed
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userExtension.source).toBe('user');
+    expect(userExtension.isActive).toBe(false);
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[userExtension.id],
+    ).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+
+    // Once the entry is genuinely cleaned up, the hand-back fires and the
+    // user copy resumes with its pre-managed activation.
+    fs.rmSync(extensionPath, { recursive: true });
+    await deployed.refreshCache();
+    const restored = await deployed.getExtensionStoreSnapshot();
+    expect(restored.extensions[userExtension.id]?.managed).toBeUndefined();
+    expect(restored.extensions[userExtension.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+    expect(
+      deployed.getLoadedExtensions().find((e) => e.name === 'portable')
+        ?.isActive,
+    ).toBe(true);
+    expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
+      true,
+    );
+  });
+
+  it('refuses the destructive by-id path for a policy still carrying the managed marker', async () => {
+    // A policy re-keyed onto a user identity id by a run that could not
+    // prove absence keeps its managed marker; the second ownership gate
+    // must read that marker, not a `source` field the policy type lacks.
+    const userPath = writeExtension(user, 'portable', { version: 'user' });
+    const managedPackage = writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const deployed = manager();
+    await deployed.refreshCache();
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[
+        deployed.getLoadedExtensions()[0].id
+      ]?.managed,
+    ).toBe(true);
+
+    const unflagged = manager({ managedExtensionsDir: undefined });
+    await unflagged.refreshCache();
+    const userCopy = unflagged
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userCopy.source).toBe('user');
+    const rekeyed = await unflagged.getExtensionStoreSnapshot();
+    expect(rekeyed.extensions[userCopy.id]?.managed).toBe(true);
+
+    // The package is withdrawn and the user artifact disappears without a
+    // release: the managed-marked policy is all that is left. A fresh
+    // flagged process that never refreshed holds no loaded extension for
+    // the id, so only the marker itself can stop the destructive path.
+    fs.rmSync(managedPackage, { recursive: true });
+    fs.rmSync(userPath, { recursive: true });
+    const flagged = manager();
+    await expect(
+      flagged.uninstallExtensionById(userCopy.id, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await flagged.getExtensionStoreSnapshot()).toEqual(rekeyed);
+  });
+
+  it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {
+    writeExtension(managed, 'valid');
+    writeExtension(user, 'user-package');
+    fs.symlinkSync(
+      path.join(managed, 'missing-target'),
+      path.join(managed, 'dangling'),
+      'dir',
+    );
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      subject
+        .getLoadedExtensions()
+        .map((extension) => extension.name)
+        .sort(),
+    ).toEqual(['user-package', 'valid']);
+  });
+
+  it('degrades to an empty managed set when the root becomes unreadable after construction', async () => {
+    writeExtension(managed, 'valid');
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      subject.getLoadedExtensions().map((extension) => extension.name),
+    ).toEqual(['valid']);
+    fs.rmSync(managed, { recursive: true });
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(
+      `Managed extensions root "${managed}" could not be listed`,
+    );
+    expect(writes).toContain('no longer shadowed');
+  });
+
+  it('warns that same-name user extensions are no longer shadowed when the managed root cannot be listed', async () => {
+    writeExtension(user, 'example', { name: 'example', version: 'user' });
+    const missing = path.join(temporary, 'missing-root');
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager({ managedExtensionsDir: missing });
+    await subject.refreshCache();
+    // The managed set is unknown rather than empty: the user copy loads,
+    // and the lost shadowing is announced on stderr.
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'example', source: 'user' }),
+    ]);
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(
+      `Managed extensions root "${missing}" could not be listed`,
+    );
+    expect(writes).toContain('no longer shadowed');
+  });
+
+  it('constructs without re-validating after the root disappears', async () => {
+    writeExtension(managed, 'valid');
+    const first = manager();
+    await first.refreshCache();
+    expect(
+      first.getLoadedExtensions().map((extension) => extension.name),
+    ).toEqual(['valid']);
+    fs.rmSync(managed, { recursive: true });
+    // The fail-hard validation lives at the process boundary. A second
+    // manager (or Config) constructed in a running process after the root
+    // disappeared must degrade to an empty managed set instead of throwing.
+    const second = manager();
+    await second.refreshCache();
+    expect(second.getLoadedExtensions()).toEqual([]);
+    const config = new Config({
+      sessionId: 'managed-root-vanished',
+      model: '',
+      targetDir: workspace,
+      cwd: workspace,
+      debugMode: false,
+      chatRecording: false,
+      interactive: false,
+      trustedFolder: true,
+      managedExtensionsDir: managed,
+      telemetry: { enabled: false },
+      disableAllHooks: true,
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+    try {
+      expect(config.getManagedExtensionsDir()).toBe(managed);
+    } finally {
+      await config.shutdown();
+    }
+  });
+
+  it('rechecks managed ownership when committing a previously prepared user install', async () => {
+    const replacement = writeExtension(temporary, 'replacement', {
+      name: 'portable',
+    });
+    const subject = manager();
+    await subject.refreshCache();
+    const prepared = await subject.prepareExtensionInstall({
+      installMetadata: { type: 'local', source: replacement },
+      initialActivation: { scope: 'user' },
+    });
+    writeExtension(managed, 'portable');
+    try {
+      await expect(
+        subject.commitPreparedExtension(prepared),
+      ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+      expect(fs.existsSync(path.join(user, 'portable'))).toBe(false);
+    } finally {
+      await subject.disposePreparedExtension(prepared);
+    }
+  });
+
+  it('update-all reports managed skips while continuing user updates', async () => {
+    writeExtension(managed, 'portable');
+    writeExtension(user, 'updatable');
+    const subject = manager();
+    await subject.refreshCache();
+    const update = vi.spyOn(subject, 'updateExtension').mockResolvedValue({
+      name: 'updatable',
+      originalVersion: '1',
+      updatedVersion: '2',
+    });
+    const callback = vi.fn();
+    const states = new Map(
+      subject
+        .getLoadedExtensions()
+        .map((extension) => [
+          extension.name,
+          { status: ExtensionUpdateState.UPDATE_AVAILABLE, processed: true },
+        ]),
+    );
+    expect(
+      await subject.updateAllUpdatableExtensions(states, callback),
+    ).toEqual([
+      { name: 'updatable', originalVersion: '1', updatedVersion: '2' },
+    ]);
+    expect(callback).toHaveBeenCalledWith(
+      'portable',
+      ExtensionUpdateState.NOT_UPDATABLE,
+    );
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0].source).toBe('user');
+  });
+
+  it('retains CLI name selection and leaves unspecified managed roots unused', async () => {
+    writeExtension(managed, 'portable');
+    writeExtension(user, 'personal');
+    const selected = manager({ enabledExtensionOverrides: ['portable'] });
+    await selected.refreshCache();
+    expect(
+      selected
+        .getLoadedExtensions()
+        .map(({ name, isActive }) => [name, isActive]),
+    ).toEqual([
+      ['portable', true],
+      ['personal', false],
+    ]);
+    const omitted = manager({ managedExtensionsDir: undefined });
+    await omitted.refreshCache();
+    expect(omitted.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'personal', source: 'user' }),
+    ]);
+  });
+
+  it('rejects overlapping managed and writable state paths, including symlink aliases', () => {
+    fs.mkdirSync(user, { recursive: true });
+    expect(() => manager({ managedExtensionsDir: user })).toThrow(
+      'must not overlap writable extension state',
+    );
+    expect(() => manager({ managedExtensionsDir: temporary })).toThrow(
+      'must not overlap writable extension state',
+    );
+    const nested = path.join(user, 'nested');
+    fs.mkdirSync(nested);
+    expect(() => manager({ managedExtensionsDir: nested })).toThrow(
+      'must not overlap writable extension state',
+    );
+    const alias = path.join(temporary, 'alias');
+    fs.symlinkSync(
+      user,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(() => manager({ managedExtensionsDir: alias })).toThrow(
+      'must not overlap writable extension state',
+    );
+    expect(() =>
+      manager({
+        extensionStore: new ExtensionStore({
+          extensionsDir: user,
+          storeDir: path.join(managed, 'new-state'),
+        }),
+      }),
+    ).toThrow('must not overlap writable extension state');
+  });
+
+  it.each(['omitted', 'absolute', 'explicit-cwd'] as const)(
+    'does not read the process cwd for a %s managed root',
+    (kind) => {
+      const cwd = vi.spyOn(process, 'cwd').mockImplementation(() => {
+        throw Object.assign(new Error('Startup cwd was removed'), {
+          code: 'ENOENT',
+        });
+      });
+      let result: string | undefined;
+      let failure: unknown;
+      let calls = 0;
+      try {
+        result = resolveManagedExtensionsDir(
+          kind === 'omitted'
+            ? undefined
+            : kind === 'absolute'
+              ? managed
+              : 'managed',
+          kind === 'explicit-cwd' ? temporary : undefined,
+        );
+      } catch (error) {
+        failure = error;
+      } finally {
+        calls = cwd.mock.calls.length;
+        cwd.mockRestore();
+      }
+      expect(failure).toBeUndefined();
+      expect(calls).toBe(0);
+      expect(result).toBe(kind === 'omitted' ? undefined : managed);
+    },
+  );
+
+  it('rejects invalid roots clearly and allows an empty root', async () => {
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const writes = () =>
+      warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(resolveManagedExtensionsDir('managed', temporary)).toBe(managed);
+    expect(resolveManagedExtensionsDir(undefined)).toBeUndefined();
+    expect(() => resolveManagedExtensionsDir('')).toThrow(
+      'one non-empty directory',
+    );
+    expect(() =>
+      resolveManagedExtensionsDir(['first', 'second'] as unknown as string),
+    ).toThrow('one non-empty directory');
+    expect(() =>
+      resolveManagedExtensionsDir(path.join(temporary, 'missing')),
+    ).toThrow(/Invalid --managed-extensions.*missing/);
+    const missingRoot = path.join(temporary, 'missing');
+    const missing = manager({
+      managedExtensionsDir: missingRoot,
+    });
+    await missing.refreshCache();
+    expect(missing.getLoadedExtensions()).toEqual([]);
+    expect(writes()).toContain(
+      `Managed extensions root "${missingRoot}" is unavailable`,
+    );
+    expect(writes()).toContain('no longer shadowed');
+    const file = path.join(temporary, 'file');
+    fs.writeFileSync(file, 'not a directory');
+    expect(() => resolveManagedExtensionsDir(file)).toThrow(
+      /Invalid --managed-extensions.*not a directory/,
+    );
+    const linkedRoot = path.join(temporary, 'linked-root');
+    fs.symlinkSync(
+      managed,
+      linkedRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(() => resolveManagedExtensionsDir(linkedRoot)).toThrow(
+      /Invalid --managed-extensions.*symbolic link/,
+    );
+    const viaLinkedParent = path.join(temporary, 'linked-parent');
+    fs.symlinkSync(
+      temporary,
+      viaLinkedParent,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    // A link ABOVE the root is not the root: the resolved path is pinned to
+    // the canonical spelling so later re-resolution cannot move it.
+    expect(
+      resolveManagedExtensionsDir(path.join(viaLinkedParent, 'managed')),
+    ).toBe(managed);
+    const fileRoot = manager({ managedExtensionsDir: file });
+    await fileRoot.refreshCache();
+    expect(fileRoot.getLoadedExtensions()).toEqual([]);
+    expect(writes()).toContain(
+      `Managed extensions root "${file}" is unavailable`,
+    );
+    await manager().refreshCache();
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      fs.chmodSync(managed, 0);
+      try {
+        expect(() => resolveManagedExtensionsDir(managed)).toThrow(
+          /Invalid --managed-extensions.*EACCES/,
+        );
+        const unreadable = manager();
+        await unreadable.refreshCache();
+        expect(unreadable.getLoadedExtensions()).toEqual([]);
+        expect(writes()).toContain(
+          `Managed extensions root "${managed}" is unavailable`,
+        );
+      } finally {
+        fs.chmodSync(managed, 0o755);
+      }
+    }
+  });
+});

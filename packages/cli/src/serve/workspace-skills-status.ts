@@ -34,13 +34,17 @@ import {
   ExtensionManager,
   ExtensionStore,
   SkillManager,
-  Storage,
   isSafeModeEnv,
   getExtensionDisplayName,
   authoredSkillName,
   qualifySkillName,
 } from '@qwen-code/qwen-code-core';
-import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  Extension,
+  ExtensionStoreSnapshot,
+  SkillLevel,
+} from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
@@ -56,6 +60,7 @@ export interface WorkspaceSkillsStatusProvider {
 }
 
 export interface WorkspaceSkillsStatusProviderOptions {
+  managedExtensionsDir?: string;
   workspaceTrusted?: boolean;
   /** Read inert on-disk Skill manifests without loading workspace settings. */
   includeUntrustedSkills?: boolean;
@@ -88,7 +93,7 @@ type SkillManagerConfigShim = Pick<
 
 interface WorkspaceSkillManagers {
   skillManager: SkillManager;
-  extensionManager?: ExtensionManager;
+  extensions: Extension[];
   extensionSkillStates: Map<Extension, Map<string, boolean>>;
 }
 
@@ -107,6 +112,7 @@ export function createWorkspaceSkillsStatusProvider(
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
+      options.managedExtensionsDir,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
   return provider;
@@ -117,6 +123,7 @@ async function buildWorkspaceSkillsStatus(
   managers: Map<string, WorkspaceSkillManagers>,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
+  managedExtensionsDir?: string,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -149,46 +156,125 @@ async function buildWorkspaceSkillsStatus(
       );
       const safeMode =
         (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
-      let extensionManager: ExtensionManager | undefined;
+      let extensions: Extension[] = [];
       const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
-        const directory = Storage.getUserExtensionsDir();
-        const entry = await fs
-          .lstat(directory)
-          .catch((error: NodeJS.ErrnoException) => {
+        const lstatOrUndefined = (target: string) =>
+          fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
             if (error.code === 'ENOENT') return undefined;
             throw error;
           });
-        if (entry) {
-          await fs.readdir(directory);
-          const extensionStore = new ExtensionStore();
-          extensionManager = new ExtensionManager({
+        // Construction is pure path computation; only the store-backed read
+        // below materializes directories. A read-only status probe must not
+        // create state: take the store-backed path only when state already
+        // exists, because a store that has to be created cannot hold
+        // activation preferences yet. A fresh home with a managed root is
+        // answered by a store-free managed discovery with manifest defaults
+        // — which also keeps working when the home cannot be written at all.
+        const extensionStore = new ExtensionStore();
+        const entry = await lstatOrUndefined(extensionStore.extensionsDir);
+        const storeEntry = entry
+          ? undefined
+          : await lstatOrUndefined(extensionStore.storeDir);
+        if (entry || storeEntry || managedExtensionsDir) {
+          const extensionManager = new ExtensionManager({
+            managedExtensionsDir,
             extensionStore,
             workspaceDir: workspaceCwd,
             isWorkspaceTrusted: workspaceTrusted,
             locale,
           });
-          const snapshot = await extensionManager.refreshCacheWithSnapshot();
-          for (const extension of extensionManager.getLoadedExtensions()) {
+          const defaultSkillStates = (extension: Extension) => {
             const states = new Map<string, boolean>();
             for (const skill of extension.skills ?? []) {
               const name = skill.name.trim().toLowerCase();
               const defaults = extension.config.skillStates;
-              const defaultEnabled =
-                defaults && Object.hasOwn(defaults, name)
-                  ? defaults[name]!
-                  : true;
               states.set(
                 name,
-                extensionStore.getSkillWorkspaceOverride(
-                  snapshot,
-                  extension.id,
-                  workspaceCwd,
-                  name,
-                ) ?? defaultEnabled,
+                defaults && Object.hasOwn(defaults, name)
+                  ? defaults[name]!
+                  : true,
               );
             }
-            extensionSkillStates.set(extension, states);
+            return states;
+          };
+          const applySnapshotOverrides = (snapshot: ExtensionStoreSnapshot) => {
+            for (const extension of extensions) {
+              const states = defaultSkillStates(extension);
+              for (const name of [...states.keys()]) {
+                states.set(
+                  name,
+                  extensionStore.getSkillWorkspaceOverride(
+                    snapshot,
+                    extension.id,
+                    workspaceCwd,
+                    name,
+                  ) ?? states.get(name)!,
+                );
+              }
+              extensionSkillStates.set(extension, states);
+            }
+          };
+          let storeRead = false;
+          if (entry) {
+            // State exists: a read failure must not fall back to manifest
+            // defaults, which would report a managed package the user
+            // disabled as active — the error propagates to the outer catch.
+            await fs.readdir(extensionStore.extensionsDir);
+            // createDataDir: false — a read-only status probe must not
+            // create plugin data directories for agent-plugins packages.
+            const snapshot = await extensionManager.refreshCacheWithSnapshot({
+              createDataDir: false,
+            });
+            extensions = extensionManager.getLoadedExtensions();
+            applySnapshotOverrides(snapshot);
+            storeRead = true;
+          } else if (storeEntry) {
+            // A store without an extensions dir can hold managed activation
+            // state, but no user packages. Read the snapshot without the
+            // store lock: acquiring it materializes the store directories, a
+            // write this probe must not perform (and cannot, on a read-only
+            // home). A corrupt store still fails closed out of peekSnapshot.
+            const snapshot = await extensionStore.peekSnapshot();
+            if (snapshot) {
+              if (managedExtensionsDir) {
+                extensions = await extensionManager.loadManagedExtensions(
+                  workspaceCwd,
+                  { createDataDir: false },
+                );
+                for (const extension of extensions) {
+                  extension.isActive =
+                    extensionStore.getActivation(
+                      snapshot,
+                      extension.id,
+                      extension.name,
+                      workspaceCwd,
+                    ).effective === 'enabled';
+                }
+              }
+              applySnapshotOverrides(snapshot);
+              storeRead = true;
+            }
+          }
+          if (!storeRead) {
+            // Fresh home: neither the user extensions dir nor the store
+            // exists, so no activation preferences can exist, and a
+            // store-free managed discovery with manifest defaults gives the
+            // same answer — and performs no write. createDataDir: false
+            // keeps the probe read-only even for agent-plugins-format
+            // managed packages.
+            if (managedExtensionsDir) {
+              extensions = await extensionManager.loadManagedExtensions(
+                workspaceCwd,
+                { createDataDir: false },
+              );
+            }
+            for (const extension of extensions) {
+              extensionSkillStates.set(
+                extension,
+                defaultSkillStates(extension),
+              );
+            }
           }
         }
       }
@@ -201,9 +287,7 @@ async function buildWorkspaceSkillsStatus(
         // bare, so it is always off here.
         getBareMode: () => false,
         getProjectRoot: () => workspaceCwd,
-        getActiveExtensions: () =>
-          extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
-          [],
+        getActiveExtensions: () => extensions.filter((e) => e.isActive),
         getDisabledSkillLevels: () => disabledLevels,
       };
       const skillManager = new SkillManager(shim as Config);
@@ -221,12 +305,11 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      cached = { skillManager, extensionManager, extensionSkillStates };
+      cached = { skillManager, extensions, extensionSkillStates };
       managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
-    const { skillManager, extensionManager, extensionSkillStates } = cached;
-    const extensions = extensionManager?.getLoadedExtensions() ?? [];
+    const { skillManager, extensions, extensionSkillStates } = cached;
     const skills = await skillManager.listSkills();
     const statuses = skills.map((skill) => {
       const extension =

@@ -374,11 +374,12 @@ async function startSingle(
   cronEnabled: boolean,
   locale: 'en' | 'zh',
   displayLanguage?: string,
+  managedExtensions?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
-  await loadChannelsFromExtensions();
+  await loadChannelsFromExtensions(managedExtensions);
 
   if (!channelsConfig[name]) {
     writeStderrLine(
@@ -412,7 +413,12 @@ async function startSingle(
 
   const bridgeReadiness = createBridgeReadinessGate();
 
-  const bridgeOpts = { cliEntryPath, cwd: config.cwd, model: config.model };
+  const bridgeOpts = {
+    cliEntryPath,
+    cwd: config.cwd,
+    model: config.model,
+    managedExtensions,
+  };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();
 
@@ -534,11 +540,12 @@ async function startAll(
   cronEnabled: boolean,
   locale: 'en' | 'zh',
   displayLanguage?: string,
+  managedExtensions?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
-  await loadChannelsFromExtensions();
+  await loadChannelsFromExtensions(managedExtensions);
 
   if (Object.keys(channelsConfig).length === 0) {
     writeStderrLine(
@@ -571,6 +578,7 @@ async function startAll(
   const bridgeReadiness = createBridgeReadinessGate();
 
   const bridgeOpts = {
+    managedExtensions,
     cliEntryPath,
     cwd: defaultCwd,
     model: selectFirstModel(parsed, 'Shared bridge'),
@@ -718,7 +726,10 @@ async function startAll(
   await new Promise<void>(() => {});
 }
 
-export const startCommand: CommandModule<object, { name?: string }> = {
+export const startCommand: CommandModule<
+  object,
+  { name?: string; 'managed-extensions'?: string }
+> = {
   command: 'start [name]',
   describe: 'Start channels (all if no name given, or a single named channel)',
   builder: (yargs) =>
@@ -727,6 +738,7 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       describe: 'Channel name (omit to start all configured channels)',
     }),
   handler: async (argv) => {
+    const managedExtensions = argv['managed-extensions'] as string | undefined;
     const settings = loadSettings(process.cwd());
     const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
@@ -740,9 +752,22 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       ),
     );
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled, locale, displayLanguage);
+      await startSingle(
+        argv.name,
+        proxy,
+        cronEnabled,
+        locale,
+        displayLanguage,
+        managedExtensions,
+      );
     } else {
-      await startAll(proxy, cronEnabled, locale, displayLanguage);
+      await startAll(
+        proxy,
+        cronEnabled,
+        locale,
+        displayLanguage,
+        managedExtensions,
+      );
     }
   },
 };

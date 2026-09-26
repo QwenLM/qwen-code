@@ -1922,6 +1922,7 @@ export async function loadSubagentFromDir(
   // name, so a by-name dispatch can refuse instead of falling through to a
   // builtin of the same name.
   refusals?: Map<string, SubagentError>,
+  transformConfig?: (config: SubagentConfig) => SubagentConfig,
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
@@ -1939,6 +1940,7 @@ export async function loadSubagentFromDir(
           filePath,
           'extension',
           new SubagentValidator(),
+          transformConfig,
         );
         subagents.push(config);
       } catch (error) {
@@ -1960,6 +1962,7 @@ function parseSubagentContent(
   filePath: string,
   level: SubagentLevel,
   validator: SubagentValidator,
+  transformConfig?: (config: SubagentConfig) => SubagentConfig,
 ): SubagentConfig {
   // R11-1/R11-4: the executor claim and the trusted declared name are computed
   // at FUNCTION scope so the catch can convert ANY load failure of an
@@ -2330,7 +2333,7 @@ function parseSubagentContent(
       );
     }
 
-    const config: SubagentConfig = {
+    const parsedConfig: SubagentConfig = {
       name,
       description,
       tools,
@@ -2349,6 +2352,12 @@ function parseSubagentContent(
       ...(hooks !== undefined ? { hooks } : {}),
       ...(executor !== undefined ? { executor } : {}),
       ...(executionBackend !== undefined ? { executionBackend } : {}),
+    };
+
+    const config: SubagentConfig = {
+      ...(transformConfig?.(parsedConfig) ?? parsedConfig),
+      filePath,
+      level,
     };
 
     // Validate the parsed configuration

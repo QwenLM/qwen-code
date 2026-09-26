@@ -47,6 +47,7 @@ describe('LSTool', () => {
       storage: {
         getUserSkillsDirs: () => [userSkillsBase],
       },
+      getManagedExtensionsDir: () => undefined,
     } as unknown as Config;
 
     lsTool = new LSTool(mockConfig);
@@ -99,6 +100,27 @@ describe('LSTool', () => {
       const invocation = lsTool.build({ path: '/tmp' });
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');
+    });
+
+    it('should return allow for paths within the managed extensions directory', async () => {
+      // Outside every workspace dir: without the managed-root allowlist entry
+      // this listing would need a confirmation prompt.
+      const managedRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-ls-managed-'),
+      );
+      try {
+        const managedTool = new LSTool({
+          ...mockConfig,
+          getManagedExtensionsDir: () => managedRoot,
+        } as unknown as Config);
+        const invocation = managedTool.build({
+          path: path.join(managedRoot, 'demo'),
+        });
+        const permission = await invocation.getDefaultPermission();
+        expect(permission).toBe('allow');
+      } finally {
+        await fs.rm(managedRoot, { recursive: true, force: true });
+      }
     });
   });
 

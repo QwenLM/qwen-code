@@ -16,6 +16,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -911,6 +912,106 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  describe('managed root through the MCP parser', () => {
+    let managedRoot: string;
+
+    beforeEach(() => {
+      // The coerce validates and pins the canonical path, so the fixture
+      // must exist and be spelled the way realpathSync returns it (macOS
+      // resolves /var to /private/var inside os.tmpdir()).
+      managedRoot = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'qwen-mcp-managed-')),
+      );
+      return () => {
+        rmSync(managedRoot, { recursive: true, force: true });
+      };
+    });
+
+    it.each([
+      (root: string) => ['mcp', 'list', '--managed-extensions', root],
+      (root: string) => ['mcp', 'list', `--managed-extensions=${root}`],
+    ])('passes the managed root through the MCP parser: %j', async (argv) => {
+      await runCliEntry(argv(managedRoot));
+
+      expect(mocks.mcpListHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ managedExtensions: managedRoot }),
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(stderr.join('')).not.toContain('Unknown argument');
+    });
+
+    it('routes the managed root given between mcp and the subcommand', async () => {
+      await runCliEntry(['mcp', '--managed-extensions', managedRoot, 'list']);
+
+      expect(mocks.mcpListHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ managedExtensions: managedRoot }),
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+      expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+    });
+
+    it('rejects a managed root that does not exist', async () => {
+      await runCliEntry([
+        'mcp',
+        'list',
+        '--managed-extensions',
+        path.join(managedRoot, 'no-such-root'),
+      ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('Invalid --managed-extensions');
+      expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    // Windows cannot create directory symlinks without extra privileges.
+    it.skipIf(process.platform === 'win32')(
+      'rejects a managed root that is a symbolic link',
+      async () => {
+        const link = path.join(managedRoot, 'linked-root');
+        symlinkSync(managedRoot, link, 'dir');
+
+        await runCliEntry(['mcp', 'list', '--managed-extensions', link]);
+
+        expect(process.exitCode).toBe(1);
+        expect(stderr.join('')).toContain('Invalid --managed-extensions');
+        expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+        expect(mocks.main).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it('requires a directory value for the managed MCP option', async () => {
+    await runCliEntry(['mcp', 'list', '--managed-extensions']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Not enough arguments following: managed-extensions',
+    );
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it('does not parse managed-looking server arguments after the delimiter', async () => {
+    let managedArgument: unknown = 'handler not called';
+    mocks.mcpAddHandler.mockImplementation((argv: Record<string, unknown>) => {
+      managedArgument = argv['managedExtensions'];
+      expect(argv['--']).toEqual(['--managed-extensions', 'server-argument']);
+    });
+    await runCliEntry([
+      'mcp',
+      'add',
+      'fixture',
+      'node',
+      '--',
+      '--managed-extensions',
+      'server-argument',
+    ]);
+
+    expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+    expect(managedArgument).toBeUndefined();
   });
 
   it('executes MCP subcommands after -- through the fast path', async () => {

@@ -17,6 +17,7 @@ import { processImports } from '../utils/memoryImportProcessor.js';
 import { isSubpath, QWEN_DIR, tildeifyPath } from '../utils/paths.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { Storage } from '../config/storage.js';
+import { hydrateExtensionText } from '../extension/variables.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
 import {
@@ -256,7 +257,19 @@ async function readMemoryFiles(
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>,
   loadReason: Exclude<InstructionLoadReason, 'include'> = 'session_start',
+  extensionContextRoots?: ReadonlyMap<string, string>,
 ): Promise<MemoryFileContent[]> {
+  const canonicalExtensionRoots = new Map(
+    await Promise.all(
+      [...(extensionContextRoots ?? [])].map(
+        async ([file, root]) =>
+          [
+            await fs.realpath(file).catch(() => path.resolve(file)),
+            root,
+          ] as const,
+      ),
+    ),
+  );
   // Process files in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 20; // Higher limit for file reads as they're typically faster
   const results: MemoryFileContent[] = [];
@@ -279,6 +292,10 @@ async function readMemoryFiles(
       async (filePath): Promise<MemoryFileContent> => {
         try {
           const content = await fs.readFile(filePath, 'utf-8');
+          const extensionRoot =
+            canonicalExtensionRoots.size > 0
+              ? canonicalExtensionRoots.get(await fs.realpath(filePath))
+              : undefined;
 
           // Process imports in the content
           const processedResult = await processImports(
@@ -293,6 +310,12 @@ async function readMemoryFiles(
             undefined,
             importFormat,
             {
+              ...(extensionRoot
+                ? {
+                    transformContent: (text: string) =>
+                      hydrateExtensionText(text, extensionRoot),
+                  }
+                : {}),
               onFileImported: async (notification) => {
                 const parentFilePath = notification.parentFilePath;
                 await notifyInstructionsLoaded({
@@ -442,6 +465,7 @@ export interface LoadServerHierarchicalMemoryResponse {
 }
 
 export interface LoadServerHierarchicalMemoryOptions {
+  extensionContextRoots?: ReadonlyMap<string, string>;
   explicitOnly?: boolean;
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
   /**
@@ -597,6 +621,7 @@ export async function loadServerHierarchicalMemory(
       ),
       options.onInstructionsLoaded,
       loadReason,
+      options.extensionContextRoots,
     );
     // Pass CWD for relative path display in concatenated content
     combinedInstructions = concatenateInstructions(

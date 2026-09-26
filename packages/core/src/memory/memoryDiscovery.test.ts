@@ -455,6 +455,68 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it.each(['flat', 'tree'] as const)(
+    'hydrates managed context and nested imports in %s format without rewriting files',
+    async (format) => {
+      const root = path.join(testRootDir, 'managed');
+      const original = 'Root ${CLAUDE_PLUGIN_ROOT} @./included.md';
+      const context = await createTestFile(
+        path.join(root, 'QWEN.md'),
+        original,
+      );
+      const included = await createTestFile(
+        path.join(root, 'included.md'),
+        'Included ${extensionPath} @${extensionPath}/second.md',
+      );
+      await createTestFile(
+        path.join(root, 'second.md'),
+        'NESTED_MANAGED_CONTENT',
+      );
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [context],
+        true,
+        format,
+        [],
+        { extensionContextRoots: new Map([[context, root]]) },
+      );
+      expect(result.memoryContent).toContain(`Root ${root}`);
+      expect(result.memoryContent).toContain(`Included ${root}`);
+      expect(result.memoryContent).toContain('NESTED_MANAGED_CONTENT');
+      expect(result.memoryContent).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      expect(await fsPromises.readFile(context, 'utf8')).toBe(original);
+      expect(await fsPromises.readFile(included, 'utf8')).toBe(
+        'Included ${extensionPath} @${extensionPath}/second.md',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'hydrates managed context when a workspace symlink wins path deduplication',
+    async () => {
+      const root = path.join(testRootDir, 'managed');
+      const context = await createTestFile(
+        path.join(root, 'QWEN.md'),
+        'Root ${extensionPath}',
+      );
+      await fsPromises.symlink(context, path.join(cwd, 'QWEN.md'));
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [context],
+        true,
+        'tree',
+        [],
+        { extensionContextRoots: new Map([[context, root]]) },
+      );
+      expect(result.memoryContent).toContain(`Root ${root}`);
+      expect(result.memoryContent).not.toContain('${extensionPath}');
+    },
+  );
+
   it('should load extension context file paths', async () => {
     const extensionFilePath = await createTestFile(
       path.join(testRootDir, 'extensions/ext1/QWEN.md'),

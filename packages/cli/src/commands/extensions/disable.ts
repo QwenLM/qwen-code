@@ -12,12 +12,13 @@ import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface DisableArgs {
+  managedExtensions?: string;
   name: string;
   scope?: string;
 }
 
 export async function handleDisable(args: DisableArgs) {
-  const extensionManager = await getExtensionManager();
+  const extensionManager = await getExtensionManager(args.managedExtensions);
   try {
     const scope = resolveExtensionCommandScope(args.scope);
     const result = await extensionManager.disableExtension(args.name, scope);
@@ -56,6 +57,7 @@ export const disableCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleDisable({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       name: argv['name'] as string,
       scope: argv['scope'] as string,
     });

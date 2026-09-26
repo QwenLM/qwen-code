@@ -70,6 +70,7 @@ describe('ReadFileTool', () => {
   let tempRootDir: string;
   let tool: ReadFileTool;
   let fileReadCache: FileReadCache;
+  let mockConfigInstance: Config;
   const abortSignal = new AbortController().signal;
 
   beforeEach(async () => {
@@ -97,7 +98,7 @@ describe('ReadFileTool', () => {
     );
     fileReadCache = new FileReadCache();
 
-    const mockConfigInstance = {
+    mockConfigInstance = {
       getFileService: () => new FileDiscoveryService(tempRootDir),
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => tempRootDir,
@@ -109,6 +110,7 @@ describe('ReadFileTool', () => {
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
+      getManagedExtensionsDir: () => undefined,
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({
@@ -420,6 +422,38 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the managed extensions directory', async () => {
+      // Outside the workspace: without the managed-root allowlist entry this
+      // read would need a confirmation prompt.
+      // realpath so the lexical root matches the canonicalized candidate on
+      // platforms where os.tmpdir() sits behind a symlink (macOS /var).
+      const managedRoot = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-read-managed-')),
+      );
+      try {
+        const managedConfig = {
+          ...mockConfigInstance,
+          getManagedExtensionsDir: () => managedRoot,
+        } as unknown as Config;
+        const managedTool = new ReadFileTool(managedConfig);
+        const params: ReadFileToolParams = {
+          file_path: path.join(
+            managedRoot,
+            'demo',
+            'skills',
+            'x',
+            'references',
+            'template.md',
+          ),
+        };
+        const invocation = managedTool.build(params);
+        const permission = await invocation.getDefaultPermission();
+        expect(permission).toBe('allow');
+      } finally {
+        await fsp.rm(managedRoot, { recursive: true, force: true });
+      }
     });
 
     it('should return allow for saved plan files under the plans directory', async () => {

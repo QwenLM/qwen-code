@@ -1151,9 +1151,13 @@ export function buildExtensionRows(
     favorite: favorites.has(extension.name),
     scope: scopes[extension.name] ?? 'user',
     version: extension.version,
-    source: extension.installMetadata?.source
-      ? redactUrlCredentials(extension.installMetadata.source)
-      : undefined,
+    extensionSource: extension.source,
+    source:
+      extension.source === 'managed'
+        ? 'managed'
+        : extension.installMetadata?.source
+          ? redactUrlCredentials(extension.installMetadata.source)
+          : undefined,
     origin: extension.installMetadata?.originSource,
     components: extensionComponentsSummary(extension),
   }));

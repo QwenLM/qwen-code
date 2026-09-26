@@ -17,6 +17,7 @@ import { loadSettings } from '../../config/settings.js';
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface UninstallArgs {
+  managedExtensions?: string;
   name: string; // can be extension name or source URL.
 }
 
@@ -24,6 +25,7 @@ export async function handleUninstall(args: UninstallArgs) {
   try {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
+      managedExtensionsDir: args.managedExtensions,
       workspaceDir,
       locale: getCurrentLanguage(),
       requestConsent: requestConsentOrFail.bind(
@@ -68,6 +70,7 @@ export const uninstallCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleUninstall({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       name: argv['name'] as string,
     });
   },

@@ -127,6 +127,7 @@ async function makeHarness(opts?: {
   internalRuntime?: boolean;
   secondaryTrusted?: boolean;
   singleWorkspace?: boolean;
+  managedExtensions?: string;
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-extension-management-v2-'),
@@ -168,7 +169,14 @@ async function makeHarness(opts?: {
       : [primary, secondary, ...(internal ? [internal] : [])],
   );
   const app = createServeApp(
-    { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
+    {
+      ...baseOpts,
+      workspace: canonicalPrimary,
+      token: 'secret',
+      ...(opts?.managedExtensions
+        ? { managedExtensions: opts.managedExtensions }
+        : {}),
+    },
     undefined,
     {
       workspaceRegistry: registry,
@@ -496,6 +504,7 @@ describe('extension management v2 REST', () => {
             id: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
@@ -550,6 +559,7 @@ describe('extension management v2 REST', () => {
             extensionId: linked.id,
             name: 'linked',
             version: '2.0.0',
+            extensionSource: 'user',
             defaultActivation: 'enabled',
             workspaceActivation: 'disabled',
             effectiveActivation: 'disabled',
@@ -570,6 +580,58 @@ describe('extension management v2 REST', () => {
       } else {
         process.env['QWEN_HOME'] = previousQwenHome;
       }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('serves managed catalog identity without transferring its policy to a shadowed user copy', async () => {
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-managed-catalog-'),
+    );
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    const managedExtensions = path.join(qwenHome, 'managed-packages');
+    for (const [directory, version] of [
+      [path.join(qwenHome, 'extensions', 'demo'), 'user'],
+      [path.join(managedExtensions, 'deployed'), 'managed'],
+    ]) {
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'qwen-extension.json'),
+        JSON.stringify({ name: 'demo', version }),
+      );
+    }
+    const h = await makeHarness({ managedExtensions });
+    try {
+      const manager = new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+        managedExtensionsDir: managedExtensions,
+      });
+      await manager.refreshCache();
+      const [managed] = manager.getLoadedExtensions();
+      await manager.setExtensionDefaultActivation(managed.id, 'disabled');
+      const before = await manager.getExtensionStoreSnapshot();
+      for (let round = 0; round < 2; round++) {
+        const response = await auth(request(h.app).get('/extensions'));
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          generation: before.generation,
+          extensions: [
+            {
+              id: managed.id,
+              name: 'demo',
+              version: 'managed',
+              extensionSource: 'managed',
+              defaultActivation: 'disabled',
+            },
+          ],
+        });
+        expect(response.body.extensions).toHaveLength(1);
+        expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
       await fsp.rm(qwenHome, { recursive: true, force: true });
     }
   });
@@ -2962,6 +3024,55 @@ describe('extension management v2 REST', () => {
       expect(
         ExtensionManager.prototype.uninstallExtensionById,
       ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('releases a retained managed policy whose package is gone through uninstall', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const managedId = 'b'.repeat(64);
+    const retainedSnapshot = {
+      version: 2 as const,
+      generation: 9,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [managedId]: {
+          name: 'demo',
+          managed: true as const,
+          defaultActivation: 'disabled' as const,
+          workspaceOverrides: {},
+        },
+      },
+    };
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue(retainedSnapshot);
+    vi.mocked(
+      ExtensionManager.prototype.refreshCacheWithSnapshot,
+    ).mockResolvedValue(retainedSnapshot);
+    // The deployment root no longer holds the package.
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      [],
+    );
+    try {
+      const started = await auth(
+        request(h.app).delete(`/extensions/${encodeURIComponent(managedId)}`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'uninstalled', name: 'demo' },
+      });
+      // The route must not 204 the retained policy away: only the manager
+      // releases it, so the name stops blocking a same-name user install.
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).toHaveBeenCalledWith(managedId, false, undefined, expect.any(Function));
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
