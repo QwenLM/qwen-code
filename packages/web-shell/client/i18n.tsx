@@ -4949,7 +4949,7 @@ const ZH: Messages = {
   'composerAdd.plan.description': '先出计划，批准后再执行',
   'composerAdd.plan.busy': '模式切换中',
   'composerAdd.btw.label': '顺带一问',
-  'composerAdd.btw.description': '不中断当前任务',
+  'composerAdd.btw.description': '临时提问，不打断任务',
   'composerAdd.btw.textOnly': '请先移除附件',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',

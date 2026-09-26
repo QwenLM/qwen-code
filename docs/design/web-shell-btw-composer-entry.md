@@ -12,7 +12,8 @@ is a separate, existing side-task command.
 ## Proposed solution
 
 Add “Ask a side question” to the main composer's Add menu on desktop and
-mobile. Show `/btw` and the compact, single-line hint “Keep the main task running”.
+mobile. Show `/btw` and a compact, single-line hint: “Keep the main task running”
+in English and “临时提问，不打断任务” in Chinese.
 The answer stays out of the main conversation. Selecting it prefixes the current
 text with `/btw ` and returns focus to the editor, without submitting. An
 existing `/btw` prefix is preserved, with uppercase spellings normalized to
