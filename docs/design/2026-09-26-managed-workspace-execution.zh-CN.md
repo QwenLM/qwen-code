@@ -14,7 +14,7 @@ worker 当前用固定的预批准配置构造四种普通工具。目录回执�
 
 本切片把持久化的绑定 Session 接入私有 Broker 的 acquire、execute、status、cancel 和 release 路径。以真实 Read/Write/Edit/前台 Shell 验证两个 Workspace 及子目录的执行，并串行化共享存储的工具轮次。公开绑定 Turn/生命周期门禁、Hosted 模型/工具编排、文件历史结算、WebShell 选择、W0e 恢复启用、Kubernetes 和任意配置加载不在本切片内。继续不广播 `workspace_context`。
 
-首个部署是共享 SQL 权威、由管理员管理可信目录的单个 local-process 宿主。进程供给器不是文件系统沙箱：面向不可信产品用户执行任意 Shell 前还需要部署隔离。同一宿主上的多个 Broker 进程使用相同的持久化存储租约；过期时间不会授权替换结果未知的写入者。
+首个部署是共享 SQL 权威、由管理员管理可信目录的单个 local-process 宿主。进程供给器和当前文件工具都不会把访问限制在挂载根目录内：Read/Write/Edit 和 Shell 可访问 worker 宿主权限允许的其他路径，包括另一个已配置的 Workspace。面向不可信产品用户前需要部署隔离。同一宿主上的多个 Broker 进程使用相同的持久化存储租约；过期时间不会授权替换结果未知的写入者。
 
 ## 可信 Session 与存储解析
 
@@ -30,7 +30,7 @@ worker 当前用固定的预批准配置构造四种普通工具。目录回执�
 
 worker 新增独立于封闭目录安装信封的有界、鉴权激活路由。请求绑定 Runtime Session ID、原始 context digest、冻结配置引用和档案；回执还绑定 Runtime 身份、incarnation 和 epoch。在该档案的 capability digest 下，仅安装目录不能执行工具：激活必须校验支持的冻结档案及已安装绑定。旧 worker 会拒绝新路由，因此 acquire 在任何 execute 前失败。其他已有的目录协议 fixtures 保留其原 capability 身份。
 
-每个 Runtime Session 的激活不可变且幂等。release 只有在该 Session 的日志不存在运行中的调用时才关闭门禁。已释放 Session 不能再次激活；后续工具轮次使用新的 Runtime Session ID。授权或目录丢失后，仍可查询和取消原调用。工具以已验证的 Session 目录为起点，并将可信 Workspace 根识别为允许的文件根；不修改共享进程 cwd。
+每个 Runtime Session 的激活不可变且幂等。release 只有在该 Session 的日志不存在运行中的调用时才关闭门禁。已释放 Session 不能再次激活；后续工具轮次使用新的 Runtime Session ID。授权或目录丢失后，仍可查询和取消原调用。工具以已验证的 Session 目录为起点；通过 `includeDirectories` 传入挂载根目录，在此档案中并不强制形成文件访问边界。不修改共享进程 cwd。
 
 ## Workspace 轮次归属
 

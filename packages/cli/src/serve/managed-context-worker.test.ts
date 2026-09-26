@@ -1173,6 +1173,43 @@ describe('Managed Workspace execution activation', () => {
     );
   });
 
+  it('refuses activation for an unsupported frozen configuration', async () => {
+    const root = workspace();
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = installation('unsupported-profile', '.');
+    expect(request.binding.contextConfigRef).not.toBe(
+      WORKSPACE_CONTEXT_CONFIG_REF,
+    );
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(request.sessionId, 'unsupported', 'touch unsupported.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'unsupported.txt'))).toBe(false);
+  });
+
+  it('refuses workspace activation on a worker with a legacy capability', async () => {
+    const root = workspace();
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const request = fixedInstallation('legacy-capability');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+  });
+
   it('requires activation, writes from a subdirectory, and permanently closes on release', async () => {
     const root = workspace();
     fs.mkdirSync(path.join(root, 'child'));

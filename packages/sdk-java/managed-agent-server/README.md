@@ -285,11 +285,12 @@ The private Broker can acquire, execute Read/Write/Edit/foreground Shell, and
 release these Sessions. One Runtime Session holds each tenant/storage pair
 until the original worker closes its execution gate. Lost or ambiguous
 responses retain the SQL holder; there is no timeout-based takeover. The
-provider is not a filesystem sandbox, and foreground Shell may create detached
-descendants. Use this only with trusted local workloads until physical
-isolation and W0e cleanup are implemented. Public bound Turn/lifecycle gates
-and the full Hosted tool loop remain closed. See the bilingual
-[execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
+provider and file tools do not confine access to the mount root: Read/Write/Edit
+and Shell can reach other paths allowed by the worker's host permissions.
+Foreground Shell may create detached descendants. Use this only with trusted
+local workloads until physical isolation and W0e cleanup are implemented.
+Public bound Turn/lifecycle gates and the full Hosted tool loop remain closed.
+See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
 Build the container from the repository root:

@@ -14,7 +14,7 @@ The worker currently constructs its four ordinary tools with a fixed preapproved
 
 This slice connects persisted bound Sessions to the private Broker's acquire, execute, status, cancel and release path. It proves real Read/Write/Edit/foreground Shell execution in two Workspaces and child directories, and serializes tool turns sharing storage. Public bound Turn/lifecycle gates, Hosted model/tool orchestration, file-history settlement, WebShell selection, W0e recovery enablement, Kubernetes and arbitrary configuration loading remain outside this slice. `workspace_context` remains unadvertised.
 
-The initial deployment is a single local-process host with shared SQL authority and trusted administrator-managed directories. The process provider is not a filesystem sandbox: arbitrary Shell requires deployment isolation before untrusted product use. Multiple Broker processes on that host use the same durable storage lease; expiry never authorizes replacement of an unknown writer.
+The initial deployment is a single local-process host with shared SQL authority and trusted administrator-managed directories. Neither the process provider nor the current file tools confine access to the mount root: Read/Write/Edit and Shell can reach other paths allowed by the worker's host permissions, including another configured Workspace. Deployment isolation is required before untrusted product use. Multiple Broker processes on that host use the same durable storage lease; expiry never authorizes replacement of an unknown writer.
 
 ## Trusted Session and storage resolution
 
@@ -30,7 +30,7 @@ Support one explicit immutable profile: configuration reference `managed-runtime
 
 The worker gains a bounded, authenticated activation route separate from the closed directory-installation envelope. Requests bind the Runtime Session ID, original context digest, frozen configuration reference and profile. Receipts additionally bind the Runtime identity, incarnation and epoch. Under the profile capability digest, directory installation alone cannot run tools: activation must validate the supported frozen profile and the installed binding. Old workers refuse the new route, so acquisition fails before any execute call. Other existing directory-only protocol fixtures keep their original capability identity.
 
-Activation is immutable and idempotent per Runtime Session. Release closes the gate only after that Session's journal has no running invocation. A released Session cannot be activated again; a later tool turn uses a new Runtime Session ID. Status and cancellation of the original invocation remain possible after authorization or directory loss. Tools start in the verified Session directory and recognize the trusted Workspace root as an allowed file root; shared process cwd is never changed.
+Activation is immutable and idempotent per Runtime Session. Release closes the gate only after that Session's journal has no running invocation. A released Session cannot be activated again; a later tool turn uses a new Runtime Session ID. Status and cancellation of the original invocation remain possible after authorization or directory loss. Tools start in the verified Session directory; passing the mount root through `includeDirectories` does not enforce a file-access boundary in this profile. Shared process cwd is never changed.
 
 ## Workspace turn ownership
 
