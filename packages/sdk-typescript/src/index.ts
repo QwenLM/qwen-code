@@ -143,6 +143,7 @@ export {
   type DaemonWorkspaceRemovalResult,
   type DaemonRuntimeStopRequest,
   type DaemonRuntimeStopSession,
+  type DaemonRuntimeStopChannel,
   type DaemonRuntimeStopResult,
   type DaemonRuntimeStopSnapshot,
   type DaemonRuntimeStopOption,
