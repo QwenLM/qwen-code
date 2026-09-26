@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.fastjson2.JSON;
@@ -72,6 +73,35 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void rejectsNonFiniteRequestNumbersBeforeCreatingExecution()
+            throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            assertEquals(200, fixture.post("/tool-sessions:acquire", Map.of(
+                    "protocolVersion", 1, "requestId", "acquire",
+                    "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime",
+                    "turnKind", "bootstrap")).statusCode());
+            String body = "{\"protocolVersion\":1,\"requestId\":\"request\","
+                    + "\"idempotencyKey\":\"key\","
+                    + "\"harnessSessionId\":\"harness\","
+                    + "\"runtimeSessionId\":\"runtime\","
+                    + "\"turnId\":\"turn\",\"toolCallId\":\"call\","
+                    + "\"requestDigest\":\"digest\",\"reference\":{"
+                    + "\"sessionId\":\"runtime\",\"promptId\":\"turn\","
+                    + "\"callId\":\"call\",\"argsDigest\":\"digest\","
+                    + "\"input\":{\"value\":1e400}}}";
+
+            HttpResponse<String> response = fixture.postRaw("/executions",
+                    body);
+
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains(
+                    "runtime_broker_invalid_request"), response.body());
+            assertNull(fixture.executions.findByIdempotencyKey("key"));
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
@@ -79,6 +109,8 @@ class RuntimeBrokerHttpServerTest {
 
     private static final class Fixture implements AutoCloseable {
         private final FailingTransport transport = new FailingTransport();
+        private final InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository(Clock.systemUTC());
         private final HttpClient client = HttpClient.newHttpClient();
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
@@ -92,7 +124,7 @@ class RuntimeBrokerHttpServerTest {
                             URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
                     transport, new InMemoryRuntimeBindingRepository(),
                     new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                    executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
                     "secret", service);
@@ -104,10 +136,15 @@ class RuntimeBrokerHttpServerTest {
         }
 
         private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
+            return postRaw(path, JSON.toJSONString(body));
+        }
+
+        private HttpResponse<String> postRaw(String path, String body)
+                throws Exception {
             return client.send(HttpRequest.newBuilder(uri(path))
                     .header("Authorization", "Bearer secret")
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(body)))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build(), HttpResponse.BodyHandlers.ofString());
         }
 

@@ -319,7 +319,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             String operation) {
         Map<String, Object> fields;
         try {
-            fields = JsonCodec.parseObject(bytes,
+            fields = JsonCodec.parseExactObject(bytes,
                     "Managed Runtime " + operation + " response");
         } catch (RuntimeException exception) {
             throw protocol("Managed Runtime " + operation
@@ -538,7 +538,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
         Map<String, Object> fields;
         try {
-            fields = JsonCodec.parseObject(bytes,
+            fields = JsonCodec.parseExactObject(bytes,
                     "Managed Runtime attestation");
         } catch (RuntimeBrokerException exception) {
             throw protocol("Managed Runtime attestation response is invalid.");

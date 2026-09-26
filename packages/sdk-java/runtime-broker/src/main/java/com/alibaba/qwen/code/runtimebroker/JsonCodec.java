@@ -14,12 +14,23 @@ final class JsonCodec {
     }
 
     static Map<String, Object> parseObject(byte[] bytes, String context) {
+        return parseObject(bytes, context,
+                JSONReader.Feature.DisableReferenceDetect);
+    }
+
+    static Map<String, Object> parseExactObject(byte[] bytes, String context) {
+        return parseObject(bytes, context,
+                JSONReader.Feature.DisableReferenceDetect,
+                JSONReader.Feature.UseBigDecimalForDoubles,
+                JSONReader.Feature.UseBigDecimalForFloats);
+    }
+
+    private static Map<String, Object> parseObject(byte[] bytes,
+            String context, JSONReader.Feature... features) {
         Object parsed;
         try {
             parsed = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8),
-                    JSONReader.Feature.DisableReferenceDetect,
-                    JSONReader.Feature.UseBigDecimalForDoubles,
-                    JSONReader.Feature.UseBigDecimalForFloats);
+                    features);
         } catch (RuntimeException exception) {
             throw new RuntimeBrokerException(400, "runtime_broker_invalid_json",
                     context + " contains invalid JSON.", false, exception);
