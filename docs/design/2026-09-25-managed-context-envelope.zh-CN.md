@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-context-envelope.md) | [简体中文](2026-09-25-managed-context-envelope.zh-CN.md)
 
-状态：契约已定义，尚无 worker 或 Broker 使用。更新：2026-09-25。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的第二个 W0 切片，建立在 [Workspace 绑定契约](2026-09-25-managed-workspace-binding-contract.zh-CN.md)（W0a，#12681）之上。[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)要求现在就定下 envelope 的形状，契约先行：“先 envelope 形状 + 共享 schema/fixtures，后处理器”。下文的“参考设计”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)、[契约收口](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-contract-closure.md)和 [attestation 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-runtime-attestation.zh-CN.md)，都取自 #12380 所链接的提交。
+状态：契约已定义。自 W0c-1 起 worker 提供它（[Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)），尚无 Broker 写出 boot v2。更新：2026-09-26。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的第二个 W0 切片，建立在 [Workspace 绑定契约](2026-09-25-managed-workspace-binding-contract.zh-CN.md)（W0a，#12681）之上。[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)要求现在就定下 envelope 的形状，契约先行：“先 envelope 形状 + 共享 schema/fixtures，后处理器”。下文的“参考设计”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)、[契约收口](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-contract-closure.md)和 [attestation 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-runtime-attestation.zh-CN.md)，都取自 #12380 所链接的提交。
 
 ## 问题
 
@@ -138,15 +138,15 @@ fixtures 固定了这一顺序：
 
 ## 错误
 
-| 状态码 | 错误码                                  | 类别         | 何时                                                |
-| ------ | --------------------------------------- | ------------ | --------------------------------------------------- |
-| 401    | `managed_runtime_unauthorized`          | credentials  | bearer token 缺失或错误                             |
-| 400    | `managed_runtime_attestation_invalid`   | protocol     | 形状、请求头或协议版本错误，或 `contextDigest` 错误 |
-| 413    | `managed_runtime_attestation_too_large` | protocol     | 请求体超过其上限                                    |
-| 409    | `managed_runtime_identity_conflict`     | identity     | lease 请求头、attestation 或 binding 与 boot 不一致 |
-| 409    | `managed_context_conflict`              | identity     | 以其他值复用 `operationId` 或 Session               |
-| 409    | `managed_context_unavailable`           | recovery     | 无法验证实际目录（W0c）                             |
-| 404    | 无                                      | incompatible | 该 worker 的 boot 版本不提供的路由                  |
+| 状态码 | 错误码                                  | 类别         | 何时                                                                                  |
+| ------ | --------------------------------------- | ------------ | ------------------------------------------------------------------------------------- |
+| 401    | `managed_runtime_unauthorized`          | credentials  | bearer token 缺失或错误                                                               |
+| 400    | `managed_runtime_attestation_invalid`   | protocol     | 形状、请求头或协议版本错误，或 `contextDigest` 错误                                   |
+| 413    | `managed_runtime_attestation_too_large` | protocol     | 请求体超过其上限                                                                      |
+| 409    | `managed_runtime_identity_conflict`     | identity     | lease 请求头、attestation 或 binding 与 boot 不一致                                   |
+| 409    | `managed_context_conflict`              | identity     | 以其他值复用 `operationId` 或 Session                                                 |
+| 409    | `managed_context_unavailable`           | recovery     | 无法验证实际目录；或在 boot v2 下，`execute` 调用的 Session 没有已安装的上下文（W0c） |
+| 404    | 无                                      | incompatible | 该 worker 的 boot 版本不提供的路由                                                    |
 
 前四个是 attestation v2 和 Tool v2 已经在用的错误码，Broker 对它们保持现有的分类。与 v2 不同，这里的 409 可能带三种错误码之一，而现在的 transport 只按状态码对拒绝分类。因此 v3 客户端按状态码和错误码一起分类，并把错误码未知的 409 当作身份冲突。共享 fixtures 中包含这张表。`managed_context_conflict` 不可重试。`managed_context_unavailable` 会保持该 Session 的工具 gate 关闭，并按参考设计的要求把它的上下文标记为 `recovery_blocked`；它绝不会回退到其他目录。
 
@@ -212,9 +212,13 @@ worker、attestation 契约、provisioner、transport、fake worker 和 CI workf
 3. W0a 关于 `cwdRelative` 中控制字符的待决问题（拒绝所有 Cc 字符还是只拒绝 NUL）仍然适用；安装处理器沿用 W0a 的规则。
 4. Runtime 应把安装记录保留多久？契约在 Runtime 的整个生命周期内保留每个操作和每个 Session 的上下文，而在新的 `operationId` 下安装同一个上下文会成功，所以长期运行、按 Workspace 隔离的 Runtime 会不断累积记录。W0c 必须定下保留规则，例如在 Session 结束时释放它的记录，同时不能破坏 Broker 所依赖的幂等重放。
 
+W0c-1 已为 worker 回答了第 1、3、4 个问题：它不写拒绝记录，原样沿用 W0a 对 `cwdRelative` 的规则，并在 Runtime 的整个生命周期内保留安装记录。见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md#envelope-的待决问题)。第 2 个问题仍待决。
+
 ## 后续工作
 
-| 切片 | 范围                                                                                                                                                                                                                                                                                                         |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| W0c  | worker 接受 boot v2，并提供 attestation v3 和安装；storage 解析器；provisioner 写出 boot v2；v3 transport 客户端；支持 v2 的 fake worker；Tool v2 外层的逐次调用绑定；activation gate；在写出标识符和 Session ID 之前，把 Broker 对它们的检查收紧到上述规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符。 |
-| W0e  | 在整个 W0 链路验证通过之后，再声明能力（`workspace_context`）。                                                                                                                                                                                                                                              |
+| 切片  | 范围                                                                                                                                                                                                                                 |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| W0c-1 | 已在 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md) 中完成：worker 接受 boot v2，并提供 attestation v3 和安装；支持 v2 的 fake worker；activation gate，它把每次 Tool v2 调用绑定到其 Session 已安装的上下文。 |
+| W0c-2 | provisioner 写出 boot v2；v3 transport 客户端；在写出标识符和 Session ID 之前，把 Broker 对它们的检查收紧到上述规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符。                                                                 |
+| W0c-3 | storage 解析器，以及控制面中的 Session 解析。                                                                                                                                                                                        |
+| W0e   | 在整个 W0 链路验证通过之后，再声明能力（`workspace_context`）。                                                                                                                                                                      |

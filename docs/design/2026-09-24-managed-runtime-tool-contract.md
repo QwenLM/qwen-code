@@ -183,6 +183,9 @@ The merged attestation worker now mounts the three routes beside `attest`.
 Its executor admits exactly the first-slice ordinary tools — `read_file`,
 `write_file`, `edit`, and foreground `run_shell_command` — over a real
 `Config` rooted at the attested workspace cwd, with checkpointing disabled.
+Under boot v2 of `managed-context/1`, each new call instead runs in its
+Session's installed effective directory, behind an activation gate; see
+[Managed Context Worker](2026-09-26-managed-context-worker.md).
 Admission happens on the Harness side; the worker executes with no further
 approval gate. Harness admission must include the workspace-boundary
 decision: the worker does not confine tool paths or shell commands to the
