@@ -2909,12 +2909,10 @@ The route reads only `chats/archive/<id>.jsonl` in the selected trusted workspac
 Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Accepts the same `cwd`, `approvalMode`, `sourceType`, and `sourceId` fields
-as `/load`. `historyPageSize` is not parsed here and is silently ignored.
-`liveReplayMode` and `compactedReplayMode` are parsed and validated — invalid
-values return `400 invalid_live_replay_mode` or `400 invalid_compacted_replay_mode`
-— but only the legacy-standalone compatibility restore forwards them; ordinary
-resume drops them. None of these load-only fields is part
-of the published resume request. Same response shape — `state` mirrors ACP's
+as `/load`. The load-only replay fields `historyPageSize`, `liveReplayMode`,
+and `compactedReplayMode` are not parsed, validated, or forwarded here — they
+are silently ignored, matching the published resume request schema. Same
+response shape — `state` mirrors ACP's
 `ResumeSessionResponse`. Same error envelope, including
 `409 restore_in_progress` (which fires when a `session/load` is in flight;
 `session/resume` racing behind another `session/resume` coalesces).
