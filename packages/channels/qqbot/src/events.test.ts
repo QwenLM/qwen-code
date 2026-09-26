@@ -1631,7 +1631,7 @@ describe('群管理事件', () => {
           turn: number;
         }
       >;
-      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
       const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
       const flushedSessions = chp['flushedSessions'] as Set<string>;
       const botOpenIdByGroup = chp['botOpenIdByGroup'] as Map<string, string>;
@@ -1788,9 +1788,12 @@ describe('群管理事件', () => {
           turn: number;
         }
       >;
-      const flushingSessions = chp['flushingSessions'] as Set<string>;
+      const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
       const turnCounter = chp['turnCounter'] as Map<string, number>;
-      const orphanBuffer = chp['streamOrphanBuffer'] as Map<string, string>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string }
+      >;
 
       // A streaming session in this group with its flush in flight: the
       // entry still holds the msgId, flushingSessions is armed, and msg-X's
@@ -1808,9 +1811,9 @@ describe('群管理事件', () => {
         msgId: 'msg-X',
         turn: 1,
       });
-      flushingSessions.add('sid-1');
+      flushingSessions.set('sid-1', streamState.get('sid-1'));
       turnCounter.set('sid-1', 1);
-      orphanBuffer.set('sid-1', 'stray');
+      orphanBuffer.set('sid-1', { turn: 1, text: 'stray' });
 
       const releaseSpy = vi.spyOn(
         ch as unknown as { releaseSessionReplyAnchor: (s: string) => void },
@@ -2197,7 +2200,8 @@ describe('Gateway message handling', () => {
           sessionId: 'single-era-1',
           target: { channelName: 'test-bot' },
         },
-        // User-scope 3-part key under thread scope: kept (ages out).
+        // User-scope 3-part key under thread scope: purged — unroutable under
+        // thread scope, where the routing key is channel:chatId (R8-1).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
@@ -2227,10 +2231,11 @@ describe('Gateway message handling', () => {
       ) => Promise<void>
     )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
 
-    // purgeSingleScopeOrphans ran inside the restore chain and removed the
-    // single-scope orphan, keeping the 3-part and live two-part keys.
+    // purgeSingleScopeOrphans ran inside the restore chain and removed both
+    // the single-scope orphan and this channel's unroutable 3-part key,
+    // keeping the live two-part key.
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
-    expect(removeSessionId).not.toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
     expect(chp['_ready']).toBe(true);
 

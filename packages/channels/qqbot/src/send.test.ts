@@ -409,6 +409,71 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
   });
 });
 
+describe('shared-session operator warning (R7-3)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  it('warns when group access is enabled on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open' });
+    const logged = capturedStderr();
+    expect(logged).toContain('no operators are configured');
+    expect(logged).toContain('session-control commands');
+  });
+
+  it('warns for chat_thread and single shared scopes too', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'allowlist', sessionScope: 'chat_thread' });
+    makeChannel({ groupPolicy: 'pairing', sessionScope: 'single' });
+    expect(capturedStderr()).toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when operators are configured', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', operators: ['member-1'] });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when group access is disabled', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'disabled' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning for a per-sender (user) scope', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+});
+
 describe('purgeSingleScopeOrphans', () => {
   function makeChannelWithRouter(
     router: unknown,
@@ -439,8 +504,10 @@ describe('purgeSingleScopeOrphans', () => {
     (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
 
-  it('removes only single-scope orphans, keeping user-scope 3-part keys', () => {
-    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+  it("purges single-scope orphans and this channel's unroutable 3-part keys, keeping sibling routes", () => {
+    const removeSessionId = vi.fn((sid: string) =>
+      ['single-era-1', 'user-era-1'].includes(sid),
+    );
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -465,8 +532,9 @@ describe('purgeSingleScopeOrphans', () => {
           sessionId: 'normal-1',
           target: { channelName: 'test-bot' },
         },
-        // User-scope three-part key under thread scope: kept — 3-part keys
-        // age out naturally instead of being purged (PR #8241).
+        // This channel's user-scope three-part key under thread scope:
+        // purged — under thread scope the routing key is `channel:chatId`,
+        // so a 3-part key can never resolve again (R8-1).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
@@ -486,16 +554,16 @@ describe('purgeSingleScopeOrphans', () => {
     };
     const ch = makeChannelWithRouter(router);
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
-    expect(removeSessionId).not.toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
     expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
     // The purge reports what it dropped on stderr (thread 57 gate).
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
-      'Purged 1 orphaned single-scope session mapping(s)',
+      'Purged 2 orphaned single-scope session mapping(s)',
     );
   });
 
@@ -538,13 +606,15 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
-  it('keeps user-scope 3-part keys under thread scope (age out) but purges single-scope orphans', () => {
+  it("purges this channel's unroutable 3-part legacy keys under thread scope (R8-1), sparing a sibling channel", () => {
     const removeSessionId = vi.fn(() => true);
     const discardSession = vi.fn().mockResolvedValue(undefined);
     const router = {
       getAll: () => [
-        // User-scope three-part key under thread scope: kept — 3-part keys
-        // age out naturally instead of being purged.
+        // User-scope three-part key of THIS channel under thread scope:
+        // purged — under thread scope the routing key is `channel:chatId`,
+        // so the key can never resolve again and only inflates the persisted
+        // file (and loadSession's 32-session cap) forever.
         {
           key: 'test-bot:u1:c1',
           sessionId: 'user-scope-1',
@@ -592,15 +662,15 @@ describe('purgeSingleScopeOrphans', () => {
       { router } as unknown as QQChannelOptions,
     );
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(1);
-    expect(removeSessionId).not.toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
-    // Only the purged single-scope orphan's daemon-side session is discarded.
-    expect(discardSession).toHaveBeenCalledTimes(1);
+    // Both purged entries also release their daemon-side sessions.
+    expect(discardSession).toHaveBeenCalledTimes(2);
+    expect(discardSession).toHaveBeenCalledWith('user-scope-1');
     expect(discardSession).toHaveBeenCalledWith('single-era-1');
-    expect(discardSession).not.toHaveBeenCalledWith('user-scope-1');
     expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
   });
 
@@ -687,7 +757,7 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).not.toHaveBeenCalled();
   });
 
-  it('is a no-op under explicit single scope (live routing state, not orphans)', () => {
+  it('keeps the live __single__ key under explicit single scope (not an orphan)', () => {
     const removeSessionId = vi.fn();
     const router = {
       getAll: () => [
@@ -700,6 +770,41 @@ describe('purgeSingleScopeOrphans', () => {
     const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
     callPurge(ch);
     expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it("purges this channel's unroutable 3-part key under explicit single scope, keeping its live __single__ key", () => {
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // The live single-scope routing key — kept.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'live-single',
+          target: { channelName: 'test-bot' },
+        },
+        // Under 'single' scope the routing key is `channel:__single__`, so a
+        // 3-part key can never resolve: this channel's own legacy entry is
+        // purged even under the explicit single scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot' },
+        },
+        // A sibling channel's 3-part key is never touched.
+        {
+          key: 'other-bot:u9:c9',
+          sessionId: 'sibling-3part',
+          target: { channelName: 'other-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
+    callPurge(ch);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-single');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
   });
 });
 
