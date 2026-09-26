@@ -9,6 +9,7 @@ import {
   BACKGROUND_AGENT_CONCURRENCY_ENV,
   BackgroundTaskRegistry,
   DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS,
+  FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
   MAX_CONCURRENT_BACKGROUND_AGENTS,
   MAX_RETAINED_TERMINAL_AGENTS,
   resolveMaxConcurrentBackgroundAgents,
@@ -1169,15 +1170,38 @@ describe('BackgroundTaskRegistry', () => {
       expect(() =>
         registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
       ).toThrow(
-        'Cannot start background agent: maximum concurrent background agents ' +
-          'for model "weak-model" (1) reached. Stop an existing agent on that ' +
-          'model first.',
+        'Cannot start background agent: the concurrency cap ' +
+          'for model "weak-model" (1) reached — it is already held by running ' +
+          'background agents. Wait for one to finish or stop an agent ' +
+          'on that model first.',
       );
       expect(registry.get('bg-2')).toBeUndefined();
 
       // ...but a different model is unaffected.
       registry.register(makeRegistration('bg-3', { model: 'strong-model' }));
       expect(registry.get('bg-3')?.status).toBe('running');
+    });
+
+    it('names the foreground sub-agent when a foreground claim holds the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      // A foreground sub-agent holds the only slot on the capped model.
+      const fg = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(fg).toBeDefined();
+
+      // A background launch refused against that model is told to wait for the
+      // foreground sub-agent, not for a background agent that is not there.
+      expect(() =>
+        registry.register(makeRegistration('bg-1', { model: 'weak-model' })),
+      ).toThrow(
+        'Cannot start background agent: the concurrency cap ' +
+          'for model "weak-model" (1) reached — a running foreground ' +
+          'sub-agent counts toward it. Wait for it to finish or stop an agent ' +
+          'on that model first.',
+      );
     });
 
     it('lets a model without a per-model cap use the global limit', () => {
@@ -1320,6 +1344,148 @@ describe('BackgroundTaskRegistry', () => {
       expect(() =>
         registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
       ).toThrow('for model "weak-model" (1) reached');
+    });
+  });
+
+  describe('foreground per-model slot claims', () => {
+    it('refuses a second foreground claim on a full cap and admits a parked waiter on release', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      const first = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(first).toBeDefined();
+      // Cap full: a second foreground claim is refused.
+      expect(
+        registry.tryReserveForegroundModelSlot('weak-model', null),
+      ).toBeUndefined();
+
+      // A waiter parks behind the full cap.
+      const waiter = registry.waitForForegroundModelSlot(
+        new AbortController().signal,
+        'weak-model',
+        null,
+      );
+      expect(registry.getForegroundQueuedCount()).toBe(1);
+
+      // Releasing the first claim drains the foreground waiter.
+      registry.releaseBackgroundSlot(first!);
+      const admitted = await waiter;
+      expect(admitted.model).toBe('weak-model');
+      expect(registry.getForegroundQueuedCount()).toBe(0);
+    });
+
+    it('leaves the global background budget untouched while a foreground claim is held', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      const fg = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(fg).toBeDefined();
+      // The foreground claim must not consume the single global background
+      // slot: a background reservation on another model still succeeds.
+      const bg = registry.tryReserveBackgroundSlot('other-model', null);
+      expect(bg).toBeDefined();
+    });
+
+    it('excludes a foreground claim from owner-scoped outstanding-launch notifications', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      // Hold a foreground claim owned by the top-level (null) owner.
+      const fg = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(fg).toBeDefined();
+
+      // A background agent owned by the same (null) owner completes. The
+      // foreground claim must not appear as an outstanding launch, so the
+      // notification reports the owner fully terminal.
+      registry.register(makeRegistration('bg-1', { model: 'other-model' }));
+      registry.complete('bg-1', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+    });
+
+    it('rejects a parked foreground waiter on abort and on reset', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+      const holder = registry.tryReserveForegroundModelSlot('weak-model', null);
+      expect(holder).toBeDefined();
+
+      const ac = new AbortController();
+      const waiter = registry.waitForForegroundModelSlot(
+        ac.signal,
+        'weak-model',
+        null,
+      );
+      expect(registry.getForegroundQueuedCount()).toBe(1);
+      ac.abort();
+      await expect(waiter).rejects.toThrow(
+        FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
+      );
+
+      // reset() rejects a parked waiter too.
+      const waiter2 = registry.waitForForegroundModelSlot(
+        new AbortController().signal,
+        'weak-model',
+        null,
+      );
+      expect(registry.getForegroundQueuedCount()).toBe(1);
+      registry.reset();
+      await expect(waiter2).rejects.toThrow(
+        FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
+      );
+    });
+
+    it('admits a parked foreground launch ahead of a background waiter on the same model', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+      // Fill the weak-model cap with a running background agent.
+      registry.register(makeRegistration('bg-holder', { model: 'weak-model' }));
+
+      // Park one background waiter and one foreground waiter on the capped
+      // model.
+      const bgWaiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        'weak-model',
+        null,
+      );
+      const fgWaiter = registry.waitForForegroundModelSlot(
+        new AbortController().signal,
+        'weak-model',
+        null,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+      expect(registry.getForegroundQueuedCount()).toBe(1);
+
+      // Free the weak-model slot. The foreground waiter (blocking the user's
+      // turn) is admitted first; the background waiter stays queued because
+      // the per-model cap is now held by the foreground claim.
+      registry.complete('bg-holder', 'done');
+
+      const fg = await fgWaiter;
+      expect(fg.model).toBe('weak-model');
+      expect(registry.getForegroundQueuedCount()).toBe(0);
+      expect(registry.getQueuedCount()).toBe(1);
+
+      // Release the foreground claim so the background waiter can proceed,
+      // then await it to avoid a dangling promise.
+      registry.releaseBackgroundSlot(fg);
+      const bg = await bgWaiter;
+      expect(bg.model).toBe('weak-model');
     });
   });
 

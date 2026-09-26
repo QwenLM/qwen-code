@@ -3737,7 +3737,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 1,
         description:
-          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
         showInDialog: false,
         jsonSchemaOverride: {
           type: 'integer',
@@ -3751,7 +3751,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as Record<string, number> | undefined,
         description:
-          'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.SHALLOW_MERGE,
         jsonSchemaOverride: {
