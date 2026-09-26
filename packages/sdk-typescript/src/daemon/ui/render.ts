@@ -461,7 +461,7 @@ function daemonToolPreviewToPlainText(
   // HTML preview content was uncapped while every other field hit the
   // 8192 default.
   const url = (u: string) => (opts.sanitizeUrls ? sanitizeUrl(u) : u);
-  const cap = capLength(opts);
+  const cap = (raw: string) => capLength(opts)(sanitizeTerminalText(raw));
   switch (preview.kind) {
     case 'ask_user_question':
       return preview.questions
