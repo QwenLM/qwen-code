@@ -70,7 +70,11 @@ const assertions = [
   { fullName: 'environment', title: 'environment', status: envFailure ? 'failed' : 'passed' },
 ];
 if (process.env.TESTLOC_EMPTY_ASSERTIONS === '1' && broken) assertions.length = 0;
-if (process.env.TESTLOC_ONLY_SKIPPED === '1') for (const assertion of assertions) assertion.status = 'pending';
+if (process.env.TESTLOC_MIXED_SKIPPED === '1') {
+  assertions.push(...Array.from({ length: 1914 }, (_, index) => ({ fullName: 'passed ' + index, title: 'passed ' + index, status: 'passed' })));
+  assertions.push(...['Darwin guard', 'root guard'].map((name) => ({ fullName: name, title: name, status: 'skipped' })));
+}
+if (process.env.TESTLOC_ONLY_SKIPPED) for (const assertion of assertions) assertion.status = process.env.TESTLOC_ONLY_SKIPPED;
 const testResults = [{ name: path.resolve('src/example.test.ts'), status: assertions.some((a) => a.status === 'failed') ? 'failed' : 'passed', assertionResults: assertions }];
 if (fs.existsSync('src/loading.test.ts')) testResults.push({
   name: path.resolve('src/loading.test.ts'), status: collectionFailure ? 'failed' : 'passed',
@@ -79,11 +83,11 @@ if (fs.existsSync('src/loading.test.ts')) testResults.push({
 });
 const allAssertions = testResults.flatMap((suite) => suite.assertionResults);
 const failed = allAssertions.filter((a) => a.status === 'failed').length;
-const pending = allAssertions.filter((a) => a.status === 'pending').length;
+const pending = allAssertions.filter((a) => ['pending', 'skipped'].includes(a.status)).length;
 const total = process.env.TESTLOC_EMPTY_ASSERTIONS === '1' && broken ? 2 : allAssertions.length;
 const out = process.argv.find((a) => a.startsWith('--outputFile=')).slice('--outputFile='.length);
 if (process.env.TESTLOC_NO_FAULT_REPORT !== '1' || !broken) {
-  fs.writeFileSync(out, JSON.stringify({ numTotalTests: total, numPassedTests: total - failed - pending, numFailedTests: failed, numPendingTests: pending, numTodoTests: 0, testResults }));
+  fs.writeFileSync(out, JSON.stringify({ success: !failed && !collectionFailure, numTotalTests: total, numPassedTests: total - failed - pending, numFailedTests: failed, numPendingTests: pending, numTodoTests: 0, testResults }));
 }
 process.exitCode = failed || collectionFailure ? 1 : 0;
 `,
@@ -169,7 +173,8 @@ test('refuses a changed implementation before replaying a frozen plan', (t) => {
 
 for (const [label, env] of [
   ['empty assertion collection', { TESTLOC_EMPTY_ASSERTIONS: '1' }],
-  ['all skipped assertions', { TESTLOC_ONLY_SKIPPED: '1' }],
+  ['all skipped assertions', { TESTLOC_ONLY_SKIPPED: 'skipped' }],
+  ['all pending assertions', { TESTLOC_ONLY_SKIPPED: 'pending' }],
 ]) {
   test(`rejects ${label} as capability evidence`, (t) => {
     const f = fixture(t);
@@ -180,6 +185,33 @@ for (const [label, env] of [
     assert.equal(f.git('status', '--porcelain', '--untracked-files=no'), '');
   });
 }
+
+test('accepts passed and skipped assertions counted as pending in real Vitest reports', (t) => {
+  const f = fixture(t);
+  const result = f.call('run-faults', 'result.json', {
+    TESTLOC_MIXED_SKIPPED: '1',
+  });
+  assert.equal(
+    result.status,
+    0,
+    result.stderr || JSON.stringify(f.read('result.json')),
+  );
+  const [fault] = f.read('result.json').results;
+  assert.equal(fault.status, 'detected');
+  assert.equal(fault.failedTests, 1);
+  assert.equal(fault.healthFailures, 0);
+  assert.equal(fault.totalTests, 1918);
+  const health = JSON.parse(fs.readFileSync(fault.healthReport, 'utf8'));
+  assert.equal(health.success, true);
+  assert.equal(health.numPassedTests, 1916);
+  assert.equal(health.numPendingTests, 2);
+  assert.equal(
+    health.testResults[0].assertionResults.filter((a) => a.status === 'skipped')
+      .length,
+    2,
+  );
+  assert.equal(f.git('status', '--porcelain', '--untracked-files=no'), '');
+});
 
 test('SIGTERM terminates the owned process tree and restores an active injection', async (t) => {
   const f = fixture(t);

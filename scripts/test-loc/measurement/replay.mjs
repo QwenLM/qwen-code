@@ -388,9 +388,11 @@ async function collectTests(
   );
   const counts = { passed: 0, failed: 0, pending: 0, todo: 0 };
   for (const assertion of assertions) {
-    if (!(assertion.status in counts))
+    const status =
+      assertion.status === 'skipped' ? 'pending' : assertion.status;
+    if (!(status in counts))
       throw new Error(`Unknown assertion status: ${assertion.status}`);
-    counts[assertion.status]++;
+    counts[status]++;
   }
   if (
     assertions.length !== result.numTotalTests ||

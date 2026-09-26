@@ -347,13 +347,13 @@
     },
     {
       "file": "scripts/test-loc/measurement/replay.mjs",
-      "bytes": 32346,
-      "sha256": "8b95ae99b7334d96f4b96ce3e849d9ffad8785465419e1483ecfb38fda0e44b3"
+      "bytes": 32414,
+      "sha256": "cdff4bd4efb38e9cb60410b1cc9ccbaa70c2304e4747a214ba733277ccf13e34"
     },
     {
       "file": "scripts/test-loc/measurement/replay.test.mjs",
-      "bytes": 12495,
-      "sha256": "e67b8cdf4d2fc60e25cce785afedda9a6e78bad17e9e17308365844bdf2a4048"
+      "bytes": 13896,
+      "sha256": "9f09d9964b72d4b3d90baa1dd30eee1b816265bd2c4cdf27e94df129a1b0f63b"
     },
     {
       "file": "scripts/test-loc/measurement/stryker.core.json",
