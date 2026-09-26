@@ -19,8 +19,8 @@ import {
 
 // The managed-tool-result/1 contract (O1a of #12723). The shared fixtures in
 // contracts/managed-tool-result-v1.fixtures.json pin it, and a conformance
-// test in packages/sdk-java/runtime-broker pins the same constants. Nothing
-// uses it until the local segment store (O1b) and the worker (O1c).
+// test in packages/sdk-java/runtime-broker pins the same constants. The local
+// segment store consumes it in O1b; the worker follows in O1c.
 
 export const MANAGED_TOOL_RESULT_PROTOCOL = 'managed-tool-result/1';
 
@@ -992,6 +992,84 @@ export interface ToolResultPrefix extends ToolResultSealReceipt {
   readonly sealed: boolean;
 }
 
+export interface ToolResultPublishRequest {
+  readonly captureId: string;
+  readonly streamId: string;
+  readonly ordinal: number;
+  readonly bytes: Uint8Array;
+  readonly expectedDigest: string | null;
+}
+
+export interface ToolResultSealRequest extends ToolResultSealReceipt {
+  readonly captureId: string;
+  readonly streamId: string;
+}
+
+export interface ToolResultPrefixRequest {
+  readonly captureId: string;
+  readonly streamId: string;
+}
+
+/** Shared request gates for the in-memory ledger and the local store. */
+export function parseToolResultPublishRequest(
+  request: unknown,
+): ToolResultPublishRequest {
+  const value = closed(
+    request,
+    ['bytes', 'captureId', 'digest', 'ordinal', 'streamId'],
+    'publish',
+    ['digest'],
+  );
+  const bytes = value.bytes;
+  if (
+    !(bytes instanceof Uint8Array) ||
+    bytes.byteLength < 1 ||
+    bytes.byteLength > LIMITS.maxSegmentBytes
+  ) {
+    fail('publish.bytes must be 1 to 16 MiB.');
+  }
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+    ordinal: count(value.ordinal, 'publish.ordinal', 0, LIMITS.maxOrdinal),
+    bytes,
+    expectedDigest:
+      'digest' in value ? digest(value.digest, 'publish.digest') : null,
+  };
+}
+
+export function parseToolResultSealRequest(
+  request: unknown,
+): ToolResultSealRequest {
+  const value = closed(
+    request,
+    ['byteLength', 'captureId', 'digest', 'segmentCount', 'streamId'],
+    'seal',
+  );
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+    segmentCount: count(
+      value.segmentCount,
+      'seal.segmentCount',
+      0,
+      LIMITS.maxOrdinal + 1,
+    ),
+    byteLength: count(value.byteLength, 'seal.byteLength'),
+    digest: digest(value.digest, 'seal.digest'),
+  };
+}
+
+export function parseToolResultPrefixRequest(
+  request: unknown,
+): ToolResultPrefixRequest {
+  const value = closed(request, ['captureId', 'streamId'], 'prefix');
+  return {
+    captureId: token(value.captureId, 'captureId'),
+    streamId: token(value.streamId, 'streamId'),
+  };
+}
+
 function refused(code: ToolResultStoreCode): ToolResultStoreOutcome<never> {
   return Object.freeze({ status: 'refused', code });
 }
@@ -1020,39 +1098,19 @@ export class ToolResultSegmentLedger {
   readonly #streams = new Map<string, Stream>();
 
   publish(request: unknown): ToolResultStoreOutcome<ToolResultSegmentReceipt> {
-    const fields = attempt(() => {
-      const value = closed(
-        request,
-        ['bytes', 'captureId', 'digest', 'ordinal', 'streamId'],
-        'publish',
-        ['digest'],
-      );
-      const bytes = value.bytes;
-      if (
-        !(bytes instanceof Uint8Array) ||
-        bytes.byteLength < 1 ||
-        bytes.byteLength > LIMITS.maxSegmentBytes
-      ) {
-        fail('publish.bytes must be 1 to 16 MiB.');
-      }
-      return {
-        key: streamKey(value),
-        ordinal: count(value.ordinal, 'publish.ordinal', 0, LIMITS.maxOrdinal),
-        bytes: Uint8Array.from(bytes),
-        expected:
-          'digest' in value ? digest(value.digest, 'publish.digest') : null,
-      };
-    });
+    const fields = attempt(() => parseToolResultPublishRequest(request));
     if (!fields) return refused('managed_tool_result_invalid');
-    const received = sha256([fields.bytes]);
-    if (fields.expected !== null && fields.expected !== received) {
+    const bytes = Uint8Array.from(fields.bytes);
+    const received = sha256([bytes]);
+    if (fields.expectedDigest !== null && fields.expectedDigest !== received) {
       return refused('managed_tool_result_digest_mismatch');
     }
-    const stream = this.#streams.get(fields.key);
+    const key = streamKey(fields);
+    const stream = this.#streams.get(key);
     const stored = stream?.segments.get(fields.ordinal);
     if (stored) {
       return sha256([stored]) === received &&
-        stored.byteLength === fields.bytes.byteLength
+        stored.byteLength === bytes.byteLength
         ? ok(segmentReceipt(fields.ordinal, stored))
         : refused('managed_tool_result_conflict');
     }
@@ -1060,37 +1118,21 @@ export class ToolResultSegmentLedger {
       return refused('managed_tool_result_conflict');
     }
     const target: Stream = stream ?? { segments: new Map() };
-    target.segments.set(fields.ordinal, fields.bytes);
-    this.#streams.set(fields.key, target);
-    return ok(segmentReceipt(fields.ordinal, fields.bytes));
+    target.segments.set(fields.ordinal, bytes);
+    this.#streams.set(key, target);
+    return ok(segmentReceipt(fields.ordinal, bytes));
   }
 
   seal(request: unknown): ToolResultStoreOutcome<ToolResultSealReceipt> {
-    const fields = attempt(() => {
-      const value = closed(
-        request,
-        ['byteLength', 'captureId', 'digest', 'segmentCount', 'streamId'],
-        'seal',
-      );
-      return {
-        key: streamKey(value),
-        segmentCount: count(
-          value.segmentCount,
-          'seal.segmentCount',
-          0,
-          LIMITS.maxOrdinal + 1,
-        ),
-        byteLength: count(value.byteLength, 'seal.byteLength'),
-        digest: digest(value.digest, 'seal.digest'),
-      };
-    });
+    const fields = attempt(() => parseToolResultSealRequest(request));
     if (!fields) return refused('managed_tool_result_invalid');
     const wanted = {
       segmentCount: fields.segmentCount,
       byteLength: fields.byteLength,
       digest: fields.digest,
     };
-    const stream: Stream = this.#streams.get(fields.key) ?? {
+    const key = streamKey(fields);
+    const stream: Stream = this.#streams.get(key) ?? {
       segments: new Map(),
     };
     if (stream.seal) {
@@ -1116,16 +1158,15 @@ export class ToolResultSegmentLedger {
       return refused('managed_tool_result_digest_mismatch');
     }
     stream.seal = Object.freeze(wanted);
-    this.#streams.set(fields.key, stream);
+    this.#streams.set(key, stream);
     return ok({ ...wanted });
   }
 
   /** The verified prefix: the stored segments from ordinal 0 without a gap. */
   prefix(request: unknown): ToolResultStoreOutcome<ToolResultPrefix> {
-    const key = attempt(() =>
-      streamKey(closed(request, ['captureId', 'streamId'], 'prefix')),
-    );
-    if (key === undefined) return refused('managed_tool_result_invalid');
+    const fields = attempt(() => parseToolResultPrefixRequest(request));
+    if (fields === undefined) return refused('managed_tool_result_invalid');
+    const key = streamKey(fields);
     const stream = this.#streams.get(key);
     const chunks: Uint8Array[] = [];
     for (
