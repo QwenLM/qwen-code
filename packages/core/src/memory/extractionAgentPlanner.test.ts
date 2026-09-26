@@ -65,10 +65,6 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
     vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
       {
-        scope: 'project' as const,
-        category: 'uncategorized' as const,
-        keywords: [],
-        usageScenarios: [],
         type: 'user',
         filePath: '/tmp/auto-memory/user/prefs.md',
         relativePath: 'user/prefs.md',
