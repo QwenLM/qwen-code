@@ -83,11 +83,15 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -200,7 +204,11 @@ import {
 } from './json-rpc.js';
 
 function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  if (err instanceof Error) return err.message;
+  // The ACP SDK rejects with the child's JSON-RPC error object, not an Error.
+  if (isObject(err) && typeof err['message'] === 'string')
+    return err['message'];
+  return String(err);
 }
 
 const SESSION_WRITER_RPC_ERRORS = {
@@ -763,6 +771,61 @@ export function toRpcError(err: unknown): {
         sessionId: err.sessionId,
         ...err.details,
       },
+    };
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data:
+        err.errorKind === 'invalid_session_id'
+          ? { httpStatus: 400, errorKind: err.errorKind }
+          : {
+              httpStatus: 409,
+              errorKind: err.errorKind,
+              sessionId: err.sessionId,
+              conflict: 'live',
+            },
+    };
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: err.sessionId,
+      },
+    };
+  }
+  // Raised by a paired host's owner selection or by the ACP child's check.
+  if (
+    err instanceof SessionExecutionEngineError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'session_execution_engine_unavailable')
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    };
+  }
+  if (
+    err instanceof SessionTranscriptSnapshotUnavailableError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'transcript_snapshot_unavailable')
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: errMsg(err),
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     };
   }
   if (err instanceof RequestedSessionIdNotHonoredError) {

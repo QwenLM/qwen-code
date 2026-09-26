@@ -287,6 +287,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/daemon-update.ts',
+    {
+      reason:
+        'The process-global updater snapshots the running daemon launcher and its managed npm installation stamp, not workspace configuration.',
+      accesses: {
+        'key:QWEN_CODE_CLI': 1,
+        'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/routes/workspace-git-branches.ts',
     {
       reason:

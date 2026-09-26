@@ -200,6 +200,143 @@ describe('BatchTaskStore', () => {
     expect(() => store.load(task.id)).toThrow(/schema version/);
   });
 
+  /** A task directory whose record this build cannot parse. */
+  const breakRecord = (id: string, content = '{ truncated') => {
+    const dir = path.join(root, 'tasks', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'task.json'), content);
+  };
+
+  it('lists the healthy tasks and reports an unreadable record once', () => {
+    const healthy = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    breakRecord('paid-but-unreadable');
+    const details: string[] = [];
+    const report = (detail: string) => details.push(detail);
+
+    expect(store.list(undefined, report).map((task) => task.id)).toEqual([
+      healthy.id,
+    ]);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toContain('paid-but-unreadable');
+    expect(details[0]).toMatch(/cannot load task/);
+
+    // The session collector re-scans every minute; one bad record must not be
+    // reported again on every pass.
+    store.list(undefined, report);
+    expect(details).toHaveLength(1);
+  });
+
+  it('reports a record from another schema version by id and reason', () => {
+    const task = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    const raw = JSON.parse(fs.readFileSync(store.fileOf(task.id), 'utf8'));
+    raw.schemaVersion = 99;
+    fs.writeFileSync(store.fileOf(task.id), JSON.stringify(raw));
+
+    const details: string[] = [];
+    expect(store.list(undefined, (detail) => details.push(detail))).toEqual([]);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toContain(task.id);
+    expect(details[0]).toMatch(/schema version 99/);
+  });
+
+  it('passes over a task directory that holds no record', () => {
+    const healthy = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    // create() mkdirs before save() renames and remove() rms recursively, so
+    // an empty task directory is a shape a live store really has — the
+    // ordering test above builds one on purpose and expects it skipped.
+    fs.mkdirSync(path.join(root, 'tasks', 'half-created'), { recursive: true });
+
+    const details: string[] = [];
+    const ids = store
+      .list(undefined, (detail) => details.push(detail))
+      .map((task) => task.id);
+
+    expect(ids).toEqual([healthy.id]);
+    expect(details).toEqual([]);
+  });
+
+  it('reports a record that parses but lacks the fields callers dereference', () => {
+    const healthy = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    breakRecord('shape-broken', JSON.stringify({ schemaVersion: 1 }));
+
+    const details: string[] = [];
+    const ids = store
+      .list(undefined, (detail) => details.push(detail))
+      .map((task) => task.id);
+
+    // Without the field check this record sorts on an undefined createdAt and
+    // then dies inside refreshTaskStatus / the collector's isOpen, taking the
+    // healthy task's listing down with it.
+    expect(ids).toEqual([healthy.id]);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toContain('shape-broken');
+    expect(details[0]).toMatch(/record is missing/);
+  });
+
+  // A directory name carrying a control character is not expressible on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'strips terminal control sequences out of a reported name',
+    () => {
+      // readdirSync hands the name back verbatim and the detail is echoed to
+      // the terminal, so an OSC payload in a directory name must not arrive
+      // intact — the load error quotes the same name a second time.
+      breakRecord('paid\x1b]52;c;c2VjcmV0\x07task');
+
+      const details: string[] = [];
+      store.list(undefined, (detail) => details.push(detail));
+
+      expect(details).toHaveLength(1);
+      expect(details[0].includes('\x1b')).toBe(false);
+      expect(details[0]).not.toContain(']52;c;');
+      expect(details[0]).not.toContain('c2VjcmV0');
+      expect(details[0]).toMatch(/invalid task id/);
+    },
+  );
+
+  it('frees the report slot once the record reads again', () => {
+    breakRecord('flaky');
+    const details: string[] = [];
+    const report = (detail: string) => details.push(detail);
+
+    store.list(undefined, report);
+    store.list(undefined, report);
+    expect(details).toHaveLength(1);
+
+    // The half-written file is completed by its rename, so the id reads.
+    const healthy = store.create(
+      validatePlan(validPlan, 'plan.json'),
+      root,
+      'qwen-plus',
+    );
+    fs.copyFileSync(
+      store.fileOf(healthy.id),
+      path.join(root, 'tasks', 'flaky', 'task.json'),
+    );
+    store.list(undefined, report);
+    expect(details).toHaveLength(1);
+
+    // A later genuine failure on the same id is a new fact, said once.
+    breakRecord('flaky');
+    store.list(undefined, report);
+    expect(details).toHaveLength(2);
+  });
+
   it('refuses task ids that would walk out of the store', () => {
     expect(() => store.load('../escape')).toThrow(/invalid task id/);
   });

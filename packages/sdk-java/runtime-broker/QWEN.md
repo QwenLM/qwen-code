@@ -26,6 +26,15 @@ mvn test
 mvn checkstyle:check
 ```
 
+## Fault gates
+
+The `fault-gate` tests (profile `fault-gates`) inject faults only through
+the network, the database link and the process table. Never add a fault
+hook to production code for them. Two gates pin current behaviour: a
+restart that cannot adopt a `LocalProcessRuntimeProvisioner` worker, and the
+#12670 `LOST` wedge. A change to either behaviour updates its pin and the
+design document in the same change.
+
 ## Workspace binding package
 
 Keep `com.alibaba.qwen.code.runtimebroker.managedworkspace` on the JDK alone:
@@ -57,3 +66,15 @@ Compute new expected values with an implementation independent of both. Both
 fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose; read
 them with a parser that keeps such escapes, as Jackson does. `jq` rejects the
 files, and Go's `encoding/json` replaces the surrogates with U+FFFD.
+
+## Tool result contract
+
+The `managed-tool-result/1` fixtures live beside the TypeScript module that
+replays them, in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`.
+A change to the manifest, the segment rules or the Tool v3 routes updates the
+fixtures, the schema, `packages/core/src/managed-runtime/managed-tool-result.ts`
+and `ManagedToolResultConformanceTest` in the same change, with expected
+values computed by an implementation independent of both languages. A Java
+Tool v3 client must refuse a Tool v2 answer on a v3 route and never retry a
+refused v3 call through v2.

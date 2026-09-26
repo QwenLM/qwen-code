@@ -286,7 +286,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 - 调用方提供的绝对路径、storage ID 或 generation 都无法进入已解析的 Workspace。
 - 替换快照不能删除 Workspace、降低它的 generation，也不能在不提升 generation 的情况下修改它的 storage ID。
 - Java 包只使用 JDK，不依赖其他 Broker 类、Spring、CLI 内部实现或调度器。
-- 文档不声称已实现持久化、接线或能力声明。
+- 文档不声称已实现持久化或能力声明。worker 的接线在之后的 W0c-1 中完成。
 
 ## 待决问题
 

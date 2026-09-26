@@ -10,6 +10,10 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import {
+  registerSessionProjectDir,
+  sessionIdContext,
+} from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -54,7 +58,14 @@ export class ManagedToolUnavailableError extends Error {
 }
 
 /** The admitted tools, keyed by name, over one configuration. */
-export type ManagedToolSet = ReadonlyMap<string, AnyDeclarativeTool>;
+export interface ManagedToolSet {
+  /**
+   * The session the tools run as. A shell they start sees it as
+   * QWEN_CODE_SESSION_ID, with that session's project directory.
+   */
+  readonly sessionId: string;
+  readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
+}
 
 /**
  * The tools a new invocation runs with, or undefined when its Session has no
@@ -134,7 +145,7 @@ export class ManagedToolExecutor {
         'Managed context directory is unavailable.',
       );
     }
-    const tool = tools.get(toolName);
+    const tool = tools.tools.get(toolName);
     if (!tool) {
       throw new ManagedToolConflictError(
         `Managed Runtime does not admit tool ${toolName}.`,
@@ -167,7 +178,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool);
+    entry.promise = this.run(entry, tool, tools.sessionId);
     await entry.promise;
     return entry.result!;
   }
@@ -221,14 +232,16 @@ export class ManagedToolExecutor {
   private async run(
     entry: JournalEntry,
     tool: AnyDeclarativeTool,
+    sessionId: string,
   ): Promise<void> {
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
     try {
-      const invocation = tool.build(structuredClone(entry.input));
-      const result: ToolResult = await invocation.execute(
-        entry.controller.signal,
+      const result: ToolResult = await sessionIdContext.run(sessionId, () =>
+        tool
+          .build(structuredClone(entry.input))
+          .execute(entry.controller.signal),
       );
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
@@ -263,14 +276,15 @@ export class ManagedToolExecutor {
 
 /**
  * The admitted tools over a configuration whose working directory and
- * workspace are `directory`, as they are when it is built.
+ * workspace are `directory`, as they are when it is built. They run as
+ * `sessionId`, whose project directory is registered for their shells.
  */
 export function createManagedToolSet(
   directory: string,
-  runtimeInstanceId: string,
+  sessionId: string,
 ): ManagedToolSet {
   const config = new Config({
-    sessionId: runtimeInstanceId,
+    sessionId,
     targetDir: directory,
     cwd: directory,
     model: 'managed-runtime-worker',
@@ -281,14 +295,18 @@ export function createManagedToolSet(
     // The worker has no conversation history to justify cached read elision.
     fileReadCacheDisabled: true,
   });
-  return new Map(
-    [
-      new ReadFileTool(config),
-      new WriteFileTool(config),
-      new EditTool(config),
-      new ShellTool(config),
-    ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
-  );
+  registerSessionProjectDir(sessionId, config.storage.getProjectDir());
+  return {
+    sessionId,
+    tools: new Map(
+      [
+        new ReadFileTool(config),
+        new WriteFileTool(config),
+        new EditTool(config),
+        new ShellTool(config),
+      ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
+    ),
+  };
 }
 
 async function join(

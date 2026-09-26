@@ -141,6 +141,7 @@ import {
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import { UpdateControl } from './UpdateControl';
 import {
   useSessionCatalogController,
   useSessionCatalogPolling,
@@ -234,6 +235,7 @@ function comparePinnedSectionSessions(
 
 export type WebShellSidebarFooterItem =
   | 'settings'
+  | 'update'
   | 'version'
   | 'theme'
   | 'sessionsOverview'
@@ -284,6 +286,7 @@ export interface WebShellSidebarFooterOptions {
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
+  'update',
   'version',
   'theme',
   'sessionsOverview',
@@ -1032,6 +1035,10 @@ export function WebShellSidebar({
     () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
     [primaryNavOptions?.items],
   );
+  const showUpdate =
+    footerItems.has('update') &&
+    !isDesktopShell() &&
+    connection.capabilities?.features?.includes('daemon_update');
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
@@ -2153,11 +2160,7 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
-  // One breakpoint degrades the whole footer: below it the settings button
-  // drops its text label, every footer button becomes a fixed 26px icon, and the
-  // version label leaves the row. That label can neither shrink nor truncate
-  // (`flex: 0 0 auto; white-space: nowrap`), so keeping it rendered past this
-  // point overflowed `.footerPrimary` into the action icons (#11453).
+  // Keep action buttons compact; the version and update share a separate row.
   const footerCompact =
     !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
   const sidebarStyle = {
@@ -5375,6 +5378,7 @@ export function WebShellSidebar({
         ref={sidebarRef}
         className={cx(
           styles.sidebar,
+          (footerItems.has('version') || showUpdate) && styles.withVersion,
           collapsed && styles.collapsed,
           isResizing && styles.resizing,
           mobileOpen && styles.mobileOpen,
@@ -6535,6 +6539,24 @@ export function WebShellSidebar({
           <div
             className={cx(styles.footer, footerCompact && styles.footerCompact)}
           >
+            <div className={styles.footerVersion}>
+              {!collapsed && versionLabel && footerItems.has('version') && (
+                <span
+                  className={styles.version}
+                  title={`${brandName} ${versionLabel}`}
+                >
+                  {versionLabel}
+                </span>
+              )}
+              {showUpdate && (
+                <UpdateControl
+                  client={workspace.client}
+                  collapsed={collapsed && !mobileOpen}
+                  currentVersion={qwenCodeVersion}
+                  onError={onError}
+                />
+              )}
+            </div>
             <div className={styles.footerPrimary}>
               {footer && typeof footer === 'object' && footer.render?.()}
               {projectFeaturesEnabled && footerItems.has('settings') && (
@@ -6555,17 +6577,6 @@ export function WebShellSidebar({
                   )}
                 </button>
               )}
-              {!collapsed &&
-                !footerCompact &&
-                versionLabel &&
-                footerItems.has('version') && (
-                  <span
-                    className={styles.version}
-                    title={`${brandName} ${versionLabel}`}
-                  >
-                    {versionLabel}
-                  </span>
-                )}
             </div>
             <div className={styles.footerActions}>
               {footerItems.has('theme') && (
