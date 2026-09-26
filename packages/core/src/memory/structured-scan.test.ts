@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryFilePath,
@@ -28,6 +28,11 @@ import {
   validateStructuredAutoMemoryDocument,
 } from './structured-scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual };
+});
 
 describe('auto-memory topic scanning', () => {
   let tempDir: string;
@@ -1318,13 +1323,6 @@ describe('auto-memory topic scanning', () => {
   });
 
   it('reports an unreadable subdirectory as an incomplete scope instead of complete', async () => {
-    // chmod 000 does not block root, where this scenario cannot run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      return;
-    }
-    // A mode-000 subdirectory is skipped by the walk; without an incomplete
-    // marker the tree prompt would claim the map is complete while
-    // reference/hidden.md is silently missing.
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const visible = path.join(memoryRoot, 'project', 'visible.md');
     const locked = path.join(memoryRoot, 'reference');
@@ -1340,7 +1338,17 @@ describe('auto-memory topic scanning', () => {
       '---\ntype: reference\nname: Hidden\ndescription: hidden\n---\nbody',
       'utf-8',
     );
-    await fs.chmod(locked, 0o000);
+    const readdir = fs.readdir.bind(fs);
+    const readDirectory = vi
+      .spyOn(fs, 'readdir')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === locked) {
+          throw Object.assign(new Error('Permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return readdir(...args);
+      });
     try {
       const snapshot = await scanAutoMemorySnapshot(projectRoot, {
         scopes: ['project'],
@@ -1358,7 +1366,7 @@ describe('auto-memory topic scanning', () => {
         snapshot.docs.some((doc) => doc.relativePath === 'reference/hidden.md'),
       ).toBe(false);
     } finally {
-      await fs.chmod(locked, 0o700);
+      readDirectory.mockRestore();
     }
   });
 });
