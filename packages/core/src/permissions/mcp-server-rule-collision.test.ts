@@ -604,6 +604,45 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
     ).toBe(true);
   });
 
+  // The row above is the fixture whose coverage the provenance test decides:
+  // the reduction rewrote the SERVER segment, so demanding that the first
+  // `__` chunk survive byte-identically rejects the reduction and a persisted
+  // restriction silently stops covering its own tool — fail-open on
+  // `deny`/`ask`/`disallowedTools`, fail-closed only on `allow`. A reduction
+  // that kept the length vouches for the tool it came from, because only the
+  // 63-character middle truncation shortens a name. Every row here answers
+  // `default`/`false` under the chunk-equality gate.
+  const rewrittenServerRule = 'mcp__foo.bar_baz__get_*';
+
+  it.each([
+    ['deny', { permissionsDeny: [rewrittenServerRule] }, 'deny'],
+    ['ask', { permissionsAsk: [rewrittenServerRule] }, 'ask'],
+    ['allow', { permissionsAllow: [rewrittenServerRule] }, 'allow'],
+  ])(
+    'keeps a legacy-spelled %s prefix on a rewritten server segment effective',
+    async (_label, lists, expected) => {
+      const mixed = prodTool('foo.bar+baz', 'get+data');
+      // The `disallowedTools` blocklist judges a tool through this predicate.
+      expect(
+        matchesToolPattern(
+          rewrittenServerRule,
+          mixed.name,
+          mixed.permissionAliases,
+        ),
+      ).toBe(true);
+      expect(matchesRuleWith(rewrittenServerRule, mixed)).toBe(true);
+
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: mixed.name,
+          toolAliases: mixed.permissionAliases,
+        }),
+      ).toBe(expected);
+    },
+  );
+
   it.each([
     ['deny', { permissionsDeny: [prefixRule] }, 'deny'],
     ['ask', { permissionsAsk: [prefixRule] }, 'ask'],
