@@ -4126,6 +4126,10 @@ describe('StandaloneSessionService', () => {
     ).rejects.toMatchObject({
       code: 'standalone_session_conflict',
       retryable: false,
+      creationDiagnostic: {
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
     });
 
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
