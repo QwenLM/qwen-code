@@ -5599,13 +5599,13 @@ function getShellCommandSequencingGuidance({
   shell,
 }: ShellConfiguration): string {
   const independentGuidance =
-    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message.';
 
   switch (shell) {
     case 'bash':
       return `- When issuing multiple commands:
   ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
   - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
     case 'cmd':
@@ -5654,9 +5654,7 @@ function getShellToolDescription(
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
 **Usage notes**:
-- The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
-- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 - Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
   - File search: Use ${ToolNames.GLOB} (NOT find or ls)
@@ -5684,12 +5682,7 @@ ${getShellCommandSequencingGuidance(shellConfiguration)}
   - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
   - Any command expected to run indefinitely until manually stopped
 ${processGroupNote}${processStopNote}
-- Use foreground execution (is_background: false) for:
-  - One-time commands: \`ls\`, \`cat\`, \`grep\`
-  - Build commands: \`npm run build\`, \`make\`
-  - Installation commands: \`npm install\`, \`pip install\`
-  - Git operations: \`git commit\`, \`git push\`
-  - Test runs: \`npm test\`, \`pytest\`
+- Use foreground execution (the default) for commands that finish on their own, such as builds, installs, git operations, and test runs.
 `;
 }
 
