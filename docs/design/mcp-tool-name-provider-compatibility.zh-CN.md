@@ -27,18 +27,19 @@ Qwen Code 目前按 Gemini 的字符集接受 MCP 工具名。诸如 `literature
 
 权限规则和 `disallowedTools` 阻止列表可能是用历史拼写（`mcp__foo.bar__tool`）书写的，它们不再等于注册后的 provider 安全名。匹配方式如下（`packages/core/src/permissions/rule-parser.ts`）：
 
-- 每个 `DiscoveredMCPTool` 都声明 `permissionAliases`：首先是**精确的原始身份** `mcp__<server>__<tool>`，然后是与之不同的 legacy `generateLegacyMcpToolName` 归约拼写。逐字注册的 provider 安全名字没有任何损失，因此不声明 alias。注册表（`ToolRegistry.getPermissionAliases`）与调用对象（`permissionFlow.ts`，供 L4 调用期检查）读取的是同一个数组。注册表一侧的读取者是 L1 启用闸门以及 agent 一侧的声明式过滤器（`agent-core.ts`、`tools/agent/agent.ts`，以及 `workflow-orchestrator.ts` 中的 deny 收窄）。L1 闸门在两个彼此独立的位点解析 alias，而不是一条生产者/消费者链：`coreToolScheduler.ts` 读取 `ToolRegistry.getPermissionAliases`，而 ACP 路径上 `Session.ts` 里的 `L1: Tool enablement check` 直接从 `DiscoveredMCPTool` 实例读取 `tool.permissionAliases`——因此在 `ToolRegistry.getPermissionAliases` 内部做的策略变更（vouching、过滤，或空数组到 `undefined` 的归一化）不会到达 ACP 闸门。`getToolRegistrationStatus` 同样接了 alias 通道，但只有部分调用方如此：`PermissionManager.isToolEnabled` 与两个 agent-config 规划器（`memory-scoped-agent-config.ts`、`skillReviewAgentPlanner.ts`）会转发 `toolAliases`，而注册期的调用点（`config.ts`、`tool-registry.ts`、`managed-tool-runtime.ts`、`Session.ts`）只传工具名。请勿把这个参数读成没有接线。本词表中不存在 L2——代码里标注的层次是 L1、L3/L4（`permissionFlow.ts`）、L5（`coreToolScheduler.ts`）与 L5.1-L5.3（`autoMode.ts`）。
+- 每个 `DiscoveredMCPTool` 都声明 `permissionAliases`：首先是**精确的原始身份** `mcp__<server>__<tool>`，然后是与之不同的 legacy `generateLegacyMcpToolName` 归约拼写。逐字注册的 provider 安全名字没有任何损失，因此不声明 alias。注册表（`ToolRegistry.getPermissionAliases`）与调用对象（`permissionFlow.ts`）读取的是同一个数组。
 - 一个 alias 只有在它自己的归一化结果**就是**注册名时，才会被接受为该工具的原始身份，因此另一个 server 的工具永远无法提供规则所匹配的身份。原始前缀来自用户配置中的 server 键，而不是来自 server。
 - 精确、server 级与通配模式随后与注册名和原始身份做**字面**比较。在这个匹配器内部不做任何重建，也不做任何哈希：尾部只是模仿归一化哈希的注册名什么也证明不了。早期的设计会重建候选原始名并用无密钥的 FNV-1a 名字哈希做验证；那只能证明一个存在性命题（规则前缀下存在某个原始名归一化后等于该注册名），而且可以被伪造，因此被删除而不是再加闸门（#10199）。
-- `disabledTools` 根本不会到达 `rule-parser.ts`。`ToolRegistry.isToolDisabled` 单独匹配它：既按精确集合成员关系读取这同一个 `permissionAliases` 数组，也仍然把 `normalizeMcpToolName(条目)` 与注册名做比较，因此历史拼写的条目也可能禁用另一个冲突 server 的工具。该归一化分支早于 #10199 存在且是失效关闭的——请勿把上一条读成也覆盖了它，也请勿仅凭本文档就删除它而不做一次行为决策。
+- 通配分支也会读取 legacy 归约，但仅当归约**没有截断**名字时。字符替换会保留 server 段的可识别性；超过 63 字符时 `generateLegacyMcpToolName` 会截成 `slice(0, 28) + '___' + slice(-32)`，这既缩短了较长的 server 键，又注入了前缀匹配所需的 `__` 分隔符，于是两个不同的长键可能落进同一个窗口。被截断过的归约不为任何 server 作证。
+- `disabledTools` 根本不会到达 `rule-parser.ts`。`ToolRegistry.isToolDisabled` 单独匹配它：既按精确集合成员关系读取这同一个 `permissionAliases` 数组，也仍然把 `normalizeMcpToolName(条目)` 与注册名做比较，因此历史拼写的条目也可能禁用另一个冲突 server 的工具。该归一化分支早于 #10199 存在且是失效关闭的——请勿仅凭本文档就删除它而不做一次行为决策。
 - legacy 的 `sanitizeToolNameForProvider` 归约被特意从匹配中移除：它让 `mcp__foo.bar` 规则能命中以不同名字注册的 server `foo_bar`。请勿重新引入。另一个方向上，用 provider 安全拼写书写的规则（`mcp__foo_bar`）仍然能字面命中任何归一化后落在该前缀下的 server——这是一处被接受的残留行为。
 - 裸 `*` 不是 MCP 模式，不匹配任何 MCP 工具；`mcp__*` 和 `mcp__server__*` 保持其文档语义。
-- 不对称性：失去匹配在 `allow` 上是失效关闭的（工具回退到 `ask`），但在 `deny`/`ask` 规则和 `disallowedTools` 阻止列表上是失效放行的，这正是每个可达调用方都必须接入 alias 通道的原因。
+- 不对称性：失去匹配在 `allow` 上是失效关闭的（工具回退到 `ask`），但在 `deny`/`ask` 规则和 `disallowedTools` 阻止列表上是失效放行的，因此**执行**这些规则的路径都接入了 alias 通道。有一条路径刻意没接：`narrowAgentTools` 里前置的“所请求的工具全部被拒”报错只是提示，不是闸门——agent 自己的声明式过滤器与调度器的启用检查都接了通道，所以被拒的东西不会执行。
 
 ## 验证
 
 - 针对合法、非法、冲突、超长、稳定与幂等名字的单元测试。
 - 针对注册、权限规则、重连查找与禁用工具的 MCP 工具测试。
-- 冲突测试（`mcp-server-rule-collision.test.ts`）：跨 server 伪造 witness（精确、server 级与通配三种形状）、中间截断过度匹配、各原始长度下的历史拼写 deny 覆盖，以及无 alias 姿态。
+- 冲突测试（`mcp-server-rule-collision.test.ts`）：跨 server 伪造 witness（精确、server 级与通配三种形状）、中间截断过度匹配、历史拼写 deny 覆盖，以及无 alias 姿态。
 - 针对含带点 MCP 名字的恢复历史的 OpenAI 与 Anthropic 转换器测试。
 - core 包的构建与类型检查。

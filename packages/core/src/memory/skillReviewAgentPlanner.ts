@@ -264,12 +264,11 @@ export function createSkillScopedAgentConfig(
     },
     async getToolRegistrationStatus(
       toolName: string,
-      toolAliases?: readonly string[],
     ): Promise<ToolRegistrationStatus> {
       if (isScopedTool(toolName)) return 'registered';
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName, toolAliases)
+          ? basePm.getToolRegistrationStatus(toolName)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';

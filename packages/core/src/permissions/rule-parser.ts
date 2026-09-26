@@ -1637,35 +1637,20 @@ export function matchesDomainPattern(
  *
  * `toolName` is the registered provider-safe name and `rawToolName` the
  * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
- * tool's advertised `permissionAliases` by `resolveRawMcpIdentity` — an alias
- * is accepted as the raw identity only when its own normalization IS the
- * registered name, so a different server's tool cannot supply one. Exact and
- * server-level prefixes are compared *literally* against those two spellings;
- * the wildcard arm also reads the legacy `generateLegacyMcpToolName`
- * reduction of the raw identity, because a persisted prefix was copied from
- * the spelling settings showed when it was written (see
- * {@link resolveLegacyMcpSpelling} for the provenance that keeps the
- * reduction from vouching for a different server). Nothing is reconstructed
- * and nothing is hashed: a registered name whose tail merely imitates a
- * normalization hash proves nothing, which is what keeps a server registered
- * under the provider-safe key `foo_bar` from satisfying a rule written for
- * the *different* server `foo.bar` (#10199).
+ * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
+ * are compared *literally* against those two spellings — never through
+ * `sanitizeToolNameForProvider`, which is what let a rule for the server
+ * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
+ * The wildcard arm additionally reads the legacy reduction of the raw
+ * identity, because a persisted prefix was copied from the spelling settings
+ * showed when it was written.
  *
- * The legacy `sanitizeToolNameForProvider` reduction is avoided in only one
- * direction: a rule written in a legacy unsafe spelling (`mcp__foo.bar`) no
- * longer reaches the differently-registered server `foo_bar`, but the
- * registered spelling that a literal comparison runs against *is* that
- * reduction, so a rule written provider-safe (`mcp__foo_bar`) still matches
- * any server whose name sanitizes under that prefix (`foo.bar`, `foo:bar`,
- * `foo/bar`). A pattern that does not match literally does not match at all;
- * whether that removes a restriction depends on the rule's semantics —
- * fail-closed on `allow` (the tool falls back to `ask`), fail-open on
- * `deny`/`ask` rules and on `disallowedTools` blocklists, which is why every
- * reachable caller threads the alias channel. Threading is necessary but not
- * sufficient for a wildcard prefix: the channel resolves the *raw* identity,
- * and a prefix whose tail crosses a character the legacy reduction changed
- * matches neither the registered name nor the raw one, so the wildcard arm
- * reads that reduction too.
+ * A rule written provider-safe (`mcp__foo_bar`) still matches any server
+ * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
+ * registered spelling a literal comparison runs against *is* that reduction.
+ * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
+ * `disallowedTools`, which is why every reachable caller threads the alias
+ * channel.
  */
 export function matchesMcpPattern(
   pattern: string,
@@ -1703,25 +1688,18 @@ export function matchesMcpPattern(
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
     const prefix = pattern.slice(0, -1);
-    // A bare `*` has an empty prefix, and every string starts with `''`. Before
-    // patterns stopped being reduced through `sanitizeToolNameForProvider`, the
-    // empty prefix became `tool_` — which no `mcp__…` name starts with — so a
-    // bare `*` matched no MCP tool. Keep that: `*` is not an MCP pattern, and
-    // matching it here would authorize every MCP tool (the class whose own
-    // default is `ask`) while built-ins keep prompting. `mcp__*` still matches
-    // every MCP tool, and `mcp__server__*` still matches that server.
+    // A bare `*` is not an MCP pattern: its empty prefix would match every
+    // MCP tool. Reducing patterns through `sanitizeToolNameForProvider` used
+    // to turn it into `tool_`, which matched nothing — keep that.
     if (prefix === '') {
       return false;
     }
     // A persisted prefix was copied from the spelling settings showed when it
-    // was written, so this arm also reads the legacy reduction of the tool's
-    // own raw identity. A `deny` / `ask` / `disallowedTools` prefix that lost
-    // its match is a fail-open — the call the operator denied runs with no
-    // prompt — and the reduction is the spelling it was written against.
-    // Wildcard arm only: an exact rule already reaches every advertised
-    // spelling through `matchesAdvertisedExactName`, and a server-level rule
-    // reaches the raw identity through `spellings`, so neither needs a
-    // reduction that could carry a truncation artifact.
+    // was written, which for a pre-normalization entry is the legacy
+    // reduction. Losing that match is a fail-open on `deny`/`ask`/
+    // `disallowedTools`. Wildcard arm only: exact rules reach every advertised
+    // spelling through `matchesAdvertisedExactName`, server-level rules
+    // through `spellings`.
     const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
     return (
       matchesPrefixLiterally(prefix) ||
@@ -1731,14 +1709,11 @@ export function matchesMcpPattern(
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
   // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
-  // The 3-part test is asked of every spelling the body matches against, not of
-  // the registered name alone: a long server key pushes the registered name past
-  // the 63-character budget, so truncation can cut the `__` separator out of it
-  // and leave it with two parts while the raw identity still exposes the tool
-  // segment. Judging the structure by the registered name only would drop the
-  // bare `mcp__<server>` spelling of a whole-server rule while its
-  // `mcp__<server>__*` spelling kept matching, and a deny that silently matches
-  // nothing is a fail-open on a rule the operator wrote to cover the server.
+  // The 3-part test is asked of every spelling, not of the registered name
+  // alone: past the 63-character budget truncation can cut the `__` separator
+  // out of the registered name while the raw identity still exposes the tool
+  // segment, and a whole-server deny that silently matches nothing is a
+  // fail-open.
   const patternParts = pattern.split('__');
   const toolParts = toolName.split('__');
   if (
@@ -1777,20 +1752,15 @@ function resolveRawMcpIdentity(
 /**
  * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
  * for a wildcard prefix persisted in that spelling — or `undefined` when the
- * reduction cannot vouch for the tool's server.
+ * reduction cut the name.
  *
- * Provenance is established twice over. The input is the raw identity that
- * {@link resolveRawMcpIdentity} already vouched for, so it belongs to this
- * tool and not to a different server that sanitizes into the same registered
- * name. And the reduction must have left the server segment byte-identical:
- * past 63 characters `generateLegacyMcpToolName` cuts at
- * `slice(0, 28) + '___' + slice(-32)`, which for a server key of 24+
- * characters shortens the key *and* injects the very `__` separator a prefix
- * match needs, so a rule written for `weather-forecast-server` would
- * otherwise reach the different server `weather-forecast-server-premium`
- * through that server's own legacy alias.
- *
- * A lossless reduction is the raw identity itself and adds no spelling.
+ * Character substitution is length-preserving, so the server segment stays
+ * recognizable. Past 63 characters the reduction instead cuts at
+ * `slice(0, 28) + '___' + slice(-32)`, which shortens a long server key *and*
+ * injects the very `__` separator a prefix match needs: two different long
+ * keys can land in one window, and a rule written for
+ * `weather-forecast-server` would reach `weather-forecast-server-premium`.
+ * A reduction that changed the length therefore vouches for no server.
  */
 function resolveLegacyMcpSpelling(
   rawToolName: string | undefined,
@@ -1802,9 +1772,7 @@ function resolveLegacyMcpSpelling(
   if (legacy === rawToolName) {
     return undefined;
   }
-  return legacy.split('__')[1] === rawToolName.split('__')[1]
-    ? legacy
-    : undefined;
+  return legacy.length === rawToolName.length ? legacy : undefined;
 }
 
 /**

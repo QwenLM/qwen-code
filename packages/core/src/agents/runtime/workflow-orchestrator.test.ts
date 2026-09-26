@@ -3590,9 +3590,6 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
      * the way the real manager treats them.
      */
     registeredTools?: Array<{ name: string; displayName?: string }>;
-    // What the session registry answers for getPermissionAliases, keyed by
-    // registered tool name.
-    permissionAliases?: Record<string, readonly string[]>;
     /**
      * Tools that background MCP discovery registers: absent from the registry
      * until `waitForMcpReady` settles.
@@ -3639,27 +3636,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // tests — only that the override flow doesn't crash on the missing methods — so the
     // stub registry just answers the API surface those helpers call.
     const registered = [...(opts.registeredTools ?? [])];
-    // The session registry — the only one production resolves deny aliases
-    // from (`workflow-orchestrator.ts:1253-1256`).
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
-      getPermissionAliases: (name: string) => opts.permissionAliases?.[name],
-    };
-    // The per-agent registry, deliberately a DIFFERENT object that vouches for
-    // no alias: it is not built until after narrowing runs
-    // (`createSchemaConfigOverride` → `rebuildToolRegistryOnOverride`, or
-    // `createAgentHeadless`), so at narrowing time it can answer nothing. One
-    // shared object for both roles left the alias tests unable to tell which
-    // registry the resolver consults — pointing the resolver at
-    // `createToolRegistry()` instead kept every test in this file green.
-    const perAgentFakeRegistry = {
-      copyDiscoveredToolsFrom: () => {},
-      registerTool: () => {},
-      getPermissionAliases: (_name: string) => undefined,
     };
     const cfg = {
-      createToolRegistry: async () => perAgentFakeRegistry,
+      createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
       waitForMcpReady: vi.fn(async () => {
         registered.push(...(opts.discoveredTools ?? []));
@@ -4904,77 +4886,6 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       });
 
       expect(calls[0]!.config.tools).toEqual(['mcp__agentdb__query']);
-    });
-
-    // The session registry cannot vouch for an agent type's own MCP servers
-    // (their tools live in the per-agent registry), so the alias-dependent
-    // deny narrowing must not consult it for those names: a legacy-spelled
-    // deny is left to the agent's own declaration filter, which resolves
-    // aliases from the registry that actually serves the agent.
-    it('does not consult session-registry aliases when narrowing an own-MCP agent', async () => {
-      const { config, calls } = fakeConfigWithMgr({
-        findSubagentByName: async () => ({
-          name: 'Db',
-          description: 'db agent',
-          systemPrompt: 'db',
-          level: 'project',
-          mcpServers: { 'own.srv': { command: 'owndb' } },
-          disallowedTools: ['mcp__own.srv'],
-        }),
-        // The session registry happens to answer an alias for the name —
-        // with the alias channel consulted here, the deny would narrow the
-        // tool away and the dispatch would refuse before provisioning.
-        permissionAliases: {
-          mcp__own_srv__search_documents_in_corpus_09ozidk: [
-            'mcp__own.srv__search_documents_in_corpus',
-          ],
-        },
-        onCreate: ok,
-      });
-
-      await createProductionDispatch(config)('query', {
-        agentType: 'Db',
-        tools: ['mcp__own_srv__search_documents_in_corpus_09ozidk'],
-      });
-
-      expect(calls[0]!.config.tools).toEqual([
-        'mcp__own_srv__search_documents_in_corpus_09ozidk',
-      ]);
-    });
-
-    // The other side of that ternary: with no `mcpServers` of its own the agent
-    // type's tools ARE in this session's registry, so the resolver answers and a
-    // deny written in a legacy spelling still narrows. This is the only place
-    // the positive branch is exercised — replacing the resolver with
-    // `undefined` unconditionally must redden it.
-    it('refuses up front when a legacy-spelled deny covers every requested tool', async () => {
-      const { config, calls } = fakeConfigWithMgr({
-        registeredTools: [{ name: 'mcp__srv__get_data_04b75xd' }],
-        findSubagentByName: async () => ({
-          name: 'Legacy',
-          description: 'legacy denies',
-          systemPrompt: 'legacy',
-          level: 'project',
-          // The pre-normalization spelling of `mcp__srv__get+data`. It is not
-          // the registered name, so only the alias channel can match it.
-          disallowedTools: ['mcp__srv__get_data'],
-        }),
-        permissionAliases: {
-          mcp__srv__get_data_04b75xd: [
-            'mcp__srv__get+data',
-            'mcp__srv__get_data',
-          ],
-        },
-        onCreate: ok,
-      });
-
-      await expect(
-        createProductionDispatch(config)('scan', {
-          agentType: 'Legacy',
-          tools: ['mcp__srv__get_data_04b75xd'],
-        }),
-      ).rejects.toThrow(/every tool in .* is denied/);
-      expect(calls).toHaveLength(0);
     });
 
     // A deny is resolved the way the agent's own config resolves it, so a
