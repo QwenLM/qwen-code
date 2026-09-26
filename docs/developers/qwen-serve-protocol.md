@@ -206,7 +206,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 §10).
 
 ```
-['health', 'capabilities', 'session_create', 'session_id_override', 'session_scope_override',
+['health', 'capabilities', 'session_create', 'session_startup_config', 'session_id_override', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
  'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
@@ -253,6 +253,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ```
 
 > Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
+
+`session_startup_config` advertises optional `startupConfig: { modelServiceId, reasoningEffort? }` on ordinary and standalone creation. Always preflight this tag: older ordinary-create routes may silently ignore the object. `modelServiceId` is required (1–256 characters); `reasoningEffort` accepts `none`, `default`, `low`, `medium`, `high`, `xhigh`, or `max` when supported by the selected model. Omission applies only the model, without a reasoning setter or implicit `default`. The object cannot be combined with the legacy top-level `modelServiceId` or explicit single scope and implies a new thread. Startup never saves shared defaults; later session behavior is unchanged.
+
+Success includes `modelApplied: true` and `startupConfigApplied: { modelServiceId, reasoningEffort?, effectiveReasoning? }`. The model selector is canonical. Only explicit reasoning requests include the two reasoning fields; effective state is `{ state: 'disabled' }`, `{ state: 'provider-default' }`, or `{ state: 'enabled', effort? }` (toggle-only reasoning has no effort). Invalid structure is `400 invalid_startup_config`; a rejected or unconfirmed selection is `422 startup_config_rejected`. Definite standalone rejection rolls back its owned recording and attempts to discard the empty output directory before returning; a recording rollback whose removal cannot be confirmed and transient startup failures retain `standalone_creation_outcome_unknown`, while a failed directory discard is only logged and the definite rejection is still returned. A success-body confirmation failure in the SDK is a protocol error, not an instruction to adopt a recovered session.
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
@@ -565,12 +569,16 @@ Validation and authorization failures are synchronous HTTP errors using `{ "erro
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
 
+`daemon_update` advertises the process-global `GET /daemon/update`,
+`POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
+
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 
 <!-- conditional-serve-features:start -->
 
 | Tag                                 | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hosted_harness_private_v1`         | the private Hosted Harness profile is active; only its authenticated session API is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `require_auth`                      | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every normal API route, including `/health` on loopback binds; channel webhook ingress keeps its independent shared-secret authentication, and Web Shell document and asset routes remain pre-auth.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mcp_workspace_pool`                | the shared MCP transport pool is active. Omitted when `QWEN_SERVE_NO_MCP_POOL=1` disables the pool.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `mcp_pool_restart`                  | the shared MCP transport pool is active; restart responses may include pool-aware multi-entry shapes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -691,6 +699,62 @@ These fields are an observation cache, not a restart lease: even a fresh, fully-
 > ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required on non-loopback binds and when loopback is hardened with `--require-auth`. On an ordinary loopback bind (`127.0.0.0/8`, `localhost`, `::1`, `[::1]`), `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) or hardened loopback, the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the ordinary-loopback exemption.
+
+### `GET /daemon/update`, `POST /daemon/update/prepare`, and `POST /daemon/update/restart`
+
+These authenticated routes manage the daemon's Qwen Code installation,
+independent of the selected workspace. They always use REST, including from SDK
+clients with an ACP session transport. The `daemon_update` capability advertises
+the protocol; availability is determined by the returned state.
+
+GET checks for releases without downloading or activating them. Successful
+checks are cached for 15 minutes and errors for one minute; `?refresh=true`
+requests a fresh check. Concurrent checks share one lookup. The response contains
+`state` (`available`, `up-to-date`, `installing`, `ready`, `restarting`,
+`unavailable`, or `error`), `canInstall`, optional `currentVersion` and
+`latestVersion`, and optional `instructions` and `message`. `currentVersion`
+identifies the running daemon, including after an update is prepared. Unsupported
+installation methods can report `available` with `canInstall: false` and manual
+instructions.
+
+Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
+standalone or managed global npm installation, and operator settings that permit
+`general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
+and development mode report `unavailable`. Only global/system settings apply;
+workspace settings cannot enable installation. The connection must use the
+primary listener and its daemon runtime token, or the explicitly trusted
+loopback deployment without a token. Paired browsers and Local Control connections
+report `unavailable`, because their credentials or listener would not survive
+restart; their update mutations return `403 update_connection_unsupported`.
+
+Both POST routes require the strict mutation gate's daemon operator authority
+and accept no parameters. The server chooses the release, destination, and
+launcher; clients cannot supply a version or command.
+
+- `POST /daemon/update/prepare` starts a background download and returns `202`
+  with `state: "installing"`. It does not change the active installation. Poll GET
+  until the state is `ready`; repeated preparations share the same operation and
+  a prepared update returns `200`. With no automatic update available it returns
+  `409 update_unavailable`.
+- `POST /daemon/update/restart` requires a prepared update, otherwise it returns
+  `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
+  activating the update, gracefully closing the daemon, and replacing the process
+  with the updated launcher. Repeated clicks share one restart. The replacement
+  preserves PID, working directory, CLI options, bound port, and effective daemon
+  token, clears old version pins, and does not reopen a browser. The client polls
+  GET until `currentVersion` changes, then reloads the document at the URL
+  captured when the update was requested. Standalone launcher validation runs before closing
+  services; a failed check leaves the daemon running. Failures after shutdown
+  begins or during process replacement are not guaranteed to recover.
+
+Web Shell automatically checks and prepares available supported updates in the
+background, and displays its version-adjacent update button only when ready.
+Preparation and readiness survive workspace runtime reloads. Ordinary daemon
+shutdown discards the prepared download. Activation failures keep the daemon
+running and report `error`; the next check after the one-minute error cache can
+prepare a new download for retry. Disabling automatic updates removes readiness
+and cleans the download before a restart can begin. Clicking the update button
+explicitly restarts the entire daemon and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
@@ -2535,7 +2599,7 @@ When `/capabilities.features` contains `standalone_sessions_v1`, the daemon expo
 
 | Route                                            | Request                                                                                                                                                                              | Success                                                                                                                                        |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /standalone/sessions`                      | `{ "sessionId": "<UUID>", "modelServiceId"?: string, "approvalMode"?: ApprovalMode }`                                                                                                | `200` with the standalone session, `context: { "kind": "standalone" }`, and its managed projectless output directory. Creation is prompt-less. |
+| `POST /standalone/sessions`                      | `{ "sessionId": "<UUID>", "modelServiceId"?: string, "startupConfig"?: { "modelServiceId": string, "reasoningEffort"?: ReasoningSelection }, "approvalMode"?: ApprovalMode }`        | `200` with the standalone session, `context: { "kind": "standalone" }`, and its managed projectless output directory. Creation is prompt-less. |
 | `GET /standalone/session-options`                | none; any query field is rejected with 400                                                                                                                                           | `200` with `{ v, initialized, current?, approvalMode?, providers, errors? }`; the internal workspace path and ACP-channel state are omitted    |
 | `GET /standalone/sessions`                       | Query: `cursor?`, `size?` (1-100), `archiveState?` (`active` or `archived`)                                                                                                          | `200 { sessions, nextCursor?, liveMergeFailed?, truncated? }`                                                                                  |
 | `GET /standalone/sessions/:id`                   | none                                                                                                                                                                                 | `202 { sessionId, state: "creating" }` while local creation is in flight, otherwise `200` with the exact summary.                              |
@@ -2548,7 +2612,7 @@ When `/capabilities.features` contains `standalone_sessions_v1`, the daemon expo
 | `POST /standalone/sessions/unarchive`            | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                                                  | `200 { unarchived, alreadyActive, notFound, errors }`                                                                                          |
 | `POST /standalone/sessions/delete`               | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                                                  | `200 { removed, notFound, errors, fileCleanupPending }`                                                                                        |
 
-When `POST /standalone/sessions` carries `modelServiceId`, the response includes `modelApplied`: `false` means the spawn-time model switch failed (also surfaced via the `model_switch_failed` session event) and the session is running on the agent default model — the create itself still succeeds so the caller can warn, release, or retry explicitly.
+When `POST /standalone/sessions` carries the legacy `modelServiceId`, the response includes `modelApplied`: `false` means the spawn-time model switch failed (also surfaced via the `model_switch_failed` session event) and the session is running on the agent default model — the create itself still succeeds so the caller can warn, release, or retry explicitly.
 
 Bodies must be JSON objects with no unknown fields. IDs are RFC UUID v1-v5 values; the daemon canonicalizes them to lowercase. Batch requests contain 1-100 strings and are validated and de-duplicated before mutation. A batch failure is reported as `{ sessionId, code, message }` and does not roll back successful operations on other IDs. `fileCleanupPending` means transcript deletion committed but journal-authorized sidecar or managed-directory cleanup must be retried by reconciliation; the session is already logically removed.
 
@@ -2557,6 +2621,8 @@ Only explicit standalone transcripts and the documented top-level legacy compati
 Archive, unarchive, repair, rename, and delete share the same per-session lifecycle admission as load/resume and prompts. Delete uses transcript unlink as its durable commit point and a private journal plus atomic managed-directory staging for crash recovery. Recovery restores the directory when the transcript remains intact and completes cleanup when the transcript is gone; any mismatched identity, conflicting path, foreign owner, or ambiguous transcript returns a structured fail-closed error.
 
 ### `POST /session`
+
+The optional `startupConfig` contract is described under [Capabilities](#capabilities). Unlike legacy best-effort model selection, a rejected startup selection fails creation.
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).
 
@@ -2576,6 +2642,7 @@ Request:
 | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cwd`            | no       | Absolute path matching one registered workspace. If omitted, the route falls back to the primary workspace (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch`. When `features` contains `multi_workspace_sessions`, clients may pass any trusted `workspaces[].cwd`; otherwise only the primary workspace is accepted. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                      |
 | `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
+| `startupConfig`  | no       | `{ modelServiceId: string, reasoningEffort?: ReasoningSelection }`; requires `session_startup_config`, creates a new thread and confirms the requested selection without writing shared defaults. Cannot be mixed with top-level `modelServiceId` or explicit single scope.                                                                                                                                                                                                                                                                                                                                              |
 | `sessionId`      | no       | RFC-variant UUID v1-v5 chosen by the caller. The daemon normalizes it to lowercase and always creates a fresh thread session; it never treats this field as an idempotent attach. Confirm that `caps.features` contains `session_id_override` before sending it because older daemons may ignore unknown fields. `null` is equivalent to omission.                                                                                                                                                                                                                                                                       |
 | `sessionScope`   | no       | Per-request override for session sharing. `'single'` (the daemon-wide default) makes a second same-workspace `POST /session` reuse the existing session (`attached: true`); `'thread'` forces a fresh distinct session every call. Omit to inherit the daemon-wide default. Values outside the enum return `400 { code: 'invalid_session_scope' }`. Old daemons (pre-#4175 PR 5) silently ignore the field — pre-flight `caps.features.session_scope_override` before sending. The daemon-wide default is hardcoded to `'single'` in production today; #4175 may add a `--sessionScope` CLI flag in a follow-up.         |
 | `worktree`       | no       | Create a fresh thread session in a user-named Git worktree. The optional `slug` uses the daemon's worktree-name validation. Pre-flight `session_worktree_persistence_v1`; clients must not infer durable isolation from older worktree-shaped responses. Worktree creation is not an attach operation and cannot be combined with branch creation. The route returns success only after relocation, exclusive ownership-marker creation, sidecar persistence, and a final runtime-generation check.                                                                                                                      |
@@ -2840,12 +2907,10 @@ The route reads only `chats/archive/<id>.jsonl` in the selected trusted workspac
 Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Accepts the same `cwd`, `approvalMode`, `sourceType`, and `sourceId` fields
-as `/load`. `historyPageSize` is not parsed here and is silently ignored.
-`liveReplayMode` and `compactedReplayMode` are parsed and validated — invalid
-values return `400 invalid_live_replay_mode` or `400 invalid_compacted_replay_mode`
-— but only the legacy-standalone compatibility restore forwards them; ordinary
-resume drops them. None of these load-only fields is part
-of the published resume request. Same response shape — `state` mirrors ACP's
+as `/load`. The load-only replay fields `historyPageSize`, `liveReplayMode`,
+and `compactedReplayMode` are not parsed, validated, or forwarded here — they
+are silently ignored, matching the published resume request schema. Same
+response shape — `state` mirrors ACP's
 `ResumeSessionResponse`. Same error envelope, including
 `409 restore_in_progress` (which fires when a `session/load` is in flight;
 `session/resume` racing behind another `session/resume` coalesces).

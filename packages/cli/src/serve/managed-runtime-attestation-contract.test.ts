@@ -640,7 +640,7 @@ describe('Managed Runtime tool contract', () => {
     }
   });
 
-  it('rejects declared tool routes until their handlers land', async () => {
+  it('admits exactly the declared tool routes through the owned-route gate', async () => {
     const app = express();
     for (const route of toolFixtures.routes) {
       app.post(route.path, (_req, res) => {
@@ -665,8 +665,28 @@ describe('Managed Runtime tool contract', () => {
         headers: { 'content-type': 'application/json' },
         body: '{}',
       });
-      expect(response.status).toBe(404);
-      expect(await response.text()).toBe('');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        protocolVersion: 2,
+        state: 'unknown',
+      });
+
+      for (const [method, suffix] of [
+        ['GET', ''],
+        ['POST', '/'],
+        ['POST', '?unexpected=1'],
+      ]) {
+        const rejected = await fetch(`${origin}${route.path}${suffix}`, {
+          method,
+        });
+        expect(rejected.status).toBe(404);
+        expect(await rejected.text()).toBe('');
+      }
     }
+    const unlisted = await fetch(
+      `${origin}/internal/managed-runtime/v2/prepare`,
+      { method: 'POST' },
+    );
+    expect(unlisted.status).toBe(404);
   });
 });

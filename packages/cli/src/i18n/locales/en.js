@@ -2424,6 +2424,10 @@ export default {
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
+  'Estimated usage, including the conversation':
+    'Estimated usage, including the conversation',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'No provider usage yet. These are local estimates, including the conversation.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
   'Context window': 'Context window',
   tokens: 'tokens',

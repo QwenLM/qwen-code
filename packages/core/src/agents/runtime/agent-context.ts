@@ -19,6 +19,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -32,6 +33,7 @@ export interface RuntimeContentGeneratorView {
 }
 
 interface AgentContext {
+  readonly chat?: LlmChat;
   readonly agentId?: string;
   readonly runtimeView?: RuntimeContentGeneratorView;
   /**
@@ -128,6 +130,17 @@ export function getCurrentAgentDisallowedTools():
   | readonly string[]
   | undefined {
   return storage.getStore()?.disallowedTools;
+}
+
+export function runWithAgentChat<T>(
+  chat: LlmChat | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return storage.run({ ...storage.getStore(), chat }, fn);
+}
+
+export function getCurrentAgentChat(): LlmChat | undefined {
+  return storage.getStore()?.chat;
 }
 
 export function getCurrentAgentId(): string | null {

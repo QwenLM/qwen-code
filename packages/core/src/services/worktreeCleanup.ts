@@ -10,9 +10,9 @@ import {
   AGENT_WORKTREE_SLUG_PATTERN,
   GitWorktreeService,
   worktreeBranchForSlug,
+  worktreeHasWork,
 } from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { loadSimpleGit } from '../utils/load-simple-git.js';
 
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
 
@@ -49,7 +49,10 @@ function isEphemeralSlug(slug: string): boolean {
  * Safety guarantees (fail-closed):
  * - Only touches slugs matching {@link EPHEMERAL_WORKTREE_PATTERNS}.
  * - Skips entries newer than {@link STALE_WORKTREE_CUTOFF_MS} (default 30 days).
- * - Skips entries with any uncommitted tracked changes.
+ * - Skips entries with any uncommitted work — tracked, untracked, or
+ *   git-ignored content — via the shared {@link worktreeHasWork}
+ *   predicate the daemon reaper also uses (#12758); only disposable
+ *   build output and the session marker stay exempt.
  * - Skips entries with commits not reachable from the upstream remote.
  * - Any error reading git status / log → skip the entry (don't delete).
  *
@@ -116,7 +119,7 @@ export async function cleanupStaleAgentWorktrees(
     // Run both checks concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      hasTrackedChanges(worktreePath),
+      worktreeHasWork(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) continue;
@@ -153,37 +156,4 @@ export async function cleanupStaleAgentWorktrees(
   return removed;
 }
 
-async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
-  try {
-    const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
-    // `git status --porcelain --untracked-files=no` lists every tracked
-    // change (staged, unstaged, conflicted — `UU` lines) and skips the
-    // untracked-file scan that simple-git's `status()` runs
-    // unconditionally. Untracked files in a long-dead agent worktree
-    // are typically build artifacts, not user work — and the
-    // untracked walk is the slowest part of `git status` on large
-    // repos. The previous implementation manually enumerated
-    // `status.staged/modified/...` which silently missed
-    // `conflicted[]` (mutually exclusive with the others in
-    // simple-git), so a worktree mid-merge looked "clean" and would
-    // be swept.
-    const out = await wtGit.raw([
-      '--no-optional-locks',
-      'status',
-      '--porcelain',
-      '--untracked-files=no',
-    ]);
-    return out.trim().length > 0;
-  } catch (error) {
-    // Fail-closed (preserve worktree) and log so a permission error or
-    // unmounted filesystem leaves a breadcrumb instead of being
-    // indistinguishable from "has real changes".
-    debugLogger.warn(
-      `hasTrackedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
-    );
-    return true;
-  }
-}
-
-export const __test__ = { isEphemeralSlug, hasTrackedChanges };
+export const __test__ = { isEphemeralSlug };
