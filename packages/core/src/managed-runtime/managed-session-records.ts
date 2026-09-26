@@ -5,6 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { parseBranchCheckpointPayload } from '../services/branch-points.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 
@@ -38,6 +40,8 @@ export const MANAGED_SESSION_LIMITS = {
   maxCommitMarkerBytes: 64 * 1024,
   maxTransactionEvents: 256,
   maxTransactionBytes: 8 * 1024 * 1024,
+  defaultReadEvents: 100,
+  maxReadEvents: 256,
 } as const;
 
 export const MANAGED_SESSION_EVENT_KINDS = [
@@ -96,9 +100,29 @@ export const MANAGED_SESSION_DOMAINS = [
   'team_plan',
   'session_message',
   'session_metadata',
+  'file_history',
+  'session_source',
 ] as const;
 
 export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
+
+/**
+ * The domains a caller may actually submit today. The registry above is the
+ * closed v1 name space; recognising a name never means the capability is
+ * implemented or admitted, so submission is gated separately.
+ */
+export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
+  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+
+export function assertManagedSessionDomainEnabled(
+  domain: ManagedSessionDomain,
+): void {
+  if (!MANAGED_SESSION_ENABLED_DOMAINS.includes(domain)) {
+    throw new ManagedSessionRecordError(
+      `domain ${domain} is registered but not enabled for submission.`,
+    );
+  }
+}
 
 export const MANAGED_SESSION_ACTOR_CLASSES = [
   'harness',
@@ -206,7 +230,7 @@ export interface ManagedSessionCommitMarker {
 }
 
 export class ManagedSessionRecordError extends Error {
-  readonly code = 'managed_session_invalid_record';
+  readonly code: string = 'managed_session_invalid_record';
 
   constructor(message: string) {
     super(message);
@@ -457,6 +481,33 @@ export function assertManagedSessionDurableRef(
   };
 }
 
+export function assertManagedBranchRecord(
+  value: unknown,
+  sessionKey: ManagedSessionKey,
+  recordId: string,
+): ChatRecord {
+  const record = object(value, 'branch record');
+  if (
+    record['type'] !== 'system' ||
+    record['subtype'] !== 'branch_checkpoint' ||
+    record['uuid'] !== recordId ||
+    record['sessionId'] !== sessionKey.sessionId ||
+    typeof record['timestamp'] !== 'string' ||
+    !Number.isFinite(Date.parse(record['timestamp'])) ||
+    typeof record['cwd'] !== 'string' ||
+    typeof record['version'] !== 'string' ||
+    (record['parentUuid'] !== null &&
+      (typeof record['parentUuid'] !== 'string' ||
+        record['parentUuid'].length === 0)) ||
+    parseBranchCheckpointPayload(
+      record['systemPayload'] as unknown as ChatRecord['systemPayload'],
+    ) === undefined
+  ) {
+    fail('branch record does not match its committed identity or v1 payload.');
+  }
+  return record as unknown as ChatRecord;
+}
+
 function assertSubject(
   value: ManagedSessionJsonValue | undefined,
   label: string,
@@ -558,7 +609,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         expiresAt: 'timeOrNull',
         installRef: 'refOrNull',
         boundaryRef: 'refOrNull',
+        renewalSeq: 'sequence',
       },
+      optional: ['renewalSeq'],
     },
     'model.attempt': {
       fields: {
@@ -684,7 +737,7 @@ const EVENT_ACTORS: Readonly<
   'wake.requested': ['authority'],
   'activation.changed': ['coordinator'],
   'model.attempt': ['harness'],
-  'message.committed': ['harness', 'authority'],
+  'message.committed': ['harness', 'trusted_entry'],
   'tool.intent': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
@@ -704,7 +757,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'wake.requested': false,
   'activation.changed': false,
   'model.attempt': true,
-  'message.committed': true,
+  'message.committed': false,
   'tool.intent': true,
   'action.changed': false,
   'tool.receipt': false,
@@ -1027,7 +1080,9 @@ export function assertManagedSessionEventActor(
         `action.changed ${state}/${source} must be requested by ${expected}, not ${actor}.`,
       );
     }
-    return;
+  }
+  if (actor === 'harness' && event.subject?.type !== 'activation') {
+    fail(`${event.kind} from the harness requires an activation subject.`);
   }
 }
 
@@ -1223,8 +1278,7 @@ export function parseManagedSessionCommitMarker(
 }
 
 /**
- * Digest over the ordered event identities. It does not cover session keys,
- * timestamps, or payloads and must not be used as an event-content proof.
+ * Digest over the full committed events, including payloads and session scope.
  */
 export function managedSessionEventsDigest(
   events: readonly ManagedSessionEvent[],
@@ -1238,26 +1292,9 @@ export function managedSessionEventsDigest(
     );
   }
   assertJsonValue(events, 'events', new Set<object>(), 0);
-  const identities: ManagedSessionJsonValue[] = [];
-  for (let index = 0; index < events.length; index++) {
-    const event = events[index];
-    identities.push({
-      sequence: assertManagedSessionSequence(
-        event.sequence,
-        `events[${index}].sequence`,
-      ),
-      eventId: assertManagedSessionStableId(
-        event.eventId,
-        `events[${index}].eventId`,
-      ),
-      kind: assertEnum(
-        event.kind,
-        MANAGED_SESSION_EVENT_KINDS,
-        `events[${index}].kind`,
-      ),
-    });
-  }
-  const encoded = canonicalManagedSessionJson(identities);
+  const encoded = canonicalManagedSessionJson(
+    events as unknown as ManagedSessionJsonValue,
+  );
   if (
     Buffer.byteLength(encoded, 'utf8') >
     MANAGED_SESSION_LIMITS.maxTransactionBytes
