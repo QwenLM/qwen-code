@@ -2815,8 +2815,9 @@ export class ChatRecordingService {
   }
 
   /**
-   * Persist the execution engine that owns this session. Strict: the caller
-   * fails session creation rather than continue without a durable owner.
+   * Persist the execution engine that owns this session. A failed write
+   * rejects, so creation fails instead of continuing without a durable owner.
+   * A session without chat recording has no recorder, so nothing is written.
    */
   async recordExecutionEngine(engine: SessionExecutionEngine): Promise<void> {
     const systemPayload: SessionExecutionEnginePayload = { version: 1, engine };

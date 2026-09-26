@@ -798,6 +798,23 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
   return caps.workspaceCwd;
 }
 
+/** Process-global update state from `GET /daemon/update`. */
+export interface DaemonUpdateStatus {
+  state:
+    | 'available'
+    | 'up-to-date'
+    | 'installing'
+    | 'ready'
+    | 'restarting'
+    | 'unavailable'
+    | 'error';
+  currentVersion?: string;
+  latestVersion?: string;
+  canInstall: boolean;
+  instructions?: string[];
+  message?: string;
+}
+
 /** Detail level accepted by `GET /daemon/status?detail=`. */
 export type DaemonStatusReportDetail = 'summary' | 'full';
 

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -28,6 +29,20 @@ public interface RuntimeTransport {
                 "runtime_broker_attestation_unavailable",
                 "Runtime transport does not support attestation.", false));
         return failed;
+    }
+
+    /**
+     * Installs directory context only; does not activate a Session. The
+     * binding must be READY and be the one the Session was acquired on, at
+     * the same generation, and hold the Session's placement: its scope and,
+     * under session isolation, its Harness Session.
+     */
+    default CompletionStage<Map<String, Object>> installContext(
+            RuntimeBindingRecord runtime, RuntimeSessionRecord session,
+            String operationId, ContextBinding binding) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_runtime_incompatible",
+                "Runtime transport does not support context installation.", false));
     }
 
     CompletionStage<Void> acquire(RuntimeLease lease,
