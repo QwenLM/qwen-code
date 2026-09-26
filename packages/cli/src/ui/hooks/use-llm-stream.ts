@@ -3212,6 +3212,16 @@ export const useLlmStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          // The scheduler may complete a fast tool before this stream's caller
+          // regains control. Seal streamed assistant text first so the tool
+          // group cannot enter static history ahead of it.
+          if (pendingHistoryItemRef.current) {
+            commitItemInOrder(
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
+            setPendingHistoryItem(null);
+          }
           if (toolContinuationOwner) {
             for (const request of executableToolCallRequests) {
               continuationOwnersByToolCallIdRef.current.set(
@@ -6039,10 +6049,10 @@ export const useLlmStream = (
         // Reasoning renders above the streaming answer.
         pendingThoughtItem,
         ...pendingAssistantItems,
+        pendingToolCallGroupDisplay,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
-        pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
       pendingThoughtItem,

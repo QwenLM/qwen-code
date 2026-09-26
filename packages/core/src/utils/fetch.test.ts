@@ -6,9 +6,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  CONNECTION_LEVEL_ERROR_CODES,
   FetchError,
   fetchWithPolicy,
   formatFetchErrorForUser,
+  isConnectionLevelError,
   isPermittedRedirect,
   isPrivateHost,
 } from './fetch.js';
@@ -83,6 +85,73 @@ describe('formatFetchErrorForUser', () => {
 
   it('does not include troubleshooting for non-fetch errors', () => {
     expect(formatFetchErrorForUser(new Error('boom'))).toBe('boom');
+  });
+});
+
+describe('isConnectionLevelError', () => {
+  // The exact expected membership of CONNECTION_LEVEL_ERROR_CODES (fetch.ts).
+  // One list drives both the per-code cases below and the membership pin, so
+  // dropping a member reddens a named case and adding one reddens the pin.
+  const EXPECTED_CONNECTION_LEVEL_CODES = [
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EPROTO',
+    'ERR_SSL_WRONG_VERSION_NUMBER',
+    'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'CERT_HAS_EXPIRED',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+  ];
+
+  it('pins the exact membership of CONNECTION_LEVEL_ERROR_CODES', () => {
+    // Widening direction: every member is an https→http downgrade trigger in
+    // tools/web-fetch.ts, so an addition — a mid-transfer code, or a TLS code
+    // added to TLS_ERROR_CODES only to widen the shouldShowTlsHint message —
+    // must be a deliberate change to this list, not a silent one.
+    expect([...CONNECTION_LEVEL_ERROR_CODES].sort()).toEqual(
+      [...EXPECTED_CONNECTION_LEVEL_CODES].sort(),
+    );
+  });
+
+  it.each(EXPECTED_CONNECTION_LEVEL_CODES)(
+    'treats %s as connection-level (https upgrade may fall back to http)',
+    (code) => {
+      expect(
+        isConnectionLevelError(new FetchError(`connect ${code}`, code)),
+      ).toBe(true);
+    },
+  );
+
+  // Two distinct exclusion classes, not one:
+  // - Name resolution (ENOTFOUND, EAI_AGAIN) fails before any socket exists.
+  //   The upgrade changes only the scheme, so the http fallback would
+  //   re-resolve the same hostname and cannot succeed — a guaranteed-fail
+  //   cleartext retry on every unresolvable host. EAI_AGAIN also already gets
+  //   one retry inside fetchWithPolicy (RETRYABLE_ERROR_CODES).
+  // - Mid-transfer failures on an already-established, healthy connection: a
+  //   fallback would re-fetch a stalled-but-live https response over
+  //   cleartext, doubling the worst-case wait for an ambiguous gain (same
+  //   rationale as the ETIMEDOUT exclusion in fetch.ts).
+  it.each([
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT',
+    'EPIPE',
+  ])('does not treat %s as connection-level', (code) => {
+    expect(isConnectionLevelError(new FetchError(code, code))).toBe(false);
+  });
+
+  it('returns false for non-FetchError values and code-less FetchErrors', () => {
+    expect(isConnectionLevelError(new Error('boom'))).toBe(false);
+    expect(isConnectionLevelError(new FetchError('no code'))).toBe(false);
   });
 });
 
