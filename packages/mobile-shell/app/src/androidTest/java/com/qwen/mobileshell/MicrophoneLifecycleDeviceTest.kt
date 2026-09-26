@@ -1,10 +1,15 @@
 package com.qwen.mobileshell
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.webkit.PermissionRequest
 import android.webkit.WebView
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.TextView
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -42,6 +47,16 @@ class MicrophoneLifecycleDeviceTest {
         scenario.onActivity { activity ->
             assertNull(field(activity, "webView"))
             assertNull(view.parent)
+            val nodes = descendants(activity.window.decorView).toList()
+            assertTrue("Stopped audio connection explains why reconnect is required", nodes.any {
+                it is TextView && it.text.toString() == activity.getString(R.string.microphone_closed)
+            })
+            assertTrue("Stopped audio connection offers an explicit reconnect button", nodes.any {
+                it is Button && it.isEnabled && it.text.toString() == activity.getString(R.string.retry)
+            })
+            assertTrue("Reconnect explanation is shown", nodes.any {
+                it is TextView && it.text.toString() == activity.getString(R.string.microphone_reconnect)
+            })
         }
         scenario.close()
     }
@@ -79,9 +94,17 @@ class MicrophoneLifecycleDeviceTest {
 
     private fun grantMicrophonePermission() {
         val command = "pm grant ${instrumentation.targetContext.packageName} ${Manifest.permission.RECORD_AUDIO}"
-        ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command)).use {
-            it.readBytes()
+        val output = ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command)).use {
+            it.bufferedReader().readText()
         }
+        instrumentation.waitForIdleSync()
+        assertEquals("Microphone grant failed: $output", PackageManager.PERMISSION_GRANTED,
+            instrumentation.targetContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO))
+    }
+
+    private fun descendants(view: View): Sequence<View> = sequence {
+        yield(view)
+        if (view is ViewGroup) for (index in 0 until view.childCount) yieldAll(descendants(view.getChildAt(index)))
     }
 
     private fun attach(activity: MainActivity): WebView {

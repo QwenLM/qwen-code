@@ -81,6 +81,20 @@ class MicrophoneDeviceTest {
         assertFalse(controller.awaitingResult)
     }
 
+    @Test fun repeatedConsentDoesNotLaunchAnotherSystemRequest() {
+        val request = WebRequest()
+        assertTrue(begin(request))
+        controller.decide(request, true)
+        controller.decide(request, true)
+        assertTrue(controller.awaitingResult)
+        assertEquals(1, launches)
+        assertEquals(0, grants)
+        osPermission = true
+        controller.result(true)
+        assertEquals(1, request.grants.size)
+        assertFalse(controller.awaitingResult)
+    }
+
     @Test fun wrongOriginsInsecureOriginsAndResourcesAreDenied() {
         for (request in listOf(
             WebRequest("https://other.example/"), WebRequest("https://daemon.example:444/"),
@@ -94,8 +108,10 @@ class MicrophoneDeviceTest {
         }
         assertFalse(begin(WebRequest("http://daemon.example/"), "http://daemon.example/"))
         assertEquals(0, launches)
-        assertTrue(begin(WebRequest("http://127.0.0.1:49441/"), "http://127.0.0.1:49441/"))
-        controller.cancel()
+        for (origin in listOf("http://127.0.0.1:49441/", "http://localhost:49441/", "http://[::1]:49441/")) {
+            assertTrue("Loopback origin should reach consent: $origin", begin(WebRequest(origin), origin))
+            controller.cancel()
+        }
     }
 
     @Test fun staleDocumentIsCheckedAtEntryConsentAndOsResult() {
