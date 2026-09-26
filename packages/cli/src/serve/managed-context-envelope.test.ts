@@ -108,13 +108,24 @@ const BEYOND_SCHEMA = {
     'generation-over-int64',
     'two-byte-mount-root-over-4096-bytes',
   ],
-  ready: ['other-epoch', 'other-incarnation', 'other-instance', 'other-lease'],
+  ready: [
+    'incarnation-other-case',
+    'instance-other-case',
+    'lease-other-case',
+    'other-epoch',
+    'other-incarnation',
+    'other-instance',
+    'other-lease',
+  ],
   attestation: [
     'astral-mount-root-over-4096-bytes',
     'generation-over-int64',
     'two-byte-mount-root-over-4096-bytes',
   ],
   installation: [
+    'after-a-digest-refusal-keeps-the-operation#1',
+    'after-a-digest-refusal-keeps-the-session#1',
+    'after-a-digest-refusal-replays-the-receipt#1',
     'astral-session-over-512-units',
     'binding-directory-dot-segment',
     'binding-directory-parent-inside',
@@ -124,10 +135,13 @@ const BEYOND_SCHEMA = {
     'binding-parent-segment',
     'binding-revision-over-int64',
     'binding-trailing-slash',
+    'checks-the-digest-before-an-operation-reused-by-another-session#1',
     'checks-the-digest-before-the-workspace',
     'digest-of-another-binding',
+    'keeps-no-session-after-a-digest-refusal#0',
     'keeps-no-state-after-a-binding-rule-refusal#0',
     'keeps-no-state-after-a-digest-refusal#0',
+    'keeps-no-state-after-a-digest-refusal-for-another-session#0',
   ],
 };
 /** The keywords of a closed record definition, and no others. */
@@ -214,12 +228,14 @@ function rawDigest(binding: Record<string, unknown>): string | undefined {
 }
 
 /**
- * The case an order case derives from. It differs from its base case in one
- * valid field only, so the schema judges both alike.
+ * The case an order case derives from: the malformed step of an
+ * after-an-installation sequence, or an other-identity or other-workspace
+ * variant. Every field in which it differs from its base case is itself
+ * valid, so the schema judges both alike.
  */
 function baseCase(id: string): string {
   return id.replace(
-    /-(?:after-an-installation#\d+|with-other-(?:identity|workspace))$/,
+    /-(?:after-an-installation#1|with-other-(?:identity|workspace))$/,
     '',
   );
 }
