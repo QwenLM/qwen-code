@@ -16,6 +16,8 @@ On Windows use `gradlew.bat`. The committed wrapper pins Gradle 8.2.1 and verifi
 
 Open the app and choose **Add connection**. Enter a display name, a daemon origin and its bearer token, then Save and Connect. The native Connections button returns to the profile list. Profiles can be renamed, edited and deleted. Editing an origin requires entering its token again or explicitly deselecting **Keep the saved credential**. A blank token without Keep means no saved credential. Deleting a local profile does not revoke a daemon credential.
 
+Native profile actions include the connection name in their accessibility descriptions. Editor inputs are associated with their visible labels, and validation/storage errors expose polite live-region semantics. The storage recovery page scrolls when enlarged text needs more room. See the [native profile accessibility design](../../docs/design/mobile-profile-accessibility.md) for scope and acceptance requirements.
+
 Native connection data is encrypted with an Android Keystore AES-GCM key and atomically saved in the app's no-backup directory. Token fields do not reveal a previously saved token. A missing key or corrupt vault shows Retry/Reset instead of connecting with different credentials. Reset deletes saved native connections after confirmation; they must then be entered again.
 
 Existing development installations are migrated automatically from the old private `shared_prefs/qwen_profiles.xml` format:
@@ -59,6 +61,6 @@ retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#securit
 
 ## Limitations
 
-This is not a released production mobile client. File selection, microphone permission bridging, downloads and new-window handling still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
+This is not a released production mobile client. File selection, microphone permission bridging, downloads and new-window handling still need native integrations. Full Web Shell, font-scale, pinch-zoom and TalkBack acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
 
 JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.
