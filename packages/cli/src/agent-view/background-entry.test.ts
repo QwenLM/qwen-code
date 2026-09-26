@@ -169,67 +169,68 @@ describe('readBackgroundPrompt', () => {
     );
   });
 
-  it('reads the prompt from the attached --bg=<prompt> form', () => {
-    // The CLI's other prompt flags are used as `--prompt=<value>`, so the
-    // attached form must reach the same reader instead of dying in the
-    // strict parser on an unregistered `bg`.
+  it('leaves every attached --bg=<value> spelling to the parser', () => {
+    // `bg` is declared `type: 'boolean'`, and yargs-parser reads an
+    // attached value as that boolean rather than as a prompt: measured on
+    // the installed 21.1.1, `--bg=false`, `--bg=` and `--bg=false\r` all
+    // give `bg: false`, and `--bg=audit` gives `bg: false` with `audit` as
+    // the positional. Intercepting attached values here is what made the
+    // two spellings of one wrapper variable disagree, and what let a
+    // padded or empty OFF value dispatch a real agent and certify it with
+    // exit 0. So none of them is a background launch: the prompt has one
+    // spelling, the positional one, and a dash-led prompt goes after `--`.
     expect(
       readBackgroundPrompt([`${BACKGROUND_FLAG}=audit the release`]),
-    ).toEqual({ prompt: 'audit the release' });
-    // The attached value is data even when it starts with a dash.
-    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=-repro`])).toEqual({
-      prompt: '-repro',
-    });
-    // Trailing positionals still join behind the attached prompt.
-    expect(
-      readBackgroundPrompt([`${BACKGROUND_FLAG}=audit`, 'the', 'release']),
-    ).toEqual({ prompt: 'audit the release' });
-  });
-
-  it('reads the attached boolean literals as the flag, not as prompt text', () => {
-    // `bg` is declared `type: 'boolean'` in the help surface, so
-    // `--bg=false` / `--bg=0` is how a wrapper (`qwen --bg=$ENABLED
-    // "$TASK"` with ENABLED=false) turns the launch OFF. Reading the
-    // attached value as prompt data dispatched a real agent on the prompt
-    // `false audit the release` — supervisor started, session recorded,
-    // worker spawned, quota burned — and certified it with exit 0.
+    ).toBeUndefined();
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=-repro`])).toBeUndefined();
     expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=false`])).toBeUndefined();
     expect(
-      readBackgroundPrompt([`${BACKGROUND_FLAG}=0`, 'audit', 'the', 'release']),
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=false\r`, 'audit the release']),
     ).toBeUndefined();
-    // The affirmative spellings mean the bare flag, so they contribute no
-    // prompt word of their own.
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=`, 'audit the release']),
+    ).toBeUndefined();
     expect(
       readBackgroundPrompt([`${BACKGROUND_FLAG}=true`, 'audit the release']),
+    ).toBeUndefined();
+  });
+
+  it('reads the space-separated boolean words as the flag value, like yargs', () => {
+    // yargs-parser consumes exactly the lowercase `false`/`true` after a
+    // boolean flag: measured on the installed 21.1.1, `--bg false` is
+    // `bg: false` with NO positional, while `--bg FALSE`, `--bg 0` and
+    // `--bg off` leave `bg: true` and put the word in `_`. The intercept
+    // runs before the parser, so it has to agree. Reading every non-dash
+    // word as prompt data made the unquoted-variable wrapper form
+    // `qwen --bg $ENABLED "$TASK"` with ENABLED=false dispatch a real
+    // agent on the prompt `false audit the release` — supervisor started,
+    // session recorded, worker spawned, quota burned — and certify it with
+    // exit 0, where the parser itself would have started no session.
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, 'false', 'audit the release']),
+    ).toBeUndefined();
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, 'false'])).toBeUndefined();
+    // `true` means the bare flag, so it contributes no prompt word.
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, 'true', 'audit the release']),
     ).toEqual({ prompt: 'audit the release' });
-    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=1`, 'audit'])).toEqual({
-      prompt: 'audit',
+    // Every other word stays prompt data, exactly as yargs leaves it in
+    // `_` — the reader is not allowed to be cleverer than the parser, or
+    // the two disagree about what the operator asked for.
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, 'FALSE', 'audit the release']),
+    ).toEqual({ prompt: 'FALSE audit the release' });
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, '0', 'audit the release']),
+    ).toEqual({ prompt: '0 audit the release' });
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, 'off', 'audit'])).toEqual({
+      prompt: 'off audit',
     });
-    // Only the exact boolean literals are special: every other attached
-    // value stays prompt data, dash-led included.
-    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=-repro`])).toEqual({
+    // A dash-led prompt keeps its spelling through `--`, which the reader
+    // collects verbatim now that the attached form is the parser's.
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, '--', '-repro'])).toEqual({
       prompt: '-repro',
     });
-    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=falsey`])).toEqual({
-      prompt: 'falsey',
-    });
-    // The match is case-insensitive and widened to the off/on short forms
-    // a real wrapper emits (`--bg=False`, `--bg=off`): the `type:
-    // 'boolean'` declaration folds every non-`true` attached value to
-    // false, so a wrapper spelling that reaches argv as `False`/`off`/`no`
-    // must read as OFF — reading it as prompt data dispatched an agent on
-    // `False audit the release` and certified it with exit 0. The
-    // lowercase stays on the set lookup only: the returned prompt word is
-    // verbatim, so `--bg=-Repro` still round-trips.
-    expect(
-      readBackgroundPrompt([`${BACKGROUND_FLAG}=False`, 'audit the release']),
-    ).toBeUndefined();
-    expect(
-      readBackgroundPrompt([`${BACKGROUND_FLAG}=off`, 'audit the release']),
-    ).toBeUndefined();
-    expect(
-      readBackgroundPrompt([`${BACKGROUND_FLAG}=True`, 'audit the release']),
-    ).toEqual({ prompt: 'audit the release' });
   });
 
   it('declines any other flag and names it, because --bg forwards nothing', () => {
@@ -443,160 +444,43 @@ describe('runBackgroundDispatch', () => {
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 
-  it('reports a supervisor that died after recording the session as in flight, not failed', async () => {
-    // The dispatch handler records the session, spawns the PTY host and
-    // persists its pids BEFORE the ready wait, and rolls the record back
-    // only if it survives to do so. A supervisor killed inside that window
-    // — an OOM kill, CI teardown, a logout — leaves the client with the
-    // socket's 'closed' error (never 'timeout') beside a persisted
-    // `starting` session, `ownership: 'managed'` and a live detached host.
-    // Certifying exit 1 "Could not start" contradicts the product's own
-    // store and has a wrapper honoring this entry's contract retry, which
-    // starts a SECOND agent on the same prompt.
+  it('reports a supervisor that died mid-dispatch as a failure, not in flight', async () => {
+    // A supervisor killed between the store write and its reply leaves the
+    // client with the socket's 'closed' error beside a persisted `starting`
+    // session and possibly a live detached host. This used to certify that
+    // as exit 2 "may still be starting" by scanning the store for a managed
+    // row recorded since the dispatch began — but the store cannot say
+    // WHICH launch a row belongs to: the failure envelope carries only a
+    // code and a message, so the client holds no session id to match, and
+    // ownership + projectCwd + createdAt are equally satisfied by a
+    // concurrent launch in the same directory. Two rounds of adding
+    // conjuncts (a terminal-state exclusion, then a worker-pid term)
+    // narrowed that without closing it.
+    //
+    // The false positive was the worse error: it told a wrapper "do not
+    // retry" about a launch that definitively failed, so the task was
+    // silently never run, where a retry that starts a second agent is at
+    // least visible in `qwen sessions ps`. So every non-timeout rejection
+    // reports failure, whatever the store happens to hold.
     supervisorDispatch.mockRejectedValue(supervisorClosedError());
     listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(2);
-    expect(stderr.join('')).toContain('may still be starting');
-    expect(stderr.join('')).toContain('qwen sessions ps');
-    expect(stderr.join('')).not.toContain(
-      'Could not start a background session',
-    );
-    // The pid is read for the MATCHED row, not for whatever session this
-    // launch happened to be told about — the dispatch failed, so it was
-    // never told one.
-    expect(readAgentViewWorker).toHaveBeenCalledWith('sess-recorded');
-  });
-
-  it('reports a recorded session that never spawned a PTY host as a failure, not in flight', async () => {
-    // The session-state record is byte-identical before and after the
-    // spawn: the handler writes it first, and the pids go into the WORKER
-    // record afterwards. So a recorded row on its own certified a launch
-    // that spawned nothing — a supervisor killed between the store write
-    // and the spawn, or one that threw while writing the launch record,
-    // which happens OUTSIDE the try that would roll the row back. The
-    // wrapper was told exit 2 means do not retry, so the task was lost
-    // outright while `qwen sessions ps` showed the orphan as `starting`
-    // with recoverability `blocked` forever. The cost the guard exists to
-    // avoid — a retry starting a second agent — is impossible when no host
-    // was ever spawned, so a pid-less worker record is the retryable
-    // exit 1. This is the pid-less shape dispatchAgentViewSession itself
-    // writes, so the term must read the pid FIELDS, not the record's
-    // existence.
-    supervisorDispatch.mockRejectedValue(supervisorClosedError());
-    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
-    readAgentViewWorker.mockResolvedValue({ sessionId: 'sess-recorded' });
+    readAgentViewWorker.mockResolvedValue({
+      sessionId: 'sess-recorded',
+      hostPid: 4242,
+      workerPid: 4343,
+    });
 
     const code = await runBackgroundDispatch('audit', '/w/app');
 
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('Could not start a background session');
     expect(stderr.join('')).not.toContain('may still be starting');
-  });
-
-  it('reports a recorded session with no worker record as a failure, not in flight', async () => {
-    // No worker record at all: nothing was spawned, nothing to orphan, so
-    // a retry cannot start a second agent.
-    supervisorDispatch.mockRejectedValue(supervisorClosedError());
-    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
-    readAgentViewWorker.mockResolvedValue(undefined);
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(1);
-    expect(stderr.join('')).toContain('Could not start a background session');
-    expect(stderr.join('')).not.toContain('may still be starting');
-  });
-
-  it('keeps a worker pid on one row enough to certify the launch in flight', async () => {
-    // The scan is over rows, so a pid-less sibling must not mask the row
-    // that did spawn: only one matching row with a host is enough to make
-    // a retry dangerous.
-    supervisorDispatch.mockRejectedValue(supervisorClosedError());
-    listAgentViewSessionStates.mockResolvedValue([
-      recordedSession({ sessionId: 'sess-pidless' }),
-      recordedSession({ sessionId: 'sess-spawned' }),
-    ]);
-    readAgentViewWorker.mockImplementation(async (sessionId: string) =>
-      sessionId === 'sess-spawned'
-        ? { sessionId, hostPid: 424242 }
-        : { sessionId },
-    );
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(2);
-    expect(stderr.join('')).toContain('may still be starting');
-  });
-
-  it('reports a session the supervisor terminally failed as a failure, not in flight', async () => {
-    // The supervisor patches a post-record failure to `sessionState:
-    // 'failed'` WITHOUT touching ownership, projectCwd or createdAt
-    // (markFailedSession), so the recorded-since predicate matched it and
-    // certified a definitively failed launch "may still be starting" —
-    // exit 2, the do-not-retry code — while `qwen sessions ps` listed it
-    // `failed`. Terminal states must read as NOT recorded, so the truthful
-    // exit 1 stands.
-    const internalError = new Error(
-      'Agent View worker did not report ready before timeout.',
-    ) as Error & { code: string };
-    internalError.code = 'internal_error';
-    supervisorDispatch.mockRejectedValue(internalError);
-    listAgentViewSessionStates.mockResolvedValue([
-      recordedSession({ sessionState: 'failed' }),
-    ]);
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(1);
-    expect(stderr.join('')).toContain('Could not start a background session');
-    expect(stderr.join('')).not.toContain('may still be starting');
-  });
-
-  it('keeps a dispatch rejection the store does not date to this launch a failure', async () => {
-    // The positive signal is narrow: a MANAGED session for THIS cwd
-    // recorded AT OR AFTER the dispatch began. None of these rows is that
-    // — an older `starting` session (an earlier launch), a fresh session in
-    // another directory (a concurrent launch), a fresh unmanaged one — so a
-    // genuine failure must keep its exit 1 and its reason. Widening the
-    // guard to every dispatch rejection would turn the pre-record
-    // rejections (an oversize prompt, an empty one) into do-not-retry
-    // in-flight reports.
-    supervisorDispatch.mockRejectedValue(supervisorClosedError());
-    listAgentViewSessionStates.mockResolvedValue([
-      recordedSession({
-        createdAt: new Date(Date.now() - 60_000).toISOString(),
-      }),
-      // Resolved like the default so this row stays a genuine cwd MISMATCH
-      // rather than a malformed path on every platform.
-      recordedSession({ projectCwd: path.resolve('/w/other') }),
-      recordedSession({ ownership: 'unmanaged' }),
-    ]);
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(1);
-    expect(stderr.join('')).toBe(
-      'Could not start a background session: Agent View supervisor closed before sending a response.\n',
-    );
-  });
-
-  it('keeps a supervisor that never came up a failure even with a fresh session in the store', async () => {
-    // The widened guard is scoped to the dispatch RPC: this launch never
-    // reached it, so it recorded nothing, and a concurrent launch's fresh
-    // session must not certify it as in flight.
-    ensureAgentViewSupervisor.mockRejectedValue(
-      new Error('ECONNREFUSED: no supervisor socket'),
-    );
-    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
-
-    const code = await runBackgroundDispatch('audit', '/w/app');
-
-    expect(code).toBe(1);
-    expect(supervisorDispatch).not.toHaveBeenCalled();
-    expect(stderr.join('')).toContain('Could not start a background session');
+    // The store is not consulted at all now. A fresh, non-terminal,
+    // pid-bearing row for this cwd is exactly the shape that used to
+    // certify the launch in flight, so pinning the absence of the read
+    // pins the removal rather than one of its outcomes.
+    expect(listAgentViewSessionStates).not.toHaveBeenCalled();
+    expect(readAgentViewWorker).not.toHaveBeenCalled();
   });
 
   it('reports an error-like rejection reason instead of [object Object]', async () => {

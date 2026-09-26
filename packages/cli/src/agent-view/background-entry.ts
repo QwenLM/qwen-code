@@ -28,8 +28,6 @@
  * nothing and cost all of it.
  */
 
-import * as path from 'node:path';
-
 import { getErrorMessage } from '../utils/errors.js';
 import {
   ignoreBrokenPipe,
@@ -37,8 +35,10 @@ import {
   writeStdoutLineSafe,
 } from '../utils/stdioHelpers.js';
 import {
-  backgroundFlagPromptWord,
-  isBackgroundFlagToken,
+  BACKGROUND_FLAG,
+  BACKGROUND_FLAG_ATTACHED_PREFIX,
+  BACKGROUND_FLAG_OFF_WORD,
+  BACKGROUND_FLAG_ON_WORD,
 } from './entry-flags.js';
 
 /**
@@ -69,47 +69,59 @@ export type BackgroundPromptRead =
  * The background launch a raw argv asks for, or undefined when it is not
  * one.
  *
- * `--bg` is a boolean and takes its prompt where the default command
- * takes it — as the trailing positional query — so `qwen --bg "audit the
+ * `--bg` is a boolean and takes its prompt where the default command takes
+ * it — as the trailing positional query — so `qwen --bg "audit the
  * release"` reads like the interactive form. Tokens after `--` are the
- * user's own data: they are never scanned for flags — a `--bg` passed as
- * a prompt word declines — but they are collected as prompt words,
- * matching yargs' positional-after-`--` semantics. That collection is the
- * only way to express a prompt that starts with `-`.
+ * user's own data: they are never scanned for flags, but they are
+ * collected as prompt words, matching yargs' positional-after-`--`
+ * semantics. That collection is how a prompt that starts with `-` is
+ * spelled (`qwen --bg -- -repro`).
  *
- * Any other flag before `--` declines too, named: `--bg` forwards nothing
- * to the session (the worker argv carries only the session id and the
- * prompt), so silently dropping the flag would run the session without
- * the behavior it asks for — and a hand-rolled scan of which flags take
- * values misreads the value slots of the ones it cannot model as prompt
- * words. A flag added later cannot silently start leaking into prompts.
+ * Any other flag before `--` declines, named: `--bg` forwards nothing to
+ * the session (the worker argv carries only the session id and the
+ * prompt), so silently dropping the flag would run the session without the
+ * behavior it asks for — and a hand-rolled scan of which flags take values
+ * misreads the value slots of the ones it cannot model as prompt words. A
+ * flag added later cannot silently start leaking into prompts.
  *
- * The attached `--bg=<prompt>` spelling reads like the CLI's other prompt
- * flags (`--prompt=<value>`); its value travels inside the token and is
- * prompt data even when it starts with a dash. The boolean literals the
- * flag's own `type: 'boolean'` declaration advertises are the exception:
- * `--bg=false` / `--bg=0` turn the launch off — this is not one, so the
- * argv falls through to the parser — and `--bg=true` / `--bg=1` mean the
- * bare flag, contributing no prompt word. Reading them as prompt data
- * dispatched a real agent on the prompt `false audit the release` for a
- * wrapper's `qwen --bg=$ENABLED "$TASK"` with ENABLED=false, and
- * certified it with exit 0.
+ * Only the bare token launches. An attached `--bg=<value>` is left to the
+ * parser, because `bg` is declared `type: 'boolean'` and yargs reads every
+ * attached spelling as a boolean rather than as a prompt: `--bg=false`,
+ * `--bg=` and `--bg=false\r` are all OFF, and so is `--bg=audit` — which
+ * the parser then runs as an ordinary positional launch. Reading attached
+ * values here instead is what made the two spellings of one wrapper
+ * variable disagree, and what let a padded or empty OFF value dispatch a
+ * real agent and certify it with exit 0.
  */
 export function readBackgroundPrompt(
   rawArgv: readonly string[],
 ): BackgroundPromptRead | undefined {
   const separator = rawArgv.indexOf('--');
   const argv = separator === -1 ? rawArgv : rawArgv.slice(0, separator);
-  if (!argv.some(isBackgroundFlagToken)) {
+  if (
+    !argv.includes(BACKGROUND_FLAG) ||
+    argv.some((token) => token.startsWith(BACKGROUND_FLAG_ATTACHED_PREFIX))
+  ) {
     return undefined;
   }
 
   const words: string[] = [];
-  for (const token of argv) {
-    if (isBackgroundFlagToken(token)) {
-      const attached = backgroundFlagPromptWord(token);
-      if (attached !== undefined) {
-        words.push(attached);
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === BACKGROUND_FLAG) {
+      // yargs-parser consumes exactly `false`/`true` as a boolean flag's
+      // space-separated value, and the intercept runs before the parser,
+      // so it has to consume them the same way. `false` switches the
+      // launch off and the whole argv belongs to the parser; `true` means
+      // the bare flag and contributes no prompt word. Any other word —
+      // `FALSE`, `0`, `off` included, exactly as yargs treats them — stays
+      // prompt data.
+      const value = argv[i + 1];
+      if (value === BACKGROUND_FLAG_OFF_WORD) {
+        return undefined;
+      }
+      if (value === BACKGROUND_FLAG_ON_WORD) {
+        i++;
       }
       continue;
     }
@@ -125,84 +137,6 @@ export function readBackgroundPrompt(
     words.push(...rawArgv.slice(separator + 1));
   }
   return { prompt: words.join(' ').trim() };
-}
-
-// The session states a supervisor writes that mean the launch is already
-// over. A row the supervisor terminally patched to one of these still
-// keeps its `managed` ownership, its `projectCwd` and its `createdAt`, so
-// the recorded-since predicate below would otherwise match it and certify
-// a definitively failed launch as "may still be starting".
-const TERMINAL_SESSION_STATES = new Set(['failed', 'stopped', 'completed']);
-
-/**
- * True when the store holds a managed session for `cwd` recorded at or
- * after `since` whose PTY host was actually spawned — the positive "the
- * supervisor already wrote the record and launched something" signal that
- * a dispatch rejection cannot carry: the response envelope has only a code
- * and a message, and a supervisor that dies mid-dispatch sends nothing at
- * all, so the client settles from the socket's `end` with `code:
- * 'closed'`.
- *
- * The dispatch handler records the session, spawns its PTY host and
- * persists the pids BEFORE the ready wait — a window as long as the
- * worker takes to come up — and rolls the record back only if it survives
- * to do so. Exit 1 "Could not start" beside a persisted `starting`
- * session and a live detached host is a contradiction a wrapper resolves
- * by retrying, which starts a SECOND agent on the same prompt.
- *
- * Terminal states are excluded: the supervisor itself patches a row it
- * terminally failed to `failed`/`exited` (and `stopped`/`completed` are
- * equally done) without touching `ownership`, `projectCwd` or `createdAt`,
- * so a definitively failed launch would otherwise satisfy the predicate
- * and be certified "may still be starting" — exit 2, the do-not-retry
- * code — while `qwen sessions ps` lists it `failed`.
- *
- * The pid term is the other half of the same exclusion, and it is what
- * makes the certification evidence rather than a coincidence of directory
- * and clock. A recorded row alone proves nothing was started: the handler
- * writes the session-state record before any host exists, and that record
- * is byte-identical pre- and post-spawn because the pids go into the
- * WORKER record right after the spawn and before any further store I/O —
- * a crash before the ready wait must not leave an unsignalable orphan
- * host holding the deterministic session socket. So the term keys on the
- * pid fields themselves: never on readiness, never on a terminal-adjacent
- * state, and never on the worker record's mere existence, which the
- * dispatch path already creates pid-less. Without it a launch that never
- * spawned anything was certified in flight, the wrapper honored
- * do-not-retry, and the task was lost outright while `qwen sessions ps`
- * presented the orphan as `starting` forever — the cost the guard exists
- * to avoid (a retry starting a second agent) is impossible when no host
- * was spawned.
- */
-async function sessionRecordedSince(
-  since: number,
-  cwd: string,
-): Promise<boolean> {
-  try {
-    const { listAgentViewSessionStates, readAgentViewWorker } = await import(
-      './supervisor-store.js'
-    );
-    const resolvedCwd = path.resolve(cwd);
-    for (const state of await listAgentViewSessionStates()) {
-      if (
-        state.ownership !== 'managed' ||
-        TERMINAL_SESSION_STATES.has(state.sessionState) ||
-        state.projectCwd !== resolvedCwd ||
-        Date.parse(state.createdAt) < since
-      ) {
-        continue;
-      }
-      const worker = await readAgentViewWorker(state.sessionId);
-      if (worker?.hostPid !== undefined || worker?.workerPid !== undefined) {
-        return true;
-      }
-    }
-    return false;
-  } catch {
-    // An unreadable store proves nothing about the launch; the failure
-    // report stands.
-    return false;
-  }
 }
 
 /**
@@ -240,17 +174,15 @@ export async function runBackgroundDispatch(
 
   const { ensureAgentViewSupervisor } = await import('./supervisor-runner.js');
 
-  const dispatchStartedAt = Date.now();
   let reachedDispatch = false;
   let sessionId: string;
   try {
     // Route through the supervisor's dispatch RPC: it is the one path that
     // records the session AND spawns its worker — it writes the store with
-    // the supervisor's sideband endpoint, launches the pty host, waits for
-    // the worker to come up, and answers with the session id. Writing the
-    // store directly (dispatchAgentViewSession) would record a session
-    // nothing ever starts. The ready-wait means this can block while the
-    // worker starts; the returned session id is the output contract.
+    // the supervisor's sideband endpoint, launches the pty host, and
+    // answers with the session id. Writing the store directly
+    // (dispatchAgentViewSession) would record a session nothing ever
+    // starts. The returned session id is the output contract.
     const supervisor = await ensureAgentViewSupervisor();
     reachedDispatch = true;
     ({ sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
@@ -258,37 +190,37 @@ export async function runBackgroundDispatch(
     });
   } catch (error) {
     const reason = getErrorMessage(error);
-    // Not every rejection from the dispatch RPC means nothing started, and
-    // the rejection itself cannot say which: the envelope carries only a
-    // code and a message, so a session id cannot ride a custom error
-    // property, and a supervisor that dies mid-dispatch sends no envelope
-    // at all — the client settles from the socket's 'end' with `code:
-    // 'closed'`. Two cases are in flight rather than failed:
+    // A client-side timeout is the one rejection that is itself evidence
+    // the launch may still be in flight: the dispatch RPC runs under a
+    // client cap (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS) while the
+    // supervisor's handler keeps recording and launching, so a store I/O
+    // stall can push the client past a cap the server is still inside.
+    // Calling that a failure has a wrapping script — the consumer this
+    // entry is built for — retry and start a second agent on the same
+    // prompt, so it returns the exit code a wrapper reads as "do not
+    // retry". reachedDispatch scopes it to the RPC: a supervisor that never
+    // came up recorded nothing, and pre-record rejections inside the
+    // handler (an oversize or empty prompt) leave the store empty too, so
+    // both stay exit 1.
     //
-    // - a client-side timeout: the dispatch RPC runs under a client cap
-    //   (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS) and the supervisor's handler
-    //   keeps recording and launching after the client gives up — a store
-    //   I/O stall can push it past the cap;
-    // - a rejection the store shows arrived AFTER the session was recorded
-    //   for this cwd AND its PTY host was spawned — the pid in the worker
-    //   record is the evidence, not the row's existence (see
-    //   sessionRecordedSince). That is what a supervisor killed inside the
-    //   ready wait leaves behind: `sessionState: 'starting'`, `ownership:
-    //   'managed'`, a live detached PTY host and a session directory on
-    //   disk.
-    //
-    // Certifying failure in either case has a wrapping script (the consumer
-    // this entry is built for) retry and start a second agent on the same
-    // prompt, so both report the in-flight launch and return the distinct
-    // exit code a wrapper can treat as "do not retry". The widened guard is
-    // scoped to the RPC by reachedDispatch: a supervisor that never came up
-    // recorded nothing, and pre-record rejections inside the handler (an
-    // oversize prompt, an empty one) leave the store empty too, so both
-    // stay exit 1.
+    // Every other rejection reports failure, including a supervisor killed
+    // mid-dispatch (`code: 'closed'`). This used to widen to that case by
+    // scanning the store for a managed row recorded since the dispatch
+    // began, but the store cannot say which launch a row belongs to: the
+    // failure envelope carries only a code and a message, so the client
+    // holds no session id to match, and ownership + projectCwd + createdAt
+    // are equally satisfied by a concurrent launch in the same directory.
+    // Two rounds of adding conjuncts narrowed that without closing it, and
+    // the false positive is the worse error — it certified a definitively
+    // failed launch as "may still be starting", the wrapper honored
+    // do-not-retry, and the task was silently never run, where a retry that
+    // starts a second agent is at least visible in `qwen sessions ps`.
+    // Carrying the session id on the failure envelope would restore the
+    // certification as evidence rather than a guess; that is a wire change,
+    // not a closeout fix.
     if (
       reachedDispatch &&
-      ((error as { code?: string } | undefined)?.code === 'timeout' ||
-        (await sessionRecordedSince(dispatchStartedAt, cwd)))
+      (error as { code?: string } | undefined)?.code === 'timeout'
     ) {
       writeStderrLine(
         `The background session may still be starting: ${reason}. Check: qwen sessions ps`,

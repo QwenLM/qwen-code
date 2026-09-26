@@ -23,10 +23,9 @@ import {
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
 import {
-  backgroundFlagPromptWord,
+  BACKGROUND_FLAG,
   INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
-  isBackgroundFlagToken,
 } from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
@@ -399,11 +398,11 @@ function lastPositionalArg(argv: readonly string[]): string | undefined {
 // literal string `--bg` — is that launch's data, not a background
 // launch. Without the skip the gate fired and declined the launch for
 // the flag whose value the token was, advice that cannot work (dropping
-// the flag leaves a bare `--bg`). The token test is the shared
-// isBackgroundFlagToken, so the boolean off spellings a `type: 'boolean'`
-// declaration advertises (`--bg=false`, `--bg=0`) are not a launch: the
-// scan keeps going and the argv falls through to the parser instead of
-// dispatching an agent on the prompt `false …`.
+// the flag leaves a bare `--bg`). Only the exact bare token counts: an
+// attached `--bg=<value>` is the parser's business, because `bg` is
+// declared `type: 'boolean'` and yargs reads every attached spelling as a
+// boolean rather than as a prompt. `readBackgroundPrompt` defers the whole
+// argv when one is present, so locating the bare token here is enough.
 function backgroundFlagIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -418,7 +417,7 @@ function backgroundFlagIndex(argv: readonly string[]): number {
       continue;
     }
     i = skipOptionValues(argv, i);
-    if (isBackgroundFlagToken(token)) {
+    if (token === BACKGROUND_FLAG) {
       return i;
     }
   }
@@ -807,47 +806,22 @@ export async function runCliEntry(
         (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!) ||
           lastPositionalArg(argv) === HELP_COMMAND);
       // A `--help`/`-h` before `--` is parser-owned like a command
-      // entrance: base rendered help for every ordering of the pair
-      // (`--help --bg=x`, `--bg=x --help`), and the decline's advice —
-      // drop the flag, re-run — turned the help request into a
+      // entrance: base rendered help for `--help --bg`, and the decline's
+      // advice — drop the flag, re-run — turned the help request into a
       // dispatched session once followed. The scan is value-slot-aware
       // like the gate's own, so a help token sitting in a value slot
-      // stays data. The fall-through lands on the FULL parser, not the
-      // help fast path: an attached `--bg=<prompt>` is outside the fast
-      // path's known-safe grammar (see argvSafeForFastPath), and the
-      // parser renders help even for the unregistered spelling.
+      // stays data.
       //
-      // The scan always covers the flag and everything before it, so base
-      // behavior for the pair survives: `--help --bg=x` and `--bg=x --help`
-      // both stay on the help path. Beyond the flag, the bound depends on
-      // whether the flag carries a prompt word. An attached `--bg=<prompt>`
-      // consumes no positional words of its own, so the flag tokens that
-      // immediately follow it are still flags and are scanned too; the scan
-      // stops at the first PROMPT word, because `readBackgroundPrompt`
-      // joins every trailing positional behind the attached prompt — a
-      // `--help`/`-h` sitting among them is prompt data and must decline by
-      // name, not hijack the launch into top-level help. After a BARE
-      // `--bg` — and after `--bg=true`, which means the bare flag — every
-      // following token is a prompt word, so the scan stops AT the flag: a
-      // help token there (`qwen --bg add a --help section`, a spelling this
-      // gate's own reader supports since the shell splits the prompt into
-      // words) is the trigger this bound exists for, matching the exit-0
-      // help fall-through the whole-argv scan let through. A `--help`
-      // inside one quoted token never triggered this; the trigger is a
-      // help token as its own argv word.
-      const carriedWord = backgroundFlagPromptWord(argv[backgroundFlag] ?? '');
-      let helpScanEnd = backgroundFlag;
-      if (carriedWord !== undefined) {
-        helpScanEnd = argv.length;
-        for (let i = backgroundFlag + 1; i < argv.length; i++) {
-          if (!argv[i]!.startsWith('-')) {
-            helpScanEnd = i;
-            break;
-          }
-        }
-      }
+      // The scan covers the flag and everything before it. Beyond the
+      // flag every token is a prompt word, so it stops AT the flag: a
+      // help token there (`qwen --bg add a --help section`, a spelling
+      // this gate's own reader supports because the shell splits the
+      // prompt into words) is prompt data and must decline by name rather
+      // than hijack the launch into top-level help. A `--help` inside one
+      // quoted token never triggered this; the trigger is a help token as
+      // its own argv word.
       const helpRequested =
-        flagIndex(argv.slice(0, helpScanEnd), '--help', '-h') !== -1;
+        flagIndex(argv.slice(0, backgroundFlag), '--help', '-h') !== -1;
       if (!parserOwnsLaunch && !helpRequested) {
         const { readBackgroundPrompt, runBackgroundDispatch } = await import(
           './agent-view/background-entry.js'

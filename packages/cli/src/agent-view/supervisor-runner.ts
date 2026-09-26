@@ -147,6 +147,14 @@ export async function runAgentViewSupervisor(
     ...(options.hibernationPolicy
       ? { hibernationPolicy: options.hibernationPolicy }
       : {}),
+    // The ready handshake has no producer: nothing in the CLI sends the
+    // `{ type: 'ready' }` worker event the wait resolves on, so leaving the
+    // default made every dispatch burn the full worker-ready timeout, then
+    // kill the PTY host it had just spawned and mark the session failed.
+    // Turning it off also flips the dispatch to `promptInArgv`, which is
+    // the other half of the same fix: the prompt then rides the worker's
+    // argv instead of a sideband control queue that nothing drains either.
+    waitForWorkerReady: false,
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
