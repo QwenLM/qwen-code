@@ -46,6 +46,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     getHeaders,
     agentId,
     productScope,
+    enableWorkspaceBinding,
   } = props;
   const resolvedLanguage = normalizeLanguage(language);
   const provider = useMemo(
@@ -58,6 +59,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
         getHeaders,
         agentId,
         productScope,
+        enableWorkspaceBinding,
       }),
     [
       baseUrl,
@@ -67,12 +69,16 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       getHeaders,
       agentId,
       productScope,
+      enableWorkspaceBinding,
     ],
   );
   const [selectedSessionId, setSelectedSessionId] = useState(sessionId);
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const emptyMap = useMemo(() => new Map(), []);
-  useEffect(() => setSelectedSessionId(sessionId), [sessionId]);
+  useEffect(
+    () => setSelectedSessionId(sessionId),
+    [sessionId, provider.storageKey],
+  );
 
   return (
     <ErrorBoundary
@@ -102,6 +108,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                       lang={resolvedLanguage}
                     >
                       <ManagedSessionsPage
+                        key={provider.storageKey}
                         sessionId={selectedSessionId}
                         onSelectSession={(next) => {
                           setSelectedSessionId(next);

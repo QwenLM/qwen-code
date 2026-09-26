@@ -26,6 +26,20 @@ export interface JavaAgentSession {
   activeTurn?: JavaAgentTurn;
   environment?: JavaAgentEnvironment;
   lastSequence: number;
+  workspace?: { workspaceId: string; cwdRelative: string };
+}
+
+export interface JavaAgentWorkspace {
+  workspaceId: string;
+  displayName: string;
+  state: string;
+  canCreateSession: boolean;
+}
+
+export interface JavaAgentWorkspacePage
+  extends JavaAgentCursorPage<JavaAgentWorkspace> {
+  defaultWorkspace?: JavaAgentWorkspace | null;
+  capabilities?: { workspaceBinding?: boolean; workspaceContext?: boolean };
 }
 
 export interface JavaAgentEvent {
@@ -135,6 +149,21 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  listWorkspaces(
+    request: { cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspacePage> {
+    return this.post('/workspaces/query', request, signal);
+  }
+
+  getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    return this.post<JavaAgentWorkspace>(
+      '/workspaces/get',
+      { workspaceId },
+      signal,
+    );
+  }
+
   getTranscript(
     request: { sessionId: string; cursor?: string; limit?: number },
     signal?: AbortSignal,
@@ -151,6 +180,7 @@ export class JavaManagedAgentClient {
       title?: string;
       input: Array<{ type: 'text'; text: string }>;
       metadata?: Record<string, unknown>;
+      workspace?: { workspaceId: string; cwdRelative: string };
     },
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {

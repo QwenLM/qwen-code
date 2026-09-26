@@ -9,6 +9,116 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('keeps an empty bound session idle and disables execution', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'empty-1',
+          status: 'ACTIVE',
+          createdAt: 1,
+          updatedAt: 1,
+          lastSequence: 0,
+          workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        }),
+      ),
+    });
+    expect(
+      await provider.getSession('empty-1', { clientId: 'client' }),
+    ).toEqual(
+      expect.objectContaining({
+        phase: 'created',
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
+  });
+
+  it('does not offer send on any active session without a Turn', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'empty-1',
+          status: 'ACTIVE',
+          createdAt: 1,
+          updatedAt: 1,
+          lastSequence: 0,
+        }),
+      ),
+    });
+    expect(
+      await provider.getSession('empty-1', { clientId: 'client' }),
+    ).toEqual(
+      expect.objectContaining({
+        phase: 'created',
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
+  });
+
+  it('creates a bound empty session without requiring turnId', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
+      jsonResponse(
+        String(input).includes('/workspaces/query')
+          ? {
+              data: [
+                {
+                  workspaceId: 'ws-a',
+                  displayName: 'A',
+                  state: 'ACTIVE',
+                  canCreateSession: true,
+                },
+              ],
+              defaultWorkspace: null,
+              hasMore: false,
+              capabilities: {
+                workspaceBinding: true,
+                workspaceContext: false,
+              },
+            }
+          : { sessionId: 'empty-1', status: 'accepted', replayed: false },
+      ),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      agentId: 'agent-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    const listed = await provider.workspaceBinding!.list({
+      clientId: 'client',
+    });
+    expect(listed.supported).toBe(true);
+    expect(
+      await provider.workspaceBinding!.createEmpty(
+        {
+          agentId: 'agent-a',
+          workspaceId: 'ws-a',
+          cwdRelative: './docs',
+        },
+        { clientId: 'client', idempotencyKey: 'key-a' },
+      ),
+    ).toEqual({ sessionId: 'empty-1' });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual(
+      expect.objectContaining({
+        agentId: 'agent-a',
+        input: [],
+        idempotencyKey: 'key-a',
+        workspace: { workspaceId: 'ws-a', cwdRelative: './docs' },
+      }),
+    );
+    expect(provider.storageKey).toContain('agent-a');
+    expect(() =>
+      createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        enableWorkspaceBinding: true,
+      }),
+    ).toThrow('productScope');
+  });
   it('maps Java session, environment, and active turn state', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
