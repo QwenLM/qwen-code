@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MonitorIcon } from 'lucide-react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import {
@@ -195,11 +195,26 @@ function isLiveProbe(probe: DesktopRelayProbe | undefined): boolean {
   );
 }
 
+/**
+ * Consecutive inconclusive probes a retained live observation may survive.
+ * Retention keeps the revoke control across a transient probe failure, but the
+ * control only works while the relay is reachable — so retention that never
+ * expires would keep asserting a connection that has been unobservable for as
+ * long as the panel stays mounted.
+ */
+const MAX_INCONCLUSIVE_PROBES = 3;
+
 export function retainLiveDesktopRelayProbe(
   previous: DesktopRelayProbe | undefined,
   next: DesktopRelayProbe,
+  inconclusiveProbes = 0,
 ): DesktopRelayProbe {
-  if (next.kind !== 'ready' && previous && isLiveProbe(previous)) {
+  if (
+    next.kind !== 'ready' &&
+    inconclusiveProbes < MAX_INCONCLUSIVE_PROBES &&
+    previous &&
+    isLiveProbe(previous)
+  ) {
     return previous;
   }
   return next;
@@ -246,6 +261,10 @@ export function deriveDesktopRelayStatus(input: {
       return { phase: 'failed', message: input.error ?? active.message };
     }
   } else if (live) {
+    // A relay that is live for another session says nothing about this one, so
+    // it must not mask this session's own connect failure.
+    if (input.error !== undefined)
+      return { phase: 'failed', message: input.error };
     return { phase: 'other-session' };
   }
   if (input.error !== undefined)
@@ -449,6 +468,14 @@ export function DesktopRelayControl({
     }
   }, [baseUrl]);
 
+  // Connect-flow state belongs to the session and daemon it was raised against;
+  // without this, switching either one shows the previous session's pending
+  // dialog or its stale error.
+  useEffect(() => {
+    setAwaitingApproval(false);
+    setError(undefined);
+  }, [sessionId, daemonUrl]);
+
   const status = deriveDesktopRelayStatus({
     blocker,
     sessionId: sessionId ?? undefined,
@@ -458,9 +485,17 @@ export function DesktopRelayControl({
     error,
   });
 
+  // A ref rather than state: `refresh` is memoized with no dependencies, and
+  // counting in state would reset the poll interval on every probe.
+  const inconclusiveProbes = useRef(0);
+
   const refresh = useCallback(async () => {
     const next = await probeDesktopRelay();
-    setProbe((previous) => retainLiveDesktopRelayProbe(previous, next));
+    setProbe((previous) =>
+      retainLiveDesktopRelayProbe(previous, next, inconclusiveProbes.current),
+    );
+    inconclusiveProbes.current =
+      next.kind === 'ready' ? 0 : inconclusiveProbes.current + 1;
   }, []);
 
   // Probe only when someone looks, or while a connection is live: an
@@ -509,8 +544,11 @@ export function DesktopRelayControl({
 
   const disconnect = useCallback(async () => {
     setError(undefined);
-    await disconnectDesktopRelay();
-    setProbe(undefined);
+    const revoked = await disconnectDesktopRelay();
+    // Drop the last observation only once the relay confirms the revocation:
+    // clearing it on failure would report a revoke that never arrived and leave
+    // no way to retry.
+    if (revoked) setProbe(undefined);
     await refresh();
   }, [refresh]);
 

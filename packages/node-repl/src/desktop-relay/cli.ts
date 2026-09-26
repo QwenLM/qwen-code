@@ -47,7 +47,13 @@ function homeFrom(args: string[]): string {
   return path.resolve(flag(args, '--home') ?? defaultRelayHome());
 }
 
-function currentUid(): number {
+export function currentUid(): number {
+  // Under `sudo` the effective uid is 0, but launchd holds the agent in the
+  // invoking user's `gui/<uid>` domain. Querying `gui/0` finds nothing, so the
+  // unload guard in `uninstallLaunchAgent` could not tell a live agent from an
+  // absent one and would delete the plist out from under it.
+  const sudoUid = Number(process.env['SUDO_UID'] ?? '');
+  if (Number.isInteger(sudoUid) && sudoUid > 0) return sudoUid;
   return process.getuid?.() ?? os.userInfo().uid;
 }
 

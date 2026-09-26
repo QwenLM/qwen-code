@@ -229,6 +229,24 @@ describe('deriveDesktopRelayStatus', () => {
       }),
     ).toEqual({ phase: 'permission-required' });
   });
+
+  it("does not let another session's relay hide this session's failure", () => {
+    expect(
+      deriveDesktopRelayStatus({
+        ...base,
+        error: 'connect refused',
+        probe: {
+          kind: 'ready',
+          version: '0.1.5',
+          active: {
+            sessionId: 's2',
+            daemonUrl: 'https://devbox:4170',
+            phase: 'connected',
+          },
+        },
+      }),
+    ).toEqual({ phase: 'failed', message: 'connect refused' });
+  });
 });
 
 describe('retainLiveDesktopRelayProbe', () => {
@@ -255,5 +273,11 @@ describe('retainLiveDesktopRelayProbe', () => {
   it('accepts a conclusive ready probe that reports no active relay', () => {
     const idle = { kind: 'ready' as const, version: '0.1.6' };
     expect(retainLiveDesktopRelayProbe(live, idle)).toBe(idle);
+  });
+
+  it('stops retaining once the relay has been unobservable too long', () => {
+    const gone = { kind: 'missing' as const };
+    expect(retainLiveDesktopRelayProbe(live, gone, 2)).toBe(live);
+    expect(retainLiveDesktopRelayProbe(live, gone, 3)).toBe(gone);
   });
 });

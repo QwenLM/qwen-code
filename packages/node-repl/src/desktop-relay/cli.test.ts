@@ -8,7 +8,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isRelayHome, purgeRelayHome, runDesktopRelayCommand } from './cli.js';
+import {
+  currentUid,
+  isRelayHome,
+  purgeRelayHome,
+  runDesktopRelayCommand,
+} from './cli.js';
 
 const temporary: string[] = [];
 
@@ -81,5 +86,24 @@ describe('desktop-relay install safety', () => {
       '--home requires a non-empty directory.\n',
     );
     stderr.mockRestore();
+  });
+});
+
+describe('desktop-relay launchd domain', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("targets the invoking user's gui domain under sudo", () => {
+    vi.stubEnv('SUDO_UID', '501');
+    expect(currentUid()).toBe(501);
+  });
+
+  it('falls back to the effective uid when SUDO_UID is unusable', () => {
+    const effective = process.getuid?.() ?? os.userInfo().uid;
+    for (const value of ['0', '-1', '501.5', 'not-a-number', '']) {
+      vi.stubEnv('SUDO_UID', value);
+      expect(currentUid()).toBe(effective);
+    }
   });
 });

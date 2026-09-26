@@ -262,18 +262,24 @@ export async function connectDesktopRelay(
   }
 }
 
+/**
+ * Revokes the approved session. Resolves `false` when the relay was unreachable
+ * or refused, so a caller can never report a revocation that did not happen.
+ * The next status probe shows whatever state is left.
+ */
 export async function disconnectDesktopRelay(
   fetchImpl: FetchLike = defaultFetch,
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await withTimeout(5_000, (signal) =>
+    const response = await withTimeout(5_000, (signal) =>
       fetchImpl(`${DESKTOP_RELAY_URL}/disconnect`, {
         method: 'POST',
         cache: 'no-store',
         signal,
       }),
     );
+    return response.ok;
   } catch {
-    // The next status probe shows whatever state is left.
+    return false;
   }
 }

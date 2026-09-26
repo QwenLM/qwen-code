@@ -213,13 +213,23 @@ describe('connectDesktopRelay', () => {
 });
 
 describe('disconnectDesktopRelay', () => {
-  it('posts to /disconnect and swallows failures', async () => {
+  it('posts to /disconnect and reports an unreachable relay', async () => {
     const fetchImpl = vi.fn<FetchLike>(async () => {
       throw new TypeError('Failed to fetch');
     });
-    await expect(disconnectDesktopRelay(fetchImpl)).resolves.toBeUndefined();
+    await expect(disconnectDesktopRelay(fetchImpl)).resolves.toBe(false);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
       'http://127.0.0.1:47821/disconnect',
     );
+  });
+
+  it('reports a refusal, so the caller cannot claim a revocation', async () => {
+    await expect(
+      disconnectDesktopRelay(respond(403, { code: 'denied' })),
+    ).resolves.toBe(false);
+  });
+
+  it('reports success only when the relay accepted the revocation', async () => {
+    await expect(disconnectDesktopRelay(respond(200, {}))).resolves.toBe(true);
   });
 });
