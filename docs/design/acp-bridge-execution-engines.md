@@ -141,12 +141,14 @@ Production paired-host wiring is also blocked on these workspace contracts:
   rule must not silently leave existing Managed sessions on old permissions.
 
 These are acceptance gates for #12380 host integration, not capabilities supplied
-by the current Legacy-only workspace-control implementation.
+by the current Legacy-only workspace-control implementation. The B2b follow-up,
+[Paired engine workspace runtime identity](./2026-09-26-paired-engine-workspace-runtime-identity.md),
+specifies the first two gates; the third remains open.
 
-The existing workspace-stop receipt addresses one physical channel, so stopping
-multiple live channels is explicitly blocked until that receipt is extended.
-A single live channel remains stoppable. Managed branch/side-task requests reject
-before mutating history.
+This slice's workspace-stop receipt addresses one physical channel, so stopping
+multiple live channels is blocked; a single live channel remains stoppable. The
+B2b follow-up extends the receipt to every live channel. Managed
+branch/side-task requests reject before mutating history.
 
 ## Files and consumers
 

@@ -284,6 +284,44 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).not.toContain('write 10 items to the todo list');
   });
 
+  it('states the todo usage rules once, in the Task Management section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+      undefined,
+      true,
+    );
+
+    // The Plan bullet and the tool-guidance bullet only point at the section.
+    expect(prompt).toContain(
+      "Track complex, ambiguous, or multi-step work with 'todo_write'",
+    );
+    expect(prompt).toContain("'# Task Management' governs its use");
+    expect(prompt).not.toContain(
+      'If a todo list exists, keep it current as the scope or approach changes',
+    );
+    expect(prompt.match(/outcome-oriented/g)?.length).toBe(1);
+    expect(prompt.match(/simple or single-step/g)?.length).toBe(1);
+  });
+
+  it('states the comment rule once', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Default to none. Add one only when the _why_ cannot be conveyed',
+    );
+    // The removed sentences are covered by the why-only criterion and the
+    // 'Tools vs. Text' rule; they must not creep back as a second statement.
+    expect(prompt).not.toContain(
+      'talk to the user or describe your changes through comments',
+    );
+    expect(prompt.match(/Default to none/g)?.length).toBe(1);
+  });
+
   it('adapts final response detail to the request', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();

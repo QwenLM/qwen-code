@@ -214,6 +214,8 @@ describe('evaluateShellCommandReadOnly', () => {
     it('allows safe sed commands', () => {
       expect(isShellCommandReadOnly("sed 's/foo/bar/' file.txt")).toBe(true);
       expect(isShellCommandReadOnly("sed -n '1,5p' file.txt")).toBe(true);
+      expect(isShellCommandReadOnly("sed --quiet '1,5p' file.txt")).toBe(true);
+      expect(isShellCommandReadOnly("sed --silent '1,5p' file.txt")).toBe(true);
     });
 
     it('rejects sed with execute command', () => {
@@ -226,6 +228,12 @@ describe('evaluateShellCommandReadOnly', () => {
         isShellCommandReadOnly("sed 's/foo/bar/w output.txt' file.txt"),
       ).toBe(false);
       expect(isShellCommandReadOnly("sed 'w backup.txt' file.txt")).toBe(false);
+      expect(
+        isShellCommandReadOnly("sed --quiet 'w output.txt' file.txt"),
+      ).toBe(false);
+      expect(
+        isShellCommandReadOnly("sed --silent 'w output.txt' file.txt"),
+      ).toBe(false);
     });
 
     it('rejects sed with read command', () => {

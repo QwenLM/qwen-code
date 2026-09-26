@@ -8,6 +8,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { SchemaValidator } from './schemaValidator.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => debugLogger,
+}));
+
+// The compile cache lives as long as the module. A test that builds its
+// schemas from names of its own on every attempt, a retry included, meets the
+// cache as its first attempt did.
+let probes = 0;
+const probe = (name: string) => `${name}${probes++}`;
+
 describe('SchemaValidator', () => {
   it('strictly validates without coercing application data', () => {
     const schema = {
@@ -82,6 +99,8 @@ describe('SchemaValidator', () => {
   it('allows custom format values', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const schema = {
+      // Text of its own, so that every attempt compiles it.
+      description: probe('customFormats'),
       type: 'object',
       properties: {
         duration: {
@@ -2337,15 +2356,14 @@ describe('SchemaValidator compile cache', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const AjvClass = ((AjvPkg as any).default || AjvPkg) as any;
     const compile = vi.spyOn(AjvClass.prototype, 'compile');
+    const name = probe('compileOnceProbe');
     try {
       for (let i = 0; i < 50; i++) {
         const schema = {
           type: 'object',
-          properties: { compileOnceProbe: { type: 'string' } },
+          properties: { [name]: { type: 'string' } },
         };
-        expect(
-          SchemaValidator.validate(schema, { compileOnceProbe: 'x' }),
-        ).toBeNull();
+        expect(SchemaValidator.validate(schema, { [name]: 'x' })).toBeNull();
       }
       expect(compile).toHaveBeenCalledTimes(1);
     } finally {
@@ -2354,60 +2372,58 @@ describe('SchemaValidator compile cache', () => {
   });
 
   it('never hands a mutated schema object its old validator for fresh text', () => {
-    const mutated = {
-      type: 'object',
-      properties: { mutationProbe: { type: 'string' } },
-    };
-    expect(
-      SchemaValidator.validate(mutated, { mutationProbe: 'x' }),
-    ).toBeNull();
-    mutated.properties.mutationProbe.type = 'boolean';
-    SchemaValidator.validate(mutated, { mutationProbe: true });
+    const name = probe('mutationProbe');
+    const property = { type: 'string' };
+    const mutated = { type: 'object', properties: { [name]: property } };
+    expect(SchemaValidator.validate(mutated, { [name]: 'x' })).toBeNull();
+    property.type = 'boolean';
+    SchemaValidator.validate(mutated, { [name]: true });
 
     const fresh = {
       type: 'object',
-      properties: { mutationProbe: { type: 'boolean' } },
+      properties: { [name]: { type: 'boolean' } },
     };
-    expect(SchemaValidator.validate(fresh, { mutationProbe: true })).toBeNull();
-    expect(
-      SchemaValidator.validate(fresh, { mutationProbe: 'x' }),
-    ).not.toBeNull();
+    expect(SchemaValidator.validate(fresh, { [name]: true })).toBeNull();
+    expect(SchemaValidator.validate(fresh, { [name]: 'x' })).not.toBeNull();
   });
 
   it('keeps apart schemas that JSON text cannot tell apart', () => {
+    const name = probe('exactProbe');
     const constant = (value: unknown) => ({
       type: 'object',
-      properties: { exactProbe: { const: value } },
+      properties: { [name]: { const: value } },
     });
 
-    expect(SchemaValidator.validate(constant(null), { exactProbe: null })).toBe(
+    expect(SchemaValidator.validate(constant(null), { [name]: null })).toBe(
       null,
     );
     expect(
-      SchemaValidator.validate(constant(Number.NaN), { exactProbe: null }),
+      SchemaValidator.validate(constant(Number.NaN), { [name]: null }),
     ).not.toBeNull();
     expect(
       SchemaValidator.validate(constant(Number.POSITIVE_INFINITY), {
-        exactProbe: null,
+        [name]: null,
       }),
     ).not.toBeNull();
   });
 
   it('does not let a toJSON method stand in for a schema', () => {
-    const plain = { type: 'object' };
+    const name = probe('disguiseProbe');
+    const plain = { type: 'object', description: name };
     const disguised = {
       type: 'object',
-      required: ['disguiseProbe'],
+      required: [name],
       toJSON: () => plain,
     };
 
     expect(SchemaValidator.validate(plain, {})).toBeNull();
-    expect(SchemaValidator.validate(disguised, {})).toContain('disguiseProbe');
+    expect(SchemaValidator.validate(disguised, {})).toContain(name);
   });
 
   it('validates a rebuilt schema that carries an $id', () => {
+    const id = probe('id-probe');
     const schema = () => ({
-      $id: 'https://example.com/schemas/id-probe.json',
+      $id: `https://example.com/schemas/${id}.json`,
       type: 'object',
       properties: { idProbe: { type: 'integer' } },
       required: ['idProbe'],
@@ -2421,97 +2437,319 @@ describe('SchemaValidator compile cache', () => {
   it('compiles a schema that fails to compile as Ajv always has', () => {
     // Ajv cannot load the draft-04 meta-schema, so the first compile fails
     // and validation is skipped; Ajv compiles the same object on later calls.
+    const name = probe('draftProbe');
     const schema = {
       $schema: 'http://json-schema.org/draft-04/schema#',
       type: 'object',
-      properties: { draftProbe: { type: 'integer' } },
-      required: ['draftProbe'],
+      properties: { [name]: { type: 'integer' } },
+      required: [name],
     };
     const parse = vi.spyOn(JSON, 'parse');
     try {
       const results = [0, 1, 2].map(() => SchemaValidator.validate(schema, {}));
 
       expect(results[0]).toBeNull();
-      expect(results[1]).toContain('draftProbe');
-      expect(results[2]).toContain('draftProbe');
+      expect(results[1]).toContain(name);
+      expect(results[2]).toContain(name);
       expect(parse).toHaveBeenCalledTimes(1);
     } finally {
       parse.mockRestore();
     }
   });
 
-  it('shares no validator with a caller that mutates its schema object', () => {
+  it('does not compile a copy for each rebuilt schema that fails to compile', () => {
+    // A per-call tool build or a rediscovery hands over a new object each
+    // time. Only the first one is compiled from a copy parsed from its text.
+    const name = probe('rebuiltDraftProbe');
     const schema = () => ({
+      $schema: 'http://json-schema.org/draft-04/schema#',
       type: 'object',
-      properties: { sharedProbe: { const: { value: 1 } } },
+      properties: { [name]: { type: 'integer' } },
+      required: [name],
     });
-    const mutated = schema();
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      for (let i = 0; i < 3; i++) {
+        expect(SchemaValidator.validate(schema(), {})).toBeNull();
+      }
+      // As before, Ajv compiles such an object on its second use, and the
+      // object is not serialized again.
+      const reused = schema();
+      expect(SchemaValidator.validate(reused, {})).toBeNull();
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        for (let i = 0; i < 2; i++) {
+          expect(SchemaValidator.validate(reused, {})).toContain(name);
+        }
+        expect(stringify.mock.calls.map(([value]) => value)).not.toContain(
+          reused,
+        );
+      } finally {
+        stringify.mockRestore();
+      }
+      // An object rebuilt after that still fails its own first compile.
+      expect(SchemaValidator.validate(schema(), {})).toBeNull();
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('validates each rebuilt schema with an $id that fails to compile on its second use', () => {
+    // The copy parsed from the text claims the $id first, so each object's
+    // first compile fails as a duplicate of it. Ajv still keeps the object
+    // and compiles it on its second use, as it did before.
+    const id = probe('id-fail-probe');
+    const schema = () => ({
+      $id: `https://example.com/schemas/${id}.json`,
+      $schema: 'http://json-schema.org/draft-04/schema#',
+      type: 'object',
+      properties: { idFailProbe: { type: 'integer' } },
+      required: ['idFailProbe'],
+    });
+    for (let i = 0; i < 2; i++) {
+      const object = schema();
+      expect(SchemaValidator.validate(object, {})).toBeNull();
+      expect(SchemaValidator.validate(object, {})).toContain('idFailProbe');
+    }
+  });
+
+  it('shares no validator with a caller that mutates its schema object', () => {
+    const name = probe('sharedProbe');
+    const schema = (constant: { value: number }) => ({
+      type: 'object',
+      properties: { [name]: { const: constant } },
+    });
+    const shared = { value: 1 };
+    const mutated = schema(shared);
     expect(
-      SchemaValidator.validate(mutated, { sharedProbe: { value: 1 } }),
+      SchemaValidator.validate(mutated, { [name]: { value: 1 } }),
     ).toBeNull();
-    mutated.properties.sharedProbe.const.value = 2;
+    shared.value = 2;
 
     expect(
-      SchemaValidator.validate(schema(), { sharedProbe: { value: 1 } }),
+      SchemaValidator.validate(schema({ value: 1 }), { [name]: { value: 1 } }),
     ).toBeNull();
   });
 
   it('validates a schema that JSON text does not describe by its own content', () => {
+    const inheritedProbe = probe('inheritedProbe');
     class Inherited {
       get required() {
-        return ['inheritedProbe'];
+        return [inheritedProbe];
       }
     }
+    const hiddenProbe = probe('hiddenProbe');
     const hidden = { type: 'object' };
     Object.defineProperty(hidden, 'required', {
-      value: ['hiddenProbe'],
+      value: [hiddenProbe],
       enumerable: false,
     });
     class Listed extends Array<string> {}
-    const listed = Listed.from(['listedProbe']);
+    const listedProbe = probe('listedProbe');
+    const listed = Listed.from([listedProbe]);
+    const disguisedProbe = probe('disguisedProbe');
+    const enumProbe = probe('enumProbe');
 
     expect(
       SchemaValidator.validate(
         Object.assign(new Inherited(), { type: 'object' }),
         {},
       ),
-    ).toContain('inheritedProbe');
-    expect(SchemaValidator.validate(hidden, {})).toContain('hiddenProbe');
+    ).toContain(inheritedProbe);
+    expect(SchemaValidator.validate(hidden, {})).toContain(hiddenProbe);
     expect(
       SchemaValidator.validate(
         {
           type: 'object',
-          required: Object.assign(['disguisedProbe'], { toJSON: () => [] }),
+          required: Object.assign([disguisedProbe], { toJSON: () => [] }),
         },
         {},
       ),
-    ).toContain('disguisedProbe');
-    expect(
-      SchemaValidator.validate({ type: 'object', required: listed }, {}),
-    ).toContain('listedProbe');
+    ).toContain(disguisedProbe);
+    // Its text is that of a plain array with the same items, so only the
+    // absence of a parsed copy shows that it was compiled from the object.
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      expect(
+        SchemaValidator.validate({ type: 'object', required: listed }, {}),
+      ).toContain(listedProbe);
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
     expect(
       SchemaValidator.validate(
         {
           type: 'object',
-          properties: { enumProbe: { enum: [undefined] } },
+          properties: { [enumProbe]: { enum: [undefined] } },
         },
-        { enumProbe: 'x' },
+        { [enumProbe]: 'x' },
       ),
     ).toBeNull();
   });
 
-  it('does not serialize a schema object it has already compiled', () => {
-    const schema = {
-      type: 'object',
-      properties: { reuseProbe: { type: 'string' } },
-    };
-    expect(SchemaValidator.validate(schema, { reuseProbe: 'x' })).toBeNull();
+  it.each([
+    [
+      'that JSON text describes',
+      (name: string) => ({
+        type: 'object',
+        properties: { [name]: { type: 'string' } },
+      }),
+    ],
+    [
+      'that JSON text does not describe',
+      (name: string) => ({
+        type: 'object',
+        properties: {
+          [name]: { type: 'string' },
+          nanProbe: { const: Number.NaN },
+        },
+      }),
+    ],
+  ])('does not serialize a second time a schema object %s', (_label, build) => {
+    const name = probe('reuseProbe');
+    const schema = build(name);
+    expect(SchemaValidator.validate(schema, { [name]: 'x' })).toBeNull();
     const stringify = vi.spyOn(JSON, 'stringify');
     try {
-      expect(SchemaValidator.validate(schema, { reuseProbe: 'y' })).toBeNull();
+      for (const value of ['y', 'z']) {
+        expect(SchemaValidator.validate(schema, { [name]: value })).toBeNull();
+      }
       expect(stringify).not.toHaveBeenCalled();
     } finally {
       stringify.mockRestore();
     }
+  });
+
+  it.each([
+    [
+      'whose first compile failed',
+      (name: string) => ({
+        $schema: 'http://json-schema.org/draft-04/schema#',
+        type: 'object',
+        properties: { [name]: { type: 'string' } },
+      }),
+      // Ajv compiles such an object on its second use.
+      (name: string) => expect.stringContaining(name),
+    ],
+    [
+      'that never compiles',
+      (name: string) => ({
+        type: 'object',
+        properties: { [name]: { $ref: '#/definitions/missing' } },
+      }),
+      () => null,
+    ],
+  ])(
+    'does not serialize a second time a schema object %s',
+    (_label, build, later) => {
+      const name = probe('failedReuseProbe');
+      const schema = build(name);
+      expect(SchemaValidator.validate(schema, { [name]: 'x' })).toBeNull();
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        for (let i = 0; i < 2; i++) {
+          expect(SchemaValidator.validate(schema, { [name]: {} })).toEqual(
+            later(name),
+          );
+        }
+        // Compiling serializes parts of a schema, but never the object
+        // itself.
+        expect(stringify.mock.calls.map(([value]) => value)).not.toContain(
+          schema,
+        );
+      } finally {
+        stringify.mockRestore();
+      }
+    },
+  );
+
+  it('shares one validator between rebuilt schemas holding -0, which the text writes as 0', async () => {
+    // JSON.parse gives -0 for -0.0, and Ajv validates it as 0, so each rebuilt
+    // object, $id and all, is validated on its first use.
+    const { default: AjvPkg } = await import('ajv');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const AjvClass = ((AjvPkg as any).default || AjvPkg) as any;
+    const compile = vi.spyOn(AjvClass.prototype, 'compile');
+    const name = probe('zeroProbe');
+    try {
+      for (let i = 0; i < 3; i++) {
+        const schema = {
+          $id: `https://example.com/schemas/${name}.json`,
+          type: 'object',
+          properties: { [name]: { type: 'number', minimum: -0 } },
+        };
+        expect(SchemaValidator.validate(schema, { [name]: -1 })).toContain(
+          name,
+        );
+      }
+      expect(compile).toHaveBeenCalledTimes(1);
+    } finally {
+      compile.mockRestore();
+    }
+  });
+
+  it('compiles a schema holding an array with a named property from the object', () => {
+    // The text drops the property, but a JSON pointer in a $ref reaches it.
+    const name = probe('pointedProbe');
+    const schema = {
+      $id: `https://example.com/schemas/${name}.json`,
+      type: 'object',
+      allOf: Object.assign([{}], { note: { required: [name] } }),
+      properties: { wrapped: { $ref: '#/allOf/note' } },
+    };
+
+    expect(SchemaValidator.validate(schema, { wrapped: {} })).toContain(name);
+  });
+
+  it('compiles a schema holding an object without a prototype from the object', () => {
+    // Ajv tells such an object from a plain one with the same keys, which is
+    // all that a copy parsed from the text would hold.
+    const name = probe('bareProbe');
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare['x'] = 1;
+    const schema = { type: 'object', properties: { [name]: { const: bare } } };
+
+    expect(SchemaValidator.validate(schema, { [name]: { x: 1 } })).toContain(
+      name,
+    );
+  });
+
+  it('gives a schema whose $id another schema holds the results it gave before', () => {
+    // The text changes but the $id stays, as when a server updates a tool.
+    const id = probe('taken-id-probe');
+    const schema = (name: string) => ({
+      $id: `https://example.com/schemas/${id}.json`,
+      type: 'object',
+      properties: { [name]: { type: 'integer' } },
+      required: [name],
+    });
+    const first = probe('takenFirstProbe');
+    const second = probe('takenSecondProbe');
+
+    expect(SchemaValidator.validate(schema(first), {})).toContain(first);
+    for (let i = 0; i < 2; i++) {
+      const object = schema(second);
+      expect(SchemaValidator.validate(object, {})).toBeNull();
+      expect(SchemaValidator.validate(object, {})).toContain(second);
+    }
+  });
+
+  it("logs a failing schema's own error, not a duplicate of the $id its copy claimed", () => {
+    const schema = {
+      $id: `https://example.com/schemas/${probe('logged-id-probe')}.json`,
+      $schema: 'http://json-schema.org/draft-04/schema#',
+      type: 'object',
+    };
+    debugLogger.warn.mockClear();
+
+    expect(SchemaValidator.validate(schema, {})).toBeNull();
+    expect(debugLogger.warn).toHaveBeenCalledOnce();
+    expect(debugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'no schema with key or ref "http://json-schema.org/draft-04/schema#"',
+      ),
+    );
   });
 });

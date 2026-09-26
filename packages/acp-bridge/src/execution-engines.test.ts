@@ -18,6 +18,7 @@ import { SESSION_EXECUTION_ENGINE_META_KEY } from './bridgeOptions.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   type AcpSessionBridge,
+  type BridgeRuntimeStopRequest,
 } from './bridgeTypes.js';
 import {
   makeBridge,
@@ -103,6 +104,55 @@ function paired(
     choose: (engine: BridgeExecutionEngine) => {
       selected = engine;
     },
+  };
+}
+
+// Every start gets a new child whose registry release follows its exit.
+function restartable(
+  options: Partial<BridgeOptions> = {},
+  agents: Partial<Record<BridgeExecutionEngine, FakeAgentOpts>> = {},
+) {
+  let selected: BridgeExecutionEngine = 'managed';
+  const channels: Record<
+    BridgeExecutionEngine,
+    Array<ReturnType<typeof engineChannel>>
+  > = { legacy: [], managed: [] };
+  const start = (engine: BridgeExecutionEngine) => async () => {
+    const handle = engineChannel(engine, agents[engine]);
+    handle.channel.registryReleased = handle.channel.exited.then(
+      () => undefined,
+    );
+    channels[engine].push(handle);
+    return handle.channel;
+  };
+  const bridge = makeBridge({
+    sessionScope: 'thread',
+    channelIdleTimeoutMs: 60_000,
+    executionEngines: {
+      legacy: start('legacy'),
+      managed: start('managed'),
+      select: () => selected,
+    },
+    ...options,
+  });
+  bridges.push(bridge);
+  return {
+    bridge,
+    channels,
+    choose: (engine: BridgeExecutionEngine) => {
+      selected = engine;
+    },
+  };
+}
+
+function stopConfirmation(bridge: AcpSessionBridge): BridgeRuntimeStopRequest {
+  const snapshot = bridge.getRuntimeStopSnapshot!();
+  return {
+    confirmInterruptions: true,
+    expectedChannelId: snapshot.channelId!,
+    expectedRuntimeEpoch: snapshot.runtimeEpoch,
+    expectedStopToken: snapshot.stopToken,
+    expectedSessionIds: snapshot.sessions.map((s) => s.sessionId),
   };
 }
 
@@ -1188,20 +1238,412 @@ describe('ACP Bridge execution engines', () => {
     expect(p.bridge.pendingPermissionCount).toBe(0);
   });
 
-  it('reports Managed-only liveness and blocks a multi-channel runtime stop', async () => {
-    const p = paired();
+  it('reports aggregate liveness and workspace control separately', async () => {
+    const ready = deferred<void>();
+    const p = paired(
+      {},
+      engineChannel('legacy', {
+        initializeImpl: async () => {
+          await ready.promise;
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: {},
+            authMethods: [],
+          };
+        },
+      }),
+    );
+    const lifecycle = () => p.bridge.getWorkspaceRuntimeLifecycleSnapshot!();
     await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(p.bridge.isChannelLive()).toBe(true);
     expect(p.bridge.getDaemonStatusSnapshot().channelLive).toBe(true);
-    expect(p.bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+    expect(p.bridge.isWorkspaceControlLive!()).toBe(false);
+    expect(lifecycle()).toMatchObject({
+      state: 'active',
       runtimeLive: true,
-      activeWork: true,
+      workspaceControl: 'cold',
     });
+
+    const preheat = p.bridge.preheat();
+    await vi.waitFor(() =>
+      expect(p.legacy.agent.initializeCalls).toHaveLength(1),
+    );
+    expect(lifecycle().workspaceControl).toBe('starting');
+    ready.resolve();
+    await preheat;
+    expect(p.bridge.isWorkspaceControlLive!()).toBe(true);
+    expect(lifecycle().workspaceControl).toBe('live');
+
+    p.legacy.crash();
+    await vi.waitFor(() => expect(lifecycle().workspaceControl).toBe('cold'));
+    expect(p.bridge.isWorkspaceControlLive!()).toBe(false);
+    expect(lifecycle().runtimeLive).toBe(true);
+  });
+
+  it('keeps the workspace-control epoch while Managed channels come and go', async () => {
+    const p = restartable(
+      {},
+      {
+        legacy: {
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.workspaceSkills
+              ? { v: 1, workspaceCwd: WS_A, initialized: true, skills: [] }
+              : {},
+        },
+      },
+    );
+    const lifecycle = () => p.bridge.getWorkspaceRuntimeLifecycleSnapshot!();
+    const skillsEpoch = async () =>
+      (
+        await p.bridge.queryWorkspaceStatus<{ runtimeEpoch?: number }>(
+          SERVE_STATUS_EXT_METHODS.workspaceSkills,
+          () => ({}),
+        )
+      ).runtimeEpoch;
+    await p.bridge.preheat();
+    const legacyEpoch = lifecycle().runtimeEpoch;
+    expect(await skillsEpoch()).toBe(legacyEpoch);
+
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const stop = p.bridge.getRuntimeStopSnapshot!();
+    expect(stop.channels.map((c) => c.executionEngine)).toEqual([
+      'legacy',
+      'managed',
+    ]);
+    expect(stop.channels[0].runtimeEpoch).toBe(legacyEpoch);
+    expect(stop.runtimeEpoch).toBe(stop.channels[1].runtimeEpoch);
+    expect(stop.runtimeEpoch).toBeGreaterThan(legacyEpoch);
+    expect(lifecycle()).toMatchObject({
+      runtimeEpoch: legacyEpoch,
+      workspaceControl: 'live',
+    });
+    expect(await skillsEpoch()).toBe(legacyEpoch);
+
+    p.channels.managed[0].crash();
+    await vi.waitFor(() => expect(p.bridge.sessionCount).toBe(0));
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(p.channels.managed).toHaveLength(2);
+    expect(lifecycle().runtimeEpoch).toBe(legacyEpoch);
+    expect(await skillsEpoch()).toBe(legacyEpoch);
+
+    p.channels.legacy[0].crash();
+    await vi.waitFor(() => expect(lifecycle().workspaceControl).toBe('cold'));
+    expect(lifecycle().runtimeLive).toBe(true);
+    await p.bridge.preheat();
+    const nextLegacyEpoch = lifecycle().runtimeEpoch;
+    expect(nextLegacyEpoch).toBeGreaterThan(
+      p.bridge.getRuntimeStopSnapshot!().channels[1].runtimeEpoch,
+    );
+    expect(await skillsEpoch()).toBe(nextLegacyEpoch);
+  });
+
+  it('stamps an idle candidate with its own channel epoch', async () => {
+    const p = restartable();
+    await p.bridge.preheat();
+    const legacyEpoch =
+      p.bridge.getWorkspaceRuntimeLifecycleSnapshot!().runtimeEpoch;
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(managed.sessionId);
+    const candidate = p.bridge.getIdleChannelCandidate!();
+    expect(candidate).toMatchObject({ runtimeEpoch: legacyEpoch });
+    expect(await p.bridge.reclaimIdleChannel!(candidate!)).toBe(true);
+    expect(p.channels.legacy[0].killed).toBe(true);
+    expect(p.channels.managed[0].killed).toBe(false);
+  });
+
+  it('stops every live channel with one confirmation', async () => {
+    const p = restartable();
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('managed');
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const snapshot = p.bridge.getRuntimeStopSnapshot!();
+    expect(snapshot.blockedReasons).toEqual([]);
+    expect(snapshot.channels).toEqual([
+      {
+        channelId: snapshot.channelId,
+        runtimeEpoch: expect.any(Number),
+        executionEngine: 'legacy',
+      },
+      {
+        channelId: expect.any(String),
+        runtimeEpoch: snapshot.runtimeEpoch,
+        executionEngine: 'managed',
+      },
+    ]);
+    const request = stopConfirmation(p.bridge);
+    const result = await p.bridge.stopWorkspaceRuntime!(request);
+    expect(result).toMatchObject({
+      state: 'stopped',
+      stopped: true,
+      released: true,
+      channelId: snapshot.channelId,
+      runtimeEpoch: snapshot.runtimeEpoch,
+      channels: snapshot.channels,
+      closedSessionIds: [legacy.sessionId, managed.sessionId].sort(),
+      remainingSessionIds: [],
+    });
+    for (const [engine, sessionId] of [
+      ['legacy', legacy.sessionId],
+      ['managed', managed.sessionId],
+    ] as const) {
+      const [handle] = p.channels[engine];
+      expect(handle.killed).toBe(true);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: expect.objectContaining({ sessionId }),
+      });
+    }
+    expect(await p.bridge.stopWorkspaceRuntime!(request)).toEqual(result);
+    expect(p.bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      runtimeLive: false,
+      workspaceControl: 'cold',
+    });
+  });
+
+  it('stales a stop confirmation when a channel starts after the preview', async () => {
+    const p = restartable();
     p.choose('legacy');
     await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    expect(p.bridge.getRuntimeStopSnapshot!().blockedReasons).toContain(
-      'multiple_engine_channels',
+    const request = stopConfirmation(p.bridge);
+    p.choose('managed');
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(managed.sessionId);
+    expect(p.bridge.getRuntimeStopSnapshot!().sessions).toHaveLength(1);
+    expect(() => p.bridge.stopWorkspaceRuntime!(request)).toThrow('changed');
+    expect(p.channels.legacy[0].killed).toBe(false);
+    expect(p.channels.managed[0].killed).toBe(false);
+  });
+
+  it('keeps a confirmation after an older channel without sessions exits', async () => {
+    const p = restartable();
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(managed.sessionId);
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const request = stopConfirmation(p.bridge);
+    p.channels.managed[0].crash();
+    await vi.waitFor(() =>
+      expect(p.bridge.getRuntimeStopSnapshot!().channels).toHaveLength(1),
     );
+    await expect(
+      p.bridge.stopWorkspaceRuntime!(request),
+    ).resolves.toMatchObject({
+      state: 'stopped',
+      closedSessionIds: [legacy.sessionId],
+      channels: [{ executionEngine: 'legacy' }],
+    });
+  });
+
+  it('reports only the sessions of an exited channel as interrupted', async () => {
+    const p: ReturnType<typeof restartable> = restartable(
+      {},
+      {
+        managed: {
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            p.channels.managed[0].crash();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            throw new RequestError(-32603, 'child exited');
+          },
+        },
+      },
+    );
+    const managed = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'a-managed',
+    });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'z-legacy',
+    });
+    const managedEvents = p.bridge.subscribeEvents(managed.sessionId);
+    const result = await p.bridge.stopWorkspaceRuntime!(
+      stopConfirmation(p.bridge),
+    );
+    expect(result).toMatchObject({
+      state: 'incomplete',
+      stopped: false,
+      closedSessionIds: [],
+      interruptedSessionIds: [managed.sessionId],
+      remainingSessionIds: [legacy.sessionId],
+    });
+    expect(p.channels.legacy[0].killed).toBe(false);
+    expect(p.bridge.getSessionSummary(legacy.sessionId)).toBeDefined();
+    const events = [];
+    for await (const event of managedEvents) events.push(event);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'session_closed',
+        data: expect.objectContaining({ cause: 'workspace_runtime_stop' }),
+      }),
+    );
+  });
+
+  it('counts sessions lost while an exited channel releases as interrupted', async () => {
+    const release = deferred<void>();
+    const p: ReturnType<typeof restartable> = restartable(
+      {},
+      {
+        managed: {
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            p.channels.managed[0].crash();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            throw new RequestError(-32603, 'child exited');
+          },
+        },
+      },
+    );
+    const managed = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'a-managed',
+    });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'z-legacy',
+    });
+    p.channels.managed[0].channel.registryReleased = release.promise;
+    const stop = p.bridge.stopWorkspaceRuntime!(stopConfirmation(p.bridge));
+    await vi.waitFor(() =>
+      expect(p.bridge.getRuntimeStopSnapshot!().lastStop?.error).toBeDefined(),
+    );
+    p.channels.legacy[0].crash();
+    await vi.waitFor(() => expect(p.bridge.sessionCount).toBe(0));
+    release.resolve();
+    await expect(stop).resolves.toMatchObject({
+      state: 'incomplete',
+      closedSessionIds: [],
+      interruptedSessionIds: [managed.sessionId, legacy.sessionId],
+      remainingSessionIds: [],
+    });
+  });
+
+  it('reports a paired stop released only after every child is released', async () => {
+    const p = restartable();
+    p.choose('legacy');
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('managed');
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const release = deferred<void>();
+    p.channels.managed[0].channel.registryReleased = release.promise;
+    const stop = p.bridge.stopWorkspaceRuntime!(stopConfirmation(p.bridge));
+    await vi.waitFor(() => {
+      expect(p.channels.legacy[0].killed).toBe(true);
+      expect(p.channels.managed[0].killed).toBe(true);
+    });
+    expect(p.bridge.getRuntimeStopSnapshot!().lastStop).toMatchObject({
+      state: 'stopping',
+      released: false,
+    });
+    expect(p.bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      state: 'stopping',
+      workspaceControl: 'stopping',
+    });
+    release.resolve();
+    await expect(stop).resolves.toMatchObject({
+      state: 'stopped',
+      released: true,
+    });
+  });
+
+  it('returns channels an incomplete stop left running to the idle policy', async () => {
+    const p = restartable(
+      { channelIdleTimeoutMs: 100 },
+      {
+        legacy: {
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              throw new RequestError(-32603, 'flush refused');
+            }
+            return {};
+          },
+        },
+      },
+    );
+    const managed = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'a-managed',
+    });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: 'z-legacy',
+    });
+    await expect(
+      p.bridge.stopWorkspaceRuntime!(stopConfirmation(p.bridge)),
+    ).resolves.toMatchObject({
+      state: 'incomplete',
+      closedSessionIds: [managed.sessionId],
+      remainingSessionIds: [legacy.sessionId],
+    });
+    await vi.waitFor(() => expect(p.channels.managed[0].killed).toBe(true));
+    expect(p.channels.legacy[0].killed).toBe(false);
+  });
+
+  it('reports a dying Legacy channel as stopping workspace control', async () => {
+    const p = restartable({ channelIdleTimeoutMs: 0 });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const [legacyChannel] = p.channels.legacy;
+    // Terminate returns while the child has not exited yet.
+    legacyChannel.channel.kill = async () => {
+      legacyChannel.killed = true;
+    };
+    p.choose('managed');
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(legacy.sessionId);
+    expect(legacyChannel.killed).toBe(true);
+    expect(p.bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+      runtimeLive: true,
+      workspaceControl: 'stopping',
+    });
+    legacyChannel.crash();
+    await vi.waitFor(() =>
+      expect(
+        p.bridge.getWorkspaceRuntimeLifecycleSnapshot!().workspaceControl,
+      ).toBe('cold'),
+    );
+  });
+
+  it('ignores workspace generation events from a foreign connection', async () => {
+    const completion = deferred<Record<string, unknown>>();
+    const legacy = engineChannel('legacy', {
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart
+          ? completion.promise
+          : {},
+    });
+    const p = paired({}, legacy);
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const stream = p.bridge.generateWorkspaceContent!(
+      'generate',
+      new AbortController().signal,
+      undefined,
+    );
+    await vi.waitFor(() => expect(legacy.agent.extMethodCalls).toHaveLength(1));
+    const requestId = legacy.agent.extMethodCalls[0].params['requestId'];
+    try {
+      for (const [channel, text] of [
+        [p.managed, 'FOREIGN'],
+        [legacy, 'OWNER'],
+      ] as const) {
+        await channel.agentConnection.extNotification(
+          'qwen/notify/workspace/generation/event',
+          { v: 1, requestId, event: { type: 'delta', seq: 0, text } },
+        );
+      }
+    } finally {
+      completion.resolve({ model: 'owner model', modelSource: 'main' });
+    }
+    const events = [];
+    for await (const event of stream) events.push(event);
+    expect(events).toEqual([
+      { type: 'delta', requestId, seq: 0, text: 'OWNER' },
+      { type: 'done', requestId, model: 'owner model', modelSource: 'main' },
+    ]);
   });
 
   it('does not report a tracked Managed channel live before its handshake completes', async () => {

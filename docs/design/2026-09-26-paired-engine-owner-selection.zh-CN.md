@@ -98,14 +98,18 @@ Managed 分支和 side-task 请求原来的普通错误，这些请求仍在修�
 | 已存活的请求 ID               | 409 `{ code: 'session_id_conflict', sessionId, conflict: 'live' }` | `-32602`，`{ httpStatus: 409, errorKind: 'session_id_conflict', sessionId, conflict: 'live' }` |
 | Managed 分支或 side task      | 409 `{ code: 'managed_session_branch_unsupported', sessionId }`    | `-32602`，`{ httpStatus: 409, errorKind: 'managed_session_branch_unsupported', sessionId }`    |
 | owner 不可用（选择器/子进程） | 409 `{ code: 'session_execution_engine_unavailable' }`             | `-32602`，`{ httpStatus: 409, errorKind: 'session_execution_engine_unavailable' }`             |
+| transcript 快照不可用         | 409 `{ code: 'transcript_snapshot_unavailable' }`（已有）          | `-32603`，`{ httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' }`                  |
 
 冲突与非法 ID 的形状与现有共享准入响应一致。SDK 的 HTTP 与 WebSocket 传输从
-`data.httpStatus` 还原 HTTP 状态。只映射这些类型；其他 SDK 错误仍映射为内部错误。
+`data.httpStatus` 还原 HTTP 状态。选择器读取快照时与 ACP 子进程都可能报告快照不可用，
+REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不再是笼统的内部错误。只映射
+这些类型；其他 SDK 错误仍映射为内部错误。
 
 直接创建方保留各自的错误词汇。`LocalManagedRuntimeProvider` 把已存活 ID 的拒绝
 映射为不可重试的 `managed_runtime_identity_conflict`。standalone 服务把未派发的
 已存活 ID 拒绝映射为 `standalone_session_conflict`，而不是
-`standalone_creation_rolled_back`。
+`standalone_creation_rolled_back`。此时它不检查该 ID 是否有已持久化的内容，因为存活
+owner 自己的 transcript 本就应当存在；发现它不能导致 runtime 被隔离。
 
 ## 文件与消费者
 
