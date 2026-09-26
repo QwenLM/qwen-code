@@ -52,6 +52,10 @@ type BootstrapRoute =
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  [
+    'batch <command>',
+    'Run many independent requests through the DashScope Batch API',
+  ],
   ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
