@@ -8,7 +8,7 @@
 
 用户面前那台有图形会话的机器（下称桌面机）把自己的 `node_repl`（连同 `@qwen-code/cua-sdk` 和内嵌驱动）借给一个远端会话。两个部件：
 
-1. **桌面机上一次性安装**：`npx -y @qwen-code/node-repl-mcp@latest desktop-relay install`。它把运行时装到 `~/.qwen/desktop-relay`，并向 launchd 注册 `127.0.0.1:47821` 上的 socket（inetd 模式）。平时没有任何进程；有连接进来时 launchd 才拉起一个短命进程。
+1. **桌面机上一次性安装**：`npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install`。它把运行时装到 `~/.qwen/desktop-relay`，并向 launchd 注册 `127.0.0.1:47821` 上的 socket（inetd 模式）。平时没有任何进程；有连接进来时 launchd 才拉起一个短命进程。
 2. **Web Shell 的“使用这台电脑”入口**：页面先向 daemon 换取一次性、短时且只绑定当前会话与 `desktop-node-repl` 的凭证，再把 daemon 地址、`sessionId` 和该凭证交给本机中继；中继在桌面机上弹出原生确认框；用户允许后，中继拉起 `node_repl`，通过 daemon 的反向工具通道按会话注册给这一个会话。daemon 的完整 bearer token 不会发送到本机中继。
 
 Computer Use skill 会优先选择 `desktop-node-repl`，并在它存在时跳过普通 `node_repl` 的安装引导；未连接桌面中继时仍走原有本地路径。
@@ -132,7 +132,7 @@ daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一�
 2. 已实测 Chromium 浏览器通过 SSH localhost 转发访问 Linux Serve，再调用 Mac Computer Use 读写测试文稿并返回裁剪截图；不代表 Safari、HTTPS 部署或所有截图尺寸已验收。
 3. 非 GUI cell 的取消、超过 30 秒后的继续调用、会话切换保持及断开撤销已通过；连续 GUI 输入中的取消尚未完整验收。
 4. 全新 Mac 的首次安装、TCC 首次授权及权限归属仍需专门验证；本轮使用已有 Mac 上安装的候选 tarball。
-5. 发布：`npx … @latest desktop-relay install` 要等 `@qwen-code/node-repl-mcp` 发布包含本改动的版本后才可用；发布前用 `--package <tarball>` 安装（见验证说明）。
+5. 发布：安装命令固定到 `@qwen-code/node-repl-mcp@0.1.7`（不用 `@latest`——已发布的 0.1.6 没有 `desktop-relay` 子命令，其入口不读 argv，照文档敲下去只会静默挂在 stdin 上）。本 PR 同步把 `packages/node-repl/package.json` 从 0.1.6 bump 到 0.1.7，并带上 `cd-cua-driver.yml` validate-version 门禁要求的三处版本行（computer-use/browser-use 的 SKILL.md、用户指南）；不 bump 则发布链路会以 “already exists with different integrity” 拒绝发布，固定出去的版本里依然没有中继。发布前仍用 `--package <tarball>` 安装（见验证说明）。
 6. 2026-09-26 最终候选在 Node 22 上通过 612 项聚焦回归、全仓 build、typecheck 和 lint；这些自动化结果验证受限凭证、路由、状态机和失败路径，不冒充一次新的 macOS 授权截图或跨机 GUI 实测。
 
 ## 7. 非目标与后续

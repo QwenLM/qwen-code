@@ -4,13 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DESKTOP_RELAY_INSTALL_COMMAND,
   connectDesktopRelay,
   disconnectDesktopRelay,
   probeDesktopRelay,
   type FetchLike,
 } from './desktop-relay-client';
+
+// The version the copy button hands out must be one the release workflow
+// actually publishes with the `desktop-relay` subcommand in it.
+const nodeReplPackage = JSON.parse(
+  readFileSync(
+    new URL('../../../node-repl/package.json', import.meta.url),
+    'utf8',
+  ),
+) as { version: string };
 
 function respond(status: number, body: unknown) {
   return vi.fn<FetchLike>(
@@ -23,6 +34,18 @@ function respond(status: number, body: unknown) {
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('DESKTOP_RELAY_INSTALL_COMMAND', () => {
+  it('pins the published node-repl version instead of @latest', () => {
+    const pin = DESKTOP_RELAY_INSTALL_COMMAND.match(
+      /^npx -y @qwen-code\/node-repl-mcp@(\S+) desktop-relay install$/,
+    )?.[1];
+    expect(pin).toBe(nodeReplPackage.version);
+    expect(DESKTOP_RELAY_INSTALL_COMMAND).not.toContain(
+      '@qwen-code/node-repl-mcp@latest',
+    );
+  });
+});
 
 describe('probeDesktopRelay', () => {
   it('reads the version and the connection this page started', async () => {

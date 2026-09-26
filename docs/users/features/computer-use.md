@@ -25,7 +25,7 @@ Node.js 22 or later and npm are required.
 When first used, the skill runs these commands itself:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
 npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
 ```
 
@@ -95,7 +95,7 @@ still drive the desktop you are sitting at: that computer lends its own
 Set it up once on your computer:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@latest desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
 ```
 
 This installs `node_repl` and the SDK under `~/.qwen/desktop-relay` and registers

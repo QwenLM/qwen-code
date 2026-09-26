@@ -48,12 +48,12 @@ call `node_repl_reset` and run the setup again.
 If `node_repl` is unavailable, configure it with:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
 ```
 
 Then tell the user to restart Qwen Code and stop. Do not start a separate
 Browser Use MCP server. Screenshot metadata requires `@qwen-code/node-repl-mcp`
-0.1.6 or later, so keep this exact pin.
+0.1.7 or later, so keep this exact pin.
 
 Qwen reports the absolute `Base directory for this skill` when loading this
 file. Use that directory as `<skill-base>`. The bundled SDK ships with its

@@ -123,7 +123,7 @@ somewhere else, typically a headless dev box, so the computer-use skill can
 drive the desktop you are sitting at. On macOS:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@latest desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
 ```
 
 This installs the server and `@qwen-code/cua-sdk` under `~/.qwen/desktop-relay`

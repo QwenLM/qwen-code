@@ -38,7 +38,7 @@ function mount(status: DesktopRelayStatus, language: WebShellLanguage = 'en') {
       <I18nProvider language={language}>
         <DesktopRelayPanel
           status={status}
-          installCommand="npx -y @qwen-code/node-repl-mcp@latest desktop-relay install"
+          installCommand="npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install"
           copied={false}
           {...handlers}
         />

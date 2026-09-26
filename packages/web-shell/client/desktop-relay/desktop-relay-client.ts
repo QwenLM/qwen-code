@@ -12,8 +12,17 @@
 
 export const DESKTOP_RELAY_URL = 'http://127.0.0.1:47821';
 
+/**
+ * Pinned on purpose, never `@latest`. A `latest` build that predates the
+ * `desktop-relay` subcommand ignores argv and connects a stdio MCP server, so
+ * the command this panel hands out (with a Copy button, in exactly the
+ * `missing` state that command produced) would block on stdin and install
+ * nothing. `desktop-relay-client.test.ts` fails when the pin drifts from
+ * `packages/node-repl/package.json`, and `.github/workflows/cd-cua-driver.yml`
+ * publishes that version, so the pinned spec always carries the subcommand.
+ */
 export const DESKTOP_RELAY_INSTALL_COMMAND =
-  'npx -y @qwen-code/node-repl-mcp@latest desktop-relay install';
+  'npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install';
 
 export type DesktopRelayRemotePhase =
   | 'connecting'
