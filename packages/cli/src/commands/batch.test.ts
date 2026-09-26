@@ -16,12 +16,17 @@ import {
   getBatchJob,
   listBatchJobs,
 } from './batch-client.js';
-import { prepareEndpoint, resolveEndpoint } from './batch.js';
+import {
+  listWorkflowCommand,
+  prepareEndpoint,
+  resolveEndpoint,
+} from './batch.js';
 
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockResolve = vi.hoisted(() => vi.fn());
 const mockResolveProxy = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockIgnoreBrokenPipe = vi.hoisted(() => vi.fn());
 
 vi.mock('../config/settings.js', () => ({ loadSettings: mockLoadSettings }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
@@ -30,6 +35,7 @@ vi.mock('../utils/modelConfigUtils.js', () => ({
 }));
 vi.mock('./channel/proxy.js', () => ({ resolveProxy: mockResolveProxy }));
 vi.mock('../utils/stdioHelpers.js', () => ({
+  ignoreBrokenPipe: mockIgnoreBrokenPipe,
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: vi.fn(),
 }));
@@ -254,5 +260,33 @@ describe('batch-client', () => {
       await batchRequest(ep, route);
     }
     expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe('batch list command', () => {
+  let home: string;
+  let savedHome: string | undefined;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-list-'));
+    savedHome = process.env['QWEN_BATCH_HOME'];
+    process.env['QWEN_BATCH_HOME'] = home;
+    mockIgnoreBrokenPipe.mockClear();
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env['QWEN_BATCH_HOME'];
+    else process.env['QWEN_BATCH_HOME'] = savedHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('installs the broken-pipe guard before the listing is written', async () => {
+    // An unreadable record makes `batch list` write to stderr for the first
+    // time, so `batch list 2>&1 | head -1` used to exit 1 on a listing that
+    // had already succeeded: the reader leaves, EPIPE lands on a stream with
+    // no error listener, and the process dies after the work is done.
+    await (listWorkflowCommand.handler as () => Promise<void>)();
+
+    expect(mockIgnoreBrokenPipe).toHaveBeenCalledTimes(1);
   });
 });

@@ -91,6 +91,7 @@ import type {
   DaemonUsageDashboard,
   DaemonUsageRange,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -1381,6 +1382,33 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonStatusReport>(
       `/daemon/status${query}`,
       'GET /daemon/status',
+    );
+  }
+
+  /** Check the daemon installation; refresh bypasses its cached release check. */
+  async daemonUpdateStatus(refresh = false): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      `/daemon/update${refresh ? '?refresh=true' : ''}`,
+      'GET /daemon/update',
+      { mode: 'rest' },
+    );
+  }
+
+  /** Download and verify the checked release without activating it. */
+  async prepareDaemonUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/prepare',
+      'POST /daemon/update/prepare',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /** Activate a prepared release and restart the daemon after responding. */
+  async restartDaemonForUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/restart',
+      'POST /daemon/update/restart',
+      { method: 'POST', body: {}, mode: 'rest' },
     );
   }
 

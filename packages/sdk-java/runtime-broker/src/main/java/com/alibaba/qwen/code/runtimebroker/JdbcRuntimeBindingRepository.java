@@ -31,7 +31,7 @@ public final class JdbcRuntimeBindingRepository
             "attestation_generation", "drain_requested", "operation_owner",
             "operation_lease_until", "operation_generation",
             "record_version", "last_health_at", "last_reconciled_at",
-            "last_active_at");
+            "last_active_at", "storage_id");
 
     private final DataSource dataSource;
     private final SecretProtector secretProtector;
@@ -314,14 +314,15 @@ public final class JdbcRuntimeBindingRepository
                 + "tenant_id, workspace_id, workspace_generation, "
                 + "canonical_cwd, capability_digest, isolation_class, "
                 + "isolation_key, provisioner_kind, last_generation, "
-                + "active_binding_id) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL) "
+                + "active_binding_id, storage_id) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?) "
                 + "ON DUPLICATE KEY UPDATE request_key = request_key";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, requestKey);
             setScope(statement, 2, scope);
             statement.setString(8, request.getIsolationKey());
             statement.setString(9, request.getProvisionerKind());
+            statement.setString(10, request.getStorageId());
             statement.executeUpdate();
         }
     }
@@ -331,7 +332,7 @@ public final class JdbcRuntimeBindingRepository
         String sql = "SELECT tenant_id, workspace_id, "
                 + "workspace_generation, canonical_cwd, capability_digest, "
                 + "isolation_class, isolation_key, provisioner_kind, "
-                + "last_generation, active_binding_id "
+                + "last_generation, active_binding_id, storage_id "
                 + "FROM qwen_runtime_binding_slot "
                 + "WHERE request_key = ?" + (forUpdate
                         ? " FOR UPDATE" : "");
@@ -344,7 +345,8 @@ public final class JdbcRuntimeBindingRepository
                 RuntimeScope scope = mapScope(result);
                 RuntimeProvisionRequest request = new RuntimeProvisionRequest(
                         scope, result.getString("isolation_key"),
-                        result.getString("provisioner_kind"));
+                        result.getString("provisioner_kind"),
+                        result.getString("storage_id"));
                 return new Slot(request,
                         result.getLong("last_generation"),
                         result.getString("active_binding_id"));
@@ -377,7 +379,7 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord record) throws SQLException {
         String sql = "INSERT INTO qwen_runtime_binding (" + BINDING_COLUMNS
                 + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             setBinding(statement, record);
             statement.executeUpdate();
@@ -483,6 +485,7 @@ public final class JdbcRuntimeBindingRepository
                 record.getLastReconciledAt());
         JdbcRepositorySupport.setInstant(statement, 33,
                 record.getLastActiveAt());
+        statement.setString(34, request.getStorageId());
     }
 
     private void setSeedColumns(PreparedStatement statement, int start,
@@ -536,7 +539,8 @@ public final class JdbcRuntimeBindingRepository
         RuntimeScope scope = mapScope(result);
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
                 result.getString("isolation_key"),
-                result.getString("provisioner_kind"));
+                result.getString("provisioner_kind"),
+                result.getString("storage_id"));
         String storedRequestKey = result.getString("request_key");
         if (!JdbcRepositorySupport.requestKey(request).equals(
                 storedRequestKey)) {

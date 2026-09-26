@@ -120,6 +120,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -498,6 +499,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
@@ -2396,6 +2398,13 @@ export function createServeApp(
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
+  registerDaemonUpdateRoutes(app, {
+    currentVersion: deps.qwenCodeVersion,
+    runtimeToken: opts.token,
+    restartForUpdate: deps.restartForUpdate,
+    mutate,
+  });
+
   registerDaemonStatusRoutes(app, {
     opts,
     boundWorkspace: primaryBoundWorkspace,
@@ -3804,6 +3813,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
           app.locals as {
