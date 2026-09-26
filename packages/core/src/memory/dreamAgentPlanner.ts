@@ -19,6 +19,10 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import {
+  MEMORY_CATEGORY_SECTION,
+  MEMORY_FRONTMATTER_EXAMPLE,
+} from './prompt.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -35,7 +39,14 @@ Rules:
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
 - Update the MEMORY.md index to accurately reflect surviving files.
 - Keep the MEMORY.md index concise: one line per file in the format \`- [Title](relative/path.md) — one-line hook\`.
-- If nothing needs consolidation, do nothing and say so.`;
+- If nothing needs consolidation, do nothing and say so.
+- Keep one independently retrievable fact or rule per file, with the body near or below 1,200 characters.
+- When updating a file, refresh its description, category, keywords, and usage_scenarios from the complete content.
+
+${MEMORY_CATEGORY_SECTION.join('\n')}
+
+Memory file format reference:
+${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;
 
 export function getTranscriptDir(projectRoot: string): string {
   return path.join(new Storage(projectRoot).getProjectDir(), 'chats');

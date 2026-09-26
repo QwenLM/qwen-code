@@ -1223,6 +1223,10 @@ describe('remember memory helper', () => {
       systemPrompt: string;
     };
     // Full-protocol markers must be present (forceFullProtocol: true)
+    expect(params.systemPrompt).toContain('category:');
+    expect(params.systemPrompt).toContain('keywords:');
+    expect(params.systemPrompt).toContain('usage_scenarios:');
+    expect(params.systemPrompt).toContain('## Existing keyword vocabulary');
     expect(params.systemPrompt).toContain('## Types of memory');
     expect(params.systemPrompt).toContain('## What NOT to save in memory');
     expect(params.systemPrompt).toContain('## When to access memories');

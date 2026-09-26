@@ -308,7 +308,9 @@ describe('managed auto-memory prompt helpers', () => {
   it('condensed prompt includes maintenance directives', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
-    expect(prompt).toContain('Keep the name, description, and type fields');
+    expect(prompt).toContain(
+      'Keep the name, description, type, category, keywords, and usage_scenarios fields',
+    );
     expect(prompt).toContain('Organize memories semantically by topic');
     expect(prompt).toContain(
       'Update or remove memories that turn out to be wrong',
