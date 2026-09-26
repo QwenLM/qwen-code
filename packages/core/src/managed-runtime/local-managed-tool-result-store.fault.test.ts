@@ -294,4 +294,49 @@ describe('local tool-result disk faults', () => {
     await expect(store.seal(request)).rejects.toThrow('injected sync failure');
     expect((await store.seal(request)).status).toBe('ok');
   });
+
+  it('rechecks a prefix when the seal lands after the scan', async () => {
+    const { store, runtimeBaseDir } = await harness();
+    const bytes = Buffer.from('first');
+    const later = Buffer.from('later');
+    const request = { captureId: 'capture', streamId: 'stdout' };
+    expect(
+      (await store.publish({ ...request, ordinal: 0, bytes })).status,
+    ).toBe('ok');
+    const reader = await LocalToolResultSegmentStore.openReadOnly({
+      runtimeBaseDir,
+      sessionKey: key,
+    });
+    // The reader misses segment 1 and its marker; the seal then covers both.
+    fault.target = path.join(
+      store.root,
+      'capture-capture',
+      'stream-stdout',
+      'published-00001',
+    );
+    fault.missingOnce = async () => {
+      expect(
+        (await store.publish({ ...request, ordinal: 1, bytes: later })).status,
+      ).toBe('ok');
+      expect(
+        (
+          await store.seal({
+            ...request,
+            segmentCount: 2,
+            byteLength: bytes.byteLength + later.byteLength,
+            digest: createHash('sha256')
+              .update(bytes)
+              .update(later)
+              .digest('hex'),
+          })
+        ).status,
+      ).toBe('ok');
+    };
+    expect(await reader.prefix(request)).toMatchObject({
+      status: 'ok',
+      result: { segmentCount: 2, sealed: true },
+    });
+    expect(fault.missingOnce).toBeUndefined();
+    await reader.close();
+  });
 });
