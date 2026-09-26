@@ -342,6 +342,72 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   return truncateText(firstLine, 80);
 }
 
+export function getEmptyMcpToolTitleDescription(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): string | undefined {
+  if (
+    !toolName?.startsWith('mcp__') ||
+    !input ||
+    Object.keys(input).length > 0
+  ) {
+    return undefined;
+  }
+  // core's mcp-tool.ts getDescription serializes arguments as JSON; the CLI
+  // tool-call-emitter may prefix the MCP display name. Require confirmed-empty
+  // input so missing or nonempty arguments keep their original title.
+  const trimmed = title?.trim() ?? '';
+  if (trimmed === '{}') return '';
+  const match = /^(.+) \((.+) MCP Server\): \{\}$/.exec(trimmed);
+  // Preserve prose or aliased names when the prefix cannot be confirmed.
+  if (match === null) return undefined;
+  const rawName = `mcp__${match[2]}__${match[1]}`;
+  if (
+    toolName !== rawName &&
+    toolName !== normalizeToolNameForProvider(rawName)
+  )
+    return undefined;
+  return `${match[1]} (${match[2]} MCP Server)`;
+}
+
+export function isEmptyMcpToolTitle(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): boolean {
+  return getEmptyMcpToolTitleDescription(toolName, title, input) !== undefined;
+}
+
+// The web-shell bundle cannot import core, so keep this provider-name mirror
+// aligned with packages/core/src/utils/tool-name-utils.ts.
+const MAX_TOOL_NAME_LENGTH = 63;
+const PROVIDER_SAFE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+function normalizeToolNameForProvider(name: string): string {
+  if (
+    name.length <= MAX_TOOL_NAME_LENGTH &&
+    PROVIDER_SAFE_TOOL_NAME.test(name)
+  ) {
+    return name;
+  }
+
+  const sanitized = name.replace(/[^A-Za-z0-9_-]/g, '_');
+  const normalized = /^[A-Za-z]/.test(sanitized)
+    ? sanitized
+    : `tool_${sanitized}`;
+  const suffix = `_${stableToolNameHash(name)}`;
+  return `${normalized.slice(0, MAX_TOOL_NAME_LENGTH - suffix.length)}${suffix}`;
+}
+
+function stableToolNameHash(name: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = Math.imul(hash ^ name.charCodeAt(index), 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(7, '0');
+}
+
 function getDescriptionFromTitle(
   tool: ACPToolCall,
   workspaceCwd?: string,
@@ -350,6 +416,16 @@ function getDescriptionFromTitle(
 
   const displayName = formatToolDisplayName(tool.toolName);
   const title = tool.title.trim();
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    tool.toolName,
+    title,
+    tool.args,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription
+      ? formatDescriptionPaths(emptyMcpDescription, workspaceCwd)
+      : null;
+  }
   if (title === tool.toolName || title === displayName) return null;
 
   const prefixes = [displayName, tool.toolName];
