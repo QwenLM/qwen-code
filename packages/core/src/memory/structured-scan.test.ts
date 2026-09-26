@@ -133,6 +133,14 @@ describe('auto-memory topic scanning', () => {
       valid: true,
       missingOrInvalidFields: [],
     });
+    expect(
+      validateStructuredAutoMemoryDocument(
+        content.replace('\n---\nBody', '\nbroken: [\n---\nBody'),
+      ),
+    ).toEqual({
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-malformed'],
+    });
   });
 
   it('distinguishes missing and malformed frontmatter', () => {

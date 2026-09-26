@@ -329,6 +329,13 @@ export function validateStructuredAutoMemoryDocument(
       : 'frontmatter-missing';
     return { valid: false, missingOrInvalidFields: [reason] };
   }
+  const document = parseDocument(frontmatterMatch[1], { schema: 'core' });
+  if (document.errors.length > 0 || !isMap(document.contents)) {
+    return {
+      valid: false,
+      missingOrInvalidFields: ['frontmatter-malformed'],
+    };
+  }
   const parsed = rescueUnquotedHashFields(
     frontmatterMatch[1],
     parseYaml(frontmatterMatch[1]),
@@ -367,21 +374,6 @@ export function validateStructuredAutoMemoryDocument(
     parseUsageScenarios(rawScenarios, '').length !== rawScenarios.length
   ) {
     invalid.push('usage_scenarios');
-  }
-  if (invalid.length > 0) {
-    // A delimited head the strict parser rejects (tab indentation, broken
-    // YAML) or that holds no mapping can never be spliced losslessly, so it
-    // is terminally malformed rather than a migration candidate: attempting
-    // it would retry a paid migration agent on every turn, pin the corpus to
-    // legacy mode, and then wrap the original frontmatter into the body.
-    // Runs only on rejection, so valid files never pay for the second parse.
-    const document = parseDocument(frontmatterMatch[1], { schema: 'core' });
-    if (document.errors.length > 0 || !isMap(document.contents)) {
-      return {
-        valid: false,
-        missingOrInvalidFields: ['frontmatter-malformed'],
-      };
-    }
   }
   return { valid: invalid.length === 0, missingOrInvalidFields: invalid };
 }
