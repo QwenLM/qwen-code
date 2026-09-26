@@ -243,11 +243,13 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe(null);
     });
 
-    it('should handle locale without encoding (no dot)', () => {
+    it('should return null for a locale label TextDecoder cannot decode (LANG=C)', () => {
       process.env['LANG'] = 'C';
 
+      // 'c' is not a valid WHATWG encoding label; handing it to consumers
+      // that call `new TextDecoder(encoding)` would throw RangeError.
       const result = getSystemEncoding();
-      expect(result).toBe('c');
+      expect(result).toBe(null);
     });
 
     it('should handle empty locale environment variables', () => {
@@ -260,11 +262,11 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe('utf-8');
     });
 
-    it('should return locale as-is when locale format has no dot', () => {
+    it('should return null when locale format has no dot and the label is undecodable', () => {
       process.env['LANG'] = 'invalid_format';
 
       const result = getSystemEncoding();
-      expect(result).toBe('invalid_format');
+      expect(result).toBe(null);
     });
 
     it('should prioritize LC_ALL over other environment variables', () => {
@@ -453,6 +455,24 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       expect(result).toBe('ibm866');
       expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('should fall through to chardet (never an undecodable label) on Unix when LANG=C', () => {
+      mockedOsPlatform.mockReturnValue('linux');
+      process.env['LANG'] = 'C'; // 'c' is not a valid TextDecoder label
+      // chardet misclassifies CP-866 Cyrillic as windows-1252 (see issue table)
+      mockedChardetDetect.mockReturnValue('windows-1252');
+
+      // "Ощибка" in CP-866 (verified via TextDecoder('ibm866') on Node 24)
+      const buffer = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).not.toBe('c');
+      expect(result).toBe('windows-1252');
+      // Consumers call `new TextDecoder(encoding)` unguarded in places
+      // (decodeBufferedOutput); the returned label must always be valid.
+      expect(() => new TextDecoder(result)).not.toThrow();
+      expect(mockedChardetDetect).toHaveBeenCalledWith(buffer);
     });
 
     it('should still use chardet for non-UTF-8 bytes when the system encoding is UTF-8', () => {
