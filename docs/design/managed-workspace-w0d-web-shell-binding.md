@@ -30,7 +30,7 @@ Creation uses the existing BFF Session create command with `input: []` and an ex
 
 Immediately before sending, the client stores a frozen request in `sessionStorage`: Agent ID, Workspace ID, raw relative directory, empty input, client ID, and idempotency key. Creation does not start if that first write fails. A lost response is retried with that exact request. Once a Session ID is returned, the client saves it and subsequent retries read the Session only. A first definitive 4xx restores editing; after any uncertain outcome a later 4xx cannot prove the original request never committed. The user can explicitly abandon local confirmation, with a warning that the empty server Session may still exist. No automatic server deletion occurs.
 
-Changing tenant, actor, or Agent changes the host scope or provider storage key, remounts the form, cancels its requests, and ignores late responses. Credential refresh within the same identity retains the pending request. Ordinary unsubmitted drafts and recent directories are not persisted.
+Changing tenant, actor, or Agent changes the host scope or provider storage key, remounts the form, cancels its requests, and ignores late responses. The old selected Session ID is cleared before the new provider can request it; a newly supplied Session ID can still be opened. Credential refresh within the same identity retains the pending request. Ordinary unsubmitted drafts and recent directories are not persisted.
 
 ## Validation and boundaries
 

@@ -72,13 +72,30 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       enableWorkspaceBinding,
     ],
   );
-  const [selectedSessionId, setSelectedSessionId] = useState(sessionId);
+  const [selection, setSelection] = useState(() => ({
+    storageKey: provider.storageKey,
+    externalSessionId: sessionId,
+    selectedSessionId: sessionId,
+  }));
+  const selectedSessionId =
+    selection.storageKey === provider.storageKey
+      ? selection.selectedSessionId
+      : sessionId === selection.externalSessionId
+        ? undefined
+        : sessionId;
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const emptyMap = useMemo(() => new Map(), []);
-  useEffect(
-    () => setSelectedSessionId(sessionId),
-    [sessionId, provider.storageKey],
-  );
+  useEffect(() => {
+    setSelection((current) => ({
+      storageKey: provider.storageKey,
+      externalSessionId: sessionId,
+      selectedSessionId:
+        current.storageKey !== provider.storageKey &&
+        sessionId === current.externalSessionId
+          ? undefined
+          : sessionId,
+    }));
+  }, [sessionId, provider.storageKey]);
 
   return (
     <ErrorBoundary
@@ -111,7 +128,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                         key={provider.storageKey}
                         sessionId={selectedSessionId}
                         onSelectSession={(next) => {
-                          setSelectedSessionId(next);
+                          setSelection((current) => ({
+                            ...current,
+                            selectedSessionId: next,
+                          }));
                           onSessionChange?.(next);
                         }}
                         managedAgentProvider={provider}

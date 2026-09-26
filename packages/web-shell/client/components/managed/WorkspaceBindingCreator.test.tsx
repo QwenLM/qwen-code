@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
+import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type { ManagedAgentProvider } from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 
@@ -140,6 +141,54 @@ describe('WorkspaceBindingCreator', () => {
     expect(onCreated).toHaveBeenCalledWith('session-a');
   });
 
+  it('keeps the recovery record when an aborted create is later denied', async () => {
+    let rejectFirst!: (error: Error) => void;
+    createEmpty
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(403, 'workspace_forbidden', 'denied'),
+      );
+    await render();
+    await click('Create session');
+    const key =
+      'qwen-managed-workspace-create:host:scope-a:agent-a:workspace-v1';
+    const saved = sessionStorage.getItem(key);
+    expect(createEmpty).toHaveBeenCalledTimes(1);
+    expect(saved).not.toBeNull();
+
+    await act(async () => root.unmount());
+    await act(async () => {
+      rejectFirst(new Error('aborted'));
+      await flush();
+    });
+    root = createRoot(container);
+    await render();
+    await click('Retry the same request');
+    expect(createEmpty).toHaveBeenCalledTimes(2);
+    expect(createEmpty.mock.calls[1][0]).toEqual(createEmpty.mock.calls[0][0]);
+    expect(createEmpty.mock.calls[1][1].idempotencyKey).toBe(
+      createEmpty.mock.calls[0][1].idempotencyKey,
+    );
+    expect(sessionStorage.getItem(key)).toBe(saved);
+    expect(container.textContent).toContain('Creation is unconfirmed');
+  });
+
+  it('restores editing after the first create is definitively rejected', async () => {
+    createEmpty.mockRejectedValue(
+      new JavaManagedAgentHttpError(400, 'invalid_cwd', 'invalid directory'),
+    );
+    await render();
+    await click('Create session');
+    expect(sessionStorage.length).toBe(0);
+    expect(container.querySelector('#managed-workspace-cwd')).not.toBeNull();
+    expect(container.textContent).toContain('invalid directory');
+  });
+
   it('keeps the returned Session ID when binding read-back is invalid', async () => {
     createEmpty.mockResolvedValue({ sessionId: 'session-a' });
     getSession
@@ -213,7 +262,6 @@ describe('WorkspaceBindingCreator', () => {
         input: [],
         clientId: 'client-a',
         idempotencyKey: 'key-a',
-        uncertain: true,
       }),
     );
     vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
@@ -270,5 +318,30 @@ describe('WorkspaceBindingCreator', () => {
     await click('Refresh');
     await click('Create session');
     expect(createEmpty.mock.calls[0][0].workspaceId).toBe('ws-a');
+  });
+
+  it('disables creation when a retained choice cannot be rechecked', async () => {
+    const previous = { ...workspace, workspaceId: 'ws-b' };
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockResolvedValueOnce({
+        data: [previous],
+        defaultWorkspace: previous,
+        supported: true,
+      })
+      .mockResolvedValueOnce({
+        data: [workspace],
+        supported: true,
+      });
+    vi.mocked(provider.workspaceBinding!.get).mockRejectedValue(
+      new Error('temporary failure'),
+    );
+    await render();
+    await click('Refresh');
+    expect(container.textContent).toContain('temporary failure');
+    const create = [...container.querySelectorAll('button')].find((item) =>
+      item.textContent?.includes('Create session'),
+    );
+    expect(create?.disabled).toBe(true);
+    expect(createEmpty).not.toHaveBeenCalled();
   });
 });

@@ -34,7 +34,6 @@ interface PendingCreation {
   clientId: string;
   idempotencyKey: string;
   sessionId?: string;
-  uncertain?: boolean;
 }
 
 function readPending(key: string): PendingCreation | undefined {
@@ -226,6 +225,7 @@ export function WorkspaceBindingCreator({
     const abort = lifetime.current;
     if (!abort || abort.signal.aborted || busy) return;
     let attempt = pendingRef.current;
+    const firstSubmission = !attempt;
     if (!attempt) {
       if (
         !supported ||
@@ -302,13 +302,13 @@ export function WorkspaceBindingCreator({
         failure.status < 500 &&
         failure.status !== 408 &&
         failure.status !== 429 &&
-        !attempt.uncertain
+        firstSubmission
       ) {
         updatePending(undefined);
         if (failure.code === 'invalid_cwd') setPathError(message(failure));
         else setError(message(failure));
       } else {
-        updatePending({ ...attempt, uncertain: true });
+        updatePending(attempt);
         setError(message(failure));
       }
     } finally {
@@ -450,7 +450,15 @@ export function WorkspaceBindingCreator({
           </p>
           <Button
             type="submit"
-            disabled={!supported || !selected || loading || busy}
+            disabled={
+              !supported ||
+              loading ||
+              busy ||
+              !items.some(
+                (item) =>
+                  item.workspaceId === selected && item.canCreateSession,
+              )
+            }
           >
             {t('managed.workspaceCreate')}
           </Button>

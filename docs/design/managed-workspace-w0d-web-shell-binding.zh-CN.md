@@ -30,7 +30,7 @@ W0b 已能在创建 Session 时保存经过授权的 Workspace 绑定，但已�
 
 发送前，客户端立即在 `sessionStorage` 保存冻结请求：Agent ID、Workspace ID、原始相对目录、空 input、client ID 和幂等键。首次写入失败时不会发送创建请求。响应丢失后使用完全相同的请求重试。一旦返回 Session ID，客户端先保存它，此后只重试读取 Session。首次明确的 4xx 恢复编辑；发生结果不明的请求后，后续 4xx 不能证明原请求没有提交。用户可以明确放弃本地确认记录，界面提示原空会话可能仍存在；不会自动删除服务端记录。
 
-tenant、actor 或 Agent 改变时，宿主 scope 或 provider 存储键随之变化，表单重新挂载、取消旧请求并忽略迟到响应。同一身份下的凭据刷新保留待确认请求。普通未提交草稿和最近使用目录不持久化。
+tenant、actor 或 Agent 改变时，宿主 scope 或 provider 存储键随之变化，表单重新挂载、取消旧请求并忽略迟到响应。新 provider 发起请求前会清除旧的已选 Session ID；宿主新提供的 Session ID 仍可打开。同一身份下的凭据刷新保留待确认请求。普通未提交草稿和最近使用目录不持久化。
 
 ## 验证与边界
 
