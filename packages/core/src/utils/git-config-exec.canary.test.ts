@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdtempSync,
@@ -230,6 +231,12 @@ describe('a planted git program reaches no automatic git call', () => {
       // error. Read the clean tree first: only a successful `status` can
       // return `false`.
       writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+      // The fsmonitor helper sits untracked at `plant.sh`, and the probe now
+      // counts untracked files as changes — which is the fix's whole point,
+      // but would make the "clean" read below come back dirty. Hide the
+      // helper from the status walk the same way production hides the
+      // `.qwen-session` marker; the plant stays armed in `.git/config`.
+      appendFileSync(join(repo, '.git', 'info', 'exclude'), 'plant.sh\n');
       expect(await worktreeCleanupInternals.hasUncommittedChanges(repo)).toBe(
         false,
       );
