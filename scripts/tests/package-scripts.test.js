@@ -115,7 +115,9 @@ describe('package scripts', () => {
         docEntry,
         `Workflow variable ${name} missing from docs`,
       ).toBeDefined();
-      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(fallback);
+      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+        fallback,
+      );
       expect(new Set(docEntry.files), `Used-in mismatch for ${name}`).toEqual(
         info.files,
       );
@@ -133,7 +135,9 @@ describe('package scripts', () => {
       ).toBeGreaterThan(0);
     }
     for (const name of excludedNonTestVariables) {
-      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(true);
+      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(
+        true,
+      );
     }
   });
 

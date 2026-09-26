@@ -69,8 +69,8 @@ test regression.
 (`VITEST_MAX_THREADS` / `VITEST_MAX_FORKS`, with the matching minimum forced to
 `1`) on the reserved self-hosted runners whose name starts with `ecs-qwen-`.
 The variable is exported only by the main CI workspace-test step and the
-release `workspace_tests` and `quality_scripts` steps; other Vitest
-integration Vitest invocations that land on the same reserved pool in the CI
+release `workspace_tests` and `quality_scripts` steps; other
+integration tests running Vitest that land on the same reserved pool in the CI
 and release workflows do not consume it; they use their own Vitest limits.
 The web-shell E2E smoke is pinned to `ubuntu-latest`, so the cap cannot apply
 to it. On GitHub-hosted runners
