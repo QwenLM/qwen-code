@@ -129,10 +129,7 @@ async function listMarkdownFiles(
             entry.name !== AUTO_MEMORY_INDEX_FILENAME,
         )
         .map((entry) =>
-          path.relative(
-            resolvedRoot,
-            path.join(entry.parentPath, entry.name),
-          ),
+          path.relative(resolvedRoot, path.join(entry.parentPath, entry.name)),
         )
         // Normalize to forward slashes so relative paths are valid URL segments
         // on all platforms (Windows readdir returns backslash-separated paths).

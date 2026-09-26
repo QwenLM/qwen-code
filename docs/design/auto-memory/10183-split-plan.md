@@ -9,12 +9,12 @@ landing model-facing infrastructure before it has a production caller.
 
 ## Delivery order
 
-| Part | Behavior and boundary |
-| --- | --- |
-| 1. Scan boundary hardening | Accept regular Markdown files only, do not traverse symlinks inside managed-memory roots, reject repo-controlled symlink roots, and preserve user-owned private root symlinks. Keep the existing roots, prompt, and recall/forget behavior. |
-| 2. Bounded retrieval | Add structured metadata parsing, bounded metadata rendering, search/fetch/explore, scope-qualified references, and the model-facing tool together so every new API has a production consumer. |
-| 3. Runtime activation | Switch CLI and ACP to metadata-first delivery. Keep body residency, invalidation, and compression cleanup together. Include only telemetry needed to verify delivery. |
-| 4. Existing-memory migration | Add metadata writers, background migration, readiness/activation, and the required Dream/Remember/Extraction integration. Keep old memories usable until conversion succeeds. |
+| Part                         | Behavior and boundary                                                                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Scan boundary hardening   | Accept regular Markdown files only, do not traverse symlinks inside managed-memory roots, reject repo-controlled symlink roots, and preserve user-owned private root symlinks. Keep the existing roots, prompt, and recall/forget behavior. |
+| 2. Bounded retrieval         | Add structured metadata parsing, bounded metadata rendering, search/fetch/explore, scope-qualified references, and the model-facing tool together so every new API has a production consumer.                                               |
+| 3. Runtime activation        | Switch CLI and ACP to metadata-first delivery. Keep body residency, invalidation, and compression cleanup together. Include only telemetry needed to verify delivery.                                                                       |
+| 4. Existing-memory migration | Add metadata writers, background migration, readiness/activation, and the required Dream/Remember/Extraction integration. Keep old memories usable until conversion succeeds.                                                               |
 
 Part 1 is [#12726](https://github.com/QwenLM/qwen-code/pull/12726).
 It is a security and correctness prerequisite, not a token-saving change.
