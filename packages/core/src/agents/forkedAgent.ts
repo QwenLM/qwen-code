@@ -42,7 +42,8 @@ import {
   type RuntimeContentGeneratorView,
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
-import { LlmChat, StreamEventType } from '../core/llm-chat.js';
+import { LlmChat } from '../core/llm-chat.js';
+import { ModelStreamAttemptState } from '../core/model-stream-attempt-state.js';
 import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
@@ -598,17 +599,14 @@ export async function runForkedAgent(
           )
         : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
-      let fullText = '';
-      let usage: ForkedQueryResult['usage'] = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheHitTokens: 0,
-      };
+      const attemptState = new ModelStreamAttemptState();
       let jsonResult: Record<string, unknown> | undefined;
 
       for await (const event of stream) {
-        if (event.type !== StreamEventType.CHUNK) continue;
-        const response = event.value;
+        const transition = attemptState.accept(event);
+        if (transition.type === 'attempt_reset') jsonResult = undefined;
+        if (transition.type !== 'chunk') continue;
+        const response = transition.response;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
 
         const schemaCall = parts.find(
@@ -632,18 +630,17 @@ export async function runForkedAgent(
             'Cache-path forked query received functionCall with preserveTools; discarding.',
           );
         }
-
-        const text = parts
-          .filter((p) => !(p as Record<string, unknown>)['thought'])
-          .filter((p) => !(p as Record<string, unknown>)['functionCall'])
-          .map((p) => p.text ?? '')
-          .join('');
-        if (text) fullText += text;
-        if (response.usageMetadata)
-          usage = extractQueryUsage(response.usageMetadata);
       }
 
-      const trimmed = fullText.trim() || null;
+      const attempt = attemptState.snapshot();
+      const trimmed = attempt.text.trim() || null;
+      const usage: ForkedQueryResult['usage'] = attempt.usageMetadata
+        ? extractQueryUsage(attempt.usageMetadata)
+        : {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheHitTokens: 0,
+          };
       if (jsonSchema && !jsonResult && trimmed) {
         try {
           jsonResult = asJsonObject(JSON.parse(trimmed) as unknown);
