@@ -12,6 +12,7 @@ import {
 import {
   SessionNotFoundError,
   AcpChildCapacityExceededError,
+  RequestedSessionIdRejectedError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -4100,6 +4101,35 @@ describe('StandaloneSessionService', () => {
     ).rejects.toMatchObject({
       code: 'standalone_creation_rolled_back',
       retryable: true,
+    });
+
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('classifies an ID a paired Bridge already hosts as a conflict', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(
+        false,
+        new RequestedSessionIdRejectedError('session_id_conflict', sessionId),
+      ),
+    );
+
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({
+      code: 'standalone_session_conflict',
+      retryable: false,
+      creationDiagnostic: {
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
     });
 
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
