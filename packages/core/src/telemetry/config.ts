@@ -33,6 +33,26 @@ export function parseBooleanEnvFlag(
 }
 
 /**
+ * Resolve the usage-statistics opt-in with the same precedence as the main
+ * session config: `QWEN_USAGE_STATISTICS_ENABLED` env, then
+ * `settings.privacy.usageStatisticsEnabled`, then default true.
+ *
+ * Standalone entrypoints (extension CLI commands, the serve daemon's
+ * extension controller) do not build a session Config; they must route
+ * through this so the opt-out reaches `QwenLogger.getInstance` (#12770).
+ */
+export function resolveUsageStatisticsEnabled(
+  settingsValue: boolean | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return (
+    parseBooleanEnvFlag(env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+    settingsValue ??
+    true
+  );
+}
+
+/**
  * Normalize a telemetry target value into TelemetryTarget or undefined.
  */
 export function parseTelemetryTargetValue(
