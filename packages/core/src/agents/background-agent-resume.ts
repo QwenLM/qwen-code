@@ -125,6 +125,20 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  * its Config holds a SkillManager (#12424). Names are resolved the way
  * `convertToRuntimeConfig` resolves them, because the predicate matches
  * exactly and a definition may use a display name.
+ *
+ * The parity above is only name resolution, and it is hand-maintained: this
+ * helper rebuilds the `ToolConfig` itself instead of sharing
+ * `convertToRuntimeConfig`, so neither of the two mappings it depends on is
+ * shared with the launch path — the `tools` mapping, including the `['*']`
+ * default standing in for a definition that declares none, and the
+ * `disallowedTools` mapping. A change to either in `convertToRuntimeConfig`
+ * does not propagate here and nothing fails when they drift; the resumed
+ * listing just stops matching the manager `createAgentHeadless` hands the same
+ * agent. Collapsing both into one shared mapping is the fix and stays
+ * declined, so the drift is disclosed rather than removed. Any extraction must
+ * stay throw-free on the shapes the resume path can present: this call sits
+ * inside the resume `try`, whose `catch` logs, patches `lastError` and returns
+ * `undefined`, so a throw here aborts a resume silently.
  */
 async function subagentWillHaveSkillTool(
   config: Config,
