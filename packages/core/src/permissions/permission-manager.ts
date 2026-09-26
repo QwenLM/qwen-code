@@ -9,6 +9,7 @@ import {
   parseRule,
   matchesRule,
   resolveToolName,
+  rawCommandCandidatesForRules,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
@@ -420,6 +421,13 @@ export class PermissionManager {
             ctx.cwd ?? this.config.getCwd?.(),
           );
         }
+      }
+      if (SHELL_TOOL_NAMES.has(toolName)) {
+        bashDecision = this.escalateFromRawCandidates(
+          ctx,
+          command,
+          bashDecision,
+        );
       }
     } else {
       bashDecision = this.evaluateSingle(ctx);
@@ -1061,6 +1069,40 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * Deny/ask rules see the command as raw per-operator/per-line candidates,
+   * never the joined multi-line text: the matcher's contract is a single
+   * simple command, and on joined text anchored rules cannot match, a '#'
+   * comment blinds everything after it, and `.*` over-matches across
+   * operators. The candidates keep heredoc body lines, so a payload bash
+   * would feed an interpreter still meets the deny rule the pre-projection
+   * per-line evaluation hit. Escalation only: a non-match never lowers the
+   * verdict.
+   */
+  private escalateFromRawCandidates(
+    ctx: PermissionCheckContext,
+    command: string,
+    decision: PermissionDecision,
+  ): PermissionDecision {
+    if (decision === 'deny') {
+      return decision;
+    }
+    let upgraded = decision;
+    for (const segment of rawCommandCandidatesForRules(command)) {
+      const candidate = this.evaluateSingle({
+        ...ctx,
+        command: segment.command,
+      });
+      if (candidate === 'deny') {
+        return 'deny';
+      }
+      if (candidate === 'ask' && upgraded === 'allow') {
+        upgraded = 'ask';
+      }
+    }
+    return upgraded;
+  }
+
+  /**
    * Determine the permission decision for a specific shell command string.
    *
    * This hardcodes `toolName: 'run_shell_command'`, so the Bash comment fast
@@ -1305,8 +1347,20 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+        if (
+          subCommands.some((subCmd) =>
+            this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+          )
+        ) {
+          return true;
+        }
+        // Ask rules must also see the same raw candidates deny rules
+        // escalate on: the projection strips heredoc bodies out of the
+        // segments, and an ask an explicit rule matches there must not stay
+        // invisible to the auto-approval gate that reads this method.
+        const rawCandidates = rawCommandCandidatesForRules(command);
+        return rawCandidates.some((segment) =>
+          this.hasMatchingAskRule({ ...ctx, command: segment.command }),
         );
       }
     }

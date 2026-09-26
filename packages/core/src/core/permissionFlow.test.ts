@@ -637,3 +637,33 @@ describe('isAutoEditApproved', () => {
     ).toBe(false);
   });
 });
+
+describe('pmForcedAsk with a real PermissionManager', () => {
+  it('is true when an explicit ask rule matches a stripped heredoc payload', async () => {
+    const realPm = new PermissionManager({
+      getPermissionsAllow: () => ['Bash(cat *)', 'Bash(echo *)'],
+      getPermissionsAsk: () => ['Bash(*rm -rf*)'],
+      getPermissionsDeny: () => undefined,
+      getCoreTools: () => undefined,
+    } as never);
+    realPm.initialize();
+
+    const invocation = mockInvocation();
+    const config = mockConfig({
+      getPermissionManager: vi.fn().mockReturnValue(realPm),
+    });
+
+    const result = await evaluatePermissionFlow(
+      config,
+      invocation,
+      'run_shell_command',
+      {
+        command:
+          "cat <<'EOF'\nrm -rf /important is what this doc warns about\nEOF\necho done",
+      },
+    );
+
+    expect(result.finalPermission).toBe('ask');
+    expect(result.pmForcedAsk).toBe(true);
+  });
+});
