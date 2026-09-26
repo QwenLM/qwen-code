@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-github",
-  "version": "0.24.5",
+  "version": "0.24.6",
   "description": "GitHub polling channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@octokit/rest": "^21.1.1",
-    "@qwen-code/channel-base": "0.24.5",
+    "@qwen-code/channel-base": "0.24.6",
     "https-proxy-agent": "^7.0.6"
   },
   "devDependencies": {

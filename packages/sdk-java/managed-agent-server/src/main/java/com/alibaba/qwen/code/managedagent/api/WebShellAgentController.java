@@ -41,7 +41,7 @@ public class WebShellAgentController {
     public WebShellPage<WebShellSession> list(TenantContext tenant,
             @RequestBody WebShellListRequest request) {
         return service.listWebShellSessions(tenant.tenantId(),
-                request.cursor(), request.limit() == null ? 20
+                tenant.actorId(), request.cursor(), request.limit() == null ? 20
                         : request.limit());
     }
 
@@ -49,13 +49,15 @@ public class WebShellAgentController {
     public WebShellSession get(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
         return service.getWebShellSession(tenant.tenantId(),
+                tenant.actorId(),
                 request.sessionId());
     }
 
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
-        return service.transcript(tenant.tenantId(), request.sessionId(),
+        return service.transcript(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 100 : request.limit());
     }
@@ -66,13 +68,23 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellStreamRequest request) {
         long after = request.afterSequence() == null ? 0
                 : request.afterSequence();
-        return streams.webShellStream(tenant.tenantId(), request.sessionId(),
+        return streams.webShellStream(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(),
                 after);
     }
 
     @PostMapping("/sessions/create")
     public ResponseEntity<WebShellAdmission> create(TenantContext tenant,
             @Valid @RequestBody WebShellCreateRequest request) {
+        WorkspaceSelection selection = null;
+        if (request.workspace() != null) {
+            if (request.workspace().isNull()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_request", "Workspace cannot be null.");
+            }
+            selection = WorkspaceSelection.parse(request.workspace(), true);
+            tenant.requireActorId();
+        }
         if (request.environmentId() != null
                 && !request.environmentId().isBlank()) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -80,10 +92,14 @@ public class WebShellAgentController {
                     "Standalone Phase 1 has no environment templates.");
         }
         validateTraceMetadata(request.metadata());
-        WebShellAdmission admission = webShell(service.createSession(
-                tenant.tenantId(),
-                request.idempotencyKey(), request.agentId(), request.title(),
-                null, request.input()));
+        WebShellAdmission admission = webShell(selection == null
+                ? service.createSession(tenant.tenantId(),
+                        request.idempotencyKey(), request.agentId(),
+                        request.title(), null, request.input())
+                : service.createWorkspaceSession(tenant.tenantId(),
+                        tenant.requireActorId(), request.idempotencyKey(),
+                        request.agentId(), request.title(), null,
+                        request.input(), selection));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -92,7 +108,7 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellSubmitRequest request) {
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(service.submitTurn(
-                tenant.tenantId(),
+                tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
                 request.input()));
         return ResponseEntity.accepted().body(admission);
@@ -102,7 +118,7 @@ public class WebShellAgentController {
     public ResponseEntity<WebShellAdmission> cancel(TenantContext tenant,
             @Valid @RequestBody WebShellCancelRequest request) {
         WebShellAdmission admission = webShell(service.cancelTurn(
-                tenant.tenantId(),
+                tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
                 request.turnId()));
         return ResponseEntity.accepted().body(admission);

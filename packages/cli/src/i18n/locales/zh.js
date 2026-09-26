@@ -2204,6 +2204,9 @@ export default {
   Unattributed: '未归因',
   'Cached prefix': '缓存前缀',
   tokens: 'tokens',
+  'Estimated usage, including the conversation': '估算用量（含对话）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下为本地估算，包含对话。',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',

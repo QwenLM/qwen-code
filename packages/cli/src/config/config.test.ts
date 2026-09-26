@@ -45,6 +45,7 @@ vi.mock('../serve/ssh-workspace-store.js', () => ({
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -70,6 +71,19 @@ vi.mock('../commands/update.js', () => ({
     command: 'update',
     describe: 'mock update command',
     handler: mockUpdateHandler,
+  },
+}));
+
+// The real handler resolves credentials and calls the Batch API, so leaving it
+// unmocked would turn the `batch` exit-list case into a live HTTPS request on
+// any machine with OPENAI_API_KEY + model + base URL set.
+vi.mock('../commands/batch.js', () => ({
+  batchCommand: {
+    // Positionals must be declared: parseArguments runs yargs in strict mode,
+    // so a bare `batch` would reject `status batch_x` before the handler runs.
+    command: 'batch <subcommand> [id]',
+    describe: 'mock batch command',
+    handler: mockBatchHandler,
   },
 }));
 
@@ -913,6 +927,30 @@ describe('parseArguments', () => {
     );
 
     mockExit.mockRestore();
+  });
+
+  it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
+    // Falling through would reach the memory relaunch, whose child parses argv
+    // again and would submit (and bill) a second batch job.
+    process.argv = ['node', 'script.js', 'batch', 'status', 'batch_x'];
+    mockBatchHandler.mockResolvedValue(undefined);
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockBatchHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(0);
+    } finally {
+      mockExit.mockRestore();
+      mockBatchHandler.mockReset();
+      // `run()` in the batch command assigns this before exiting; a leaked 1
+      // would change the exit code of every later test on this worker.
+      process.exitCode = undefined;
+    }
   });
 
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
