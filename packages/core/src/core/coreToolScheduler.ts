@@ -2627,7 +2627,14 @@ export class CoreToolScheduler {
       distance: levenshtein.get(unknownToolName, toolName),
     }));
 
-    matches.sort((a, b) => a.distance - b.distance);
+    matches.sort((a, b) => {
+      const aIsPrefix = unknownToolName.startsWith(a.name);
+      const bIsPrefix = unknownToolName.startsWith(b.name);
+      if (aIsPrefix !== bIsPrefix) {
+        return aIsPrefix ? -1 : 1;
+      }
+      return a.distance - b.distance;
+    });
 
     const topNResults = matches.slice(0, topN);
 
