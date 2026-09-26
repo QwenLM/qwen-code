@@ -759,6 +759,9 @@ describe('SettingsSchema', () => {
       expect(showToolCallDetails.default).toBe(true);
       expect(showToolCallDetails.showInDialog).toBe(true);
       expect(showToolCallDetails.requiresRestart).toBe(false);
+      expect(showToolCallDetails.description).toContain(
+        'click the summary to expand it and the first row of the expanded group to collapse it again',
+      );
     });
 
     it('should have showToolCallArgs in ui settings', () => {
