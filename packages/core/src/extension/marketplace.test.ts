@@ -34,6 +34,9 @@ vi.mock('node:https', () => ({
 }));
 
 vi.mock('./github.js', () => ({
+  // Mirrors the real implementations' semantics (see github.test.ts, which
+  // pins the actual helpers): https-only archive downloads, scheme-agnostic
+  // archive-shape classification, pathname-based path matching.
   isSupportedArchiveUrl: vi.fn((url: string) => {
     try {
       const parsedUrl = new URL(url);
@@ -51,6 +54,14 @@ vi.mock('./github.js', () => ({
       source.toLowerCase().endsWith('.zip') ||
       source.toLowerCase().endsWith('.tar.gz'),
   ),
+  isArchiveShapedUrl: vi.fn((url: string) => {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      return pathname.endsWith('.zip') || pathname.endsWith('.tar.gz');
+    } catch {
+      return false;
+    }
+  }),
   parseGitHubRepoForReleases: vi.fn((url: string) => {
     const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (match) {
@@ -270,11 +281,19 @@ describe('parseInstallSource', () => {
     it('should mention the git-remote reading for http URLs that end in an archive extension', async () => {
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
+      // Only the git@/SSH remote (or a local clone) actually reaches the git
+      // path — an https:// URL with an archive pathname is classified as an
+      // archive download first — so the message must not recommend it.
       await expect(
         parseInstallSource('http://example.com:8080/team/tools.zip'),
       ).rejects.toThrow(
-        /if this is a Git repository whose name ends in an archive extension/,
+        /if this is a Git repository whose name ends in an archive extension, use its git@\/SSH remote, or clone it yourself and install from the local path/,
       );
+
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+      await expect(
+        parseInstallSource('http://example.com:8080/team/tools.zip'),
+      ).rejects.not.toThrow(/use an https:\/\/ or git@ remote/);
     });
   });
 

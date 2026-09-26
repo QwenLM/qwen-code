@@ -63,6 +63,7 @@ import {
   type DiscoveredPlugin,
 } from './sourceRegistry.js';
 import {
+  InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
@@ -1269,14 +1270,13 @@ export class ExtensionManager {
             `Install it directly with: /extensions install ${redacted}`,
         );
       }
-      // A protocol-policy rejection (e.g. an insecure archive URL) is the
-      // actual diagnosis — rethrow it rather than burying it under a
-      // "No marketplace found" error that sends the user hunting for a
-      // marketplace.json the tool never even tried to fetch.
-      if (
-        probeError instanceof Error &&
-        probeError.message.startsWith('Archive URLs must use https://')
-      ) {
+      // A policy rejection (e.g. an insecure archive URL) is the actionable
+      // diagnosis for this source — rethrow it so the user sees the reason
+      // instead of the generic "No marketplace found" guidance. Note the
+      // marketplace probe above has already attempted the fetch by this
+      // point; rethrowing here only changes the reported reason, not the
+      // request behaviour.
+      if (probeError instanceof InsecureArchiveUrlError) {
         throw probeError;
       }
       throw new Error(

@@ -14,6 +14,7 @@ import {
   extractArchiveFile,
   extractFile,
   findReleaseAsset,
+  isArchiveShapedUrl,
   isSupportedArchivePath,
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
@@ -3567,6 +3568,20 @@ describe('git extension helpers', () => {
       expect(isSupportedArchiveUrl('git@github.com:owner/repo.git')).toBe(
         false,
       );
+    });
+
+    it('should classify archive-shaped URLs regardless of scheme', () => {
+      expect(isArchiveShapedUrl('http://example.com/extension.zip')).toBe(true);
+      expect(isArchiveShapedUrl('https://example.com/extension.tar.gz')).toBe(
+        true,
+      );
+      expect(isArchiveShapedUrl('HTTP://example.com/ext.zip#frag')).toBe(true);
+      expect(isArchiveShapedUrl('http://example.com/extension.tgz')).toBe(
+        false,
+      );
+      expect(isArchiveShapedUrl('http://example.com/repo')).toBe(false);
+      // Unparseable URLs classify as false, never throw.
+      expect(isArchiveShapedUrl('http://exa mple.com/plugin.zip')).toBe(false);
     });
   });
 
