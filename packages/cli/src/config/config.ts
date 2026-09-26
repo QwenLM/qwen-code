@@ -2753,6 +2753,7 @@ export async function loadCliConfig(
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     advisorModel,
+    advisorMaxUses: settings.advisorMaxUses,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:
