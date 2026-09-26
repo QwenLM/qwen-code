@@ -78,6 +78,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   >();
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
   const idleTimers = new Map<HarnessChannel, ReturnType<typeof setTimeout>>();
+  const pendingIdleTimers = new Set<HarnessChannel>();
 
   function liveHarnessChannel(
     engine: BridgeExecutionEngine | undefined = defaultEngine,
@@ -100,6 +101,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   }
 
   function cancelIdleTimer(channel?: HarnessChannel): void {
+    if (channel) pendingIdleTimers.delete(channel);
+    else pendingIdleTimers.clear();
     for (const [owner, timer] of idleTimers) {
       if (channel !== undefined && owner !== channel) continue;
       clearTimeout(timer);
@@ -171,6 +174,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   async function startIdleTimer(
     ci: HarnessChannel,
     context?: string,
+    exclusions?: ChannelWorkExclusions,
   ): Promise<void> {
     if (
       options.isRuntimeStopping() ||
@@ -178,12 +182,16 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       liveHarnessChannel(ci.executionEngine) !== ci
     )
       return;
+    if (!hasNoChannelWork(ci, exclusions)) {
+      pendingIdleTimers.add(ci);
+      return;
+    }
+    cancelIdleTimer(ci);
     const timeoutMs = resolvedChannelIdleTimeoutMs(ci.executionEngine);
     if (timeoutMs <= 0) {
       await killChannelWithLog(ci, context);
       return;
     }
-    cancelIdleTimer(ci);
     const idleTimer = setTimeout(() => {
       idleTimers.delete(ci);
       if (hasNoChannelWork(ci)) {
@@ -191,6 +199,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
         void killChannelWithLog(ci, 'idle timeout');
+      } else {
+        pendingIdleTimers.add(ci);
       }
     }, timeoutMs);
     idleTimers.set(ci, idleTimer);
@@ -244,26 +254,24 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         ci.workspaceControlInFlight - 1,
       );
       await reapPendingEmptyChannel(ci);
-      if (
-        !ci.isDying &&
-        liveHarnessChannel(ci.executionEngine) === ci &&
-        hasNoChannelWork(ci)
-      ) {
+      if (!ci.isDying && liveHarnessChannel(ci.executionEngine) === ci) {
         await startIdleTimer(ci, 'workspace control');
       }
     }
   }
 
-  async function settleReleasedRuntimeWork(
-    context: string,
-    armIdleTimer = true,
-  ): Promise<void> {
-    for (const ci of Array.from(channelLifecycle.values())) {
+  async function settleReleasedRuntimeWork(context: string): Promise<void> {
+    const channels = Array.from(channelLifecycle.values());
+    for (const ci of channels) {
       await reapPendingEmptyChannel(ci);
     }
-    if (!armIdleTimer) return;
-    for (const ci of channelLifecycle.values()) {
-      if (!ci.isDying && !idleTimers.has(ci) && hasNoChannelWork(ci)) {
+    for (const ci of channels) {
+      if (
+        !ci.isDying &&
+        pendingIdleTimers.has(ci) &&
+        !idleTimers.has(ci) &&
+        hasNoChannelWork(ci)
+      ) {
         await startIdleTimer(ci, context);
       }
     }
@@ -291,6 +299,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     engine: BridgeExecutionEngine | undefined = defaultEngine,
   ): Promise<void> {
     decrementRuntimeOperationReservation(engine);
+    const channel = liveHarnessChannel(engine);
+    if (channel) pendingIdleTimers.add(channel);
     await settleReleasedRuntimeWork(context);
   }
 
@@ -351,12 +361,14 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         Date.now() + keepAliveMs,
       );
     }
+    let channel: HarnessChannel | undefined;
     try {
       await telemetry.withSpan(
         'channel.preheat',
         { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
         async () => {
           const info = await ensureChannel();
+          channel = info;
           info.lastUsedAt = Date.now();
           if (keepAliveMs !== undefined) {
             keepAliveUntil = Math.max(keepAliveUntil, Date.now() + keepAliveMs);
@@ -368,10 +380,14 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         pendingKeepAliveDeadlines.delete(pendingKeepAliveToken);
       }
       decrementRuntimeOperationReservation();
-      await settleReleasedRuntimeWork(
-        'channel preheat',
-        resolvedChannelIdleTimeoutMs() > 0,
-      );
+      if (
+        channel &&
+        channelLifecycle.has(channel) &&
+        resolvedChannelIdleTimeoutMs() > 0
+      ) {
+        pendingIdleTimers.add(channel);
+      }
+      await settleReleasedRuntimeWork('channel preheat');
     }
   };
 

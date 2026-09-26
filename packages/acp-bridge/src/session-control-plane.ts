@@ -18,6 +18,7 @@ import {
 import type {
   CancelNotification,
   ContentBlock,
+  NewSessionResponse,
   PromptRequest,
   PromptResponse,
   SetSessionConfigOptionRequest,
@@ -2337,7 +2338,11 @@ export function createSessionControlPlane(
     );
   }
   const executionEngines = opts.executionEngines
-    ? Object.freeze({ ...opts.executionEngines })
+    ? Object.freeze({
+        legacy: opts.executionEngines.legacy,
+        managed: opts.executionEngines.managed,
+        select: opts.executionEngines.select.bind(opts.executionEngines),
+      })
     : undefined;
   let liveScreenContextCaptureHandler:
     | LiveScreenContextCaptureHandler
@@ -3390,6 +3395,7 @@ export function createSessionControlPlane(
     ).length;
     return (
       ci.sessionIds.size === 0 &&
+      unboundSessionSpawns === 0 &&
       pendingRestoreCount === 0 &&
       inFlightSpawnCount === 0 &&
       outerRestoreCount <= 0
@@ -3856,6 +3862,7 @@ export function createSessionControlPlane(
   // simultaneous calls don't collide while still being awaitable from
   // `shutdown()`.
   const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
+  let unboundSessionSpawns = 0;
   const abandonedNewSessionSettlements = new Set<Promise<void>>();
   // Reserves ids before caller-supplied spawns and exact-id late cleanup
   // reach their first await. Restore admission checks the same map, closing
@@ -4473,13 +4480,13 @@ export function createSessionControlPlane(
   async function settleAbandonedNewSession(
     ci: ChannelInfo,
     token: symbol,
-    lateSessionId: string | undefined,
+    response: NewSessionResponse | undefined,
     requestedSessionId: string | undefined,
   ): Promise<void> {
+    const lateSessionId = response?.sessionId;
     telemetry.event('session.new.late_result', {
-      'qwen-code.daemon.session_new.result': lateSessionId
-        ? 'success'
-        : 'failure',
+      'qwen-code.daemon.session_new.result':
+        response !== undefined ? 'success' : 'failure',
       'qwen-code.daemon.session_new.timeout_ms': initTimeoutMs,
       'qwen-code.daemon.acp_channel.id': ci.id,
       ...(lateSessionId
@@ -4493,7 +4500,7 @@ export function createSessionControlPlane(
     try {
       if (
         executionEngines &&
-        lateSessionId !== undefined &&
+        response !== undefined &&
         !isAddressableSessionId(lateSessionId)
       ) {
         await cleanupUnregisteredSession(ci, undefined);
@@ -4741,30 +4748,37 @@ export function createSessionControlPlane(
     // repeated failing creates would still find this channel via
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
-    const engine = selection
-      ? await selectExecutionEngine(selection)
-      : undefined;
-    const current = harness.currentFor(engine);
-    const channelPath =
-      current && !current.isDying
-        ? 'reused'
-        : harness.startingFor(engine)
-          ? 'joined'
-          : 'spawned_on_request';
-    const ci = getChannelInfo(
-      await telemetry.withSpan(
-        'channel.wait',
-        {
-          'qwen-code.daemon.bridge.operation': 'channel.wait',
-          'qwen-code.daemon.channel.path': channelPath,
-        },
-        () => harness.ensure(engine),
-      ),
-    );
-    if (ci.harness.isDying) {
-      throw new BridgeChannelClosedError('before newSession');
+    let engine: BridgeExecutionEngine | undefined;
+    let ci: ChannelInfo;
+    let channelPath: 'reused' | 'joined' | 'spawned_on_request';
+    unboundSessionSpawns++;
+    try {
+      engine = selection ? await selectExecutionEngine(selection) : undefined;
+      const current = harness.currentFor(engine);
+      channelPath =
+        current && !current.isDying
+          ? 'reused'
+          : harness.startingFor(engine)
+            ? 'joined'
+            : 'spawned_on_request';
+      ci = getChannelInfo(
+        await telemetry.withSpan(
+          'channel.wait',
+          {
+            'qwen-code.daemon.bridge.operation': 'channel.wait',
+            'qwen-code.daemon.channel.path': channelPath,
+          },
+          () => harness.ensure(engine),
+        ),
+      );
+      if (ci.harness.isDying) {
+        throw new BridgeChannelClosedError('before newSession');
+      }
+      ci.sessionSpawnsInFlight++;
+    } finally {
+      unboundSessionSpawns--;
+      void harness.settleReleasedRuntimeWork('session spawn owner selected');
     }
-    ci.sessionSpawnsInFlight++;
     if (requestedSessionId !== undefined) {
       // A caller-supplied id can legitimately reuse an id after an abandoned
       // restore settles. Transfer ownership before `newSession`, not at
@@ -4865,7 +4879,7 @@ export function createSessionControlPlane(
                     void settleAbandonedNewSession(
                       ci,
                       abandonedToken,
-                      value.sessionId,
+                      value,
                       requestedSessionId,
                     ).then(
                       () => lifecycle.resolveSettlement?.(),
@@ -4974,6 +4988,7 @@ export function createSessionControlPlane(
             requestedSessionId,
           ).finally(() => {
             abandonedNewSessionSettlements.delete(settlement);
+            void harness.startIdleTimer(ci.harness, 'rejected session');
             void harness.settleReleasedRuntimeWork('rejected session');
           });
           abandonedNewSessionSettlements.add(settlement);
@@ -7451,6 +7466,16 @@ export function createSessionControlPlane(
       expectedExecutionEngine?: BridgeExecutionEngine;
     } = {},
   ): Promise<BridgeRestoredSession> {
+    function assertExpectedEngine(engine: BridgeExecutionEngine | undefined) {
+      if (
+        options.expectedExecutionEngine !== undefined &&
+        engine !== options.expectedExecutionEngine
+      ) {
+        throw new Error(
+          'Branched session execution engine differs from its source',
+        );
+      }
+    }
     req = { ...req };
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
@@ -7508,6 +7533,9 @@ export function createSessionControlPlane(
 
     const existing = byId.get(req.sessionId);
     if (existing) {
+      assertExpectedEngine(
+        channelInfoForEntry(existing)?.harness.executionEngine,
+      );
       assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
@@ -7675,6 +7703,9 @@ export function createSessionControlPlane(
         );
       }
       try {
+        assertExpectedEngine(
+          channelInfoForEntry(entry)?.harness.executionEngine,
+        );
         assertAttachableSessionEntry(restored.sessionId, entry);
       } catch (error) {
         inFlight.coalesceState.count--;
@@ -7972,14 +8003,7 @@ export function createSessionControlPlane(
             daemonOwnedStandalone: daemonOwnedStandaloneRestore,
           })
         : undefined;
-      if (
-        options.expectedExecutionEngine !== undefined &&
-        engine !== options.expectedExecutionEngine
-      ) {
-        throw new Error(
-          'Branched session execution engine differs from its source',
-        );
-      }
+      assertExpectedEngine(engine);
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       const restoreChannel = getChannelInfo(await harness.ensure(engine));
       restoreLifecycle.channel = restoreChannel;
@@ -8221,6 +8245,7 @@ export function createSessionControlPlane(
             await harness.startIdleTimer(
               ci.harness,
               `session ${action} not found`,
+              { ignoreRestoreId: req.sessionId },
             );
           }
           throw new SessionNotFoundError(req.sessionId);
@@ -8644,6 +8669,7 @@ export function createSessionControlPlane(
         // Delete BEFORE settling: `hasNoChannelWork` counts in-flight
         // restores as channel work, so this restore's own entry would
         // otherwise block the reap of a channel it left empty.
+        if (ci) void harness.startIdleTimer(ci.harness, 'session restore');
         void harness.settleReleasedRuntimeWork('session restore');
       }
     });
@@ -8847,7 +8873,7 @@ export function createSessionControlPlane(
         /* no active prompt or session already torn down */
       }
     }
-    if (ci && harness.hasNoChannelWork(ci.harness)) {
+    if (ci) {
       await harness.reapPendingEmptyChannel(ci.harness);
       if (!ci.harness.isDying) {
         await harness.startIdleTimer(ci.harness, `closeSession "${sessionId}"`);
@@ -9796,6 +9822,20 @@ export function createSessionControlPlane(
       // Reject instead — the restore either completes and the caller attaches,
       // or it settles and the id frees up.
       if (req.sessionId !== undefined) {
+        if (executionEngines) {
+          if (!isAddressableSessionId(req.sessionId)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Requested session ID is invalid',
+            );
+          }
+          if (byId.has(req.sessionId)) {
+            throw RequestError.invalidParams(
+              { errorKind: 'session_id_conflict', sessionId: req.sessionId },
+              `Session ${req.sessionId} is already live`,
+            );
+          }
+        }
         const restoreOwner = inFlightRestores.get(req.sessionId);
         if (restoreOwner) {
           const abandoned = restoreOwner.lifecycle.phase === 'abandoned';
@@ -14962,7 +15002,7 @@ export function createSessionControlPlane(
       // `sessionIds`. Killing the channel out from under them would
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
-      if (ci && harness.hasNoChannelWork(ci.harness)) {
+      if (ci) {
         await harness.reapPendingEmptyChannel(ci.harness);
         if (!ci.harness.isDying) {
           await harness.startIdleTimer(

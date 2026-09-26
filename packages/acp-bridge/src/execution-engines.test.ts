@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PROTOCOL_VERSION,
@@ -105,6 +108,345 @@ afterEach(async () => {
 });
 
 describe('ACP Bridge execution engines', () => {
+  it.each(['prototype', 'stateful object'] as const)(
+    'preserves the receiver of a %s selector',
+    async (kind) => {
+      const legacy = engineChannel('legacy');
+      const managed = engineChannel('managed');
+      class Router {
+        legacy = vi.fn(async () => legacy.channel);
+        managed = vi.fn(async () => managed.channel);
+        calls = 0;
+        #engine = 'managed' as const;
+        select() {
+          this.calls++;
+          return this.#engine;
+        }
+      }
+      const router =
+        kind === 'prototype'
+          ? new Router()
+          : {
+              legacy: vi.fn(async () => legacy.channel),
+              managed: vi.fn(async () => managed.channel),
+              calls: 0,
+              select() {
+                this.calls++;
+                return 'managed' as const;
+              },
+            };
+      const p = paired({ executionEngines: router });
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.loadSession({
+        workspaceCwd: WS_A,
+        sessionId: 'persisted',
+      });
+      expect(router.calls).toBe(2);
+      expect(managed.agent.newSessionCalls).toHaveLength(1);
+      expect(managed.agent.loadSessionCalls).toHaveLength(1);
+      expect(router.legacy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['', 'trailing ', 'control\u0001id', 'x'.repeat(513)])(
+    'rejects an unaddressable requested ID before dispatch: %j',
+    async (sessionId) => {
+      const p = paired();
+      const live = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A, sessionId }),
+      ).rejects.toThrow('Requested session ID');
+      expect(p.managed.agent.newSessionCalls).toHaveLength(1);
+      expect(p.managed.agent.extMethodCalls).toHaveLength(0);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'managed-2' });
+      expect(p.bridge.getSessionSummary(live.sessionId)).toBeDefined();
+    },
+  );
+
+  it('rejects an already live requested ID before selecting another engine', async () => {
+    const p = paired();
+    p.choose('legacy');
+    const source = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('managed');
+    await expect(
+      p.bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionId: source.sessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_id_conflict', sessionId: source.sessionId },
+    });
+    expect(p.select).toHaveBeenCalledTimes(1);
+    expect(p.managedFactory).not.toHaveBeenCalled();
+    expect(p.legacy.agent.extMethodCalls).toHaveLength(0);
+    expect(p.bridge.sessionCount).toBe(1);
+  });
+
+  it.each(['hot', 'coalesced'] as const)(
+    'rejects a branch restored by another engine through %s attach',
+    async (mode) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-branch-engine-'));
+      const copying = deferred<void>();
+      const copied = deferred<Record<string, unknown>>();
+      const loaded = deferred<ReturnType<typeof receipt>>();
+      const legacy = engineChannel('legacy', {
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch)
+            return { newSessionId: 'legacy-branch' };
+          if (method === 'qwen/session/sources/copy') {
+            copying.resolve();
+            return copied.promise;
+          }
+          return { closed: true };
+        },
+      });
+      const managed = engineChannel('managed', {
+        loadSessionImpl: () => loaded.promise,
+      });
+      const p = paired({ sessionAttachmentsRoot: root }, legacy, managed);
+      try {
+        p.choose('legacy');
+        const source = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        p.choose('managed');
+        const branch = Promise.allSettled([
+          p.bridge.branchSession(source.sessionId, {}),
+        ]);
+        await copying.promise;
+        const load = p.bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: 'legacy-branch',
+        });
+        await vi.waitFor(() =>
+          expect(managed.agent.loadSessionCalls).toHaveLength(1),
+        );
+        if (mode === 'hot') {
+          loaded.resolve(receipt('managed'));
+          await load;
+        }
+        copied.resolve({ warnings: [] });
+        if (mode === 'coalesced') {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          loaded.resolve(receipt('managed'));
+        }
+        await load;
+        expect(await branch).toMatchObject([
+          {
+            status: 'rejected',
+            reason: {
+              message:
+                'Branched session execution engine differs from its source',
+            },
+          },
+        ]);
+        expect(
+          p.bridge
+            .getDaemonStatusSnapshot()
+            .sessions.find((entry) => entry.sessionId === 'legacy-branch')
+            ?.attachCount,
+        ).toBe(0);
+        expect(managed.agent.extMethodCalls).toHaveLength(0);
+        expect(legacy.agent.loadSessionCalls).toHaveLength(0);
+      } finally {
+        copied.resolve({});
+        loaded.resolve(receipt('managed'));
+        await p.bridge.shutdown();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([0, 100])(
+    'protects a spawn during slow selection with idle %i',
+    async (channelIdleTimeoutMs) => {
+      vi.useFakeTimers();
+      const p = paired({ channelIdleTimeoutMs });
+      p.choose('legacy');
+      const first = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const selection = deferred<BridgeExecutionEngine>();
+      p.select.mockImplementation(() => selection.promise);
+      const spawn = p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.closeSession(first.sessionId);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(p.legacy.killed).toBe(false);
+      selection.resolve('legacy');
+      await expect(spawn).resolves.toMatchObject({ sessionId: 'legacy-2' });
+      expect(p.legacyFactory).toHaveBeenCalledTimes(1);
+      await p.bridge.closeSession('legacy-2');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(p.legacy.killed).toBe(true);
+    },
+  );
+
+  it.each(['success', 'rejection', 'timeout'] as const)(
+    'rearms consumed idle timers after spawn selection ends in %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      const p = paired({ channelIdleTimeoutMs: 100, initializeTimeoutMs: 200 });
+      p.choose('legacy');
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.closeSession(session.sessionId);
+      const selection = deferred<BridgeExecutionEngine>();
+      p.select.mockImplementation(() => selection.promise);
+      const spawn = Promise.allSettled([
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ]);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(p.legacy.killed).toBe(false);
+      if (outcome === 'success') selection.resolve('managed');
+      else if (outcome === 'rejection')
+        selection.reject(new Error('selection failed'));
+      else await vi.advanceTimersByTimeAsync(50);
+      expect(await spawn).toMatchObject([
+        { status: outcome === 'success' ? 'fulfilled' : 'rejected' },
+      ]);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(p.legacy.killed).toBe(true);
+      if (outcome !== 'success') {
+        selection.resolve('managed');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(p.managedFactory).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  describe.each(['load', 'resume'] as const)(
+    '%s failure idle settlement',
+    (operation) => {
+      it.each(['missing', 'failure'] as const)(
+        'reclaims a failed cold channel after another selector releases it: %s',
+        async (outcome) => {
+          vi.useFakeTimers();
+          const selection = deferred<BridgeExecutionEngine>();
+          const failed = deferred<ReturnType<typeof receipt>>();
+          const legacy = engineChannel('legacy', {
+            loadSessionImpl: () => failed.promise,
+            resumeSessionImpl: () => failed.promise,
+          });
+          const p = paired({ channelIdleTimeoutMs: 100 }, legacy);
+          p.choose('legacy');
+          const request = { workspaceCwd: WS_A, sessionId: 'failed' };
+          const restore = Promise.allSettled([
+            operation === 'load'
+              ? p.bridge.loadSession(request)
+              : p.bridge.resumeSession(request),
+          ]);
+          await vi.advanceTimersByTimeAsync(0);
+          p.select.mockImplementation(() => selection.promise);
+          const other = p.bridge.loadSession({
+            workspaceCwd: WS_A,
+            sessionId: 'managed',
+          });
+          failed.reject(
+            outcome === 'missing'
+              ? RequestError.resourceNotFound('session:failed')
+              : new Error('restore failed'),
+          );
+          expect(await restore).toMatchObject([{ status: 'rejected' }]);
+          await vi.advanceTimersByTimeAsync(150);
+          expect(legacy.killed).toBe(false);
+          selection.resolve('managed');
+          await other;
+          await vi.advanceTimersByTimeAsync(100);
+          expect(legacy.killed).toBe(true);
+          expect(p.managed.killed).toBe(false);
+        },
+      );
+    },
+  );
+
+  it.each(['restore', 'rejected create'] as const)(
+    'preserves bare Legacy preheat during a Managed %s',
+    async (operation) => {
+      const response = deferred<ReturnType<typeof receipt>>();
+      const managed = engineChannel('managed', {
+        loadSessionImpl: () => response.promise,
+        ...(operation === 'rejected create'
+          ? { newSessionImpl: () => ({ sessionId: 'rejected' }) }
+          : {}),
+      });
+      const p = paired(
+        { channelIdleTimeoutMs: 0 },
+        engineChannel('legacy'),
+        managed,
+      );
+      await p.bridge.preheat();
+      if (operation === 'restore') {
+        const restore = p.bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: 'restored',
+        });
+        await vi.waitFor(() =>
+          expect(managed.agent.loadSessionCalls).toHaveLength(1),
+        );
+        expect(p.legacy.killed).toBe(false);
+        response.resolve(receipt('managed'));
+        await restore;
+      } else {
+        await expect(
+          p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).rejects.toThrow('receipt');
+        await vi.waitFor(() => expect(managed.killed).toBe(true));
+      }
+      expect(p.legacy.killed).toBe(false);
+      p.choose('legacy');
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(p.legacyFactory).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([2, 3])(
+    'retains admission for late success without an ID with capacity %i',
+    async (maxSessions) => {
+      vi.useFakeTimers();
+      const late = deferred<NewSessionResponse>();
+      const released = vi.fn();
+      const managed = engineChannel('managed', {
+        newSessionImpl: (_request, agent) =>
+          agent.newSessionCalls.length === 2
+            ? late.promise
+            : { sessionId: 'managed-1', ...receipt('managed') },
+      });
+      const p = paired(
+        {
+          maxSessions,
+          initializeTimeoutMs: 30,
+          freshSessionAdmission: () => ({ release: released }),
+        },
+        engineChannel('legacy'),
+        managed,
+      );
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(released).toHaveBeenCalledTimes(1);
+      const spawn = Promise.allSettled([
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ]);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await spawn).toMatchObject([
+        { status: 'rejected', reason: { name: 'BridgeTimeoutError' } },
+      ]);
+      late.resolve(receipt('managed') as unknown as NewSessionResponse);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject(
+        maxSessions === 2
+          ? { name: 'SessionLimitExceededError' }
+          : { reason: 'new_session_cleanup_failed' },
+      );
+      expect(managed.agent.newSessionCalls).toHaveLength(2);
+      expect(managed.killed).toBe(false);
+      // A rejected third attempt can reserve and release at capacity 3.
+      expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 1 : 2);
+      await p.bridge.closeSession('managed-1');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(managed.killed).toBe(true);
+      expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 2 : 3);
+    },
+  );
+
   it('rejects ambiguous construction before starting a channel', () => {
     const factory = vi.fn();
     expect(() =>
@@ -1269,7 +1611,10 @@ describe('ACP Bridge execution engines', () => {
   it('cleans a late Managed response while a Legacy session remains live', async () => {
     const late = deferred<NewSessionResponse>();
     const managed = engineChannel('managed', {
-      newSessionImpl: () => late.promise,
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 1
+          ? { sessionId: 'managed-live', ...receipt('managed') }
+          : late.promise,
     });
     const p = paired(
       { initializeTimeoutMs: 30 },
@@ -1279,12 +1624,20 @@ describe('ACP Bridge execution engines', () => {
     p.choose('legacy');
     await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     p.choose('managed');
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).rejects.toThrow('timed out');
+    expect(managed.killed).toBe(false);
     late.resolve({ sessionId: 'late-managed', ...receipt('managed') });
-    await vi.waitFor(() => expect(managed.killed).toBe(true));
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: expect.objectContaining({ sessionId: 'late-managed' }),
+      }),
+    );
+    expect(managed.killed).toBe(false);
     expect(p.legacy.killed).toBe(false);
-    expect(p.bridge.sessionCount).toBe(1);
+    expect(p.bridge.sessionCount).toBe(2);
   });
 });

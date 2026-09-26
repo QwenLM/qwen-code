@@ -40,7 +40,9 @@ or `managed`. Client metadata cannot override selection.
 Selection runs after shared capacity and ID reservation, with the operation
 already visible to shutdown. Cold load/resume requires the caller's selector
 to read verified durable ownership; ambiguous or unreadable history must reject.
-Hot attach uses the existing entry without invoking the selector again.
+Hot attach uses the existing entry without invoking the selector again. A branch
+checks its source engine on cold restore, hot attach and coalesced restore.
+The selector retains its original receiver, including prototype methods.
 
 Paired channels require the actual ACP new/load/resume response to contain
 `_meta['qwen.session.executionEngine']` matching the selected engine. This key
@@ -63,11 +65,15 @@ reusable channels and startup promises. Coalesce startup within an engine;
 allow the two engines to start independently. Track dying generations until
 physical exit. Channel quarantine blocks fresh work only for that engine.
 
-Idle timers belong to the actual channel. Binding a restore to its channel and
-settling the restore both recheck idle channels, including timers consumed while
+Idle timers belong to the actual channel. Unbound spawns and restores protect
+channels until their work transfers to a channel counter. Binding or settling
+these operations rechecks deferred idle timers, including timers consumed while
 selection had not yet bound an owner. An unrelated idle channel must not wait
-for the selected engine's restore RPC or cleanup to finish. Re-evaluation arms
-missing timers without extending another channel's existing idle deadline.
+for the selected engine's restore RPC or cleanup to finish. Re-evaluation rearms
+only deferred timers without extending another channel's existing idle deadline.
+Bare Legacy preheat at idle timeout zero remains timer-free until that channel
+is used; unrelated Managed work must not activate its idle cleanup. A settlement
+uses a snapshot of its channels and cannot reclaim a replacement published later.
 A late exit from an old generation must not cancel another channel's timer.
 Runtime-operation reservations protect only their engine's channels; workspace
 activity and stop checks still count reservations across both engines.
@@ -77,15 +83,18 @@ tracked children. No failure path switches to the other factory.
 
 ### Registration and cleanup
 
-Before registration, check the actual engine receipt and the returned session
-ID. Invalid, conflicting or missing receipts reject registration. Close a
-safely addressable unregistered session on its original connection. If its ID
+Before dispatch, reject an unaddressable caller-supplied ID or an ID already
+owned by a live session. Before registration, check the actual engine receipt
+and the returned session ID. Invalid, conflicting or missing receipts reject
+registration. Close a safely addressable unregistered session on its original connection. If its ID
 cannot be safely addressed, quarantine the original channel, let other sessions
 drain, and retain admission until physical exit. Never close another session
 merely because a malformed response returned its ID.
 
 Restore failures after a successful ACP response use the same original-channel
 cleanup discipline. Public timeout is not evidence of physical completion.
+A late success without a session ID remains a success requiring cleanup or quarantine; it is distinct
+from an explicit RPC failure.
 Keep reservations until the original operation settles and cleanup completes.
 The cleanup fence covers receipt rejection as well as timeout; its retry hint
 is a backoff policy, not an estimate of when cleanup will complete.
@@ -106,6 +115,23 @@ Managed has no independent preheat keepalive in this slice. Child resource
 sampling and user-language delivery also remain Legacy-only. Before production
 enablement, #12380 must define per-engine resource aggregation and language
 propagation together with host wiring.
+
+Production paired-host wiring is also blocked on these workspace contracts:
+
+- Separate aggregate runtime liveness from Legacy workspace-control readiness.
+  Coordinator preheat decisions and workspace-service readiness must check the
+  capability they need; Managed alone cannot make Legacy preheat successful.
+- Define capability generations independently of the shared epoch allocator.
+  Starting Managed must not invalidate unchanged Legacy skills/MCP preparation,
+  and losing Legacy must invalidate its capabilities even if Managed survives.
+  Workspace-stop confirmation must retain a deliberate generation policy.
+- Deliver session-affecting workspace changes to every relevant live engine,
+  including permission rules, approval/workflow settings, providers and skills.
+  Define acknowledgements and partial-failure handling; a newly applied deny
+  rule must not silently leave existing Managed sessions on old permissions.
+
+These are acceptance gates for #12380 host integration, not capabilities supplied
+by the current Legacy-only workspace-control implementation.
 
 The existing workspace-stop receipt addresses one physical channel, so stopping
 multiple live channels is explicitly blocked until that receipt is extended.
