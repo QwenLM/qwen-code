@@ -8479,10 +8479,16 @@ describe('CoreToolScheduler', () => {
       expect(suggestion).toContain('read_file');
     });
 
-    it('should suggest the top N closest tool names for a typo', () => {
+    it('should suggest the closest tool names and prioritize prefixes', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
-        getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
+        getAllToolNames: () => [
+          'list_files',
+          'read_file',
+          'write_file',
+          'edit',
+          'exit_plan_mode',
+        ],
         getTool: () => undefined, // No SkillTool in this test
         ensureTool: async () => undefined,
       } as unknown as ToolRegistry;
@@ -8512,6 +8518,10 @@ describe('CoreToolScheduler', () => {
       // @ts-expect-error accessing private method
       const prefixedTool = scheduler.getToolSuggestion('github.list_files', 1);
       expect(prefixedTool).toBe(' Did you mean "list_files"?');
+
+      // @ts-expect-error accessing private method
+      const extendedTool = scheduler.getToolSuggestion('edit_file_path', 1);
+      expect(extendedTool).toBe(' Did you mean "edit"?');
 
       // Test that the right tool is first
       // @ts-expect-error accessing private method

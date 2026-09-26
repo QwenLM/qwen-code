@@ -2625,9 +2625,14 @@ export class CoreToolScheduler {
     const matches = allToolNames.map((toolName) => ({
       name: toolName,
       distance: levenshtein.get(unknownToolName, toolName),
+      prefixMatch: unknownToolName.startsWith(`${toolName}_`),
     }));
 
-    matches.sort((a, b) => a.distance - b.distance);
+    matches.sort(
+      (a, b) =>
+        Number(b.prefixMatch) - Number(a.prefixMatch) ||
+        a.distance - b.distance,
+    );
 
     const topNResults = matches.slice(0, topN);
 
