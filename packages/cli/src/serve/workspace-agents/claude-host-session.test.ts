@@ -13,6 +13,7 @@ const fixture = String.raw`
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 const scenario = process.argv[1];
+if (scenario === 'ignore-term') process.on('SIGTERM', () => {});
 let mode;
 let connection;
 const send = (update) => connection.sessionUpdate({ sessionId: 's', update });
@@ -31,6 +32,10 @@ connection = new AgentSideConnection(() => ({
   authenticate: async () => ({}),
   cancel: async () => {},
   prompt: async () => {
+    if (scenario === 'ignore-term') {
+      await send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: String(process.pid) } });
+      await new Promise(() => {});
+    }
     await send({ sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Edit a.ts', status: 'pending' });
     const answer = await connection.requestPermission({
       sessionId: 's',
@@ -79,4 +84,41 @@ describe('runClaudeHostTurn', () => {
       }),
     ).rejects.toThrow(/no plan mode/);
   });
+
+  it('cancels a running adapter that ignores SIGTERM', async () => {
+    const controller = new AbortController();
+    let pid: number | undefined;
+    const turn = runClaudeHostTurn({
+      cwd: process.cwd(),
+      prompt: 'Wait until cancelled',
+      signal: controller.signal,
+      command: command('ignore-term'),
+      onUpdate: (update) => {
+        if (update.outputText) {
+          pid = Number(update.outputText);
+          controller.abort();
+        }
+      },
+    });
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      if (pid) process.kill(-pid, 'SIGKILL');
+    }, 5000);
+    try {
+      await expect(turn).rejects.toThrow(/SIGKILL|closed/i);
+      expect(timedOut).toBe(false);
+      expect(pid).toBeTypeOf('number');
+      expect(() => process.kill(pid!, 0)).toThrow();
+    } finally {
+      clearTimeout(watchdog);
+      if (pid) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+  }, 10000);
 });

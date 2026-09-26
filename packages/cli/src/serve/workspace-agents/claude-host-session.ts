@@ -43,6 +43,7 @@ export async function runClaudeHostTurn(input: {
   /** Overrides the adapter command; tests run a scripted ACP agent. */
   command?: readonly [string, ...string[]];
 }): Promise<string> {
+  input.signal.throwIfAborted();
   assertExternalAgentSpawnPlatformSupported();
   const [command, ...args] = input.command ?? [CLAUDE_ACP_COMMAND];
   const child = spawn(command, args, {
@@ -51,13 +52,26 @@ export async function runClaudeHostTurn(input: {
     detached: true,
     env: sanitizeChildEnv(process.env),
   });
+  let killTimer: NodeJS.Timeout | undefined;
   const stop = () => {
+    if (killTimer) return;
     try {
-      if (child.pid) process.kill(-child.pid, 'SIGTERM');
+      if (child.pid) {
+        process.kill(-child.pid, 'SIGTERM');
+        killTimer = setTimeout(() => {
+          try {
+            process.kill(-child.pid!, 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }, 1000);
+        killTimer.unref();
+      }
     } catch {
       // Already gone.
     }
   };
+  child.once('exit', () => clearTimeout(killTimer));
   input.signal.addEventListener('abort', stop, { once: true });
   const exited = new Promise<never>((_, reject) => {
     child.once('error', reject);
