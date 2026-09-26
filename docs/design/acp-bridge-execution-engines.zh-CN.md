@@ -109,7 +109,8 @@ keepalive，资源采样也不会让它保持运行。子进程资源采样覆�
 
 这些是 #12380 host 集成的验收门槛，当前仅走 Legacy 的工作区控制实现尚不提供这些能力。
 B2b 后续设计[双引擎工作区 runtime 身份](./2026-09-26-paired-engine-workspace-runtime-identity.zh-CN.md)
-给出了前两项门槛的方案；第三项仍待完成。
+给出了前两项门槛的方案，[双引擎工作区变更传播](./2026-09-27-paired-engine-workspace-change-propagation.zh-CN.md)
+给出了第三项的方案。
 
 本切片的工作区 stop 回执只表示一个物理通道，因此多个通道存活时拒绝 stop；只有一个
 通道时仍可停止。B2b 后续设计把回执扩展到所有存活通道。

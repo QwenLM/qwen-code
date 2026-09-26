@@ -131,6 +131,7 @@ import {
   StandaloneSessionSpawnError,
   RequestedSessionIdRejectedError,
   ManagedSessionBranchUnsupportedError,
+  WorkspaceChangePartiallyAppliedError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
 import {
@@ -674,6 +675,8 @@ interface ChannelInfo {
   isQuarantined: boolean;
   /** Paired Bridges only: the quarantine episode this channel is in. */
   quarantine?: ChannelQuarantine;
+  /** Revisions of workspace changes this channel did not acknowledge. */
+  workspaceChangesMissing?: Set<number>;
   /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
@@ -948,6 +951,11 @@ interface SessionEntry {
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
   backgroundStartsSuspended?: boolean;
+  /**
+   * Revision of a missing change that tightened permissions: the session's
+   * turns are cancelled and its permission requests refused.
+   */
+  workspaceChangeFence?: number;
   activePromptTerminal?: {
     promptId: string;
     promise: Promise<void>;
@@ -2490,6 +2498,9 @@ export function createSessionControlPlane(
     if (ci.overdueAbandonedNewSessions.size > 0) {
       return 'new_session_settlement_overdue';
     }
+    if (ci.workspaceChangesMissing?.size) {
+      return 'workspace_change_unacknowledged';
+    }
     return ci.quarantine?.reason;
   };
   // Two independent conditions close a channel to NEW session work while
@@ -3954,6 +3965,208 @@ export function createSessionControlPlane(
     return harness.withWorkspaceControl(ci.harness, fn, false);
   }
 
+  interface WorkspaceChange {
+    kind:
+      | 'permissions'
+      | 'settings'
+      | 'sessionWorkflow'
+      | 'modelProviders'
+      | 'skills';
+    tightening: boolean;
+    /** Only the workspace-control engine persists it. */
+    persistedByControl: boolean;
+    payload: Record<string, unknown>;
+  }
+
+  // Workspace commands that change what live sessions may do. A paired Bridge
+  // also sends each of them to every live channel of another engine.
+  function sessionAffectingChange(
+    method: string,
+    params: Record<string, unknown> | undefined,
+  ): WorkspaceChange | undefined {
+    switch (method) {
+      case 'qwen/permissions/setRules':
+        return {
+          kind: 'permissions',
+          tightening: true,
+          persistedByControl: true,
+          payload: {},
+        };
+      case SERVE_CONTROL_EXT_METHODS.workspaceReload:
+        return {
+          kind: 'settings',
+          tightening: true,
+          persistedByControl: false,
+          payload: {},
+        };
+      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow:
+        return {
+          kind: 'sessionWorkflow',
+          tightening: params?.['enabled'] === true,
+          persistedByControl: false,
+          payload: { enabled: params?.['enabled'] },
+        };
+      case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload:
+        return {
+          kind: 'modelProviders',
+          tightening: false,
+          persistedByControl: false,
+          payload: {},
+        };
+      case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh:
+        return {
+          kind: 'skills',
+          tightening: false,
+          persistedByControl: false,
+          payload: { reason: params?.['reason'] ?? 'all' },
+        };
+      default:
+        return undefined;
+    }
+  }
+
+  let workspaceChangeRevision = 0;
+
+  /** Sends a change to every live channel of another engine; returns the ones that did not acknowledge it. */
+  async function propagateWorkspaceChange(
+    change: WorkspaceChange,
+    timeoutMs: number,
+  ): Promise<{ revision: number; unacknowledged: string[] }> {
+    // Legacy is workspace control. A Legacy channel that replaced a timed-out
+    // one while the command ran has read the current settings itself.
+    const targets = liveChannelInfos().filter(
+      (ci) => ci.harness.executionEngine !== 'legacy',
+    );
+    if (targets.length === 0) {
+      return { revision: workspaceChangeRevision, unacknowledged: [] };
+    }
+    const revision = ++workspaceChangeRevision;
+    const params = {
+      v: 1,
+      revision,
+      kind: change.kind,
+      tightening: change.tightening,
+      cwd: boundWorkspace,
+      ...change.payload,
+    };
+    const acknowledges = (response: unknown): boolean =>
+      isRecord(response) &&
+      response['v'] === 1 &&
+      response['revision'] === revision &&
+      response['acknowledged'] === true;
+    const unacknowledged: string[] = [];
+    await Promise.all(
+      targets.map(async (ci) => {
+        // Sent outside workspace control, like a Managed resource read: a slow
+        // answer quarantines the channel rather than retiring it, so a late
+        // acknowledgement can still end that quarantine.
+        const request = ci.connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          params,
+        );
+        try {
+          const response = await withTimeout(
+            Promise.race([request, getChannelClosedReject(ci)]),
+            timeoutMs,
+            SERVE_CONTROL_EXT_METHODS.workspaceChange,
+          );
+          if (acknowledges(response)) return;
+        } catch (error) {
+          // An exited channel's sessions are gone, and a fresh session starts
+          // a new channel that reads current settings.
+          if (error instanceof BridgeChannelClosedError) return;
+          if (error instanceof BridgeTimeoutError) {
+            void request.then(
+              (response) => {
+                if (acknowledges(response)) {
+                  acknowledgeMissingWorkspaceChange(ci, revision);
+                }
+              },
+              () => undefined,
+            );
+          }
+        }
+        unacknowledged.push(ci.id);
+        refuseUnacknowledgedChannel(ci, revision, change.tightening);
+      }),
+    );
+    return { revision, unacknowledged };
+  }
+
+  /**
+   * Quarantines the channel (#12737 Q2/Q3): it takes no fresh sessions, its
+   * sessions take no new work, settled ones are closed, and it retires by the
+   * drain deadline unless a late acknowledgement ends the quarantine first. A
+   * change that tightens permissions also cancels running turns now, refuses
+   * permission requests, and cancels Goal turns the child reports later.
+   */
+  function refuseUnacknowledgedChannel(
+    ci: ChannelInfo,
+    revision: number,
+    tightening: boolean,
+  ): void {
+    (ci.workspaceChangesMissing ??= new Set()).add(revision);
+    writeStderrLine(
+      `qwen serve: ACP channel ${ci.id} did not acknowledge workspace change ${revision}` +
+        (tightening ? '; cancelling its running turns' : ''),
+    );
+    if (tightening) {
+      for (const sessionId of Array.from(ci.sessionIds)) {
+        const entry = byId.get(sessionId);
+        if (!entry || entry.channel !== ci.channel) continue;
+        entry.workspaceChangeFence = revision;
+        if (
+          entry.promptActive ||
+          entry.backgroundTurn ||
+          entry.goalTurnActive
+        ) {
+          void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+        }
+      }
+    }
+    syncChannelQuarantine(ci);
+  }
+
+  /**
+   * A late, exact acknowledgement of every change a channel missed ends its
+   * quarantine before the drain deadline, as #12737 Q3 allows. It never ends
+   * an episode that began for another cause or that another cause has joined,
+   * nor one whose channel is already terminating (the deadline starts that);
+   * sessions already closed stay closed.
+   */
+  function acknowledgeMissingWorkspaceChange(
+    ci: ChannelInfo,
+    revision: number,
+  ): void {
+    const missing = ci.workspaceChangesMissing;
+    if (!missing?.delete(revision) || missing.size > 0) return;
+    ci.workspaceChangesMissing = undefined;
+    const episode = ci.quarantine;
+    // With this cause gone, any other one, or the one the episode began with,
+    // is what the channel reports now.
+    if (
+      !episode ||
+      ci.harness.isDying ||
+      channelUnavailableReason(ci) !== 'workspace_change_unacknowledged'
+    ) {
+      return;
+    }
+    clearTimeout(episode.drainTimer);
+    ci.quarantine = undefined;
+    for (const sessionId of ci.sessionIds) {
+      const entry = byId.get(sessionId);
+      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
+    }
+    writeStderrLine(
+      `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
+        `its quarantine ended after ${Date.now() - episode.startedAt}ms`,
+    );
+    telemetry.event(
+      'channel.quarantine.cleared',
+      quarantineTelemetry(ci, episode),
+    );
+  }
+
   function startSessionReaper(): void {
     if (sessionReapIntervalMs <= 0) return;
     writeStderrLine(
@@ -4608,6 +4821,17 @@ export function createSessionControlPlane(
         entry.sessionLastSeenAt = Date.now();
         touchActivity(entry);
         return true;
+      },
+      // The child starts Goal turns without asking; a fenced Session's are
+      // cancelled as soon as they are reported.
+      (sessionId) => {
+        const entry = byId.get(sessionId);
+        if (
+          entry?.channel !== channel ||
+          entry.workspaceChangeFence === undefined
+        )
+          return;
+        void bridgeApi.cancelSession(sessionId).catch(() => undefined);
       },
     );
     const connection = harness.createConnection(client, channel);
@@ -11079,6 +11303,9 @@ export function createSessionControlPlane(
                   }
                   return copy;
                 })();
+                // Resolving attachments can yield; a quarantine that began
+                // meanwhile still refuses the prompt before it is sent.
+                assertChannelAdmitsPrompts(entry);
                 entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
                 let resolveTerminal!: () => void;
@@ -13041,10 +13268,50 @@ export function createSessionControlPlane(
         return await withEnsuredWorkspaceControl(invoke);
       }
       const info = liveChannelInfo();
-      if (!info) throw new SessionNotFoundError(`workspace-command:${method}`);
-      return await harness.withWorkspaceControl(info.harness, () =>
-        invoke(info),
+      // A stopping runtime refuses workspace control as before, so nothing is
+      // propagated and no engine is treated as unacknowledged.
+      const change =
+        executionEngines && !runtimeStop
+          ? sessionAffectingChange(method, params)
+          : undefined;
+      if (!change || (!info && change.persistedByControl)) {
+        if (!info) {
+          throw new SessionNotFoundError(`workspace-command:${method}`);
+        }
+        return await harness.withWorkspaceControl(info.harness, () =>
+          invoke(info),
+        );
+      }
+      // Other engines still need a change already on disk when workspace
+      // control failed or is not live.
+      let result: T | undefined;
+      let controlError: unknown;
+      if (info) {
+        try {
+          result = await harness.withWorkspaceControl(info.harness, () =>
+            invoke(info),
+          );
+        } catch (error) {
+          controlError = error;
+        }
+      } else {
+        controlError = new SessionNotFoundError(`workspace-command:${method}`);
+      }
+      const { revision, unacknowledged } = await propagateWorkspaceChange(
+        change,
+        invokeOpts?.timeoutMs ?? initTimeoutMs,
       );
+      if (unacknowledged.length > 0) {
+        throw new WorkspaceChangePartiallyAppliedError(
+          revision,
+          change.kind,
+          unacknowledged,
+          result,
+          controlError,
+        );
+      }
+      if (controlError !== undefined) throw controlError;
+      return result as T;
     },
 
     async isWorkspaceMemoryRememberAvailable(): Promise<boolean> {
@@ -13389,6 +13656,8 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+      // Refused before the child classifies the last turn.
+      assertChannelAdmitsPrompts(entry);
       const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
@@ -14772,6 +15041,7 @@ export function createSessionControlPlane(
       // session is the checkout itself — the strongest writer vector on the
       // superseded session, not a workspace-cwd one.
       assertSessionResetNotPending(sessionId);
+      assertChannelAdmitsPrompts(entry);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
