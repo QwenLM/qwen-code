@@ -566,6 +566,81 @@ describe('buildDaemonStatusResponse', () => {
     );
   });
 
+  it('counts each live engine of a paired runtime as a child', async () => {
+    // A paired runtime holds one child per engine. Counting runtimes would
+    // under-report children to anything dividing a budget by them, and adding
+    // a reading that covers two children as one sample would misstate
+    // `sampled` in the other direction.
+    const reading = (children: number, heapReported?: number) => ({
+      rssBytes: 100 * children,
+      cpuPercent: 1,
+      ageMs: 10 * children,
+      children,
+      ...(heapReported !== undefined
+        ? {
+            heapReported,
+            heap: {
+              peakOldGenerationBytes: 900,
+              peakLiveSetBytes: 300,
+              peakTotalHeapBytes: 1_200,
+              majorGcCount: 4,
+              majorGcMs: 8,
+              unclassifiedSpaceNames: [],
+            },
+          }
+        : {}),
+    });
+    const bridge = (
+      liveChannelCount: number | undefined,
+      snapshot: ReturnType<typeof reading>,
+    ) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => (liveChannelCount ?? 1) > 0,
+        ...(liveChannelCount !== undefined ? { liveChannelCount } : {}),
+        getChildResourceSnapshot: () => snapshot,
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+    const bridges = [
+      // Both engines live and measured, both with heap marks.
+      bridge(2, reading(2, 2)),
+      // Both engines live, one of them not measured yet.
+      bridge(2, reading(1)),
+      // Deliberately unfaithful: claims more children and heap reporters than
+      // are live, which must not push `sampled` past `activeAcpChildren` or
+      // `heap.reported` past `sampled`.
+      bridge(1, reading(3, 3)),
+      // A bridge predating the count covers exactly one child.
+      bridge(undefined, reading(1)),
+    ];
+    const runtimes = bridges.map((b, i) => ({
+      workspaceId: `w${i}`,
+      workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+      bridge: b,
+    }));
+    const options = makeOptions();
+    options.bridge = bridges[0];
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.activeAcpChildren).toBe(6);
+    expect(response.runtime.memory?.children).toMatchObject({
+      rssBytes: 700,
+      sampled: 5,
+      oldestReadingAgeMs: 30,
+      heap: expect.objectContaining({ reported: 3 }),
+    });
+  });
+
   it('reports a zero age as zero, and ages a mixed-contract sum by the ones that can', async () => {
     // `ageMs` is exactly 0 when a status read lands in the same millisecond as
     // the sampler's stamp. A truthiness guard, or a trailing `|| null`, turns
