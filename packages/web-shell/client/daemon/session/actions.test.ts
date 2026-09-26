@@ -2844,6 +2844,98 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('reloads a standalone session with the standalone context when the connection context is missing', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'standalone-a' },
+        session: standalone,
+      });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(standalone);
+    expect(standalone.detach).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('keeps the workspace reload context for a workspace session', () => {
+    const workspace = createMockSession('session-a');
+    workspace.workspaceCwd = '/work/a';
+    Object.assign(workspace, {
+      session: {
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+        sourceType: 'default',
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: workspace,
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/work/a',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('falls back to the standalone context for a contextless load of the current standalone session', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'standalone-a' },
+      session: standalone,
+    });
+
+    void actions.loadSession('standalone-a').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
   it('uses the default standalone context after a failed connection', () => {
     const setRestoreSessionContext = vi.fn();
     const { actions, getConnection } = createActionsHarness({
