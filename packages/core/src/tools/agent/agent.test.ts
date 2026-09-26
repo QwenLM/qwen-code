@@ -5546,6 +5546,127 @@ describe('AgentTool', () => {
       );
     });
 
+    describe('inherited execution policy persistence', () => {
+      function preparePolicyRuntime(mode: 'code_mode' | 'code_mode_only') {
+        config.getToolMode = vi.fn().mockReturnValue(mode);
+        config.getToolRegistry().getTool = vi.fn();
+        const emitter = new AgentEventEmitter();
+        mockAgent.getCore().getEventEmitter = () => emitter;
+        mockAgent.setExternalMessageProvider = vi.fn();
+        mockAgent.setExternalMessageWaiter = vi.fn();
+        mockAgent.setExternalMessageWaitPredicate = vi.fn();
+        vi.spyOn(transcript, 'attachJsonlTranscriptWriter').mockReturnValue({
+          cleanup: vi.fn(),
+        });
+      }
+      afterEach(() => vi.restoreAllMocks());
+      it.each(['code_mode', 'code_mode_only'] as const)(
+        'bounds and persists an explicit exec fork in %s',
+        async (mode) => {
+          preparePolicyRuntime(mode);
+          const names = [
+            'exec',
+            'read_file',
+            'mcp__github__read_file',
+            'mcp__payments__charge',
+          ];
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue(
+            names,
+          );
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [{ functionDeclarations: [{ name: 'exec' }] }],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'inherit bounded exec',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            fork_tools: ['exec'],
+            run_in_background: true,
+          });
+          const result = await runWithAgentConfiguredToolAllowlist(
+            [
+              'exec',
+              'read_file',
+              'mcp__github__read_*',
+              'mcp__github__read_file',
+            ],
+            () => invocation.execute(),
+          );
+          expect(result.error).toBeUndefined();
+          const tools = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+          expect(tools?.executionAllowedTools).toEqual([
+            'read_file',
+            'mcp__github__read_file',
+          ]);
+          expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+            executionAllowedTools: ['read_file', 'mcp__github__read_file'],
+          });
+          writeMetaSpy.mockRestore();
+        },
+      );
+
+      it.each([false, true])(
+        'bounds a default fork and persists its background sidecar (background=%s)',
+        async (background) => {
+          preparePolicyRuntime('code_mode');
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+            'exec',
+            'read_file',
+            'write_file',
+          ]);
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [{ functionDeclarations: [{ name: 'exec' }] }],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'inherit bounded default',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            run_in_background: background,
+          });
+          const result = await runWithAgentConfiguredToolAllowlist(
+            ['read_file'],
+            () => invocation.execute(),
+          );
+          expect(result.error).toBeUndefined();
+          expect(
+            vi.mocked(AgentHeadless.create).mock.calls[0]?.[5]
+              ?.executionAllowedTools,
+          ).toEqual(['read_file']);
+          if (background) {
+            expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+              executionAllowedTools: ['read_file'],
+            });
+          } else {
+            // Interactive forks return a placeholder and have no sidecar.
+            expect(writeMetaSpy).not.toHaveBeenCalled();
+          }
+          writeMetaSpy.mockRestore();
+        },
+      );
+    });
+
     it('preserves fork_tools deny-all inside a configured parent allowlist', async () => {
       const parentToolDecls = [
         {

@@ -13,6 +13,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { buildAdvisorReminder } from './advisor-policy.js';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
@@ -1882,7 +1883,7 @@ export class LlmClient {
    * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when the ToolSearch + ToolCall bridge is incomplete.
-   * Held-back schemas remain hidden, but registered tools still use normal
+   * Held-back schemas stay out of top-level declarations, but registered tools use normal
    * approval when called by name. Hybrid exec also retains its actual nested
    * bindings. The warning identifies the missing bridge half and those bindings.
    */
@@ -1948,10 +1949,10 @@ export class LlmClient {
           console.warn(
             `tools.eager is holding back ${withheld.length} tool(s) in a session where the ` +
               `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
-              `so they are not offered to the model and cannot be loaded through the bridge until restart; ` +
+              `so they are absent from top-level declarations and cannot be loaded through the bridge until restart; ` +
               `they remain registered and direct calls by name still use normal approval: ${withheld.join(', ')}. ` +
               (nestedReachable.size > 0
-                ? `These tools also remain callable through exec: ${[...nestedReachable].join(', ')}. `
+                ? `These tools also retain their schemas and remain callable through exec: ${[...nestedReachable].join(', ')}. `
                 : '') +
               `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
               `tool_search/tool_call deny rule, --exclude-tools entry, or tools.disabled entry to keep them loadable, ` +
@@ -4077,6 +4078,14 @@ export class LlmClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+        if (this.config.getAdvisorModel?.()) {
+          const registry = this.config.getToolRegistry();
+          const advisorReminder = buildAdvisorReminder(
+            !!registry.getTool(ToolNames.ADVISOR),
+            registry.getFunctionDeclarations().map((tool) => tool.name),
+          );
+          if (advisorReminder) systemReminders.push(advisorReminder);
+        }
 
         if (
           messageType === SendMessageType.UserQuery &&

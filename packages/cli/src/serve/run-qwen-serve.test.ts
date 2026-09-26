@@ -5885,6 +5885,39 @@ describe('runQwenServe telemetry validation', () => {
   });
 });
 
+describe('runQwenServe unsupported deployment profiles', () => {
+  it.each([
+    { profile: 'hosted-harness' as const },
+    { experimentalManagedAgents: true },
+    { experimentalManagedRuntimeWorker: true },
+    { experimentalManagedRuntimeAutoLocal: true },
+    { experimentalManagedRuntimeUrl: 'http://127.0.0.1:8080' },
+    { experimentalManagedRuntimeToken: 'test-token' },
+    { managedRuntimeBrokerUrl: 'http://127.0.0.1:8080' },
+    { managedRuntimeBrokerToken: 'test-token' },
+  ])('rejects before listening: %j', async (option) => {
+    const listen = vi
+      .spyOn(net.Server.prototype, 'listen')
+      .mockImplementation(() => {
+        throw new Error('Unexpected listener for an unavailable mode.');
+      });
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: isolatedTestRuntimeDir,
+          ...option,
+        }),
+      ).rejects.toThrow(/not (available|implemented)/);
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+});
+
 /**
  * Boot validation for the embedded `runQwenServe` API: a non-finite
  * `permissionResponseTimeoutMs` (e.g. config- or NaN-derived) must fail

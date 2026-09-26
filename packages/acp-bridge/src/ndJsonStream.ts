@@ -658,7 +658,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasBoundedJsonStructure(value: unknown): boolean {
+export function hasBoundedJsonStructure(value: unknown): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
   let nodes = 0;
   while (stack.length > 0) {

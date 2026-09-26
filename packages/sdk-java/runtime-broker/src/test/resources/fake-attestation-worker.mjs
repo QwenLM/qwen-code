@@ -18,6 +18,8 @@ const boot = JSON.parse(
 const args = process.argv.slice(2);
 const chatty = args.includes('--chatty');
 const foreignUrl = args.includes('--foreign-url');
+const portArg = args.find((arg) => arg.startsWith('--port='));
+const port = portArg ? Number(portArg.slice('--port='.length)) : 0;
 const probeArg = args.find((arg) => arg.startsWith('--probe='));
 const probePath = probeArg ? probeArg.slice('--probe='.length) : '';
 if (args.includes('--big-ready')) {
@@ -77,7 +79,7 @@ const server = createServer((request, response) => {
   });
 });
 
-server.listen(0, '127.0.0.1', () => {
+server.listen(port, '127.0.0.1', () => {
   const address = server.address();
   const host = foreignUrl ? '172.16.1.234' : '127.0.0.1';
   process.stdout.write(

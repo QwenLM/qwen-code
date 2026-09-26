@@ -243,6 +243,7 @@ describe('settings presentation aliases', () => {
       'setting:usage-statistics': 'privacy.usageStatisticsEnabled',
       'setting:fast-model': 'fastModel',
       'setting:advisor-model': 'advisorModel',
+      'setting:advisor-session-call-limit': 'advisorMaxUses',
       'setting:vision-model': 'visionModel',
       'setting:model-fallbacks': 'modelFallbacks',
       'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',

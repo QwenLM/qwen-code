@@ -17,6 +17,8 @@ import {
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
+  getCurrentAgentChat,
+  runWithAgentChat,
   getCurrentAgentDepth,
   getCurrentAgentConfiguredToolAllowlist,
   getCurrentAgentDisallowedTools,
@@ -138,7 +140,9 @@ describe('AgentCore.runInAgentFrames', () => {
     const runConfig: RunConfig = { max_turns: 1 };
     return new AgentCore(
       name,
-      {} as unknown as Config,
+      {
+        getToolRegistry: () => ({ getAllToolNames: () => [] }),
+      } as unknown as Config,
       promptConfig,
       modelConfig,
       runConfig,
@@ -150,6 +154,33 @@ describe('AgentCore.runInAgentFrames', () => {
       subagentId,
     );
   }
+
+  it('binds the running chat for Advisor and restores it during approval continuation', async () => {
+    const core = makeCore('child');
+    const chat = {} as LlmChat;
+    let continuation: (() => Promise<void>) | undefined;
+    vi.spyOn(
+      core as unknown as {
+        _runReasoningLoopInner: () => Promise<ReasoningLoopResult>;
+      },
+      '_runReasoningLoopInner',
+    ).mockImplementation(async () => {
+      expect(getCurrentAgentChat()).toBe(chat);
+      continuation = () =>
+        core.runInAgentFrames(async () => {
+          expect(getCurrentAgentChat()).toBe(chat);
+        });
+      return { text: 'done' } as ReasoningLoopResult;
+    });
+    await core.runReasoningLoop(chat, [], [], new AbortController());
+    expect(getCurrentAgentChat()).toBeUndefined();
+    await continuation!();
+    await runWithAgentChat(chat, () =>
+      makeCore('other').runInAgentFrames(async () => {
+        expect(getCurrentAgentChat()).toBeUndefined();
+      }),
+    );
+  });
 
   it('publishes the per-agent disallowedTools blocklist, shadowing any parent frame', async () => {
     // AgentTool's fork reads this frame (getCurrentAgentDisallowedTools) so

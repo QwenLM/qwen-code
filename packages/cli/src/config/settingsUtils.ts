@@ -137,6 +137,20 @@ export function getEffectiveValue(
     return value as SettingsValue;
   }
 
+  if (
+    key === 'tools.mode' &&
+    (getNestedValue(mergedSettings as Record<string, unknown>, [
+      'tools',
+      'codeModeOnly',
+    ]) ??
+      getNestedValue(settings as Record<string, unknown>, [
+        'tools',
+        'codeModeOnly',
+      ])) === true
+  ) {
+    return 'code_mode_only';
+  }
+
   // Return default value if no value is set anywhere
   return definition.default;
 }
@@ -287,6 +301,17 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   readonly section: keyof Settings;
   readonly key: string;
 }>;
+
+/**
+ * The root-level half of the restriction above: top-level settings that have
+ * no section to name in the `{ section, key }` shape. Its consumers — the
+ * Workspace strip, the "ignored" warning, and the daemon route that refuses
+ * the write — read it beside `WORKSPACE_RESTRICTED_SETTINGS`.
+ */
+export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
+  'advisorModel',
+  'advisorMaxUses',
+] as const;
 
 /**
  * Settings a Workspace may only make stricter.
@@ -595,7 +620,12 @@ export function saveModifiedSettings(
 
     const isDefaultValue = value === getDefaultValue(settingKey);
 
-    if (existsInOriginalFile || !isDefaultValue) {
+    // An explicit mode selection must override legacy codeModeOnly too.
+    if (
+      existsInOriginalFile ||
+      !isDefaultValue ||
+      settingKey === 'tools.mode'
+    ) {
       loadedSettings.setValue(scope, settingKey, value);
     }
   });
@@ -622,8 +652,8 @@ export function getDisplayValue(
     // Show the value defined at the current scope if present
     value = getEffectiveValue(key, settings, {});
   } else {
-    // Fall back to the schema default when the key is unset in this scope
-    value = getDefaultValue(key);
+    // Include legacy values while keeping the display scoped to this file.
+    value = getEffectiveValue(key, settings, {});
   }
 
   let valueString = value === undefined ? t('(not set)') : String(value);

@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 const {
   appendFileSync,
@@ -1186,11 +1187,12 @@ describe('standalone release packaging', () => {
     );
 
     // The list tracks the root package.json optionalDependencies, so a newly
-    // pinned platform package (e.g. linux-arm64) is staged automatically.
+    // pinned platform package is staged automatically.
     expect(readNodePtyPackageSpecs()).toEqual([
       '@lydell/node-pty@1.2.0-beta.10',
       '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
       '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-arm64@1.2.0-beta.10',
       '@lydell/node-pty-linux-x64@1.2.0-beta.10',
       '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
       '@lydell/node-pty-win32-x64@1.2.0-beta.10',
@@ -1209,6 +1211,37 @@ describe('standalone release packaging', () => {
       ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
       ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
     ]);
+  });
+
+  it('maps every release target to a pinned node-pty prebuild package', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const { TARGETS, TARGET_PREBUILD_DIR } = await import(
+      standalonePackageScriptUrl
+    );
+
+    // Derive the expectation from the pins so the version list stays
+    // single-sourced. One-directional on purpose: @lydell/node-pty-win32-arm64
+    // is pinned while no target maps to it. The prebuild dir name is not the
+    // target name on Windows ('win-x64' -> 'win32-x64'), so the lookup has to
+    // go through the map instead of comparing targets to package suffixes.
+    // Drive the loop from TARGETS rather than from the map being validated: a
+    // target with no map entry would otherwise never be visited, deleting a
+    // whole entry would merely remove an iteration, and an emptied map would
+    // pass vacuously.
+    const specs = readNodePtyPackageSpecs();
+    for (const target of TARGETS.keys()) {
+      const dir = TARGET_PREBUILD_DIR.get(target);
+      expect(
+        dir,
+        `${target} has no node-pty prebuild dir mapping`,
+      ).toBeDefined();
+      expect(
+        specs.some((spec) => spec.startsWith(`@lydell/node-pty-${dir}@`)),
+        `${target} maps to @lydell/node-pty-${dir}, which no manifest pins`,
+      ).toBe(true);
+    }
   });
 
   it('validates standalone release checksum output', async () => {
@@ -2545,6 +2578,132 @@ describe('standalone release packaging', () => {
   });
 
   itOnUnix(
+    'fails the release build when a node-pty prebuild is missing',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const nativeModulesDir = createFakeNodePtyModulesWithoutAddon(tmpDir);
+
+        // `Required ` is what separates the fatal gate from the degrade arm:
+        // copyNodePtyAddon emits the same message on both, so a prefix-less
+        // match is also satisfied by the warning a build prints before dying
+        // for an unrelated reason.
+        expect(() =>
+          packageFakeStandalone(
+            tmpDir,
+            {},
+            {
+              nativeModulesDir,
+              env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
+            },
+          ),
+        ).toThrow(/Required node-pty packages for linux-x64/);
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix('still builds a PTY-less archive when the gate is off', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeNodePtyModulesWithoutAddon(tmpDir);
+
+      // The converse arm: a polarity flip on the gate would throw here instead
+      // of building, and degrade still has to ship an archive — just without
+      // the addon it could not find.
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'node_modules',
+            '@lydell',
+            'node-pty-linux-x64',
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // The two gate arms above stage linux-x64, the one target whose prebuild dir
+  // name equals its target name, so neither can tell `prebuildDirName` apart
+  // from `target` in copyNodePtyAddon. win-x64 is the dialect where the two
+  // diverge ('win-x64' -> 'win32-x64'), and packaging it with the gate on
+  // reddens a swap of either name. Nothing here is POSIX-specific — the
+  // packager is host-independent — so this arm is live on every lane instead
+  // of only on test_windows.
+  itWithZip(
+    'bundles the win-x64 node-pty prebuild under its win32-x64 dir name',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const nativeModulesDir = createFakeNodePtyModules(tmpDir, {
+          prebuildDirName: 'win32-x64',
+          clipboard: '@teddyzhu/clipboard-win32-x64-msvc',
+        });
+        const archive = packageFakeStandalone(
+          tmpDir,
+          {},
+          {
+            nativeModulesDir,
+            target: 'win-x64',
+            nodeArchive: createFakeWindowsNodeArchive(tmpDir),
+            env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
+          },
+        );
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        extractZipForTest(archive, extractDir);
+
+        const scopedDir = path.join(
+          extractDir,
+          'qwen-code',
+          'lib',
+          'node_modules',
+          '@lydell',
+        );
+        expect(
+          existsSync(
+            path.join(
+              scopedDir,
+              'node-pty-win32-x64',
+              'prebuilds',
+              'win32-x64',
+              'pty.node',
+            ),
+          ),
+        ).toBe(true);
+        // The staged package name comes from the prebuild dir, never from the
+        // target name, so the target-spelled directory must not exist.
+        const targetSpelled = path.join(scopedDir, 'node-pty-win-x64');
+        expect(existsSync(targetSpelled)).toBe(false);
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix(
     'packages the bun flavor as an opentui-preview archive with a renderer-default shim',
     () => {
       const createdDist = ensureMinimalDist();
@@ -2854,6 +3013,19 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
+    // Pin the gate structurally on the step that actually runs the packager:
+    // build-standalone-release.js spawns it with no env override, so the value
+    // reaches create-standalone-package.js only from this step's env. A
+    // whole-file substring stays green when the line is commented out or moved
+    // into a neighbouring step's env, and the gate then silently reverts to
+    // warn-and-degrade. The value stays the conditional expression because the
+    // publish job also runs on forks, where the gate is deliberately off.
+    const archiveStep = parse(releaseWorkflow).jobs.publish.steps.find(
+      (step) => step.name === 'Build Standalone Archives',
+    );
+    expect(archiveStep?.env?.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}",
+    );
     expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
@@ -3065,14 +3237,13 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
     // The archives ship the node-pty wrapper plus the target prebuild, and the
-    // guide has to say so instead of sending PTY users to an npm install; the
-    // linux-arm64 gap it does not cover must stay named. Bare 'linux-arm64'
-    // also occurs in the release-artifact list, so pin the sentence itself:
-    // the prebuild package is published and the gap is a missing pin (#11898).
+    // guide has to say so instead of sending PTY users to an npm install. Bare
+    // 'linux-arm64' also occurs in the release-artifact list, so pin the
+    // sentence that names it as a covered PTY target (#11872).
     expect(guide).toContain('@lydell/node-pty');
     const flattenedGuide = guide.replace(/\s+/g, ' ');
     expect(flattenedGuide).toContain(
-      '`linux-arm64` is the exception: `@lydell/node-pty-linux-arm64` is published, but this repo does not pin it',
+      '`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64` and `win-x64`',
     );
     expect(flattenedGuide).not.toContain('package is published yet');
     expect(guide).not.toContain(
@@ -5361,16 +5532,16 @@ function extractZipForTest(archive, destination) {
 function packageFakeStandalone(
   tmpDir,
   nodeArchiveOptions = {},
-  { nativeModulesDir } = {},
+  { nativeModulesDir, env, target = 'linux-x64', nodeArchive } = {},
 ) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
   const args = [
     'scripts/create-standalone-package.js',
     '--target',
-    'linux-x64',
+    target,
     '--node-archive',
-    createFakeNodeArchive(tmpDir, nodeArchiveOptions),
+    nodeArchive || createFakeNodeArchive(tmpDir, nodeArchiveOptions),
     '--out-dir',
     outDir,
     '--version',
@@ -5379,8 +5550,12 @@ function packageFakeStandalone(
   if (nativeModulesDir) {
     args.push('--native-modules-dir', nativeModulesDir);
   }
-  execFileSync('node', args, { stdio: 'pipe' });
-  return path.join(outDir, 'qwen-code-linux-x64.tar.gz');
+  execFileSync('node', args, {
+    stdio: 'pipe',
+    env: { ...process.env, ...env },
+  });
+  const extension = target === 'win-x64' ? 'zip' : 'tar.gz';
+  return path.join(outDir, `qwen-code-${target}.${extension}`);
 }
 
 function createFakeClipboardModules(tmpDir, nativePackages) {
@@ -5412,18 +5587,27 @@ function createFakeClipboardModules(tmpDir, nativePackages) {
 
 // The clipboard packages are mandatory for --native-modules-dir, and the
 // node-pty prebuild comes from the same directory, so both live here. The
-// .pdb files model the win-x64 prebuild package's payload.
-function createFakeNodePtyModules(tmpDir) {
-  const modulesDir = createFakeClipboardModules(tmpDir, [
-    '@teddyzhu/clipboard-linux-x64-gnu',
-  ]);
+// .pdb files model the win-x64 prebuild package's payload. `prebuildDirName`
+// is the prebuildify platform-arch name, which differs from the target name on
+// Windows: --target win-x64 stages node-pty-win32-x64/prebuilds/win32-x64.
+function createFakeNodePtyModules(
+  tmpDir,
+  {
+    prebuildDirName = 'linux-x64',
+    clipboard = '@teddyzhu/clipboard-linux-x64-gnu',
+  } = {},
+) {
+  const modulesDir = createFakeClipboardModules(tmpDir, [clipboard]);
   const wrapperDir = path.join(modulesDir, '@lydell', 'node-pty');
-  const prebuildDir = path.join(
+  const prebuildPackageDir = path.join(
     modulesDir,
     '@lydell',
-    'node-pty-linux-x64',
+    `node-pty-${prebuildDirName}`,
+  );
+  const prebuildDir = path.join(
+    prebuildPackageDir,
     'prebuilds',
-    'linux-x64',
+    prebuildDirName,
   );
 
   mkdirSync(path.join(wrapperDir, 'lib'), { recursive: true });
@@ -5438,9 +5622,9 @@ function createFakeNodePtyModules(tmpDir) {
 
   mkdirSync(prebuildDir, { recursive: true });
   writeFileSync(
-    path.join(modulesDir, '@lydell', 'node-pty-linux-x64', 'package.json'),
+    path.join(prebuildPackageDir, 'package.json'),
     JSON.stringify({
-      name: '@lydell/node-pty-linux-x64',
+      name: `@lydell/node-pty-${prebuildDirName}`,
       version: '1.2.0-beta.10',
     }),
   );
@@ -5448,6 +5632,27 @@ function createFakeNodePtyModules(tmpDir) {
   writeFileSync(path.join(prebuildDir, 'pty.pdb'), 'debug symbols\n');
   writeFileSync(path.join(prebuildDir, 'conpty.pdb'), 'debug symbols\n');
 
+  return modulesDir;
+}
+
+// createFakeNodePtyModules minus the addon, so the packager sees a staged dir
+// with valid clipboard packages but no prebuild to copy. Dropping only pty.node
+// matters: copyClipboardAddon runs first and hard-fails on a staged dir that
+// lacks them, while hasNativePrebuild() keys off a .node entry, so the leftover
+// .pdb files do not satisfy it.
+function createFakeNodePtyModulesWithoutAddon(tmpDir, options = {}) {
+  const { prebuildDirName = 'linux-x64' } = options;
+  const modulesDir = createFakeNodePtyModules(tmpDir, options);
+  rmSync(
+    path.join(
+      modulesDir,
+      '@lydell',
+      `node-pty-${prebuildDirName}`,
+      'prebuilds',
+      prebuildDirName,
+      'pty.node',
+    ),
+  );
   return modulesDir;
 }
 

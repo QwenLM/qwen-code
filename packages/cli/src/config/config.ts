@@ -107,9 +107,9 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
-import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -131,6 +131,7 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
+import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -210,6 +211,7 @@ export function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -659,6 +661,7 @@ export async function parseArguments(): Promise<CliArgs> {
       yargsInstance
         .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
+        .option('advisor', DEFAULT_COMMAND_OPTIONS.advisor)
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],
           string: true,
@@ -926,16 +929,22 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     .command(boardCommand)
-    // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
     .command(sandboxCommand);
+
+  // /review skill helpers (presubmit checks, cleanup). The module pulls in
+  // every review subcommand, so it is only loaded when it can match.
+  if (rawArgv.includes('review')) {
+    const { reviewCommand } = await import('../commands/review.js');
+    yargsInstance.command(reviewCommand);
+  }
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -968,16 +977,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1274,6 +1287,58 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(
+  config: Config,
+  rawModel: string,
+  startupContext: {
+    fastModel?: string;
+    currentModel?: string;
+    currentAuthType?: AuthType;
+  },
+): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const availability = checkAdvisorModelAvailability(
+    config,
+    modelName,
+    startupContext,
+  );
+  if (!availability.available) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        availability.availableModelIds,
+      ),
+    );
+  }
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -2276,6 +2341,10 @@ export async function loadCliConfig(
       }
     }
 
+    if (sessionId) {
+      sessionService.assertLegacySessionExecution(sessionId);
+    }
+
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
       const forkedSessionId = randomUUID();
@@ -2389,6 +2458,8 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const advisorModel =
+    bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
   // `undefined` is the meaningful third state here: it defers to core's
   // `shouldDefaultToNodePty()`, so only an explicit one-shot prompt gets the
@@ -2718,6 +2789,8 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel,
+    advisorMaxUses: settings.advisorMaxUses,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:
@@ -2801,6 +2874,11 @@ export async function loadCliConfig(
         customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
       },
     );
+    if (resolvedToolMode.mode !== ToolMode.Direct) {
+      configParams.warnings?.push(
+        `SSH workspaces do not support tools.mode = "${resolvedToolMode.mode}"; using direct tools for this session.`,
+      );
+    }
     configParams.toolMode = ToolMode.Direct;
     configParams.disableAllHooks = true;
     configParams.mcpServers = {};
@@ -2822,6 +2900,13 @@ export async function loadCliConfig(
   }
 
   const config = new Config(configParams);
+  if (advisorModel) {
+    validateCliAdvisorModel(config, advisorModel, {
+      fastModel: settings.fastModel,
+      currentModel: resolvedModel,
+      currentAuthType: selectedAuthType,
+    });
+  }
 
   // Load the selected transport only when an external subagent is requested.
   config.setExternalAgentExecutor({

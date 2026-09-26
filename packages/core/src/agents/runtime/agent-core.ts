@@ -16,6 +16,7 @@
  * and how to interpret the results.
  */
 
+import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
@@ -58,6 +59,7 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
+import { buildAdvisorReminder } from '../../core/advisor-policy.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
@@ -228,7 +230,9 @@ export function extractParentToolNames(
  * Build the executable fork surface shared by launch and resume. Deferred
  * tools are absent from the parent's declarations but remain reachable
  * through tool_search/tool_call, so the live registry is part of this
- * surface. A configured positive allowlist remains the outer bound.
+ * surface. A configured positive allowlist remains the outer bound: inherit
+ * concrete bindings without the broad exec grant. The exec wrapper remains
+ * callable in code modes even when absent from the execution allowlist.
  */
 export function buildInheritedForkExecutionToolNames(
   advertisedToolNames: readonly string[],
@@ -241,7 +245,8 @@ export function buildInheritedForkExecutionToolNames(
     (toolName) =>
       !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
       (configuredToolAllowlist === undefined ||
-        configuredToolAllowlist.includes(toolName)),
+        (toolName !== ToolNames.EXEC &&
+          configuredToolAllowlist.includes(toolName))),
   );
 }
 
@@ -377,6 +382,7 @@ Important Rules:
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
@@ -841,6 +847,7 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    this.executionChat = chat;
     const inner = () =>
       this._runReasoningLoopInner(
         chat,
@@ -915,7 +922,10 @@ export class AgentCore {
             ...(this.taskName ? { taskName: this.taskName } : {}),
           },
           () => {
-            const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            const runWithView = () =>
+              runWithAgentChat(this.executionChat, () =>
+                this.withRuntimeView(fn, inheritedView),
+              );
             // Publish this agent's effective positive allowlist and its
             // disallowedTools blocklist so a fork it launches cannot widen
             // either policy. Both helpers always re-set their field, so an
@@ -923,7 +933,7 @@ export class AgentCore {
             // parent's policy frame.
             const runWithToolPolicy = () =>
               runWithAgentConfiguredToolAllowlist(
-                this.getConfiguredToolExecutionAllowlist(),
+                this.getInheritedToolExecutionAllowlist(),
                 () =>
                   runWithAgentDisallowedTools(
                     this.toolConfig?.disallowedTools,
@@ -1032,8 +1042,21 @@ export class AgentCore {
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
         }
+        const advisorReminder =
+          turnCounter === 1 && this.runtimeContext.getAdvisorModel?.()
+            ? buildAdvisorReminder(
+                !!this.runtimeContext
+                  .getToolRegistry()
+                  .getTool(ToolNames.ADVISOR) &&
+                  this.isToolExecutionAllowed(ToolNames.ADVISOR),
+                toolsList.map((tool) => tool.name),
+              )
+            : undefined;
         const messageParams = {
-          message: currentMessages[0]?.parts || [],
+          message: [
+            ...(advisorReminder ? [{ text: advisorReminder }] : []),
+            ...(currentMessages[0]?.parts || []),
+          ],
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
@@ -1723,6 +1746,25 @@ export class AgentCore {
       }
     }
     return [...allowed];
+  }
+
+  private getInheritedToolExecutionAllowlist(): readonly string[] | undefined {
+    const configured =
+      this.executionAllowedTools ?? this.getConfiguredToolExecutionAllowlist();
+    if (configured === undefined) return undefined;
+    return Array.from(
+      new Set([
+        ...configured,
+        ...this.runtimeContext
+          .getToolRegistry()
+          .getAllToolNames()
+          .filter(
+            (name) =>
+              getToolExposure(name) === 'code-mode-callable' &&
+              this.isToolExecutionAllowed(name, true),
+          ),
+      ]),
+    );
   }
 
   private isToolExecutionAllowed(
