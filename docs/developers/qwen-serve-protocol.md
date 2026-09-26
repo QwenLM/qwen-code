@@ -569,6 +569,9 @@ Validation and authorization failures are synchronous HTTP errors using `{ "erro
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
 
+`daemon_update` advertises the process-global `GET /daemon/update`,
+`POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
+
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 
 <!-- conditional-serve-features:start -->
@@ -696,6 +699,62 @@ These fields are an observation cache, not a restart lease: even a fresh, fully-
 > ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required on non-loopback binds and when loopback is hardened with `--require-auth`. On an ordinary loopback bind (`127.0.0.0/8`, `localhost`, `::1`, `[::1]`), `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) or hardened loopback, the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the ordinary-loopback exemption.
+
+### `GET /daemon/update`, `POST /daemon/update/prepare`, and `POST /daemon/update/restart`
+
+These authenticated routes manage the daemon's Qwen Code installation,
+independent of the selected workspace. They always use REST, including from SDK
+clients with an ACP session transport. The `daemon_update` capability advertises
+the protocol; availability is determined by the returned state.
+
+GET checks for releases without downloading or activating them. Successful
+checks are cached for 15 minutes and errors for one minute; `?refresh=true`
+requests a fresh check. Concurrent checks share one lookup. The response contains
+`state` (`available`, `up-to-date`, `installing`, `ready`, `restarting`,
+`unavailable`, or `error`), `canInstall`, optional `currentVersion` and
+`latestVersion`, and optional `instructions` and `message`. `currentVersion`
+identifies the running daemon, including after an update is prepared. Unsupported
+installation methods can report `available` with `canInstall: false` and manual
+instructions.
+
+Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
+standalone or managed global npm installation, and operator settings that permit
+`general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
+and development mode report `unavailable`. Only global/system settings apply;
+workspace settings cannot enable installation. The connection must use the
+primary listener and its daemon runtime token, or the explicitly trusted
+loopback deployment without a token. Paired browsers and Local Control connections
+report `unavailable`, because their credentials or listener would not survive
+restart; their update mutations return `403 update_connection_unsupported`.
+
+Both POST routes require the strict mutation gate's daemon operator authority
+and accept no parameters. The server chooses the release, destination, and
+launcher; clients cannot supply a version or command.
+
+- `POST /daemon/update/prepare` starts a background download and returns `202`
+  with `state: "installing"`. It does not change the active installation. Poll GET
+  until the state is `ready`; repeated preparations share the same operation and
+  a prepared update returns `200`. With no automatic update available it returns
+  `409 update_unavailable`.
+- `POST /daemon/update/restart` requires a prepared update, otherwise it returns
+  `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
+  activating the update, gracefully closing the daemon, and replacing the process
+  with the updated launcher. Repeated clicks share one restart. The replacement
+  preserves PID, working directory, CLI options, bound port, and effective daemon
+  token, clears old version pins, and does not reopen a browser. The client polls
+  GET until `currentVersion` changes, then reloads the document at the URL
+  captured when the update was requested. Standalone launcher validation runs before closing
+  services; a failed check leaves the daemon running. Failures after shutdown
+  begins or during process replacement are not guaranteed to recover.
+
+Web Shell automatically checks and prepares available supported updates in the
+background, and displays its version-adjacent update button only when ready.
+Preparation and readiness survive workspace runtime reloads. Ordinary daemon
+shutdown discards the prepared download. Activation failures keep the daemon
+running and report `error`; the next check after the one-minute error cache can
+prepare a new download for retry. Disabling automatic updates removes readiness
+and cleans the download before a restart can begin. Clicking the update button
+explicitly restarts the entire daemon and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
