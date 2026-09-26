@@ -21,6 +21,9 @@ import {
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { DiffView } from './tools/DiffView';
+import { useWebShellCustomization } from '../../customization';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -76,12 +79,15 @@ function extractContentText(request: PermissionRequest): string {
 }
 
 function isExecKind(request: PermissionRequest): boolean {
+  // `toolKind` carries the ACP frame's kind (`execute` for shell tools);
+  // `PermissionRequest.kind` is never assigned by any producer.
+  const toolKind = request.toolKind?.toLowerCase();
   const toolName = request.toolName?.toLowerCase();
   return (
-    request.kind === 'bash' ||
-    request.kind === 'exec' ||
-    request.kind === 'execute' ||
-    request.kind === 'shell' ||
+    toolKind === 'bash' ||
+    toolKind === 'exec' ||
+    toolKind === 'execute' ||
+    toolKind === 'shell' ||
     toolName === 'run_shell_command'
   );
 }
@@ -335,6 +341,7 @@ export function ToolApproval({
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
+  const contentId = useId();
 
   // Reset only when a NEW request arrives. Reading the safe default through a
   // ref keeps this keyed strictly to request identity: if the same request's
@@ -504,9 +511,48 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const diffs = useMemo(
+    () =>
+      hostOwnsEditDiffPreview
+        ? []
+        : request.content
+            .filter((block) => block.type === 'diff')
+            .map((block) => {
+              const oldText = block.oldText ?? '';
+              const newText = block.newText ?? '';
+              // Approval cards render into an [role=alertdialog] and stay
+              // synchronous — a giant edit here freezes the panel and makes
+              // the deletion/addition rows unreadable at a glance. Gate on
+              // the raw payload before running the LCS; the transcript
+              // completed-edit view calls buildUnifiedDiff directly and
+              // keeps its previous coarse rendering.
+              const OMITTED =
+                ' Diff omitted because it is too large to display safely.';
+              const tooManyChars = oldText.length + newText.length > 100_000;
+              const oldLines = oldText ? oldText.split('\n').length : 0;
+              const newLines = newText ? newText.split('\n').length : 0;
+              const tooManyLines = oldLines + newLines > 1_000;
+              return {
+                path: block.path,
+                diff:
+                  tooManyChars || tooManyLines
+                    ? OMITTED
+                    : buildUnifiedDiff(oldText, newText),
+              };
+            }),
+    [request.content, hostOwnsEditDiffPreview],
+  );
   const command = getCommandFromRawInput(request);
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
+  // Exec warnings (e.g. command-substitution notices) arrive as real content
+  // blocks, not the input fallback — render them next to the command instead
+  // of letting the command block swallow them.
+  const execWarningsText =
+    isExec && command && showsContent && !request.contentIsInput
+      ? contentText
+      : null;
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -542,6 +588,7 @@ export function ToolApproval({
         questionId,
         descriptionText ? descId : null,
         showsCommandBlock || isGoal ? commandId : null,
+        execWarningsText ? contentId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -570,11 +617,22 @@ export function ToolApproval({
           content={contentText || (goalObjective ? '' : request.title || '')}
         />
       ) : isExec && command ? (
-        <div className={styles.code}>
-          <pre className={styles.codeBlock} id={commandId} title={command}>
-            {command}
-          </pre>
-        </div>
+        <>
+          <div className={styles.code}>
+            <pre className={styles.codeBlock} id={commandId} title={command}>
+              {command}
+            </pre>
+          </div>
+          {execWarningsText && (
+            <pre
+              className={styles.content}
+              id={contentId}
+              title={execWarningsText}
+            >
+              {execWarningsText}
+            </pre>
+          )}
+        </>
       ) : showsContent ? (
         <pre
           className={`${styles.content}${
@@ -586,6 +644,21 @@ export function ToolApproval({
           {contentText}
         </pre>
       ) : null}
+
+      {diffs.length > 0 && (
+        // `data-plan-interactive` is the existing Escape-exempt opt-out the
+        // panel's handleKeyDown already recognises: it lets Arrow/j/k/Home/End
+        // reach the focused diff row for native scroll instead of moving the
+        // approval selection, while Escape still bubbles up and rejects.
+        <div className={styles.content} data-plan-interactive>
+          {diffs.map((block, index) => (
+            <div key={index}>
+              <div>{block.path}</div>
+              <DiffView diff={block.diff} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {showsPlanWorkflow && (
         <div className={styles.workflow}>

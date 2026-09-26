@@ -5,6 +5,10 @@
  */
 
 import {
+  parseSessionStartupConfig,
+  isSessionStartupConfigError,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -79,11 +83,15 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -256,6 +264,61 @@ type AddSessionArtifactInput = Parameters<
 >[1];
 
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
+const SSH_METHODS = new Set([
+  'authenticate',
+  'session/new',
+  'session/load',
+  'session/resume',
+  'session/list',
+  'session/close',
+  'session/cancel',
+  'session/prompt',
+  'session/permission',
+  'session/set_config_option',
+  'session/set_mode',
+  'session/set_model',
+  ...[
+    'session/heartbeat',
+    'session/context',
+    'session/supported_commands',
+    'session/update_metadata',
+    'session/update_organization',
+    'session/recap',
+    'session/detach',
+    'session/context_usage',
+    'session/tasks',
+    'session/agents',
+    'session/agent_trace',
+    'session/attachments',
+    'session/artifacts',
+    'workspace/session_groups/list',
+    'workspace/session_groups/create',
+    'workspace/session_groups/update',
+    'workspace/session_groups/delete',
+    'workspace/trust',
+    'workspace/trust/request',
+    'workspace/providers',
+    'workspace/tools',
+    'workspace/voice',
+    'workspace/voice/set',
+    'workspace/permissions',
+    'workspace/permissions/set',
+    'workspace/auth/status',
+    'workspace/auth/device_flow/start',
+    'workspace/auth/device_flow/get',
+    'workspace/auth/device_flow/cancel',
+    'file/read',
+    'file/read_bytes',
+    'file/stat',
+    'file/list',
+    'file/glob',
+    'file/write',
+    'file/edit',
+    'sessions/delete',
+    'sessions/archive',
+    'sessions/unarchive',
+  ].map((method) => `${QWEN_METHOD_NS}${method}`),
+]);
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
@@ -672,6 +735,20 @@ export function toRpcError(err: unknown): {
       },
     };
   }
+  if (isSessionStartupConfigError(err)) {
+    // Both kinds are caller-input rejections — a malformed config and a
+    // selection the provider refused alike — so both map to the JSON-RPC
+    // client-fault code. `data.httpStatus` keeps the REST-equivalent
+    // status, and SDK transports key on it rather than on this code.
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: err.code,
+        httpStatus: err.code === 'invalid_startup_config' ? 400 : 422,
+      },
+    };
+  }
   if (err instanceof InvalidRequestedSessionIdError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -690,6 +767,61 @@ export function toRpcError(err: unknown): {
         sessionId: err.sessionId,
         ...err.details,
       },
+    };
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data:
+        err.errorKind === 'invalid_session_id'
+          ? { httpStatus: 400, errorKind: err.errorKind }
+          : {
+              httpStatus: 409,
+              errorKind: err.errorKind,
+              sessionId: err.sessionId,
+              conflict: 'live',
+            },
+    };
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: err.sessionId,
+      },
+    };
+  }
+  // Raised by a paired host's owner selection or by the ACP child's check.
+  if (
+    err instanceof SessionExecutionEngineError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'session_execution_engine_unavailable')
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    };
+  }
+  if (
+    err instanceof SessionTranscriptSnapshotUnavailableError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'transcript_snapshot_unavailable')
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: errMsg(err),
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     };
   }
   if (err instanceof RequestedSessionIdNotHonoredError) {
@@ -1562,6 +1694,9 @@ export class AcpDispatcher {
             workspaceCwd: this.boundWorkspace,
             methods: advertisedQwenVendorMethods(
               this.sessionShellCommandEnabled,
+            ).filter(
+              (method) =>
+                !this.fsFactory?.sshWorkspace || SSH_METHODS.has(method),
             ),
           },
           imageCapability: IMAGE_CAPABILITY,
@@ -1707,6 +1842,23 @@ export class AcpDispatcher {
       : undefined;
     const id = isRequest(msg) ? msg.id : undefined;
 
+    if (this.fsFactory?.sshWorkspace && !SSH_METHODS.has(method)) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(
+            id,
+            RPC.METHOD_NOT_FOUND,
+            'This operation is not supported for SSH workspaces.',
+            {
+              errorKind: 'ssh_workspace_operation_unsupported',
+              httpStatus: 501,
+            },
+          ),
+        );
+      }
+      return;
+    }
+
     const generationScoped =
       TRUSTED_WORKSPACE_METHODS.has(method) ||
       WORKSPACE_GENERATION_MUTATION_METHODS.has(method);
@@ -1768,6 +1920,10 @@ export class AcpDispatcher {
             );
             return;
           }
+          const startupConfig = parseSessionStartupConfig(
+            params['startupConfig'],
+            params,
+          );
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const parsedSessionId = parseCallerSuppliedSessionId(
             meta?.[REQUESTED_SESSION_ID_META_KEY],
@@ -1854,13 +2010,52 @@ export class AcpDispatcher {
             // Always use sessionScope 'thread' regardless of client params.
             // The REST surface (POST /session) supports 'single' for
             // backward compat, but the ACP endpoint follows the standard.
-            const session = await sessionRuntime.bridge.spawnOrAttach({
-              workspaceCwd: cwd,
-              clientId: conn.clientId,
-              sessionScope: 'thread',
-              ...source,
-              ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
-            });
+            const session = await sessionRuntime.bridge
+              .spawnOrAttach({
+                workspaceCwd: cwd,
+                clientId: conn.clientId,
+                sessionScope: 'thread',
+                ...(startupConfig ? { startupConfig } : {}),
+                ...source,
+                ...(requestedSessionId
+                  ? { sessionId: requestedSessionId }
+                  : {}),
+              })
+              .catch(async (error: unknown) => {
+                // Mirror the REST route: a definite startup rejection
+                // already closed the live session, but the recording the
+                // spawn persisted survives — roll it back so the id stays
+                // retryable, naming the session the rejection was actually
+                // applied to (a daemon-generated id otherwise leaves a
+                // listed, resumable phantom). Uncertain outcomes keep it:
+                // the close result is unknown.
+                const rejectedSessionId =
+                  (isSessionStartupConfigError(error)
+                    ? error.sessionId
+                    : undefined) ?? requestedSessionId;
+                if (
+                  rejectedSessionId !== undefined &&
+                  isSessionStartupConfigError(error) &&
+                  error.code === 'startup_config_rejected'
+                ) {
+                  const removed = await this.removeOrphanSession(
+                    rejectedSessionId,
+                    true,
+                    sessionRuntime,
+                  );
+                  if (!removed) {
+                    // Matches the REST route: the definite rejection still
+                    // owes the caller its error, so a refused rollback (the
+                    // session stayed live) is a log line, not a throw —
+                    // otherwise a permanently occupied id has no
+                    // diagnostic at all.
+                    writeStderrLine(
+                      `qwen serve: startup rejection recording rollback was inconclusive; the session id may stay occupied (${logSafe(rejectedSessionId)})`,
+                    );
+                  }
+                }
+                throw error;
+              });
             const ownership = this.ownershipReceipt(
               conn,
               session.sessionId,
@@ -1903,6 +2098,12 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...(session.startupConfigApplied
+                    ? {
+                        modelApplied: true,
+                        startupConfigApplied: session.startupConfigApplied,
+                      }
+                    : {}),
                   ...(session.sourceType
                     ? { sourceType: session.sourceType }
                     : {}),
@@ -4705,7 +4906,8 @@ export class AcpDispatcher {
           const matches = await fs.glob(pattern, {
             maxResults: maxResults + 1,
           });
-          const truncated = matches.length > maxResults;
+          const truncated =
+            matches.truncated === true || matches.length > maxResults;
           this.replyConn(conn, id, {
             pattern,
             matches: truncated ? matches.slice(0, maxResults) : matches,

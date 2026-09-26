@@ -1016,7 +1016,7 @@ describe('package scripts', () => {
       '.pnpmfile.mjs',
       'package.json',
       'packages/*/package.json',
-      '!packages/desktop-shell/package.json',
+      '!packages/desktop/package.json',
       '!packages/live-host/package.json',
       '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',

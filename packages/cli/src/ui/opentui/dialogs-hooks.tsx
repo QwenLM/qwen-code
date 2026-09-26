@@ -367,7 +367,10 @@ export function OpenTuiHooksDialog({
 
   const wheel =
     (
-      select: { activeIndex: number; highlightIndex: (index: number) => void },
+      select: {
+        activeIndexRef: Readonly<{ current: number }>;
+        highlightIndex: (index: number) => void;
+      },
       length: number,
     ) =>
     (direction: 'up' | 'down') =>
@@ -376,7 +379,7 @@ export function OpenTuiHooksDialog({
           0,
           Math.min(
             length - 1,
-            select.activeIndex + (direction === 'down' ? 1 : -1),
+            select.activeIndexRef.current + (direction === 'down' ? 1 : -1),
           ),
         ),
       );
