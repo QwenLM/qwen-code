@@ -23,8 +23,13 @@ for the model to receive an image. Prefer the desktop relay tool when it is
 present; otherwise use the regular `node-repl` server:
 
 ```js
+// A code-mode `tools` object throws on an unknown key, so probe with `in`:
+// reading an unbound tool would abort the script before any fallback ran.
+const DESKTOP_NODE_REPL = 'mcp__desktop_node_repl__node_repl';
 const nodeReplTool =
-  tools.mcp__desktop_node_repl__node_repl ?? tools.mcp__node_repl__node_repl;
+  DESKTOP_NODE_REPL in tools
+    ? tools[DESKTOP_NODE_REPL]
+    : tools.mcp__node_repl__node_repl;
 const result = await nodeReplTool({ code });
 for (const block of result.content ?? []) {
   if (block.type === 'text') {

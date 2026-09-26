@@ -21,6 +21,7 @@
 import type { Duplex } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import type { WorkspaceSelector } from './acp-relay.js';
+import { MAX_RAW_REQUEST_BYTES } from './constants.js';
 import {
   formatHttpResponse,
   looksLikeHttp,
@@ -371,6 +372,10 @@ export function serveRawMcp(
     let consent: Promise<boolean> | undefined;
     let pendingText = '';
     let closed = false;
+    // Ids waiting on the consent dialog, and ids cancelled while waiting:
+    // an approved call the client already cancelled must not run.
+    const gatedIds = new Set<JsonRpcId>();
+    const cancelledGatedIds = new Set<JsonRpcId>();
 
     const write = (reply: JsonRpcMessage) => {
       if (!closed) socket.write(`${JSON.stringify(reply)}\n`);
@@ -397,7 +402,13 @@ export function serveRawMcp(
           }
           return allowed;
         });
-        if (!(await consent)) {
+        gatedIds.add(message.id);
+        const allowed = await consent;
+        gatedIds.delete(message.id);
+        // A cancellation that arrived while the dialog was up retires the
+        // call unanswered, as it would have after being forwarded.
+        if (cancelledGatedIds.delete(message.id)) return;
+        if (!allowed) {
           write(
             errorReply(
               message.id,
@@ -405,6 +416,23 @@ export function serveRawMcp(
               'The person at this computer declined remote use of it.',
             ),
           );
+          return;
+        }
+      } else if (
+        message !== null &&
+        typeof message === 'object' &&
+        (message as JsonRpcMessage).method === 'notifications/cancelled'
+      ) {
+        const requestId = (
+          (message as JsonRpcMessage).params as
+            | { requestId?: unknown }
+            | undefined
+        )?.requestId;
+        if (
+          (typeof requestId === 'string' || typeof requestId === 'number') &&
+          gatedIds.has(requestId)
+        ) {
+          cancelledGatedIds.add(requestId);
           return;
         }
       }
@@ -419,6 +447,11 @@ export function serveRawMcp(
         pendingText = pendingText.slice(newline + 1);
         if (line) void handleLine(line);
         newline = pendingText.indexOf('\n');
+      }
+      if (pendingText.length > MAX_RAW_REQUEST_BYTES) {
+        // An unterminated stream is not line-delimited JSON-RPC; nothing here
+        // may buffer without a bound before consent has even run.
+        finish();
       }
     };
 

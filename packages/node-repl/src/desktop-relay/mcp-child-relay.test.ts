@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { MAX_RELAYED_YIELD_TIME_MS } from './constants.js';
 import {
   McpChildRelay,
   type ChildChannel,
@@ -119,7 +120,7 @@ describe('McpChildRelay', () => {
     });
   });
 
-  it('drops cancellations that match no request or several', async () => {
+  it('drops a cancellation that matches no request', async () => {
     const child = new FakeChild();
     const relay = new McpChildRelay(child);
     const cancel = (requestId: unknown) =>
@@ -131,12 +132,133 @@ describe('McpChildRelay', () => {
     await cancel(0);
     void relay.handle({ jsonrpc: '2.0', id: 0, method: 'tools/call' });
     void relay.handle({ jsonrpc: '2.0', id: 0, method: 'tools/call' });
-    await cancel(0);
     await cancel('0');
     expect(child.sent.map((message) => message.method)).toEqual([
       'tools/call',
       'tools/call',
     ]);
+  });
+
+  it('cancels every pending request that shares the cancelled id', async () => {
+    const child = new FakeChild();
+    const relay = new McpChildRelay(child);
+    const first = relay.handle({ jsonrpc: '2.0', id: 0, method: 'tools/call' });
+    const second = relay.handle({
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'tools/call',
+    });
+    const [firstRelayId, secondRelayId] = child.sent.map((m) => m.id);
+    await relay.handle({
+      jsonrpc: '2.0',
+      method: 'notifications/cancelled',
+      params: { requestId: 0 },
+    });
+    // Two clients really can hold the same original id; cancelling both beats
+    // leaving a desktop-driving cell the user already stopped unstoppable.
+    expect(child.sent.slice(2)).toEqual([
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: firstRelayId },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: secondRelayId },
+      },
+    ]);
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+  });
+
+  it('closes the child when the relay closes', () => {
+    const child = new FakeChild();
+    new McpChildRelay(child).close();
+    expect(child.closed).toBe(true);
+  });
+
+  it('rewrites a yield above the channel budget down to it', async () => {
+    const child = new FakeChild();
+    const relay = new McpChildRelay(child);
+    const pending = relay.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'node_repl',
+        arguments: { code: 'longRunning()', yield_time_ms: 60_000 },
+      },
+    });
+    // The daemon answers one reverse-channel frame for at most 30 s; a longer
+    // yield would time the frame out while the cell kept driving the desktop.
+    expect(child.last()).toMatchObject({
+      method: 'tools/call',
+      params: {
+        name: 'node_repl',
+        arguments: {
+          code: 'longRunning()',
+          yield_time_ms: MAX_RELAYED_YIELD_TIME_MS,
+        },
+      },
+    });
+    child.reply({ jsonrpc: '2.0', id: child.last().id, result: {} });
+    await expect(pending).resolves.toMatchObject({ id: 1, result: {} });
+  });
+
+  it('leaves a yield inside the channel budget untouched', async () => {
+    const child = new FakeChild();
+    const relay = new McpChildRelay(child);
+    const pending = relay.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'node_repl',
+        arguments: { code: 'fast()', yield_time_ms: 5_000 },
+      },
+    });
+    expect(child.last()).toMatchObject({
+      params: { arguments: { code: 'fast()', yield_time_ms: 5_000 } },
+    });
+    child.reply({ jsonrpc: '2.0', id: child.last().id, result: {} });
+    await expect(pending).resolves.toMatchObject({ id: 1, result: {} });
+  });
+
+  it('never rejects handle() when the child send throws', async () => {
+    const child = new FakeChild();
+    const relay = new McpChildRelay(child);
+    const failing = child as FakeChild & { failSends: boolean };
+    failing.failSends = false;
+    child.send = (message: JsonRpcMessage) => {
+      if (failing.failSends) throw new Error('child is gone');
+      FakeChild.prototype.send.call(child, message);
+    };
+    void relay.handle({ jsonrpc: '2.0', id: 4, method: 'tools/call' });
+    failing.failSends = true;
+
+    // Notifications resolve without a reply and without throwing.
+    await expect(
+      relay.handle({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    ).resolves.toBeUndefined();
+    await expect(
+      relay.handle({
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: 4 },
+      }),
+    ).resolves.toBeUndefined();
+
+    // A request whose send throws settles as a clean error reply instead.
+    await expect(
+      relay.handle({ jsonrpc: '2.0', id: 5, method: 'tools/call' }),
+    ).resolves.toMatchObject({
+      id: 5,
+      error: {
+        code: -32000,
+        message: expect.stringContaining('child is gone'),
+      },
+    });
   });
 
   it('retires cancelled requests without a child reply so ids can be reused', async () => {

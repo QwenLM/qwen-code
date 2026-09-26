@@ -57,6 +57,13 @@ describe('buildLaunchAgentPlist', () => {
   it('escapes program arguments', () => {
     expect(plist).toContain('<string>/a &amp; b/&lt;x&gt;.js</string>');
   });
+
+  it("sends the relay's stderr to its log, the only channel it has", () => {
+    expect(plist).toContain('<key>StandardErrorPath</key>');
+    expect(plist).toContain(
+      '<string>/Users/me/.qwen/desktop-relay/agent.log</string>',
+    );
+  });
 });
 
 describe('installLaunchAgent / uninstallLaunchAgent', () => {
@@ -95,6 +102,9 @@ describe('installLaunchAgent / uninstallLaunchAgent', () => {
     ).toThrow(
       'launchctl bootstrap failed: Bootstrap failed: 5: Input/output error',
     );
+    // A failed install leaves no plist behind: launchd would load it at the
+    // next login, and `status` would read the file as a registration.
+    expect(fs.existsSync(plistPath)).toBe(false);
   });
 
   it('unloads and removes the plist', () => {
@@ -104,6 +114,42 @@ describe('installLaunchAgent / uninstallLaunchAgent', () => {
     const run = vi.fn<LaunchctlRun>(() => ({ status: 0, stderr: '' }));
     uninstallLaunchAgent({ plistPath, label: 'l', uid: 501, run });
     expect(run).toHaveBeenCalledWith(['bootout', 'gui/501/l']);
+    expect(fs.existsSync(plistPath)).toBe(false);
+  });
+
+  it('keeps the plist and reports the failure when the job is still loaded', () => {
+    const plistPath = tempPlistPath();
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, '<plist/>');
+    const run = vi.fn<LaunchctlRun>((args) =>
+      args[0] === 'bootout'
+        ? {
+            status: 113,
+            stderr:
+              'Boot-out failed: 113: Could not find specified domain/service\n',
+          }
+        : { status: 0, stderr: '' },
+    );
+    expect(() =>
+      uninstallLaunchAgent({ plistPath, label: 'l', uid: 501, run }),
+    ).toThrow('launchctl bootout failed');
+    expect(fs.existsSync(plistPath)).toBe(true);
+  });
+
+  it('removes the plist when bootout fails because nothing was loaded', () => {
+    const plistPath = tempPlistPath();
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, '<plist/>');
+    const run = vi.fn<LaunchctlRun>((args) =>
+      args[0] === 'bootout'
+        ? {
+            status: 113,
+            stderr:
+              'Boot-out failed: 113: Could not find specified domain/service\n',
+          }
+        : { status: 3, stderr: 'Could not find service\n' },
+    );
+    uninstallLaunchAgent({ plistPath, label: 'l', uid: 501, run });
     expect(fs.existsSync(plistPath)).toBe(false);
   });
 });

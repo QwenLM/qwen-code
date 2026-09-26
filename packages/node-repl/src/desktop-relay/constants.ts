@@ -32,6 +32,23 @@ export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.20.11';
  */
 export const MAX_RELAYED_REPLY_BYTES = 9 * 1024 * 1024;
 
+/**
+ * Bound on the unterminated bytes one raw JSON-RPC connection may buffer
+ * before a newline arrives; the HTTP sibling bounds a whole request at 64 KiB
+ * (`MAX_REQUEST_BYTES` in http.ts). A peer that never sends a newline is not
+ * speaking this protocol, so the connection is dropped past this.
+ */
+export const MAX_RAW_REQUEST_BYTES = 64 * 1024;
+
+/**
+ * Below the daemon's 30 s per-message round-trip limit on the reverse channel
+ * (`CLIENT_MCP_MESSAGE_TIMEOUT_MS` in packages/core), so a relayed call's
+ * reply fits its frame: a longer yield would time the frame out while the
+ * cell kept driving the desktop. A local stdio node_repl keeps its own 60 s
+ * maximum (`MAX_YIELD_TIME_MS` in mcp-server.ts).
+ */
+export const MAX_RELAYED_YIELD_TIME_MS = 25_000;
+
 export function defaultRelayHome(): string {
   return path.join(os.homedir(), '.qwen', 'desktop-relay');
 }

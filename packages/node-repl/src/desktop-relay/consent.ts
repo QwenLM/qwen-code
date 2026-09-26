@@ -14,7 +14,7 @@ import { execFile } from 'node:child_process';
 export type RunOsascript = (
   args: string[],
   timeoutMs: number,
-) => Promise<{ code: number; stdout: string }>;
+) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export const runOsascript: RunOsascript = (args, timeoutMs) =>
   new Promise((resolve) => {
@@ -22,14 +22,14 @@ export const runOsascript: RunOsascript = (args, timeoutMs) =>
       '/usr/bin/osascript',
       args,
       { timeout: timeoutMs },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         const code =
           error === null
             ? 0
             : typeof (error as { code?: unknown }).code === 'number'
               ? (error as { code: number }).code
               : 1;
-        resolve({ code, stdout: String(stdout) });
+        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
       },
     );
   });
@@ -41,12 +41,17 @@ function script(lines: string[], message: string): string[] {
   return [...lines.flatMap((line) => ['-e', line]), message];
 }
 
-/** Resolves true only for an explicit Allow; Deny, time-out and errors refuse. */
+/**
+ * Resolves true only for an explicit Allow; Deny, time-out and errors refuse.
+ * A dialog that could not run (osascript missing, blocked, or erroring) is
+ * reported on stderr — the log a launchd-spawned relay is diagnosed through —
+ * because the caller can only present a refusal, and a failure is not one.
+ */
 export async function askConsent(
   message: string,
   run: RunOsascript = runOsascript,
 ): Promise<boolean> {
-  const { code, stdout } = await run(
+  const { code, stdout, stderr } = await run(
     script(
       [
         'on run argv',
@@ -59,7 +64,19 @@ export async function askConsent(
     ),
     (DIALOG_SECONDS + 10) * 1000,
   );
-  return code === 0 && stdout.trim() === 'Allow|false';
+  const answer = stdout.trim();
+  if (code === 0 && answer === 'Allow|false') return true;
+  // Deny is the cancel button, which osascript reports as "User canceled.
+  // (-128)"; a dialog nobody answered returns `...|true` after giving up.
+  const refused = stderr.includes('-128') || (code === 0 && answer !== '');
+  if (!refused) {
+    process.stderr.write(
+      `desktop-relay: consent dialog failed (exit ${String(code)}): ${
+        stderr.trim() || answer || 'no output'
+      }\n`,
+    );
+  }
+  return false;
 }
 
 export async function notify(

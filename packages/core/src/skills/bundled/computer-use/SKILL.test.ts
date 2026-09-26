@@ -42,13 +42,26 @@ describe('bundled computer-use skill', () => {
       const regular = vi.fn().mockResolvedValue(result);
       const text = vi.fn();
       const image = vi.fn();
-      await runInNewContext(`(async () => {${example}})()`, {
-        tools: {
-          mcp__node_repl__node_repl: regular,
-          ...(desktopAvailable
-            ? { mcp__desktop_node_repl__node_repl: desktop }
-            : {}),
+      // Mirror the code-mode host (host.ts): a Proxy that throws on an
+      // unknown key, so an unbound desktop tool must be probed with `in`.
+      const toolTarget = Object.assign(Object.create(null), {
+        mcp__node_repl__node_repl: regular,
+        ...(desktopAvailable
+          ? { mcp__desktop_node_repl__node_repl: desktop }
+          : {}),
+      }) as Record<string, unknown>;
+      const tools = new Proxy(toolTarget, {
+        get(target, property) {
+          if (typeof property === 'string' && !(property in target)) {
+            throw new Error(
+              `Unknown or unavailable code mode tool: ${property}`,
+            );
+          }
+          return Reflect.get(target, property) as unknown;
         },
+      });
+      await runInNewContext(`(async () => {${example}})()`, {
+        tools,
         ALL_TOOLS: desktopAvailable
           ? [{ name: 'mcp__desktop_node_repl__node_repl' }]
           : [],

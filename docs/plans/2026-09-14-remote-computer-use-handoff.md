@@ -82,7 +82,21 @@
 
   要修改分支上已有的文件，从 `git show "$BASE":<path>` 取当前内容再编辑。
 
-- 分支落后 main 需要合并时：`git commit-tree <合并后的 tree> -p "$BASE" -p origin/main`，合并后的 tree 由 `origin/main` 的 tree 加上分支独有的文件构成，推之前用 `git diff --stat origin/main <tree>` 确认只有本 PR 的文件。
+- 分支落后 main 需要合并时：必须做三方合并，**不要**用「`origin/main` 的 tree 叠加分支独有的文件」来拼 tree——同一文件两侧都有修改时，其中一侧会被静默丢弃（本 PR 改了 35+ 个 main 上已有的文件），而且 `git diff --stat origin/main <tree>` 看不出来。做法：
+
+  ```bash
+  git fetch origin main
+  TREE=$(git merge-tree --write-tree "$BASE" origin/main)   # 三方合并；退出码非 0 = 有冲突
+  ```
+
+  有冲突就停下，到干净检出里 `git merge origin/main` 手工解决，**不要**直接提交带冲突标记的 tree。没有冲突时：
+
+  ```bash
+  git diff --stat "$BASE" "$TREE"        # 只应出现 main 带进来的改动
+  git diff --stat origin/main "$TREE"    # 只应出现本 PR 自己的文件
+  C=$(git commit-tree "$TREE" -p "$BASE" -p origin/main -m "Merge origin/main into docs/remote-computer-use-plan")
+  git push fork "$C":refs/heads/docs/remote-computer-use-plan   # 不带 --force
+  ```
 
 ## 7. 调研路径
 

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { MAX_RELAYED_REPLY_BYTES } from './constants.js';
+import {
+  MAX_RELAYED_REPLY_BYTES,
+  MAX_RELAYED_YIELD_TIME_MS,
+} from './constants.js';
 
 export type JsonRpcId = string | number;
 
@@ -48,6 +51,30 @@ function isRequestId(value: unknown): value is JsonRpcId {
 interface Pending {
   originalId: JsonRpcId;
   resolve: (reply: JsonRpcMessage | undefined) => void;
+}
+
+/**
+ * A relayed `tools/call` reply must fit the daemon's per-message round-trip
+ * budget, so a `yield_time_ms` above it is rewritten down; the caller can
+ * keep waiting with `node_repl_wait`.
+ */
+function clampYieldTime(message: JsonRpcMessage): JsonRpcMessage {
+  if (message.method !== 'tools/call') return message;
+  const params = message.params as { arguments?: unknown } | undefined;
+  const args = params?.arguments;
+  if (args === null || typeof args !== 'object') return message;
+  const record = args as Record<string, unknown>;
+  const yieldTime = record['yield_time_ms'];
+  if (typeof yieldTime !== 'number' || yieldTime <= MAX_RELAYED_YIELD_TIME_MS) {
+    return message;
+  }
+  return {
+    ...message,
+    params: {
+      ...params,
+      arguments: { ...record, yield_time_ms: MAX_RELAYED_YIELD_TIME_MS },
+    },
+  };
 }
 
 /**
@@ -118,36 +145,53 @@ export class McpChildRelay {
     this.child.close();
   }
 
+  // A notification carries no reply, so a throwing child must not reject
+  // `handle`: every send here is guarded, and the child's exit reports the
+  // break instead.
   private notify(message: JsonRpcMessage): void {
     if (this.exitReason !== undefined) return;
     if (message.method === 'notifications/initialized') {
       if (this.initializedForwarded) return;
+      try {
+        this.child.send(message);
+      } catch {
+        return;
+      }
       this.initializedForwarded = true;
-    } else if (message.method === 'notifications/cancelled') {
-      // The reverse channel does not identify which multiplexed MCP client sent
-      // a notification, and clients reuse request ids. Forward only when one
-      // pending request carries the id: stopping a turn must stop the cell
-      // that is driving the screen.
-      const params = message.params as { requestId?: unknown } | undefined;
-      const relayId = this.soleRelayId(params?.requestId);
-      if (relayId === undefined) return;
-      this.child.send({
-        ...message,
-        params: { ...params, requestId: relayId },
-      });
-      // The MCP SDK sends no response after cancellation.
-      this.settle(relayId, undefined);
       return;
     }
-    this.child.send(message);
+    if (message.method === 'notifications/cancelled') {
+      // The reverse channel does not identify which multiplexed MCP client
+      // sent a notification, and clients reuse request ids. Cancel every
+      // match: an MCP cancellation is advisory, so over-cancelling a second
+      // session's call is recoverable, while a desktop-driving cell that
+      // cannot be stopped is not.
+      const params = message.params as { requestId?: unknown } | undefined;
+      for (const relayId of this.matchingRelayIds(params?.requestId)) {
+        try {
+          this.child.send({
+            ...message,
+            params: { ...params, requestId: relayId },
+          });
+        } catch {
+          // The request is still retired below.
+        }
+        // The MCP SDK sends no response after cancellation.
+        this.settle(relayId, undefined);
+      }
+      return;
+    }
+    try {
+      this.child.send(message);
+    } catch {
+      // Lost notification; the child's exit reports the break.
+    }
   }
 
-  private soleRelayId(originalId: unknown): number | undefined {
-    let found: number | undefined;
+  private matchingRelayIds(originalId: unknown): number[] {
+    const found: number[] = [];
     for (const [relayId, entry] of this.pending) {
-      if (entry.originalId !== originalId) continue;
-      if (found !== undefined) return undefined;
-      found = relayId;
+      if (entry.originalId === originalId) found.push(relayId);
     }
     return found;
   }
@@ -160,7 +204,7 @@ export class McpChildRelay {
     return new Promise((resolve) => {
       this.pending.set(relayId, { originalId, resolve });
       try {
-        this.child.send({ ...message, id: relayId });
+        this.child.send({ ...clampYieldTime(message), id: relayId });
       } catch (error) {
         this.settle(
           relayId,

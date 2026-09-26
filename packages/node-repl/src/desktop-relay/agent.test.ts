@@ -16,6 +16,7 @@ import {
   type RawMcpDeps,
   type RelayRecord,
 } from './agent.js';
+import { MAX_RAW_REQUEST_BYTES } from './constants.js';
 import type { HttpRequest } from './http.js';
 import type { ChildChannel, JsonRpcMessage } from './mcp-child-relay.js';
 
@@ -359,6 +360,71 @@ describe('serveRawMcp', () => {
     ]);
     h.socket.push(null);
     await h.done;
+  });
+
+  it('drops a connection that buffers past the request budget without a newline', async () => {
+    const h = raw(true);
+    h.socket.push('{"jsonrpc":"2.0","method":"tools/list","id":');
+    h.socket.push('1'.repeat(MAX_RAW_REQUEST_BYTES));
+    // No consent prompt, no reply: the stream is not line-delimited JSON-RPC.
+    await h.done;
+    expect(h.deps.askConsent).not.toHaveBeenCalled();
+    expect(h.replies()).toEqual([]);
+  });
+
+  it('drops a tools/call cancelled while its approval dialog is open', async () => {
+    const child = new FakeChild();
+    let answerConsent: ((allowed: boolean) => void) | undefined;
+    const deps: RawMcpDeps = {
+      spawnChild: () => child,
+      askConsent: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            answerConsent = resolve;
+          }),
+      ),
+      notify: vi.fn(async () => undefined),
+    };
+    const socket = new MemorySocket();
+    const done = serveRawMcp(socket, Buffer.alloc(0), deps);
+    socket.push(
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"node_repl","arguments":{"code":"1"}}}\n',
+    );
+    socket.push(
+      '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}\n',
+    );
+    await settle();
+    answerConsent?.(true);
+    await settle();
+    expect(child.sent.filter((m) => m.method === 'tools/call')).toEqual([]);
+    socket.push(null);
+    await done;
+  });
+
+  it('forwards a tools/call approved before any cancellation arrives', async () => {
+    const child = new FakeChild();
+    let answerConsent: ((allowed: boolean) => void) | undefined;
+    const deps: RawMcpDeps = {
+      spawnChild: () => child,
+      askConsent: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            answerConsent = resolve;
+          }),
+      ),
+      notify: vi.fn(async () => undefined),
+    };
+    const socket = new MemorySocket();
+    const done = serveRawMcp(socket, Buffer.alloc(0), deps);
+    socket.push(
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"node_repl","arguments":{"code":"1"}}}\n',
+    );
+    await settle();
+    answerConsent?.(true);
+    await settle();
+    expect(child.sent.map((m) => m.method)).toEqual(['tools/call']);
+    socket.push(null);
+    await done;
   });
 });
 

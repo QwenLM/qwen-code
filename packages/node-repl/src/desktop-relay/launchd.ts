@@ -100,11 +100,25 @@ export function installLaunchAgent(
     target.plistPath,
   ]);
   if (result.status !== 0) {
+    // Leave nothing behind: launchd loads every plist in ~/Library/LaunchAgents
+    // at the next login, and `status` reads this file as the registration.
+    fs.rmSync(target.plistPath, { force: true });
     throw new Error(`launchctl bootstrap failed: ${result.stderr.trim()}`);
   }
 }
 
 export function uninstallLaunchAgent(target: LaunchAgentTarget): void {
-  target.run(['bootout', `gui/${target.uid}/${target.label}`]);
+  const bootout = target.run(['bootout', `gui/${target.uid}/${target.label}`]);
+  if (bootout.status !== 0) {
+    // A failed bootout means "nothing was loaded" or "could not unload"; only
+    // the latter leaves a live agent behind, so confirm before deleting the
+    // plist that manages it.
+    const probe = target.run(['print', `gui/${target.uid}/${target.label}`]);
+    if (probe.status === 0) {
+      throw new Error(
+        `launchctl bootout failed: ${bootout.stderr.trim() || `exit ${String(bootout.status)}`}`,
+      );
+    }
+  }
   fs.rmSync(target.plistPath, { force: true });
 }
