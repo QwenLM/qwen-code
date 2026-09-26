@@ -14,6 +14,28 @@ import { cleanupStaleAgentWorktrees, __test__ } from './worktreeCleanup.js';
 
 const { isEphemeralSlug } = __test__;
 
+const cleanupLogger = vi.hoisted(() => ({
+  isEnabled: () => true,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+// Intercept only the sweep's own tag; every other module in this file's import
+// graph (gitWorktreeService, storage, telemetry) keeps the real logger.
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) =>
+      tag === 'WORKTREE_CLEANUP'
+        ? cleanupLogger
+        : actual.createDebugLogger(tag),
+  };
+});
+
 describe('isEphemeralSlug', () => {
   it('matches the agent-<7hex> pattern', () => {
     expect(isEphemeralSlug('agent-aabbccd')).toBe(true);
@@ -88,6 +110,16 @@ describe('cleanupStaleAgentWorktrees (real git)', () => {
     const created = await service.createUserWorktree('agent-aabbccd');
     expect(created.success).toBe(true);
     const wtPath = service.getUserWorktreePath('agent-aabbccd');
+    // Pin the untracked mode against ambient config. `normal` is git's
+    // default, so without this a later refactor that drops the explicit
+    // `--untracked-files=normal` from the probe would keep every test green
+    // while a user's `status.showUntrackedFiles=no` (in `~/.gitconfig`, or in
+    // the repo's `.git/config`, which every linked worktree shares) hides the
+    // sentinel and #12735 returns silently. Same pin the exit-tool probes have
+    // in git-config-exec.canary.test.ts.
+    execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+      cwd: repo,
+    });
     fs.writeFileSync(path.join(wtPath, 'sentinel.txt'), 'user work\n');
     ageBeyondCutoff(wtPath);
 
@@ -96,6 +128,27 @@ describe('cleanupStaleAgentWorktrees (real git)', () => {
     expect(removed).toBe(0);
     expect(fs.existsSync(path.join(wtPath, 'sentinel.txt'))).toBe(true);
     expect(fs.existsSync(wtPath)).toBe(true);
+  });
+
+  it('logs a debug breadcrumb naming the entry it deliberately kept', async () => {
+    const repo = initRepo();
+    const service = new GitWorktreeService(repo);
+    const created = await service.createUserWorktree('agent-aabbccd');
+    expect(created.success).toBe(true);
+    const wtPath = service.getUserWorktreePath('agent-aabbccd');
+    fs.writeFileSync(path.join(wtPath, 'sentinel.txt'), 'user work\n');
+    ageBeyondCutoff(wtPath);
+    cleanupLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repo);
+
+    expect(removed).toBe(0);
+    // The caller logs "nothing to remove" when the sweep returns 0, so a
+    // preserved entry that leaves no line of its own cannot be told apart from
+    // one the sweep never saw.
+    expect(cleanupLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('keeping agent-aabbccd'),
+    );
   });
 
   it('still sweeps a clean, commit-free ephemeral worktree past the cutoff', async () => {
@@ -110,5 +163,26 @@ describe('cleanupStaleAgentWorktrees (real git)', () => {
 
     expect(removed).toBe(1);
     expect(fs.existsSync(wtPath)).toBe(false);
+  });
+});
+
+describe('hasUncommittedChanges', () => {
+  it('fail-closes to dirty when git state cannot be read', async () => {
+    // A directory that is not a git repository makes `git status` exit 128.
+    // This catch is the only thing between an unreadable worktree (pruned or
+    // corrupt admin dir, EACCES, unmounted volume) and
+    // `git worktree remove --force` plus the `fs.rm(recursive, force)`
+    // fallback, and it is the contract the sweep's docstring states: "Any
+    // error reading git status / log → skip the entry (don't delete)."
+    const notARepo = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-a-repo-')),
+    );
+    try {
+      await expect(__test__.hasUncommittedChanges(notARepo)).resolves.toBe(
+        true,
+      );
+    } finally {
+      fs.rmSync(notARepo, { recursive: true, force: true });
+    }
   });
 });

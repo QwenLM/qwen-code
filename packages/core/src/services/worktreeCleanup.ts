@@ -56,6 +56,9 @@ function isEphemeralSlug(slug: string): boolean {
  * - Only touches slugs matching {@link EPHEMERAL_WORKTREE_PATTERNS}.
  * - Skips entries newer than {@link STALE_WORKTREE_CUTOFF_MS} (default 30 days).
  * - Skips entries with any uncommitted changes, tracked or untracked.
+ *   Ignore-rule-hidden content is not reported by the probe (no
+ *   `--ignored`) and therefore does not preserve an entry; aligning this
+ *   guard with the daemon reaper's is tracked in #12758.
  * - Skips entries with commits not reachable from the upstream remote.
  * - Any error reading git status / log → skip the entry (don't delete).
  *
@@ -125,7 +128,22 @@ export async function cleanupStaleAgentWorktrees(
       hasUncommittedChanges(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
-    if (dirty || unmerged) continue;
+    if (dirty || unmerged) {
+      // A deliberately preserved entry needs its own breadcrumb. The caller
+      // logs "nothing to remove" at debug when the sweep returns 0, so
+      // without this line an operator chasing growth under
+      // `.qwen/worktrees/` cannot tell "the sweep never saw it" from "the
+      // sweep saw it and refused" — and now that any untracked file
+      // preserves an entry, refusing is a common outcome. Stays at `debug`
+      // for the reason recorded at the call site in config.ts: `info` on
+      // every CLI start that has any dirty worktree is log noise.
+      debugLogger.debug(
+        `cleanupStaleAgentWorktrees: keeping ${entry.name} (${
+          dirty ? 'uncommitted changes' : 'unmerged commits'
+        })`,
+      );
+      continue;
+    }
 
     const result = await service.removeUserWorktree(entry.name, {
       deleteBranch: true,
@@ -172,10 +190,22 @@ async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
     // and the removal path (`git worktree remove --force`) destroys
     // untracked files unrecoverably (issue #12735). This also matches
     // the dirty guard `exit_worktree action="remove"` has always
-    // applied. Ignored files (build artifacts, `node_modules`) still
-    // don't block the sweep, and neither does the `.qwen-session`
-    // marker — `writeWorktreeSessionMarker` excludes it via
-    // `.git/info/exclude`. The untracked walk costs one extra scan per
+    // applied. What this probe does NOT see, stated so neither this
+    // comment nor docs/users/features/worktree.md over-claims the
+    // guarantee: `--ignored` is not passed, so content the repository's
+    // ignore rules hide (a `.env`, `.qwen/pr-drafts/`) still does not
+    // block the sweep — the sibling daemon reaper `checkoutHasWork`
+    // (packages/cli/src/serve/server/worktree-orphan-cleanup.ts) counts
+    // ignored entries as work minus `DISPOSABLE_IGNORED_ROOTS`, and
+    // aligning the two guards on that one destructive sink is tracked in
+    // #12758. A directory symlinked in by `worktree.symlinkDirectories`
+    // also shows up here as `?? node_modules` when its ignore pattern
+    // carries a trailing slash (git treats the link as a non-directory),
+    // so that configuration pins the worktree. And the `.qwen-session`
+    // marker stays invisible only while `writeWorktreeSessionMarker`'s
+    // exclude rule sits in the common git dir — markers written before
+    // #10643 put it in the per-worktree admin dir, which git does not
+    // read. The untracked walk costs one extra scan per
     // already-stale candidate at startup; correctness wins over that
     // micro-optimisation. The previous `--untracked-files=no` form
     // made a worktree holding only untracked user files look "clean",
