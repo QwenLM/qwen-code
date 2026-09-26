@@ -157,12 +157,28 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
-    public CompletionStage<Map<String, Object>> installContext(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            String operationId, String sessionId, ContextBinding binding) {
-        if (seed == null || !seed.matches(lease)) {
-            throw new IllegalArgumentException("seed must bind the lease");
+    public CompletionStage<Map<String, Object>> installContext(
+            RuntimeBindingRecord runtime, RuntimeSession session,
+            String operationId, ContextBinding binding) {
+        if (runtime == null || session == null) {
+            throw new IllegalArgumentException("runtime and session are required");
         }
+        // The record ties the lease and seed to the placement they serve.
+        RuntimeProvisionRequest request = runtime.getRequest();
+        RuntimeLease lease = runtime.getLease();
+        RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        String isolationKey = "session".equals(
+                session.getScope().getIsolationClass())
+                        ? session.getHarnessSessionId() : null;
+        if (runtime.getState() != RuntimeBindingRecord.State.READY
+                || lease == null || seed == null
+                || !request.getScope().equals(session.getScope())
+                || !java.util.Objects.equals(request.getIsolationKey(),
+                        isolationKey)) {
+            throw new IllegalArgumentException(
+                    "session must belong to a READY Runtime binding");
+        }
+        String sessionId = session.getRuntimeSessionId();
         ManagedContextProtocol.boot(request, seed);
         Map<String, Object> body = ManagedContextProtocol.installation(request,
                 operationId, sessionId, binding);
@@ -331,7 +347,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException(
                     "reference " + field + " is required");
         }
-        return text;
+        return BrokerValues.requireWellFormed(text, "reference " + field);
     }
 
     private static Object referenceInput(Map<String, Object> reference) {

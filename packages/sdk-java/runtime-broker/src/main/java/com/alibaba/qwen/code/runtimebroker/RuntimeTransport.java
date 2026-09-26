@@ -31,10 +31,14 @@ public interface RuntimeTransport {
         return failed;
     }
 
-    /** Installs directory context only; does not activate a Session. */
-    default CompletionStage<Map<String, Object>> installContext(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            String operationId, String sessionId, ContextBinding binding) {
+    /**
+     * Installs directory context only; does not activate a Session. The
+     * binding must be READY and hold the Session's placement: its scope and,
+     * under session isolation, its Harness Session.
+     */
+    default CompletionStage<Map<String, Object>> installContext(
+            RuntimeBindingRecord runtime, RuntimeSession session,
+            String operationId, ContextBinding binding) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_runtime_incompatible",
                 "Runtime transport does not support context installation.", false));

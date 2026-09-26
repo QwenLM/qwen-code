@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -198,6 +200,87 @@ class ManagedContextRecoveryTest {
                 () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
         assertTrue(failure.getCause() instanceof RuntimeBrokerException);
         assertEquals("runtime_broker_recovery_blocked", ((RuntimeBrokerException) failure.getCause()).getCode());
+        assertFalse(((RuntimeBrokerException) failure.getCause()).isRetryable());
+    }
+
+    @Test
+    void theCallThatHitsTheDeadlineReportsTheBlock() throws Exception {
+        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        FailingProvisioner provisioner = new FailingProvisioner(true);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            assertBlocked(service);
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findActive(REQUEST).getState());
+            assertBlocked(service);
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
+    void unplaceableScopeIsATypedRefusal() throws Exception {
+        try (RuntimeBrokerService service = service(new InMemoryRuntimeBindingRepository(),
+                new LocalProcessRuntimeProvisioner(List.of("node"), Path.of("."),
+                        new HttpRuntimeTransport(), scope -> null))) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            RuntimeBrokerException refusal = (RuntimeBrokerException) failure.getCause();
+            assertEquals(400, refusal.getStatusCode());
+            assertEquals("runtime_placement_invalid", refusal.getCode());
+            assertFalse(refusal.isRetryable());
+        }
+    }
+
+    @Test
+    void schemaUpgradeToleratesAColumnAnotherInstanceAdded() throws Exception {
+        DataSource source = database();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        AtomicInteger stale = new AtomicInteger();
+        // The first check sees the table as another instance left it just
+        // before that instance added the column.
+        DataSource racing = (DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {DataSource.class},
+                (proxy, method, args) -> {
+                    Object result = invoke(method, source, args);
+                    return result instanceof Connection connection
+                            ? staleConnection(connection, stale) : result;
+                });
+        JdbcRuntimeBrokerSchema.initialize(racing);
+        // Checked stale, then again after its own ALTER failed.
+        assertEquals(2, stale.get());
+    }
+
+    private static Connection staleConnection(Connection connection, AtomicInteger stale) {
+        return (Connection) java.lang.reflect.Proxy.newProxyInstance(
+                Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
+                (proxy, method, args) -> {
+                    Object result = invoke(method, connection, args);
+                    return "createStatement".equals(method.getName())
+                            ? staleStatement((java.sql.Statement) result, stale) : result;
+                });
+    }
+
+    private static java.sql.Statement staleStatement(java.sql.Statement statement,
+            AtomicInteger stale) {
+        return (java.sql.Statement) java.lang.reflect.Proxy.newProxyInstance(
+                java.sql.Statement.class.getClassLoader(),
+                new Class<?>[] {java.sql.Statement.class}, (proxy, method, args) -> {
+                    if ("executeQuery".equals(method.getName())
+                            && ((String) args[0]).startsWith("SELECT * FROM qwen_runtime_binding_slot")
+                            && stale.getAndIncrement() == 0) {
+                        return statement.executeQuery(
+                                "SELECT request_key FROM qwen_runtime_binding_slot WHERE 1 = 0");
+                    }
+                    return invoke(method, statement, args);
+                });
+    }
+
+    private static Object invoke(java.lang.reflect.Method method, Object target, Object[] args)
+            throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            throw failure.getCause();
+        }
     }
 
     private static RuntimeBrokerService service(RuntimeBindingRepository bindings,

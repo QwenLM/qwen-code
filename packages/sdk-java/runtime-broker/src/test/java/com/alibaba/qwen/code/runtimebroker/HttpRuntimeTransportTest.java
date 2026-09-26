@@ -19,6 +19,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -114,10 +115,12 @@ class HttpRuntimeTransportTest {
                     .toCompletableFuture().get(2, TimeUnit.SECONDS), field);
         }
         var binding = ManagedContextProtocolTest.binding();
+        RuntimeBindingRecord runtime = ready(request, seed, lease);
+        RuntimeSession session = session("会话-𝄞", request);
         Map<String, Object> receipt = ManagedContextProtocol.receipt(seed, "op-1", "会话-𝄞", binding);
         reply.set(json(200, JsonCodec.encode(receipt)));
-        assertTrue(BrokerValues.sameJsonMap(receipt, transport.installContext(lease, request,
-                seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS)));
+        assertTrue(BrokerValues.sameJsonMap(receipt, transport.installContext(runtime, session,
+                "op-1", binding).toCompletableFuture().get(2, TimeUnit.SECONDS)));
         assertEquals(ManagedContextProtocol.CONTEXT_PATH, capturedPath.get());
         assertEquals("会话-𝄞", JSON.readTree(captured.get()).required("sessionId").asText());
         for (String field : receipt.keySet()) {
@@ -125,14 +128,14 @@ class HttpRuntimeTransportTest {
             wrong.put(field, receipt.get(field) instanceof Number
                     ? new BigDecimal("4.0000000000000000001") : "wrong");
             reply.set(json(200, JsonCodec.encode(wrong)));
-            assertThrows(ExecutionException.class, () -> transport.installContext(lease, request,
-                    seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS), field);
+            assertThrows(ExecutionException.class, () -> transport.installContext(runtime, session,
+                    "op-1", binding).toCompletableFuture().get(2, TimeUnit.SECONDS), field);
         }
         Map<String, Object> extra = new LinkedHashMap<>(receipt);
         extra.put("unexpected", true);
         reply.set(json(200, JsonCodec.encode(extra)));
-        assertThrows(ExecutionException.class, () -> transport.installContext(lease, request,
-                seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertThrows(ExecutionException.class, () -> transport.installContext(runtime, session,
+                "op-1", binding).toCompletableFuture().get(2, TimeUnit.SECONDS));
     }
 
     @Test
@@ -143,7 +146,7 @@ class HttpRuntimeTransportTest {
         for (String code : List.of("managed_context_unavailable", "managed_context_conflict")) {
             reply.set(json(409, JsonCodec.encode(Map.of("code", code, "error", "private detail"))));
             ExecutionException error = assertThrows(ExecutionException.class, () -> transport
-                    .installContext(lease, request, seed, "op", "session",
+                    .installContext(ready(request, seed, lease), session("session", request), "op",
                             ManagedContextProtocolTest.binding()).toCompletableFuture().get(2, TimeUnit.SECONDS));
             RuntimeBrokerException failure = (RuntimeBrokerException) error.getCause();
             assertEquals(code, failure.getCode());
@@ -159,13 +162,89 @@ class HttpRuntimeTransportTest {
         }
         reply.set(json(200, new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES + 1]));
         ExecutionException error = assertThrows(ExecutionException.class, () -> transport.installContext(
-                lease, request, seed, "op", "session", ManagedContextProtocolTest.binding())
-                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+                ready(request, seed, lease), session("session", request), "op",
+                ManagedContextProtocolTest.binding()).toCompletableFuture().get(2, TimeUnit.SECONDS));
         assertEquals(413, ((RuntimeBrokerException) error.getCause()).getStatusCode());
         captured.set(null);
         assertThrows(IllegalArgumentException.class, () -> transport.installContext(
-                lease, request, seed, "op", "bad\ud800", ManagedContextProtocolTest.binding()));
+                ready(request, seed, lease), session("bad\ud800", request), "op",
+                ManagedContextProtocolTest.binding()));
         assertNull(captured.get());
+    }
+
+    @Test
+    void installsOnlyOnTheReadyRuntimeOfTheSessionsPlacement() {
+        RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
+        RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
+        RuntimeLease lease = contextLease(seed);
+        RuntimeScope other = new RuntimeScope("tenant-a", "workspace-b", "7",
+                "/runtime/workspaces/workspace-b", request.getScope().getCapabilityDigest(),
+                "workspace");
+        RuntimeScope isolated = new RuntimeScope("tenant-a", "workspace-a", "7",
+                request.getScope().getCanonicalCwd(), request.getScope().getCapabilityDigest(),
+                "session");
+        RuntimeProvisionRequest harnessB = new RuntimeProvisionRequest(isolated, "harness-b",
+                request.getProvisionerKind(), request.getStorageId());
+        RuntimeBindingRecord runtime = ready(request, seed, lease);
+        var binding = ManagedContextProtocolTest.binding();
+        List<Runnable> refused = List.of(
+                // The Runtime of another Workspace.
+                () -> transport.installContext(ready(new RuntimeProvisionRequest(other, null,
+                        request.getProvisionerKind(), request.getStorageId()), seed, lease),
+                        session("session", request), "op", binding),
+                // Under session isolation, the Runtime of another Harness Session.
+                () -> transport.installContext(ready(harnessB, seed, lease),
+                        new RuntimeSession("harness", "session", "bootstrap", isolated), "op",
+                        binding),
+                // A binding that keeps its lease but no longer serves.
+                () -> transport.installContext(runtime.withState(
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED, lease, Instant.now()),
+                        session("session", request), "op", binding),
+                () -> transport.installContext(runtime.withState(
+                        RuntimeBindingRecord.State.LOST, lease, Instant.now()),
+                        session("session", request), "op", binding));
+        captured.set(null);
+        for (Runnable call : refused) {
+            assertThrows(IllegalArgumentException.class, call::run);
+        }
+        assertNull(captured.get());
+    }
+
+    @Test
+    void refusesReferenceIdsThatTheWriterWouldChange() {
+        RuntimeScope scope = ManagedContextProtocolTest.request().getScope();
+        RuntimeLease lease = contextLease(ManagedContextProtocolTest.seed());
+        RuntimeSession session = session("session", ManagedContextProtocolTest.request());
+        captured.set(null);
+        for (String field : List.of("sessionId", "promptId", "callId", "argsDigest")) {
+            Map<String, Object> reference = new LinkedHashMap<>(Map.of("sessionId", "session",
+                    "promptId", "prompt", "callId", "call", "argsDigest", "digest",
+                    "toolName", "read_file", "input", Map.of()));
+            reference.put(field, "p\ud800");
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.execute(lease, session, reference), field);
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.status(lease, session, reference, 0), field);
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.cancel(lease, session, reference), field);
+        }
+        assertNull(captured.get());
+        assertThrows(IllegalArgumentException.class,
+                () -> new RuntimeSession("harness", "s\ud800", "bootstrap", scope));
+    }
+
+    /** A READY durable binding whose Runtime holds this lease. */
+    private static RuntimeBindingRecord ready(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, RuntimeLease lease) {
+        Instant now = Instant.now();
+        return new RuntimeBindingRecord("binding-1", request, seed, 1,
+                RuntimeBindingRecord.State.READY, lease,
+                new RuntimeResourceHandle("local-process", 1, Map.of("provider", "local-process")),
+                1, false, null, null, 0, 0, now, now, now);
+    }
+
+    private static RuntimeSession session(String id, RuntimeProvisionRequest request) {
+        return new RuntimeSession("harness", id, "bootstrap", request.getScope());
     }
 
     private RuntimeLease contextLease(RuntimeProvisionSeed seed) {

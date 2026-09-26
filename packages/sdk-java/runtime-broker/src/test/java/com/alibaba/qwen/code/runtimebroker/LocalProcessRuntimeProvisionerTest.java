@@ -80,13 +80,13 @@ class LocalProcessRuntimeProvisionerTest {
                 assertEquals("storage:a", ready.getRequest().getStorageId());
                 var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
                         "tenant-a", "workspace-a", 7, "storage:a", "服务/api", "config:a", 1);
-                var receipt = transport.installContext(ready.getLease(), ready.getRequest(),
-                        ready.getProvisionSeed(), "op-1", "session-中文", binding)
+                RuntimeSession session = new RuntimeSession("harness", "session-中文",
+                        "bootstrap", scope);
+                var receipt = transport.installContext(ready, session, "op-1", binding)
                         .toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(binding.getContextDigest(), receipt.get("contextDigest"));
                 assertEquals("session-中文", receipt.get("sessionId"));
-                assertEquals(receipt, transport.installContext(ready.getLease(), ready.getRequest(),
-                        ready.getProvisionSeed(), "op-1", "session-中文", binding)
+                assertEquals(receipt, transport.installContext(ready, session, "op-1", binding)
                         .toCompletableFuture().get(5, TimeUnit.SECONDS));
                 provisioner.confirm(ready.getRequest(), ready.getLease())
                         .toCompletableFuture().get(5, TimeUnit.SECONDS);

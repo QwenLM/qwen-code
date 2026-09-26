@@ -37,17 +37,32 @@ public final class JdbcRuntimeBrokerSchema {
 
     private static void addStorageColumn(Statement statement, String table)
             throws SQLException {
+        if (hasStorageColumn(statement, table)) {
+            return;
+        }
+        try {
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN storage_id VARCHAR(256)");
+        } catch (SQLException failure) {
+            // Another instance may have added it since the check.
+            if (!hasStorageColumn(statement, table)) {
+                throw failure;
+            }
+        }
+    }
+
+    private static boolean hasStorageColumn(Statement statement, String table)
+            throws SQLException {
         try (java.sql.ResultSet result = statement.executeQuery(
                 "SELECT * FROM " + table + " WHERE 1 = 0")) {
             java.sql.ResultSetMetaData columns = result.getMetaData();
             for (int index = 1; index <= columns.getColumnCount(); index++) {
                 if ("storage_id".equalsIgnoreCase(columns.getColumnName(index))) {
-                    return;
+                    return true;
                 }
             }
         }
-        statement.execute("ALTER TABLE " + table
-                + " ADD COLUMN storage_id VARCHAR(256)");
+        return false;
     }
 
     private static String readSchema() {

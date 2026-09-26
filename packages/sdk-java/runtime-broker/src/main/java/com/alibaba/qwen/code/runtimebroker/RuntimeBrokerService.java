@@ -896,16 +896,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ScheduledFuture<?> deadlineTask;
         try {
             deadlineTask = scheduler.schedule(() -> {
+                boolean blocked = false;
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
-                    if (request.isManagedContext() && timedOut != null) {
-                        blockRecovery(timedOut);
-                    }
+                    blocked = request.isManagedContext() && timedOut != null
+                            && blockRecovery(timedOut);
                 } finally {
                     releaseOperationQuietly(bindingId, operationGeneration);
-                    operation.completeExceptionally(unavailable(
-                            "runtime_broker_provision_timeout",
-                            "Managed Runtime provisioning timed out."));
+                    // A retry cannot succeed once the binding is blocked.
+                    operation.completeExceptionally(blocked
+                            ? conflict("runtime_broker_recovery_blocked",
+                                    "Managed Runtime recovery is blocked.")
+                            : unavailable("runtime_broker_provision_timeout",
+                                    "Managed Runtime provisioning timed out."));
                 }
             }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
         } catch (RuntimeException scheduleFailure) {
@@ -1369,10 +1372,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return ensureBinding(request);
     }
 
-    private void blockRecovery(RuntimeBindingRecord claimed) {
-        bindingRepository.compareAndSet(claimed, claimed.withState(
+    private boolean blockRecovery(RuntimeBindingRecord claimed) {
+        return bindingRepository.compareAndSet(claimed, claimed.withState(
                 RuntimeBindingRecord.State.RECOVERY_BLOCKED,
-                claimed.getLease(), clock.instant()));
+                claimed.getLease(), clock.instant())) != null;
     }
 
     private void blockRecovery(String bindingId, long operationGeneration) {
@@ -2058,9 +2061,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private RuntimeProvisionRequest provisionRequest(
             RuntimeScope scope, String harnessSessionId) {
-        return provisioner.createRequest(scope,
-                "session".equals(scope.getIsolationClass())
-                        ? harnessSessionId : null);
+        try {
+            return provisioner.createRequest(scope,
+                    "session".equals(scope.getIsolationClass())
+                            ? harnessSessionId : null);
+        } catch (IllegalArgumentException exception) {
+            // A managed-context provisioner refuses a scope it cannot place,
+            // such as one without a storage ID, rather than fall back.
+            throw invalid("runtime_placement_invalid",
+                    "Runtime placement is invalid");
+        }
     }
 
     private static void requireSameSession(RuntimeSession actual,
@@ -2087,7 +2097,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     "reference " + field + " is required");
         }
         try {
-            return BrokerValues.requireId((String) value,
+            return BrokerValues.requireWellFormed(BrokerValues.requireId(
+                    (String) value, "reference." + field),
                     "reference." + field);
         } catch (IllegalArgumentException exception) {
             throw invalid("runtime_reference_invalid",
