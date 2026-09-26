@@ -159,6 +159,8 @@ to settle (Q2):
 - running turns are cancelled now, as if a client had cancelled them;
 - the sessions' permission requests are answered as cancelled, and a turn that
   ignores its cancel gets no queued mid-turn messages;
+- background notification turns are refused, even one reporting work already
+  under way, which other quarantines admit;
 - a Goal turn the child starts later on one of those sessions is cancelled as
   soon as it is reported.
 
@@ -240,7 +242,10 @@ field.
    - `settings_changed` is still published.
 3. A turn that ignores its cancel gets its permission requests answered as
    cancelled and no queued mid-turn messages. A Goal turn the child starts later
-   on a fenced session is cancelled, while one on a Legacy session is not.
+   on a fenced session is cancelled, while one on a Legacy session is not. The
+   report of a background job started before the change is refused on a fenced
+   session, and admitted after an unacknowledged change that does not tighten
+   permissions.
 4. On a quarantined session, every way to start work is refused with
    `workspace_change_unacknowledged`: prompts, continuations, side questions,
    recaps, generation, fork agents, shell commands, mid-turn messages, and Goal

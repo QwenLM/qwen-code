@@ -127,6 +127,7 @@ shell 命令和继续轮次，并在 prompt 的附件解析完成后、发出之
 - 进行中的轮次立即按客户端取消的方式取消；
 - 这些会话的权限请求一律按已取消回复，无视取消的轮次也拿不到排队中的 mid-turn
   消息；
+- 后台通知轮次一律拒绝，包括其他隔离会放行的、汇报已在进行的工作的通知；
 - 子进程之后在这些会话上开始的 Goal 轮次一经上报即被取消。
 
 状态读取、取消、关闭，以及暂停或清除 Goal、暂停 workflow，仍能到达每个会话。
@@ -196,7 +197,8 @@ Skills 路由仍是工作区级别，只作用于所选 runtime；`workspace_cha
    - Legacy 会话和新建的 Legacy 会话照常可用；
    - 仍发布 `settings_changed`。
 3. 无视取消的轮次，其权限请求以已取消结束，也拿不到排队中的 mid-turn 消息。子进程
-   之后在被围栏会话上开始的 Goal 轮次被取消，Legacy 会话上的则不受影响。
+   之后在被围栏会话上开始的 Goal 轮次被取消，Legacy 会话上的则不受影响。变更之前启动的
+   后台任务，其结果汇报在被围栏会话上被拒绝；不收紧权限的变更未被确认时则被放行。
 4. 在被隔离的会话上，开始工作的所有途径都以 `workspace_change_unacknowledged` 拒绝：
    prompt、继续轮次、旁支提问、recap、generation、fork agent、shell 命令、mid-turn
    消息，以及 Goal 或 workflow 的启动。在附件解析期间被隔离超越的 prompt 不会发出。

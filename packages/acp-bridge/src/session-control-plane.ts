@@ -701,6 +701,8 @@ interface ChannelQuarantine {
   exitTimer?: NodeJS.Timeout;
   /** Not confirmed gone one budget after termination; operators must act. */
   exitUnverified: boolean;
+  /** Background notification turns admitted since the quarantine began. */
+  readonly admittedTurnIds: Set<string>;
 }
 
 interface SessionEntry {
@@ -3660,6 +3662,7 @@ export function createSessionControlPlane(
       startedAt: Date.now(),
       reason,
       exitUnverified: false,
+      admittedTurnIds: new Set(),
     };
     episode.drainTimer = setTimeout(
       () => onChannelQuarantineDeadline(ci, episode),
@@ -3747,15 +3750,18 @@ export function createSessionControlPlane(
     for (const entry of unsettled) {
       void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
     }
-    void harness
-      .killChannelWithLog(ci.harness, 'quarantine drain deadline')
-      .then(() => armQuarantineExitCheck(ci, episode));
+    // Terminating the channel starts its exit check (see
+    // `onChannelTerminationStart`).
+    void harness.killChannelWithLog(ci.harness, 'quarantine drain deadline');
   }
 
   /**
-   * A child still not confirmed gone one budget after termination (never less
-   * than the registry's own termination window) is reported as needing an
-   * operator; its engine stays closed meanwhile.
+   * A child still not confirmed gone one budget after its termination began
+   * (never less than the registry's own termination window) is reported as
+   * needing an operator; its engine stays closed meanwhile. Armed when a kill
+   * or reap starts terminating the channel (the deadline, a drained channel's
+   * reap, a failed close's recovery), when its transport fails, or when its
+   * root exits before the registry releases the tree.
    */
   function armQuarantineExitCheck(
     ci: ChannelInfo,
@@ -3779,6 +3785,26 @@ export function createSessionControlPlane(
       );
     }, exitCheckMs);
     episode.exitTimer.unref();
+  }
+
+  /**
+   * Whether a quarantined channel may run a background notification turn. It
+   * reports work that was already under way, and refusing it would leave that
+   * work unsettled until the deadline: the child keeps retrying and keeps
+   * reporting the hold. A message from another session is new input, and work
+   * started by a turn admitted during the quarantine is new work; both are
+   * refused, so admitted turns cannot keep the channel busy on their own. A
+   * session fenced by a tightening change is refused before this is asked.
+   */
+  function quarantineAdmitsBackgroundTurn(
+    episode: ChannelQuarantine,
+    turn: BackgroundNotificationTurn,
+  ): boolean {
+    if (turn.kind === 'peer') return false;
+    return (
+      turn.sourceTurnId === undefined ||
+      !episode.admittedTurnIds.has(turn.sourceTurnId)
+    );
   }
 
   /**
@@ -4808,10 +4834,14 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive ||
           entry.pendingPromptList.some((p) => !p.terminalPublished) ||
-          // A quarantined channel admits no new background turn.
-          infoRef.current?.quarantine
+          // An unacknowledged change that tightened permissions admits no
+          // model turn at all until it is acknowledged (#12737 Q2).
+          entry.workspaceChangeFence !== undefined ||
+          (infoRef.current?.quarantine !== undefined &&
+            !quarantineAdmitsBackgroundTurn(infoRef.current.quarantine, turn))
         )
           return false;
+        infoRef.current?.quarantine?.admittedTurnIds.add(turn.turnId);
         entry.backgroundTurn = turn;
         delete entry.cancelBroadcastWithoutPrompt;
         // turnError/turnErrorEvent stay: only a new user prompt
@@ -5030,6 +5060,7 @@ export function createSessionControlPlane(
 
   function handleChannelTransportUnavailable(info: ChannelInfo): void {
     clearInFlightExtensionRefreshes(info.connection);
+    if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
   }
 
   const harness = createHarness({
@@ -5048,6 +5079,10 @@ export function createSessionControlPlane(
     constructHarnessChannel: constructChannelInfo,
     handleChannelTransportUnavailable: (channel) =>
       handleChannelTransportUnavailable(getChannelInfo(channel)),
+    onChannelTerminationStart: (channel) => {
+      const info = getChannelInfo(channel);
+      if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
+    },
     beforeChannelExit: (channel) => beforeChannelExit(getChannelInfo(channel)),
     handleChannelExit: (channel, exitInfo) =>
       handleChannelExit(getChannelInfo(channel), exitInfo),

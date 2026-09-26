@@ -22,6 +22,11 @@ import type {
 import { SESSION_EXECUTION_ENGINE_META_KEY } from './bridgeOptions.js';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   type AcpSessionBridge,
@@ -2558,6 +2563,43 @@ async function flushWithoutTime(): Promise<void> {
   for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
 }
 
+/** A child that reports active work, as a real `qwen --acp` child does. */
+const activeWorkInitialize = () => ({
+  protocolVersion: PROTOCOL_VERSION,
+  agentInfo: { name: 'active-work-agent', version: '0' },
+  authMethods: [],
+  agentCapabilities: {},
+  _meta: {
+    [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+      v: ACTIVE_WORK_HEARTBEAT_VERSION,
+      intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+      categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+    },
+  },
+});
+
+async function reportActiveWork(
+  handle: ReturnType<typeof engineChannel>,
+  seq: number,
+  sessions: Array<{
+    sessionId: string;
+    holds: Array<{ category: string; id: string }>;
+    hasRunningBackgroundTasks?: boolean;
+  }>,
+): Promise<void> {
+  await handle.agentConnection.extNotification(
+    ACTIVE_WORK_NOTIFICATION_METHOD,
+    { v: ACTIVE_WORK_HEARTBEAT_VERSION, seq, sessions },
+  );
+}
+
+/** Lets pending work run on real timers. */
+async function settleRealTime(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 /** Times out the next creation and lets it outlive its settlement grace. */
 async function abandonCreationPastGrace(
   bridge: AcpSessionBridge,
@@ -2635,13 +2677,14 @@ describe('paired quarantine recovery', () => {
         message: expect.stringContaining('new prompts'),
       },
     );
+    // A message from another session is new input, not work settling.
     await expect(
       managed.agentConnection.extMethod('_qwencode/start_turn', {
         sessionId: waiting.sessionId,
         source: 'background_notification',
-        turnId: 'notification-1',
-        taskId: 'Explore-1',
-        kind: 'agent',
+        turnId: 'peer-1',
+        taskId: 'message-1',
+        kind: 'peer',
         startedAt: 1000,
       }),
     ).resolves.toEqual({ accepted: false });
@@ -2987,9 +3030,9 @@ describe('paired quarantine recovery', () => {
       ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
       await vi.advanceTimersByTimeAsync(100);
       expect(killSync).toHaveBeenCalled();
-      // Not reported before the registry had its own termination window,
-      // however short the initialize budget.
-      await vi.advanceTimersByTimeAsync(14_900);
+      // Counted from the start of termination, and not before the registry
+      // had its own termination window, however short the initialize budget.
+      await vi.advanceTimersByTimeAsync(14_800);
       expect(quarantine.named('exit_unverified')).toEqual([]);
       await vi.advanceTimersByTimeAsync(100);
 
@@ -3158,8 +3201,16 @@ describe('paired quarantine recovery', () => {
     await expect(
       p.bridge.launchSessionForkAgent(session.sessionId, 'fork'),
     ).rejects.toMatchObject(refused);
+    for (const action of ['rerun', 'run-saved'] as const) {
+      await expect(
+        p.bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', action),
+      ).rejects.toMatchObject(refused);
+    }
     await expect(
-      p.bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', 'rerun'),
+      p.bridge.controlSessionGoal(session.sessionId, {
+        action: 'create',
+        objective: 'more work',
+      }),
     ).rejects.toMatchObject(refused);
     await expect(
       p.bridge.controlSessionGoal(session.sessionId, {
@@ -3228,6 +3279,327 @@ describe('paired quarantine recovery', () => {
     for await (const event of stream) events.push(event.type);
     expect(events).toEqual(['done']);
     await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('lets a background job that finishes during a quarantine settle', async () => {
+    const managed = engineChannel('managed', {
+      initializeImpl: () => activeWorkInitialize(),
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const sessionId = session.sessionId;
+    await p.bridge.sendPrompt(
+      sessionId,
+      prompt(sessionId, 'start a job'),
+      undefined,
+      { promptId: 'user-1' },
+    );
+    // The turn left a background shell running.
+    await reportActiveWork(managed, 1, [
+      {
+        sessionId,
+        holds: [{ category: 'shell', id: 'background-shells' }],
+        hasRunningBackgroundTasks: true,
+      },
+    ]);
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    await settleRealTime();
+    expect(p.bridge.getSessionSummary(sessionId)).toBeDefined();
+
+    // The job finishes and its report is admitted, so the work can settle.
+    await expect(
+      managed.agentConnection.extMethod('_qwencode/start_turn', {
+        sessionId,
+        source: 'background_notification',
+        turnId: 'notification-1',
+        taskId: 'shell-1',
+        kind: 'shell',
+        sourceTurnId: 'user-1',
+        startedAt: Date.now(),
+      }),
+    ).resolves.toEqual({ accepted: true });
+    // Work started by that report is new work: its own report is refused.
+    await reportActiveWork(managed, 2, [
+      {
+        sessionId,
+        holds: [{ category: 'agent', id: 'agent-1' }],
+        hasRunningBackgroundTasks: true,
+      },
+    ]);
+    await managed.agentConnection.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'background_notification',
+      turnId: 'notification-1',
+    });
+    await expect(
+      managed.agentConnection.extMethod('_qwencode/start_turn', {
+        sessionId,
+        source: 'background_notification',
+        turnId: 'notification-2',
+        taskId: 'agent-1',
+        kind: 'agent',
+        sourceTurnId: 'notification-1',
+        startedAt: Date.now(),
+      }),
+    ).resolves.toEqual({ accepted: false });
+    await settleRealTime();
+    expect(p.bridge.getSessionSummary(sessionId)).toBeDefined();
+    expect(managed.killed).toBe(false);
+
+    // Once the child holds nothing, the session closes and the channel
+    // retires long before its deadline.
+    await reportActiveWork(managed, 3, [
+      { sessionId, holds: [], hasRunningBackgroundTasks: false },
+    ]);
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('starts the exit check when a quarantined channel loses its transport', async () => {
+    vi.useFakeTimers();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      promptImpl: () => new Promise(() => {}),
+    });
+    const transportFailed = deferred<unknown>();
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { quarantineDrainTimeoutMs: 60_000, telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      managed,
+    );
+    p.managedFactory.mockResolvedValueOnce({
+      ...managed.channel,
+      transportFailed: transportFailed.promise,
+    });
+    try {
+      const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      void p.bridge
+        .sendPrompt(busy.sessionId, prompt(busy.sessionId, 'running'))
+        .catch(() => undefined);
+      await flushWithoutTime();
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+      // The transport fails but the child never exits.
+      transportFailed.resolve(new Error('pipe closed'));
+      await flushWithoutTime();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(quarantine.named('exit_unverified')).toHaveLength(1);
+      expect(quarantine.named('deadline')).toEqual([]);
+    } finally {
+      managed.crash();
+    }
+  });
+
+  it('starts the exit check when an early-drained channel starts terminating', async () => {
+    vi.useFakeTimers();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+    });
+    const kill = vi.fn(() => new Promise<void>(() => {}));
+    const killSync = vi.fn();
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      {
+        initializeTimeoutMs: 100,
+        quarantineDrainTimeoutMs: 60_000,
+        telemetry: quarantine.telemetry,
+      },
+      engineChannel('legacy'),
+      managed,
+    );
+    p.managedFactory.mockResolvedValueOnce({
+      ...managed.channel,
+      kill,
+      killSync,
+    });
+    try {
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+      // The idle session is closed and the empty channel's reap begins.
+      await flushWithoutTime();
+      expect(kill).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(14_900);
+      expect(quarantine.named('exit_unverified')).toEqual([]);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(quarantine.named('exit_unverified')).toHaveLength(1);
+      expect(quarantine.named('deadline')).toEqual([]);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'channel_exit_unverified' });
+    } finally {
+      managed.crash();
+    }
+  });
+
+  it('refuses a fork whose queue wait outlasts the start of a quarantine', async () => {
+    vi.useFakeTimers();
+    const abandoned = deferred<NewSessionResponse>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 2
+          ? abandoned.promise
+          : {
+              sessionId: `managed-${agent.newSessionCalls.length}`,
+              ...receipt('managed'),
+            },
+    });
+    const p = paired(
+      { initializeTimeoutMs: 30 },
+      engineChannel('legacy'),
+      managed,
+    );
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await Promise.all([
+      expect(p.bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+        'timed out',
+      ),
+      vi.advanceTimersByTimeAsync(30),
+    ]);
+    // Admitted just before the abandoned creation's grace runs out; the
+    // quarantine starts before the fork leaves the prompt queue.
+    const fork = p.bridge
+      .launchSessionForkAgent(session.sessionId, 'fork')
+      .catch((error: unknown) => error);
+    vi.advanceTimersByTime(30);
+    expect(await fork).toMatchObject({
+      reason: 'new_session_settlement_overdue',
+    });
+    expect(
+      managed.agent.extMethodCalls.map((call) => call.method),
+    ).not.toContain(SERVE_CONTROL_EXT_METHODS.sessionForkAgent);
+  });
+
+  it('refuses a creation whose channel wait outlasts the start of a quarantine', async () => {
+    vi.useFakeTimers();
+    const abandoned = deferred<NewSessionResponse>();
+    let channelWait: Promise<void> | undefined;
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (operation, _attributes, fn) => {
+        if (operation === 'channel.wait' && channelWait) await channelWait;
+        return await fn();
+      },
+      event: () => undefined,
+      injectPromptContext: (request) => request,
+    };
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 2
+          ? abandoned.promise
+          : {
+              sessionId: `managed-${agent.newSessionCalls.length}`,
+              ...receipt('managed'),
+            },
+    });
+    const p = paired(
+      { initializeTimeoutMs: 30, telemetry },
+      engineChannel('legacy'),
+      managed,
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await Promise.all([
+      expect(p.bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+        'timed out',
+      ),
+      vi.advanceTimersByTimeAsync(30),
+    ]);
+    // Selection checks the engine, then the creation waits for its channel
+    // while the abandoned creation's grace runs out.
+    const release = deferred<void>();
+    channelWait = release.promise;
+    const creation = p.bridge
+      .spawnOrAttach({ workspaceCwd: WS_A })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    channelWait = undefined;
+    await vi.advanceTimersByTimeAsync(30);
+    release.resolve();
+    expect(await creation).toMatchObject({
+      reason: 'new_session_settlement_overdue',
+    });
+    expect(managed.agent.newSessionCalls).toHaveLength(2);
+  });
+
+  it('keeps a session while its goal turn runs', async () => {
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await managed.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: session.sessionId,
+      source: 'goal',
+    });
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    await settleRealTime();
+    expect(managed.agent.extMethodCalls).toEqual([]);
+    expect(managed.killed).toBe(false);
+
+    await managed.agentConnection.extNotification('_qwencode/end_turn', {
+      sessionId: session.sessionId,
+      reason: 'end_turn',
+      source: 'goal',
+      promptId: 'goal-1',
+    });
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('keeps a restored session while it reports running background tasks', async () => {
+    const managed = engineChannel('managed', {
+      newSessionImpl: () => ({ sessionId: '', ...receipt('managed') }),
+      loadSessionImpl: () => ({
+        _meta: {
+          ...receipt('managed')._meta,
+          hasRunningBackgroundTasks: true,
+        },
+      }),
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    await p.bridge.loadSession({ workspaceCwd: WS_A, sessionId: 'restored' });
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    await settleRealTime();
+    // Nothing would ever settle it but the deadline, which is the point: a
+    // running task is not interrupted by the drain.
+    expect(p.bridge.getSessionSummary('restored')).toBeDefined();
+    expect(managed.agent.extMethodCalls).toEqual([]);
+    expect(managed.killed).toBe(false);
   });
 
   it('drains a session whose creation lands during the quarantine', async () => {
@@ -3436,6 +3808,30 @@ describe('paired per-engine operations', () => {
     expect(
       p.bridge.getChildResourceSnapshot!()!.heap!.unclassifiedSpaceNames,
     ).toHaveLength(2);
+  });
+
+  it('ages the combined reading by its oldest child', async () => {
+    vi.useFakeTimers();
+    let managedFails = false;
+    const p = paired(
+      {},
+      reporting('legacy', () => ({ rssBytes: 100, cpuPercent: 1 })),
+      reporting('managed', () => {
+        if (managedFails) throw new RequestError(-32000, 'wedged');
+        return { rssBytes: 50, cpuPercent: 1 };
+      }),
+    );
+    await bothEngines(p);
+    await p.bridge.refreshChildResource!();
+    await vi.advanceTimersByTimeAsync(10_000);
+    // Only Legacy refreshes; Managed keeps its reading from 10 s earlier.
+    managedFails = true;
+    await p.bridge.refreshChildResource!();
+    expect(p.bridge.getChildResourceSnapshot!()).toMatchObject({
+      rssBytes: 150,
+      children: 2,
+      ageMs: 10_000,
+    });
   });
 
   it('keeps sampling one engine while the other child is wedged', async () => {
@@ -3965,6 +4361,63 @@ describe('workspace change propagation', () => {
     answer.resolve({ sessionId: managed.sessionId, answer: 'done' });
     await side;
   });
+
+  it.each([
+    ['refuses', 'tightens permissions', 'qwen/permissions/setRules', denyRule],
+    [
+      'admits',
+      'does not',
+      SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+      { cwd: WS_A, reason: 'content' },
+    ],
+  ] as const)(
+    '%s the report of an earlier background job when the missed change %s',
+    async (verdict, _change, method, params) => {
+      const p = paired(
+        {},
+        legacySavingRules(),
+        engineChannel('managed', {
+          initializeImpl: () => activeWorkInitialize(),
+          extMethodImpl: (extMethod) => refuse(extMethod),
+        }),
+      );
+      const { sessionId } = await p.bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      await p.bridge.preheat();
+      await p.bridge.sendPrompt(
+        sessionId,
+        prompt(sessionId, 'start a job'),
+        undefined,
+        { promptId: 'user-1' },
+      );
+      // The turn left a background shell running.
+      await reportActiveWork(p.managed, 1, [
+        {
+          sessionId,
+          holds: [{ category: 'shell', id: 'background-shells' }],
+          hasRunningBackgroundTasks: true,
+        },
+      ]);
+      await expect(
+        p.bridge.invokeWorkspaceCommand(method, params),
+      ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+
+      // A quarantine admits the report of work already under way, but no
+      // model turn runs under the permissions the engine missed.
+      await expect(
+        p.managed.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId,
+          source: 'background_notification',
+          turnId: 'notification-1',
+          taskId: 'shell-1',
+          kind: 'shell',
+          sourceTurnId: 'user-1',
+          startedAt: Date.now(),
+        }),
+      ).resolves.toEqual({ accepted: verdict === 'admits' });
+    },
+  );
 
   it('refuses a prompt the quarantine overtakes while its attachments resolve', async () => {
     const resolving = deferred<void>();
