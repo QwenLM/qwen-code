@@ -13,10 +13,13 @@ import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedToolV2Client } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core';
+import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
 import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
 import type { ManagedWorkerFileBoot } from './managed-runtime-worker-bootstrap.js';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import {
+  RequestedSessionIdRejectedError,
+  type AcpSessionBridge,
+} from './acp-session-bridge.js';
 import {
   LocalManagedRuntimeProvider,
   RemoteManagedRuntimeProvider,
@@ -1625,6 +1628,25 @@ describe('Managed Runtime providers', () => {
     ).rejects.toThrow('not found');
     expect(() => local.prepare(prepareRequest)).toThrow('closing');
     expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    local.dispose();
+  });
+
+  it('reports a requested ID already live in a paired Bridge as an identity conflict', async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.bridge.spawnOrAttach).mockRejectedValueOnce(
+      new RequestedSessionIdRejectedError(
+        'session_id_conflict',
+        prepareRequest.sessionId,
+      ),
+    );
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    await expect(local.prepare(prepareRequest).ready).rejects.toMatchObject({
+      name: 'ManagedRuntimeProviderError',
+      code: 'managed_runtime_identity_conflict',
+      retryable: false,
+    });
+    expect(runtime.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(runtime.close).not.toHaveBeenCalled();
     local.dispose();
   });
 

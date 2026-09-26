@@ -1046,6 +1046,12 @@ export interface ConfigParameters {
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /**
+   * Engine a paired host selected for this session. Initialization records it
+   * as the owner of a new transcript, or requires the restored transcript to
+   * prove it, before hooks, MCP or tools start.
+   */
+  sessionExecutionEngine?: SessionExecutionEngine;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2770,6 +2776,8 @@ export class Config {
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /** Engine a paired host selected for this session, if any. */
+  private readonly selectedSessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -3368,6 +3376,7 @@ export class Config {
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.selectedSessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -4095,7 +4104,7 @@ export class Config {
         await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
       }
       const activation = this.activateChatRecording(
-        options?.sessionExecutionEngine,
+        options?.sessionExecutionEngine ?? this.selectedSessionExecutionEngine,
       );
       this.sessionWriterActivationPromise = activation;
       try {

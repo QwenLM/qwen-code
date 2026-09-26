@@ -16,6 +16,8 @@ import {
   MANAGED_LEASE_EPOCH_HEADER,
   type RuntimeFinishReason,
 } from './managed-runtime-activator.js';
+// Type-only: this module sits in the serve fast path's static graph, which
+// must not load the ACP runtime.
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
   isManagedMediaOperation,
@@ -277,6 +279,41 @@ function waitForLocalSession(
       )
       .catch(reject);
   });
+}
+
+// This provider creates its Sessions without shared ID admission, so a paired
+// Bridge can report the requested ID as already live.
+function spawnManagedGatewaySession(
+  bridge: AcpSessionBridge,
+  request: ManagedRuntimePrepareRequest,
+): Promise<BridgeSession> {
+  return bridge
+    .spawnOrAttach({
+      workspaceCwd: request.workspaceCwd,
+      sessionScope: 'thread',
+      sessionId: request.sessionId,
+      sourceType: 'managed-gateway',
+      sourceId: request.sessionId,
+    })
+    .catch((error: unknown) => {
+      if (isLiveSessionIdRejection(error)) {
+        throw new ManagedRuntimeProviderError(
+          'managed_runtime_identity_conflict',
+          'Managed Runtime Session ID is already live.',
+          false,
+        );
+      }
+      throw error;
+    });
+}
+
+/** The Bridge's RequestedSessionIdRejectedError for an already live ID. */
+function isLiveSessionIdRejection(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === 'RequestedSessionIdRejectedError' &&
+    (error as { errorKind?: unknown }).errorKind === 'session_id_conflict'
+  );
 }
 
 function isSessionNotFound(error: unknown): boolean {
@@ -763,25 +800,13 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
       } catch (error) {
         if (!isSessionNotFound(error)) throw error;
         result = await waitForSession(
-          runtime.bridge.spawnOrAttach({
-            workspaceCwd: request.workspaceCwd,
-            sessionScope: 'thread',
-            sessionId: request.sessionId,
-            sourceType: 'managed-gateway',
-            sourceId: request.sessionId,
-          }),
+          spawnManagedGatewaySession(runtime.bridge, request),
           false,
         );
       }
     } else {
       result = await waitForSession(
-        runtime.bridge.spawnOrAttach({
-          workspaceCwd: request.workspaceCwd,
-          sessionScope: 'thread',
-          sessionId: request.sessionId,
-          sourceType: 'managed-gateway',
-          sourceId: request.sessionId,
-        }),
+        spawnManagedGatewaySession(runtime.bridge, request),
         false,
       );
     }

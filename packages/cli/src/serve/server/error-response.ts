@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -34,6 +35,7 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
@@ -41,6 +43,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   PromptIdConflictError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
@@ -496,6 +499,15 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionExecutionEngineError) {
+    res.status(409).json({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
     res.status(404).json(skillError);
@@ -635,6 +647,27 @@ export function sendBridgeError(
       error: err.message,
       code: 'branch_while_prompt_active',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'managed_session_branch_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    if (err.errorKind === 'invalid_session_id') {
+      res.status(400).json({ error: err.message, code: err.errorKind });
+      return;
+    }
+    res.status(409).json({
+      error: err.message,
+      code: err.errorKind,
+      sessionId: err.sessionId,
+      conflict: 'live',
     });
     return;
   }

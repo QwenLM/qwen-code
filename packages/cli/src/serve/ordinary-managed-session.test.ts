@@ -1341,10 +1341,10 @@ describe('ordinary REST session Managed owner', () => {
       .post(`/session/${sessionId}/load`)
       .set('Host', host())
       .send({});
-    expect(loaded.status).not.toBe(200);
-    expect(JSON.stringify(loaded.body)).toContain(
-      'cannot execute with the current configuration',
-    );
+    expect(loaded.status).toBe(409);
+    expect(loaded.body).toMatchObject({
+      code: 'session_execution_engine_unavailable',
+    });
     expect(JSON.stringify(loaded.body)).not.toContain('legacy-spawn-blocked');
     await expect(
       sessionService().readExecutionEngine(sessionId),

@@ -23,6 +23,7 @@
  * httpAcpBridge.ts re-export shim.
  */
 
+import { RequestError } from '@agentclientprotocol/sdk';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
@@ -101,6 +102,44 @@ export class SessionNotFoundError extends Error {
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
     this.code = code;
+  }
+}
+
+/**
+ * A caller-supplied session ID that a paired Bridge rejects before dispatch.
+ * Direct ACP callers still see invalid params (-32602); hosts map `errorKind`
+ * to 400 `invalid_session_id` or 409 `session_id_conflict`. An invalid ID is
+ * not echoed back.
+ */
+export class RequestedSessionIdRejectedError extends RequestError {
+  override readonly name = 'RequestedSessionIdRejectedError';
+
+  constructor(
+    readonly errorKind: 'invalid_session_id' | 'session_id_conflict',
+    readonly sessionId?: string,
+  ) {
+    super(
+      -32602,
+      errorKind === 'invalid_session_id'
+        ? 'Invalid params: Requested session ID is invalid'
+        : `Invalid params: Session ${sessionId} is already live`,
+      errorKind === 'invalid_session_id'
+        ? { errorKind }
+        : { errorKind, sessionId },
+    );
+  }
+}
+
+/** Managed sessions cannot be branched or forked into side tasks. */
+export class ManagedSessionBranchUnsupportedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} runs on the Managed execution engine, which does not support branching`,
+    );
+    this.name = 'ManagedSessionBranchUnsupportedError';
+    this.sessionId = sessionId;
   }
 }
 

@@ -10,9 +10,12 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   InvalidSessionTranscriptTurnAnchorError,
   SessionIdCaseConflictError,
@@ -538,6 +541,72 @@ describe('sendBridgeError session writer errors', () => {
         'This session cannot be resumed with the current execution engine.',
       code: 'session_execution_engine_unavailable',
       errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
+  it('maps a paired host owner rejection to the same HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new SessionExecutionEngineError('session-1', 'conflicting owners'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: 'session_execution_engine_unavailable',
+      errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
+  it('maps a Bridge rejection of an invalid requested ID to HTTP 400', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new RequestedSessionIdRejectedError('invalid_session_id'),
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: Requested session ID is invalid',
+      code: 'invalid_session_id',
+    });
+  });
+
+  it('maps a Bridge rejection of a live requested ID to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new RequestedSessionIdRejectedError('session_id_conflict', 'session-1'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: Session session-1 is already live',
+      code: 'session_id_conflict',
+      sessionId: 'session-1',
+      conflict: 'live',
+    });
+  });
+
+  it('maps an unsupported Managed branch to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new ManagedSessionBranchUnsupportedError('session-1'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'Session session-1 runs on the Managed execution engine, which does not support branching',
+      code: 'managed_session_branch_unsupported',
+      sessionId: 'session-1',
     });
   });
 
