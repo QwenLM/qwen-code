@@ -1,11 +1,14 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -25,12 +28,26 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 class ManagedEventStreamServiceTest {
     private static final SessionRecord SESSION = new SessionRecord("tenant",
             "session", "qwen-code", null, "ACTIVE", null, null, 0,
             2, 1, 1, null, 1);
+
+    @Test
+    void rejectsNegativeReconciliationCursorBeforeReadingEvents() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedAgentService agentService = new ManagedAgentService(store,
+                null, null, null, null, mock(ManagedWorkspaceRegistry.class));
+        assertThatThrownBy(() -> agentService.streamEvents(SESSION, -1))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("invalid_event_cursor");
+                });
+        verifyNoInteractions(store);
+    }
 
     @ParameterizedTest
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})

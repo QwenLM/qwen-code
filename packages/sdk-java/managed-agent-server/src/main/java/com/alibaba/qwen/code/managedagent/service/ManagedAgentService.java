@@ -645,6 +645,11 @@ public class ManagedAgentService {
     }
 
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
+        if (afterSequence < 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "invalid_event_cursor",
+                    "Event sequence must be non-negative.");
+        }
         return store.findEvents(session.tenantId(), session.sessionId(),
                 afterSequence, 100);
     }
