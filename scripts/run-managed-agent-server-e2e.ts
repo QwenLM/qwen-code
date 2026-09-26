@@ -69,7 +69,6 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const runtimeWorker = path.join(root, 'dist', 'managed-runtime-worker.js');
 const springJar = path.join(
   root,
   'packages',
@@ -80,7 +79,6 @@ const springJar = path.join(
 );
 for (const required of [
   cliBundle,
-  runtimeWorker,
   springJar,
   ...(durableFailover ? [] : [settingsPath]),
 ]) {
@@ -803,7 +801,7 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
-              QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: runtimeWorker,
+              QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
               QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
@@ -815,7 +813,7 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
-              QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: runtimeWorker,
+              QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE:
                 runtimeDelayMs === 0 ? process.execPath : delayedNode,
               QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
@@ -1146,7 +1144,7 @@ try {
           QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
           QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
           QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
-          QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: runtimeWorker,
+          QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
           QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
           QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
           QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,

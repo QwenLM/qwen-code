@@ -373,6 +373,7 @@ describe('qwen serve — capabilities envelope', () => {
     ).toEqual([
       'health',
       'daemon_status',
+      'daemon_update',
       'capabilities',
       'session_create',
       'session_startup_config',
