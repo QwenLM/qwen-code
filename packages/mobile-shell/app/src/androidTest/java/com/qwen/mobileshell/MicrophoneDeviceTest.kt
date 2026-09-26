@@ -107,6 +107,7 @@ class MicrophoneDeviceTest {
             assertEquals(1, request.denied)
         }
         assertFalse(begin(WebRequest("http://daemon.example/"), "http://daemon.example/"))
+        assertFalse(begin(WebRequest(), "http://[broken/"))
         assertEquals(0, launches)
         for (origin in listOf("http://127.0.0.1:49441/", "http://localhost:49441/", "http://[::1]:49441/")) {
             assertTrue("Loopback origin should reach consent: $origin", begin(WebRequest(origin), origin))
