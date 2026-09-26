@@ -12,14 +12,14 @@ O1a fixes the shapes and rules before anything implements them, as the attestati
 
 ## Current state
 
-The facts below are from `main` at `16496a71ec`.
+The facts below are from `main` at `89b057befd`.
 
 - **`ToolResult`.** `packages/core/src/tools/tools.ts` separates `llmContent`, `returnDisplay`, `persistedOutputFiles`, `resultFilePaths` and `artifacts`.
 - **Truncation.** `persistAndTruncateToolResult` in `packages/core/src/tools/truncation.ts` offloads oversized text to a private local file. It stops persisting above 50 MiB per file or 500 MiB per Session, and a failed write leaves only the preview. A preview therefore does not prove that the full bytes survive.
 - **Session resources.** `LocalManagedSessionResourceStore` in `packages/core/src/managed-runtime/managed-session-resources.ts` publishes a whole `Buffer` and reads a whole file, and checks length and SHA-256 on read. It has no stream publication and no range read. A resource is referenced by a `DurableRef`: `resourceId`, `kind`, `schemaVersion`, `byteLength` and a bare lowercase hexadecimal SHA-256 `digest`.
 - **Session receipts.** The Managed Session event `tool.receipt` carries `executionCallId`, `toolOutcomeRef`, `resultRef`, `resources` and `historyRevision`.
 - **Tool v2.** `managed-runtime-tool-v2.schema.json` closes a settled `result` to `executionStatus`, `responseParts` and an optional `error`, and caps each response at 1 MiB. The worker replaces a larger result with a small terminal error.
-- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which answers any path that `OWNED_MANAGED_RUNTIME_ROUTES` does not declare with an empty 404 before a handler runs.
+- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which admits exactly the routes of its boot version, `OWNED_MANAGED_RUNTIME_ROUTES` under boot v1 and `MANAGED_CONTEXT_WORKER_ROUTES` under boot v2 (W0c-1, #12732), and answers any other path with an empty 404 before a handler runs.
 
 ## Goals
 
@@ -43,14 +43,14 @@ The facts below are from `main` at `16496a71ec`.
 The four questions of #12723 are answered here. The first decides the opt-in and is part of this contract; the other three are the plans for O1b and O1c.
 
 1. **Opt-in: a new tool contract version.** A peer opts in by calling Tool v3, a new route family that carries a versioned result envelope; no field is added to Tool v2. A worker that does not implement it answers each v3 path with the gate's empty 404 before any handler runs, so an old peer is refused before any side effect. The alternatives were weaker:
-   - A capability in the `managed-context` boot and ready negotiation would tie result capture to Workspace context, change boot v2 before W0c wires it, and still need new routes to carry the envelope.
+   - A capability in the `managed-context` boot and ready negotiation would tie result capture to Workspace context, change the boot v2 that the worker already serves since W0c-1, and still need new routes to carry the envelope.
    - Separate resource routes next to Tool v2 would let an old worker execute through v2 first; the Broker would learn afterwards that no capture exists.
 
    The routes take protocol version 3, the next version of the owned route family, which `managed-context/1` also uses for its two routes. Their paths and protocol tokens keep the two apart, and a worker serves each only when it implements that protocol.
 
 2. **Store ownership: a separate interface.** O1b adds stream publication and range reads behind a new interface implemented by the local adapter, next to `LocalManagedSessionResourceStore` and under the same resource root. `ManagedSessionResourceStore`, which the durable Session authority of #12693 and its HTTP adapter implement, stays unchanged until O2 needs remote segments.
 3. **Completeness: complete by default for foreground Shell.** O1c admits foreground Shell under `complete_required`: missing bytes block result acceptance and model continuation. `best_effort` exists in the contract, but a tool uses it only when its admission names it. Either way a partial capture is never labeled complete, and a capture failure after a side effect never executes the tool again.
-4. **Order.** O1a and O1b do not touch the worker and land first. O1c changes the worker and lands after W0c.
+4. **Order.** O1a and O1b do not touch the worker and land first. O1c changes the worker and lands after W0c, whose first slice, W0c-1 (#12732), has landed.
 
 ## Value rules
 
@@ -163,7 +163,7 @@ A producer may publish a new revision while a stream is open, so that readers se
 
 ## Tool v3 and the result envelope
 
-Tool v3 is Tool v2 with a token, a capture request and a versioned result envelope, plus an acknowledgement. Its routes are declared in the shared fixtures but not in `OWNED_MANAGED_RUNTIME_ROUTES`, so the gate admits none of them until O1c mounts their handlers.
+Tool v3 is Tool v2 with a token, a capture request and a versioned result envelope, plus an acknowledgement. Its routes are declared in the shared fixtures but in neither boot version's route list, so the gate admits none of them until O1c mounts their handlers.
 
 | Key           | Path                                       | Request limit | Response limit |
 | ------------- | ------------------------------------------ | ------------- | -------------- |
@@ -192,7 +192,7 @@ Every route is `POST` with protocol version 3, `Cache-Control: no-store` in both
 
 ### Refusal before any side effect
 
-A Broker that needs capture calls only v3 for that call, uses v3 for every later status, cancel and acknowledgement of it, and never retries it through v2. The gate of a worker without v3 answers every v3 path with an empty 404 before a handler runs, which the Broker classifies as incompatible, so nothing executes. The v2 and v3 request shapes exclude each other, so a v2 body sent to a v3 route, or a v3 body to a v2 route, is refused with 400 before a journal entry exists. A Broker also refuses a v2-shaped answer on a v3 route, because the v3 response requires the token and protocol version 3. Calls that are not admitted for capture stay on Tool v2 unchanged.
+A Broker that needs capture calls only v3 for that call, uses v3 for every later status, cancel and acknowledgement of it, and never retries it through v2. The gate of a worker without v3 answers every v3 path with an empty 404 before a handler runs, under either boot version, which the Broker classifies as incompatible, so nothing executes. The v2 and v3 request shapes exclude each other, so a v2 body sent to a v3 route, or a v3 body to a v2 route, is refused with 400 before a journal entry exists. A Broker also refuses a v2-shaped answer on a v3 route, because the v3 response requires the token and protocol version 3. Calls that are not admitted for capture stay on Tool v2 unchanged.
 
 ## Errors
 
@@ -230,7 +230,7 @@ The last three are store outcomes; O2 gives them HTTP statuses when segments cro
 The schema fixes each record's shape and the rules it can state readably, including the scope rules for roles and the status that descriptors imply. It cannot state UTF-8 byte limits, NFC, well-formed UTF-16, unique stream IDs, sums across a list, a bound that depends on another field, or a comparison between two fields or two records; the TypeScript test lists every case on which the schema and the module disagree. An implementation independent of both languages built the cases and computed every digest.
 
 - **TypeScript.** `packages/core/src/managed-runtime/managed-tool-result.ts` validates manifests, pages, page positions, revisions and result envelopes, and holds a reference segment ledger that replays the publication sequences. Nothing imports it until O1b, which keeps the ledger as the in-memory implementation of its segment store interface, as the Broker keeps its in-memory repositories beside the JDBC ones.
-- **Admission.** A CLI test sends the canonical v3 requests through the shipped route gate to handlers that would record a call, and checks that each answers an empty 404 and that no handler ran. It reads the fixtures from core's source tree, as the Java test does, so that one file stays the only copy.
+- **Admission.** A CLI test sends the canonical v3 requests through the shipped route gate, with the route set of each boot version, to handlers that would record a call, and checks that each answers an empty 404 and that no handler ran. It reads the fixtures from core's source tree, as the Java test does, so that one file stays the only copy.
 - **Java.** A conformance test in `runtime-broker` pins the token, kinds, limits, routes, closed key sets and error table, and recomputes every segment, seal and prefix digest from the fixture bytes.
 
 ## Files affected
@@ -246,7 +246,7 @@ No worker, route manifest, store, provisioner, transport or CI workflow changes.
 ## Validation plan
 
 - **TypeScript:** strict Ajv validation of the fixtures against the schema; every case and sequence replayed through the module; the schema checked against every case; the largest records measured against their limits.
-- **Admission:** the shipped gate refuses every v3 route before any handler.
+- **Admission:** the shipped gate refuses every v3 route before any handler, under both boot versions.
 - **Java:** the conformance test pins the key sets, routes, constants and error table, and recomputes every digest.
 - **Mutation check:** each check of the module is mutated in turn and the suite rerun.
 
@@ -265,7 +265,7 @@ No worker, route manifest, store, provisioner, transport or CI workflow changes.
 
 ## Follow-up work
 
-| Slice | Scope                                                                                                                                                                                                                                                                                                      |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| O1b   | The local segment store behind its own interface, with the ledger's operations and outcomes: publish, seal, prefix and range read; bounded memory for a 100 MiB stream; quarantine of corrupt or conflicting segments; the fixture sequences replayed against it.                                          |
-| O1c   | Tool v3 on the worker after W0c: capture of foreground Shell before truncation into a bounded spool, reusing `persistedOutputFiles` when its bytes are still verified; the result envelope; the acknowledgement; a Java v3 transport; route fixtures for the header discipline; the 100 MiB survival test. |
+| Slice | Scope                                                                                                                                                                                                                                                                                                                                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| O1b   | The local segment store behind its own interface, with the ledger's operations and outcomes: publish, seal, prefix and range read; bounded memory for a 100 MiB stream; quarantine of corrupt or conflicting segments; the fixture sequences replayed against it.                                                                                                           |
+| O1c   | Tool v3 on the worker after W0c, behind the same activation gate as a Tool v2 call under boot v2: capture of foreground Shell before truncation into a bounded spool, reusing `persistedOutputFiles` when its bytes are still verified; the result envelope; the acknowledgement; a Java v3 transport; route fixtures for the header discipline; the 100 MiB survival test. |

@@ -17,6 +17,7 @@ import {
   OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
 } from './managed-runtime-attestation-contract.js';
+import { MANAGED_CONTEXT_WORKER_ROUTES } from './managed-context-worker.js';
 
 // A worker that predates managed-tool-result/1 must refuse every Tool v3
 // route before a handler runs, so an old peer never executes a call that
@@ -28,6 +29,12 @@ interface Route {
   readonly method: string;
   readonly path: string;
 }
+
+/** The route set that the worker's gate admits under each boot version. */
+const GATES = [
+  { boot: 'boot v1', routes: OWNED_MANAGED_RUNTIME_ROUTES },
+  { boot: 'boot v2', routes: MANAGED_CONTEXT_WORKER_ROUTES },
+] as const;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const readJson = (file: string) =>
@@ -84,8 +91,8 @@ afterEach(async () => {
 });
 
 describe('Tool v3 admission on a worker without managed-tool-result/1', () => {
-  it('declares no v3 route in the owned route manifest', () => {
-    const declared = OWNED_MANAGED_RUNTIME_ROUTES.map((route) => route.path);
+  it.each(GATES)('declares no v3 tool route under $boot', ({ routes }) => {
+    const declared = routes.map((route) => route.path);
 
     expect(v3Fixtures.routes).toHaveLength(4);
     for (const route of v3Fixtures.routes) {
@@ -93,56 +100,60 @@ describe('Tool v3 admission on a worker without managed-tool-result/1', () => {
     }
   });
 
-  it('refuses every v3 route before any handler runs', async () => {
-    const reached: string[] = [];
-    const app = express();
-    // Handlers that would execute stand behind the gate, as in the worker.
-    app.use((req, res) => {
-      reached.push(req.path);
-      res.status(200).json({ executed: true });
-    });
-    const server = createServer(ownedManagedRuntimeRouteGate(app));
-    servers.add(server);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
-    });
-    const address = server.address();
-    if (!address || typeof address === 'string') {
-      throw new Error('Expected a TCP test server address.');
-    }
-    const { token, leaseId, epoch } = v2Fixtures.identity;
+  it.each(GATES)(
+    'refuses every v3 tool route before any handler runs under $boot',
+    async ({ routes }) => {
+      const reached: string[] = [];
+      const app = express();
+      // Handlers that would execute stand behind the gate, as in the worker.
+      app.use((req, res) => {
+        reached.push(req.path);
+        res.status(200).json({ executed: true });
+      });
+      const server = createServer(ownedManagedRuntimeRouteGate(app, routes));
+      servers.add(server);
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('Expected a TCP test server address.');
+      }
+      const { token, leaseId, epoch } = v2Fixtures.identity;
 
-    for (const route of v3Fixtures.routes) {
-      const response = await fetch(
-        `http://127.0.0.1:${address.port}${route.path}`,
-        {
-          method: route.method,
-          headers: {
-            authorization: `Bearer ${token}`,
-            'cache-control': 'no-store',
-            'content-type': 'application/json',
-            'x-qwen-managed-lease-id': leaseId,
-            'x-qwen-managed-lease-epoch': String(epoch),
+      for (const route of v3Fixtures.routes) {
+        const response = await fetch(
+          `http://127.0.0.1:${address.port}${route.path}`,
+          {
+            method: route.method,
+            headers: {
+              authorization: `Bearer ${token}`,
+              'cache-control': 'no-store',
+              'content-type': 'application/json',
+              'x-qwen-managed-lease-id': leaseId,
+              'x-qwen-managed-lease-epoch': String(epoch),
+            },
+            body: JSON.stringify(v3Fixtures.requests[route.key]),
           },
-          body: JSON.stringify(v3Fixtures.requests[route.key]),
-        },
+        );
+
+        expect(response.status).toBe(404);
+        expect(await response.text()).toBe('');
+      }
+      expect(reached).toEqual([]);
+
+      // The same server still reaches the handler for its v2 execute route.
+      const declared = routes.find((route) => route.key === 'execute');
+      if (!declared) throw new Error('Expected a declared execute route.');
+      const control = await fetch(
+        `http://127.0.0.1:${address.port}${declared.path}`,
+        { method: declared.method },
       );
-
-      expect(response.status).toBe(404);
-      expect(await response.text()).toBe('');
-    }
-    expect(reached).toEqual([]);
-
-    // The same server still reaches the handler for a declared route.
-    const declared = OWNED_MANAGED_RUNTIME_ROUTES[1];
-    const control = await fetch(
-      `http://127.0.0.1:${address.port}${declared.path}`,
-      { method: declared.method },
-    );
-    expect(control.status).toBe(200);
-    expect(reached).toEqual([declared.path]);
-  });
+      expect(control.status).toBe(200);
+      expect(reached).toEqual([declared.path]);
+    },
+  );
 
   it('keeps v2 and v3 bodies apart in both directions', () => {
     for (const suite of v2Fixtures.suites) {

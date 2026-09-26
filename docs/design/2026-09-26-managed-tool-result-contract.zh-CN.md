@@ -12,14 +12,14 @@ Managed Runtime 可能被回收,Harness 也可能被替换。此时工具的完�
 
 ## 现状
 
-以下事实来自 `main` 的 `16496a71ec`。
+以下事实来自 `main` 的 `89b057befd`。
 
 - **`ToolResult`。** `packages/core/src/tools/tools.ts` 区分了 `llmContent`、`returnDisplay`、`persistedOutputFiles`、`resultFilePaths` 和 `artifacts`。
 - **截断。** `packages/core/src/tools/truncation.ts` 中的 `persistAndTruncateToolResult` 把超长文本转存到本地私有文件。单文件超过 50 MiB 或会话累计超过 500 MiB 时不再落盘,写入失败时只剩预览。因此有预览并不能证明完整字节还在。
 - **Session 资源。** `packages/core/src/managed-runtime/managed-session-resources.ts` 中的 `LocalManagedSessionResourceStore` 整块发布 `Buffer`、整文件读取,读取时校验长度和 SHA-256。它没有流式发布,也没有按区间读取。资源通过 `DurableRef` 引用:`resourceId`、`kind`、`schemaVersion`、`byteLength` 和不带前缀的小写十六进制 SHA-256 `digest`。
 - **Session 回执。** Managed Session 事件 `tool.receipt` 携带 `executionCallId`、`toolOutcomeRef`、`resultRef`、`resources` 和 `historyRevision`。
 - **Tool v2。** `managed-runtime-tool-v2.schema.json` 把已结算的 `result` 封闭为 `executionStatus`、`responseParts` 和可选的 `error`,每个响应上限 1 MiB。worker 会把更大的结果替换为一个小的终态错误。
-- **路由闸门。** worker 的所有路由都经过 `ownedManagedRuntimeRouteGate`;对 `OWNED_MANAGED_RUNTIME_ROUTES` 未声明的路径,它在任何处理器运行前返回空的 404。
+- **路由闸门。** worker 的所有路由都经过 `ownedManagedRuntimeRouteGate`,它只放行其 boot 版本的路由:boot v1 下是 `OWNED_MANAGED_RUNTIME_ROUTES`,boot v2 下是 `MANAGED_CONTEXT_WORKER_ROUTES`(W0c-1,#12732);对其他路径,它在任何处理器运行前返回空的 404。
 
 ## 目标
 
@@ -43,14 +43,14 @@ Managed Runtime 可能被回收,Harness 也可能被替换。此时工具的完�
 这里回答 #12723 的四个问题。第一个决定启用方式,属于本契约;其余三个是 O1b 和 O1c 的计划。
 
 1. **启用方式:新的工具契约版本。** 对端通过调用 Tool v3 启用。Tool v3 是一组新路由,携带带版本的结果信封;Tool v2 不增加任何字段。未实现它的 worker 在任何处理器运行前,就以闸门的空 404 回应每个 v3 路径,因此旧对端在任何副作用之前就被拒绝。其他方案更弱:
-   - 在 `managed-context` 的 boot 与 ready 协商中加一项能力,会把结果捕获与 Workspace 上下文绑在一起,要在 W0c 接线之前改动 boot v2,而且仍需要新路由来携带信封。
+   - 在 `managed-context` 的 boot 与 ready 协商中加一项能力,会把结果捕获与 Workspace 上下文绑在一起,要改动 worker 自 W0c-1 起已经提供的 boot v2,而且仍需要新路由来携带信封。
    - 在 Tool v2 旁另设资源路由,会让旧 worker 先经 v2 执行;Broker 事后才发现没有捕获。
 
    这些路由使用协议版本 3,即自有路由族的下一个版本;`managed-context/1` 的两个路由也使用它。两者靠路径和协议 token 区分,worker 只在实现了相应协议时才提供对应路由。
 
 2. **存储归属:独立接口。** O1b 把流式发布与按区间读取放在一个新接口之后,由本地适配器实现,与 `LocalManagedSessionResourceStore` 并列,使用同一资源根目录。#12693 的持久 Session 权威及其 HTTP 适配器所实现的 `ManagedSessionResourceStore` 保持不变,直到 O2 需要远程分段。
 3. **完整性:前台 Shell 默认要求完整。** O1c 以 `complete_required` 准入前台 Shell:缺失字节会阻止结果被接受和模型继续。契约中存在 `best_effort`,但只有工具的准入明确指定时才使用。无论哪种策略,部分捕获都不会被标为完整;副作用发生后捕获失败,也绝不会再次执行工具。
-4. **顺序。** O1a 与 O1b 不涉及 worker,先落地。O1c 修改 worker,排在 W0c 之后。
+4. **顺序。** O1a 与 O1b 不涉及 worker,先落地。O1c 修改 worker,排在 W0c 之后;W0c 的第一个切片 W0c-1(#12732)已经落地。
 
 ## 取值规则
 
@@ -163,7 +163,7 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 
 ## Tool v3 与结果信封
 
-Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果信封,再加上确认操作。它的路由在共享 fixtures 中声明,但不在 `OWNED_MANAGED_RUNTIME_ROUTES` 中,因此在 O1c 挂载处理器之前,闸门不会放行其中任何一个。
+Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果信封,再加上确认操作。它的路由在共享 fixtures 中声明,但不在任何 boot 版本的路由列表中,因此在 O1c 挂载处理器之前,闸门不会放行其中任何一个。
 
 | 键            | 路径                                       | 请求上限 | 响应上限 |
 | ------------- | ------------------------------------------ | -------- | -------- |
@@ -192,7 +192,7 @@ Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果
 
 ### 在任何副作用之前拒绝
 
-需要捕获的 Broker 对该调用只使用 v3,之后对它的每次 status、cancel 和确认也都使用 v3,绝不经 v2 重试。没有 v3 的 worker,其闸门在处理器运行前以空 404 回应每个 v3 路径,Broker 把它归类为不兼容,因此什么都不会执行。v2 与 v3 的请求结构互斥,因此发到 v3 路由的 v2 请求体、发到 v2 路由的 v3 请求体,都会在日志条目产生前以 400 被拒绝。Broker 也拒绝 v3 路由上 v2 结构的回答,因为 v3 响应要求 token 和协议版本 3。未被准入捕获的调用继续原样使用 Tool v2。
+需要捕获的 Broker 对该调用只使用 v3,之后对它的每次 status、cancel 和确认也都使用 v3,绝不经 v2 重试。没有 v3 的 worker,无论哪个 boot 版本,其闸门都在处理器运行前以空 404 回应每个 v3 路径,Broker 把它归类为不兼容,因此什么都不会执行。v2 与 v3 的请求结构互斥,因此发到 v3 路由的 v2 请求体、发到 v2 路由的 v3 请求体,都会在日志条目产生前以 400 被拒绝。Broker 也拒绝 v3 路由上 v2 结构的回答,因为 v3 响应要求 token 和协议版本 3。未被准入捕获的调用继续原样使用 Tool v2。
 
 ## 错误
 
@@ -230,7 +230,7 @@ Tool v3 是在 Tool v2 基础上增加 token、捕获请求和带版本的结果
 schema 固定每种记录的结构以及它能清晰表达的规则,包括角色的范围规则和内容描述所蕴含的状态。它无法表达 UTF-8 字节上限、NFC、形式良好的 UTF-16、流 ID 唯一、列表求和、依赖另一字段的上限,以及两个字段或两条记录之间的比较;TypeScript 测试列出 schema 与模块意见不一的每个用例。用例和每个摘要由一个独立于两种语言的实现生成。
 
 - **TypeScript。** `packages/core/src/managed-runtime/managed-tool-result.ts` 校验 manifest、页、页位置、修订和结果信封,并包含一个重放发布序列的参考分段账本。在 O1b 之前没有代码导入它;O1b 会把这个账本保留为其分段存储接口的内存实现,就像 Broker 在 JDBC 仓库之外保留内存仓库一样。
-- **准入。** 一个 CLI 测试把规范的 v3 请求经已发布的路由闸门发给会记录调用的处理器,检查每个都以空 404 回应,且没有处理器运行。它与 Java 测试一样从 core 的源码目录读取 fixtures,使这份文件保持唯一副本。
+- **准入。** 一个 CLI 测试按每个 boot 版本的路由集合,把规范的 v3 请求经已发布的路由闸门发给会记录调用的处理器,检查每个都以空 404 回应,且没有处理器运行。它与 Java 测试一样从 core 的源码目录读取 fixtures,使这份文件保持唯一副本。
 - **Java。** `runtime-broker` 中的一致性测试固定 token、kind、上限、路由、封闭键集合和错误表,并根据 fixture 字节重新计算每个分段、封存与前缀摘要。
 
 ## 受影响的文件
@@ -246,7 +246,7 @@ worker、路由清单、存储、provisioner、transport 和 CI workflow 均不�
 ## 验证计划
 
 - **TypeScript:** 用严格模式 Ajv 按 schema 校验 fixtures;每个用例和序列都经模块重放;用每个用例检查 schema;测量最大记录是否在上限之内。
-- **准入:** 已发布的闸门在任何处理器之前拒绝每个 v3 路由。
+- **准入:** 两个 boot 版本下,已发布的闸门都在任何处理器之前拒绝每个 v3 路由。
 - **Java:** 一致性测试固定键集合、路由、常量和错误表,并重新计算每个摘要。
 - **变异检查:** 依次变异模块的每项检查并重跑测试。
 
@@ -265,7 +265,7 @@ worker、路由清单、存储、provisioner、transport 和 CI workflow 均不�
 
 ## 后续工作
 
-| 切片 | 范围                                                                                                                                                                                              |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| O1b  | 在独立接口之后实现本地分段存储,采用账本的操作与结果:发布、封存、前缀和按区间读取;100 MiB 流的内存有界;隔离损坏或冲突的分段;用 fixture 序列重放验证。                                              |
-| O1c  | W0c 之后在 worker 上实现 Tool v3:在截断前把前台 Shell 输出捕获到有界 spool,字节仍可校验时复用 `persistedOutputFiles`;结果信封;确认;Java v3 transport;请求头规范的路由 fixtures;100 MiB 保存测试。 |
+| 切片 | 范围                                                                                                                                                                                                                                               |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| O1b  | 在独立接口之后实现本地分段存储,采用账本的操作与结果:发布、封存、前缀和按区间读取;100 MiB 流的内存有界;隔离损坏或冲突的分段;用 fixture 序列重放验证。                                                                                               |
+| O1c  | W0c 之后在 worker 上实现 Tool v3,并与 boot v2 下的 Tool v2 调用使用同一个激活闸门:在截断前把前台 Shell 输出捕获到有界 spool,字节仍可校验时复用 `persistedOutputFiles`;结果信封;确认;Java v3 transport;请求头规范的路由 fixtures;100 MiB 保存测试。 |
