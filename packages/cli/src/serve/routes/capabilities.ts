@@ -9,6 +9,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -23,6 +24,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { WorkspaceRegistrationStore } from '../workspace-registration-store.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -40,6 +42,7 @@ interface RegisterCapabilitiesRoutesDeps {
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
   hostedHarness?: HostedHarnessCapabilities;
+  workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
 
 function workflowsEnabledForRuntime(
@@ -76,7 +79,7 @@ export function registerCapabilitiesRoutes(
     configuredPollIntervalMs <= 2_147_483_647
       ? configuredPollIntervalMs
       : 5_000;
-  app.get('/capabilities', (_req, res) => {
+  app.get('/capabilities', async (_req, res) => {
     const entries = deps.workspaceRegistry
       .listAllEntries()
       .filter(
@@ -94,6 +97,20 @@ export function registerCapabilitiesRoutes(
         >)
       : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
+    let pinnedAts: Record<string, string> | undefined;
+    if (deps.workspaceRegistrationStore) {
+      try {
+        const snapshot = await deps.workspaceRegistrationStore.read();
+        pinnedAts = snapshot.pinnedAts;
+      } catch (err) {
+        // Pin state is best-effort; do not block capabilities.
+        writeStderrLine(
+          `qwen serve: failed to read workspace pin state for /capabilities: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),
@@ -142,27 +159,39 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      workspaces: entries.map((entry) => ({
-        id: entry.workspaceId,
-        cwd: entry.workspaceCwd,
-        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
-          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
-          : {}),
-        ...(entry.displayName !== undefined
-          ? { displayName: entry.displayName }
-          : {}),
-        primary: entry.primary,
-        trusted:
-          entry.state === 'active' && entry.current?.runtime.trusted === true,
-        workflowsEnabled: workflowsEnabledForRuntime(
-          entry.state === 'active' ? entry.current?.runtime : undefined,
-          deps.daemonEnv,
-        ),
-        ...(runtimeRemoval ? { removable: entry.removable } : {}),
-        ...(entry.current?.runtime.provenance === 'live-conversation'
-          ? { kind: 'live' as const }
-          : {}),
-      })),
+      workspaces: entries.map((entry) => {
+        // Resolve pin state from any of the entry's registration IDs.
+        let pinnedAt: string | undefined;
+        for (const regId of entry.registrationIds) {
+          if (pinnedAts?.[regId] !== undefined) {
+            pinnedAt = pinnedAts[regId];
+            break;
+          }
+        }
+        return {
+          id: entry.workspaceId,
+          cwd: entry.workspaceCwd,
+          ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+            ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+            : {}),
+          ...(entry.displayName !== undefined
+            ? { displayName: entry.displayName }
+            : {}),
+          primary: entry.primary,
+          trusted:
+            entry.state === 'active' && entry.current?.runtime.trusted === true,
+          workflowsEnabled: workflowsEnabledForRuntime(
+            entry.state === 'active' ? entry.current?.runtime : undefined,
+            deps.daemonEnv,
+          ),
+          ...(runtimeRemoval ? { removable: entry.removable } : {}),
+          ...(entry.current?.runtime.provenance === 'live-conversation'
+            ? { kind: 'live' as const }
+            : {}),
+          isPinned: pinnedAt !== undefined,
+          ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+        };
+      }),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

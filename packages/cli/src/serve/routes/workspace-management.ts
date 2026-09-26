@@ -21,6 +21,7 @@ import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
+  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
@@ -2038,6 +2039,7 @@ export function registerWorkspaceManagementRoutes(
           const runtime = reserved
             ? undefined
             : workspaceRegistry.getByWorkspaceCwd(cwd);
+          const pinnedAt = snapshot.pinnedAts?.[registrationId];
           return {
             id: registrationId,
             cwd,
@@ -2048,6 +2050,8 @@ export function registerWorkspaceManagementRoutes(
               !reserved &&
               (runtime !== undefined || registrationIsActive(registrationId)),
             persisted: true,
+            isPinned: pinnedAt !== undefined,
+            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
           };
         }),
       });
@@ -2197,6 +2201,135 @@ export function registerWorkspaceManagementRoutes(
         });
       } finally {
         if (ownsInFlight && operationCwd) inFlight.delete(operationCwd);
+        operationFinished();
+      }
+    },
+  );
+
+  app.patch(
+    '/workspace-registrations/:id/pin',
+    mutate({ strict: true }),
+    async (req, res) => {
+      if (!workspaceRegistrationStore) {
+        res.status(501).json({
+          error: 'Persistent workspace registration is not available',
+          code: 'persistence_not_available',
+        });
+        return;
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      const requestedId = String(req.params['id']);
+      operationStarted();
+      try {
+        const body = await safeBody(req);
+        const isPinned = body['isPinned'];
+        if (typeof isPinned !== 'boolean') {
+          res.status(400).json({
+            error: 'isPinned must be a boolean',
+            code: 'invalid_body',
+          });
+          return;
+        }
+
+        // Find the registry entry that owns this registration ID.
+        let targetEntry: WorkspaceEntry | undefined;
+        if (typeof workspaceRegistry.listAllEntries === 'function') {
+          const entries = workspaceRegistry.listAllEntries();
+          for (const entry of entries) {
+            if (entry.registrationIds.includes(requestedId)) {
+              targetEntry = entry;
+              break;
+            }
+          }
+        }
+        if (!targetEntry) {
+          // Not found in registry — try the store directly for non-registry workspaces.
+          const changed = await workspaceRegistrationStore.setPinned(
+            requestedId,
+            isPinned,
+          );
+          if (!changed) {
+            res.status(404).json({
+              error: 'Workspace registration not found',
+              code: 'workspace_registration_not_found',
+            });
+            return;
+          }
+          const snapshot = await workspaceRegistrationStore.read();
+          const pinnedAt = snapshot.pinnedAts?.[requestedId];
+          res.json({
+            id: requestedId,
+            isPinned: pinnedAt !== undefined,
+            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+          });
+          return;
+        }
+
+        // Update pin state for ALL registration IDs of this entry.
+        for (const regId of targetEntry.registrationIds) {
+          await workspaceRegistrationStore.setPinned(regId, isPinned);
+        }
+
+        // Read back the pinnedAt for the requested ID (may be an alias).
+        const snapshot = await workspaceRegistrationStore.read();
+        // Prefer the requestedId's pinnedAt; if it's an alias, find any matching entry.
+        let pinnedAt = snapshot.pinnedAts?.[requestedId];
+        if (pinnedAt === undefined) {
+          for (const regId of targetEntry.registrationIds) {
+            if (snapshot.pinnedAts?.[regId] !== undefined) {
+              pinnedAt = snapshot.pinnedAts[regId];
+              break;
+            }
+          }
+        }
+        res.json({
+          id: requestedId,
+          isPinned: pinnedAt !== undefined,
+          ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+        });
+      } catch (err) {
+        if (err instanceof WorkspaceRegistrationStoreCommittedError) {
+          // The store already committed the change; treat as success.
+          writeStderrLine(`qwen serve: ${err.message}`);
+          const snapshot = await workspaceRegistrationStore.read();
+          let pinnedAt = snapshot.pinnedAts?.[requestedId];
+          if (pinnedAt === undefined) {
+            // Fallback: scan all entries for this requestedId.
+            if (typeof workspaceRegistry.listAllEntries === 'function') {
+              const entries = workspaceRegistry.listAllEntries();
+              for (const entry of entries) {
+                if (entry.registrationIds.includes(requestedId)) {
+                  for (const regId of entry.registrationIds) {
+                    if (snapshot.pinnedAts?.[regId] !== undefined) {
+                      pinnedAt = snapshot.pinnedAts[regId];
+                      break;
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+          }
+          res.json({
+            id: requestedId,
+            isPinned: pinnedAt !== undefined,
+            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+          });
+          return;
+        }
+        writeStderrLine(
+          `qwen serve: failed to update workspace pin state: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to update workspace pin state',
+          code: 'workspace_registration_store_error',
+        });
+      } finally {
         operationFinished();
       }
     },

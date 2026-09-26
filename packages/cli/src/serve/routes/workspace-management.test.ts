@@ -3234,6 +3234,124 @@ describe('persistent workspace registrations', () => {
     await seal;
     expect(sealed).toBe(true);
   });
+
+  it('pins and unpins a registration and reports the stored pin time', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const pinnedAt = '2026-01-01T00:00:00.000Z';
+    const setPinned = vi.fn().mockResolvedValue(true);
+    const read = vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      primaryWorkspace: '/primary',
+      workspaces: [REAL_DIR],
+      pinnedAts: { [registrationId]: pinnedAt },
+    });
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinned,
+        read,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const pinned = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: true });
+    expect(pinned.status).toBe(200);
+    expect(setPinned).toHaveBeenCalledWith(registrationId, true);
+    expect(pinned.body).toEqual({
+      id: registrationId,
+      isPinned: true,
+      pinnedAt,
+    });
+
+    read.mockResolvedValue({
+      schemaVersion: 1,
+      primaryWorkspace: '/primary',
+      workspaces: [REAL_DIR],
+    });
+    const unpinned = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: false });
+    expect(unpinned.status).toBe(200);
+    expect(setPinned).toHaveBeenLastCalledWith(registrationId, false);
+    expect(unpinned.body).toEqual({
+      id: registrationId,
+      isPinned: false,
+    });
+  });
+
+  it('rejects a pin request whose body is not a boolean', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinned = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinned,
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const missing = await request(app).patch(
+      `/workspace-registrations/${registrationId}/pin`,
+    );
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe('invalid_body');
+
+    const wrongType = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: 'true' });
+    expect(wrongType.status).toBe(400);
+    expect(wrongType.body.code).toBe('invalid_body');
+    expect(setPinned).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when pinning a registration that is not stored', async () => {
+    const setPinned = vi.fn().mockResolvedValue(false);
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinned,
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch('/workspace-registrations/not-stored/pin')
+      .send({ isPinned: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('workspace_registration_not_found');
+    expect(setPinned).toHaveBeenCalledWith('not-stored', true);
+  });
+
+  it('reports the current state when the pin is a no-op', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinned = vi.fn().mockResolvedValue(false);
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinned,
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      id: registrationId,
+      isPinned: false,
+    });
+  });
+
+  it('returns 501 for pinning without a store', async () => {
+    const { app } = createApp();
+
+    const res = await request(app)
+      .patch('/workspace-registrations/any/pin')
+      .send({ isPinned: true });
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('persistence_not_available');
+  });
 });
 
 describe('GET /workspace-path-suggestions', () => {

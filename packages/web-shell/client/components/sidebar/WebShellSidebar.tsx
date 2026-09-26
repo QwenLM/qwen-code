@@ -1769,10 +1769,19 @@ export function WebShellSidebar({
     () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
     [displayedWorkspaces],
   );
-  const projectWorkspaces = useMemo(
-    () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
-    [displayedWorkspaces],
-  );
+  const projectWorkspaces = useMemo(() => {
+    const nonLive = displayedWorkspaces.filter(
+      (entry) => entry.kind !== 'live',
+    );
+    const pinned = nonLive.filter((entry) => entry.isPinned);
+    const unpinned = nonLive.filter((entry) => !entry.isPinned);
+    pinned.sort((a, b) => {
+      const aTime = a.pinnedAt ? new Date(a.pinnedAt).getTime() : 0;
+      const bTime = b.pinnedAt ? new Date(b.pinnedAt).getTime() : 0;
+      return bTime - aTime;
+    });
+    return [...pinned, ...unpinned];
+  }, [displayedWorkspaces]);
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;
@@ -3578,6 +3587,29 @@ export function WebShellSidebar({
       setSessionBusy,
       t,
     ],
+  );
+
+  const handleToggleWorkspacePin = useCallback(
+    (workspaceCapability: DaemonWorkspaceCapability) => {
+      const targetPinned = !workspaceCapability.isPinned;
+      void (async () => {
+        try {
+          await workspaceActions.updateWorkspacePin(
+            workspaceCapability.id,
+            targetPinned,
+          );
+        } catch (error) {
+          onError(error, t('sidebar.pinWorkspaceFailed'));
+          return;
+        }
+        try {
+          await workspace.refreshCapabilities?.();
+        } catch {
+          // Reconciled by the next capabilities refresh.
+        }
+      })();
+    },
+    [workspaceActions, workspace, onError, t],
   );
 
   const handleArchive = useCallback(
@@ -6230,7 +6262,22 @@ export function WebShellSidebar({
                                   ws.primary &&
                                   ws.trusted &&
                                   Boolean(onOpenWorkspaceManagement);
+                                // Gate pin on: not primary, has registration IDs (stored in registry),
+                                // workspace_pinning feature advertised, and not locked.
+                                const canPin =
+                                  !ws.primary &&
+                                  ws.registrationIds !== undefined &&
+                                  ws.registrationIds.length > 0 &&
+                                  workspace.capabilities?.features.includes(
+                                    'workspace_pinning',
+                                  ) === true;
                                 const menuActions: WorkspaceMenuActions = {
+                                  ...(canPin
+                                    ? {
+                                        togglePin: () =>
+                                          handleToggleWorkspacePin(ws),
+                                      }
+                                    : {}),
                                   ...(canRename
                                     ? {
                                         rename: () =>
