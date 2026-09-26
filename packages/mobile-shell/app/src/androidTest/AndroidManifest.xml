@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission
+        android:name="com.qwen.mobileshell.test.READ_PICKER"
+        android:protectionLevel="signature" />
+    <application>
+        <provider
+            android:name="com.qwen.mobileshell.FilePickerFixtureProvider"
+            android:authorities="com.qwen.mobileshell.test.picker"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:readPermission="com.qwen.mobileshell.test.READ_PICKER"
+            android:process=":picker" />
+    </application>
+</manifest>

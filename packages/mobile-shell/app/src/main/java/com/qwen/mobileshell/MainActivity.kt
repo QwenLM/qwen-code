@@ -3,6 +3,7 @@ package com.qwen.mobileshell
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -11,6 +12,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.JsResult
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -25,6 +27,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.ProfileStore
@@ -40,9 +43,14 @@ class MainActivity : AppCompatActivity() {
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
     private var connectionAttempt = 0
+    private val filePicker: NativeFilePicker by lazy { NativeFilePicker(this) { filePickerLauncher.launch(it) } }
+    private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        filePicker.result(it.resultCode, it.data)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        filePicker.restoreAwaitingResult(savedInstanceState?.getBoolean("file-picker-in-flight") ?: false)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val view = webView
@@ -260,6 +268,11 @@ class MainActivity : AppCompatActivity() {
             displayZoomControls = false
         }
         view.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean =
+                filePicker.open(params, {
+                    view === webView && view.parent != null && OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())
+                }, callback)
+
             override fun onJsConfirm(view: WebView, url: String, message: String, result: JsResult): Boolean {
                 if (view !== webView || !OriginPolicy.isSameOrigin(profile.origin, url)) {
                     result.cancel()
@@ -280,6 +293,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                if (view === webView) filePicker.cancel()
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (view !== webView) return true
                 if (OriginPolicy.isSameOrigin(profile.origin, request.url.toString())) return false
@@ -321,6 +338,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
+        filePicker.cancel()
         cancelDialog()
         (view.parent as? ViewGroup)?.removeView(view)
         showMessage(getString(R.string.connection_failed), getString(R.string.connection_failed_hint)) {
@@ -372,6 +390,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun destroyConnection() {
         connectionAttempt++
+        filePicker.cancel()
         cancelDialog()
         val previous = webView
         webView = null
@@ -384,5 +403,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         destroyConnection()
         super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("file-picker-in-flight", filePicker.awaitingResult)
+        super.onSaveInstanceState(outState)
     }
 }
