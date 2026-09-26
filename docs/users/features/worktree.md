@@ -188,13 +188,13 @@ Two constraints:
 
 Ephemeral agent worktrees that survived a crash or `--no-cleanup` shutdown are reaped on every CLI startup, with conservative fail-closed rules:
 
-| Guard                                  | Behavior                                       |
-| -------------------------------------- | ---------------------------------------------- |
-| Slug must match `agent-<7hex>` pattern | Named worktrees you created are never touched. |
-| Directory `mtime` > 30 days            | Newer entries are skipped.                     |
-| Any uncommitted tracked change         | Skip the entry (don't delete).                 |
-| Any commit not reachable from a remote | Skip the entry (don't delete).                 |
-| Any error reading git state            | Skip the entry (don't delete).                 |
+| Guard                                        | Behavior                                       |
+| -------------------------------------------- | ---------------------------------------------- |
+| Slug must match `agent-<7hex>` pattern       | Named worktrees you created are never touched. |
+| Directory `mtime` > 30 days                  | Newer entries are skipped.                     |
+| Any uncommitted change, tracked or untracked | Skip the entry (don't delete).                 |
+| Any commit not reachable from a remote       | Skip the entry (don't delete).                 |
+| Any error reading git state                  | Skip the entry (don't delete).                 |
 
 Named user worktrees (`enter_worktree` slugs) are **never** auto-cleaned — you keep them around until you ask to remove them.
 

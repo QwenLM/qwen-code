@@ -225,15 +225,18 @@ describe('a planted git program reaches no automatic git call', () => {
     'the stale-worktree cleanup probe does not run %s',
     async (plant) => {
       const { repo, fired } = planted(plant);
-      // `hasTrackedChanges` fail-closes to `true`, so asserting only the dirty
-      // answer cannot tell a real status read from a swallowed git error. Read
-      // the clean tree first: only a successful `status` can return `false`.
+      // `hasUncommittedChanges` fail-closes to `true`, so asserting only the
+      // dirty answer cannot tell a real status read from a swallowed git
+      // error. Read the clean tree first: only a successful `status` can
+      // return `false`.
       writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(
+      expect(await worktreeCleanupInternals.hasUncommittedChanges(repo)).toBe(
         false,
       );
       writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(true);
+      expect(await worktreeCleanupInternals.hasUncommittedChanges(repo)).toBe(
+        true,
+      );
       expect(fired()).toBe(false);
     },
     PLANT_TIMEOUT_MS,

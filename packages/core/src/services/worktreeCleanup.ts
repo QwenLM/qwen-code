@@ -21,10 +21,16 @@ const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
  *
  * Currently only the `agent-<7hex>` shape produced by
  * `AgentTool isolation:'worktree'` qualifies. User-named worktrees created
- * via `EnterWorktreeTool` are NEVER swept — they are managed manually via
- * `ExitWorktreeTool`, and `validateUserWorktreeSlug` reserves the
- * `agent-` prefix so a user-named slug can never accidentally match
- * here.
+ * via `EnterWorktreeTool` are managed manually via `ExitWorktreeTool`, and
+ * `validateUserWorktreeSlug` reserves the `agent-` prefix — except for the
+ * exact `agent-<7hex>` shape, which is allowed through so `AgentTool`
+ * isolation can share the same `createUserWorktree` path. A user can
+ * therefore still pick that exact shape explicitly, and on disk such a
+ * worktree is indistinguishable from an ephemeral agent one (no marker
+ * records which path created it). That is why the dirty check below must
+ * treat ANY content — including untracked files — as a reason to keep the
+ * worktree: name-shape matching alone cannot protect a user-named
+ * `agent-<7hex>` worktree from being swept (issue #12735).
  *
  * Mirrors claude-code's `EPHEMERAL_WORKTREE_PATTERNS` in
  * `utils/worktree.ts`, restricted to the patterns qwen-code actually emits.
@@ -49,7 +55,7 @@ function isEphemeralSlug(slug: string): boolean {
  * Safety guarantees (fail-closed):
  * - Only touches slugs matching {@link EPHEMERAL_WORKTREE_PATTERNS}.
  * - Skips entries newer than {@link STALE_WORKTREE_CUTOFF_MS} (default 30 days).
- * - Skips entries with any uncommitted tracked changes.
+ * - Skips entries with any uncommitted changes, tracked or untracked.
  * - Skips entries with commits not reachable from the upstream remote.
  * - Any error reading git status / log → skip the entry (don't delete).
  *
@@ -116,7 +122,7 @@ export async function cleanupStaleAgentWorktrees(
     // Run both checks concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      hasTrackedChanges(worktreePath),
+      hasUncommittedChanges(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) continue;
@@ -153,26 +159,35 @@ export async function cleanupStaleAgentWorktrees(
   return removed;
 }
 
-async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
+async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
   try {
     const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath);
-    // `git status --porcelain --untracked-files=no` lists every tracked
-    // change (staged, unstaged, conflicted — `UU` lines) and skips the
-    // untracked-file scan that simple-git's `status()` runs
-    // unconditionally. Untracked files in a long-dead agent worktree
-    // are typically build artifacts, not user work — and the
-    // untracked walk is the slowest part of `git status` on large
-    // repos. The previous implementation manually enumerated
+    // `git status --porcelain --untracked-files=normal` lists every
+    // tracked change (staged, unstaged, conflicted — `UU` lines) AND
+    // every untracked file not covered by an ignore rule. Untracked
+    // files MUST be visible here: `validateUserWorktreeSlug` lets a
+    // user claim the exact `agent-<7hex>` shape, so the sweep cannot
+    // tell a user-named worktree from an ephemeral agent one by name —
+    // and the removal path (`git worktree remove --force`) destroys
+    // untracked files unrecoverably (issue #12735). This also matches
+    // the dirty guard `exit_worktree action="remove"` has always
+    // applied. Ignored files (build artifacts, `node_modules`) still
+    // don't block the sweep, and neither does the `.qwen-session`
+    // marker — `writeWorktreeSessionMarker` excludes it via
+    // `.git/info/exclude`. The untracked walk costs one extra scan per
+    // already-stale candidate at startup; correctness wins over that
+    // micro-optimisation. The previous `--untracked-files=no` form
+    // made a worktree holding only untracked user files look "clean",
+    // and the implementation before it manually enumerated
     // `status.staged/modified/...` which silently missed
     // `conflicted[]` (mutually exclusive with the others in
-    // simple-git), so a worktree mid-merge looked "clean" and would
-    // be swept.
+    // simple-git), so a worktree mid-merge looked "clean" too.
     const out = await wtGit.raw([
       '--no-optional-locks',
       'status',
       '--porcelain',
-      '--untracked-files=no',
+      '--untracked-files=normal',
     ]);
     return out.trim().length > 0;
   } catch (error) {
@@ -180,10 +195,10 @@ async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
     // unmounted filesystem leaves a breadcrumb instead of being
     // indistinguishable from "has real changes".
     debugLogger.warn(
-      `hasTrackedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
+      `hasUncommittedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
     );
     return true;
   }
 }
 
-export const __test__ = { isEphemeralSlug, hasTrackedChanges };
+export const __test__ = { isEphemeralSlug, hasUncommittedChanges };
