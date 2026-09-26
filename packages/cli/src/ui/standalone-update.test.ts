@@ -1050,6 +1050,30 @@ describe('standalone-update', () => {
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
     });
+
+    it('fails closed when the deferred bat PID cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      // Same fixture as the dead-bat case above; only the probe's answer
+      // differs. EPERM — an elevated bat seen from an unelevated shell — means
+      // the process exists, so it is not proof of death and the staged swap
+      // must survive rather than be deleted mid-update.
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+          'A previous update is still being applied',
+        );
+        expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+        expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+      } finally {
+        kill.mockRestore();
+      }
+    });
   });
 
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
