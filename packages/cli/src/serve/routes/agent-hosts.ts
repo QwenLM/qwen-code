@@ -336,10 +336,18 @@ export function registerAgentHostTransportRoutes(
       try {
         const deadline = Date.now() + waitMs;
         for (;;) {
+          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
+            res.status(404).json({ error: 'Workspace not found.' });
+            return;
+          }
           const assignment = await pickupRunForHost(
             runtime.workspaceCwd,
             hostId,
           );
+          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
+            res.status(404).json({ error: 'Workspace not found.' });
+            return;
+          }
           if (assignment) {
             res.json({ assignment });
             return;

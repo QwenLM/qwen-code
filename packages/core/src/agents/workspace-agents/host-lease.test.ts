@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
+import { createAssignedThread, postMessage } from './thread-actions.js';
 import {
   AGENT_PROGRAM_UNAVAILABLE,
   DEFAULT_RUN_LEASE_MS,
@@ -71,6 +72,7 @@ async function placeAgent(hostIds: string[], provider?: AgentProgram) {
     },
   };
   await updateWorkspaceAgents(PROJECT_ROOT, () => [agent]);
+  return agent;
 }
 
 function queuedRun(): ThreadRun {
@@ -99,6 +101,49 @@ async function seedQueued(): Promise<string> {
 }
 
 describe('pickupRunForHost', () => {
+  it('consumes follow-ups included when replaying a held lease', async () => {
+    const mine = await host('mine', ['qwen']);
+    const agent = await placeAgent([mine]);
+    const { thread: created } = await createAssignedThread(PROJECT_ROOT, {
+      title: 'Inspect both requests',
+      assignee: agent,
+      message: 'Inspect the initial request.',
+    });
+    const threadId = created.id;
+    const first = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const followup = await postMessage(PROJECT_ROOT, threadId, {
+      from: 'user',
+      text: '@remote Also inspect the follow-up.',
+    });
+    expect(followup.outcomes[0]?.decision.kind).toBe('coalesce');
+
+    const replay = (await pickupRunForHost(PROJECT_ROOT, mine, T0 + 1))!;
+    expect(replay.lease.leaseId).toBe(first.lease.leaseId);
+    expect(replay.prompt).toContain('Also inspect the follow-up.');
+    expect(
+      await applyHostRunResult(
+        PROJECT_ROOT,
+        {
+          threadId,
+          runId: replay.runId,
+          hostId: mine,
+          leaseId: replay.lease.leaseId,
+          attempt: replay.attempt,
+          status: 'completed',
+          close: { kind: 'review', summary: 'Both requests inspected.' },
+        },
+        T0 + 2,
+      ),
+    ).toMatchObject({ ok: true });
+
+    const thread = (await readThread(PROJECT_ROOT, threadId))!;
+    expect(thread.runs).toHaveLength(1);
+    expect(thread.runs[0]?.consumedMessageIds).toContain(followup.message.id);
+    expect(thread.deliveryByAgent['ag_remote']?.committedThroughSequence).toBe(
+      replay.contextThroughSequence,
+    );
+  });
+
   it('leases a queued run to its host only, starting a new attempt', async () => {
     const mine = await host('mine', ['qwen']);
     const other = await host('other', ['qwen']);
