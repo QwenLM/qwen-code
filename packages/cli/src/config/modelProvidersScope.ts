@@ -12,7 +12,8 @@ export function hasOwnModelProviders(settingsObj: unknown): boolean {
   }
   const obj = settingsObj as Record<string, unknown>;
   // Treat an explicitly configured empty object (modelProviders: {}) as "owned"
-  // by this scope, which is important when mergeStrategy is REPLACE.
+  // by this scope: ownership is keyed on presence of the setting, not on
+  // whether it has any entries.
   return Object.prototype.hasOwnProperty.call(obj, 'modelProviders');
 }
 
