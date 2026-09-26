@@ -62,9 +62,7 @@ describe('main CI failure issue workflow', () => {
   it('creates an issue that the existing autofix worker can pick up', () => {
     expect(workflow).toContain("issues: 'write'");
     expect(workflow).toContain('CI_DEV_BOT_PAT');
-    expect(workflow).toContain(
-      'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
-    );
+    expect(workflow).toContain("AUTOFIX_BOT: 'qwen-code-dev-bot'");
     expect(workflow).toContain("BUG_LABEL: 'type/bug'");
     expect(workflow).toContain(
       "READY_FOR_AGENT_LABEL: 'status/ready-for-agent'",
@@ -229,5 +227,48 @@ describe('main CI failure issue workflow', () => {
       issues: 'read',
     });
     expect(privilegedJobs[0][1].needs).toBe('analyze');
+  });
+
+  it('binds the marker lookup to bot-authored, marker-carrying issues', () => {
+    // The workflow bridge is a static, published, human-writable token, so
+    // the lookup cannot grant on marker shape alone (R1-4): the search is
+    // scoped to the bot's own issues and pinned to the newest carrier
+    // (R1-5), the downloaded body must actually carry the marker before
+    // `issue_number` is emitted, and the privileged job re-checks authorship
+    // before overwriting any body with machine output.
+    const planStep = jobs.analyze.steps.find((step) => step.id === 'plan');
+    const plan = oneLine(planStep.run);
+    expect(planStep.env.AUTOFIX_BOT).toBe('qwen-code-dev-bot');
+    expect(plan).toContain(
+      '--search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc"',
+    );
+    expect(plan).toContain("--jq '.[].number'");
+    expect(plan).toContain(
+      'if ! gh issue list --repo "${REPO}" --state open --search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc" --json number --jq \'.[].number\' > "${candidate_list}"; then echo "::error::Could not search issues while checking ${marker}" rm -f "${candidate_list}" exit 1 fi',
+    );
+    expect(plan).toContain('done < "${candidate_list}"');
+    expect(plan).toContain('rm -f "${candidate_list}"');
+    expect(plan).not.toContain('--jq \'.[0].number // ""\'');
+    expect(plan).toContain(
+      'echo "Issue #${candidate} did not carry ${marker}; continuing search."',
+    );
+    expect(plan).toContain(
+      'if ! gh issue view "${candidate}" --repo "${REPO}" --json body --jq \'.body\' > "${candidate_body}"; then echo "::error::Could not read issue #${candidate} while checking ${marker}" rm -f "${candidate_list}" exit 1 fi',
+    );
+    expect(plan).not.toContain(
+      'echo "::warning::Could not read issue #${candidate} while checking ${marker}"',
+    );
+    expect(plan).toContain('break 2');
+    const verify = plan.indexOf(
+      'grep -qxF "<!-- ${marker} -->" "${candidate_body}"',
+    );
+    const emit = plan.indexOf('issue_number=${existing_issue}');
+    expect(verify).toBeGreaterThanOrEqual(0);
+    expect(emit).toBeGreaterThan(verify);
+
+    const fileIssue = oneLine(jobs.file_issue.steps.at(-1).run);
+    expect(fileIssue).toContain("--jq '.author.login'");
+    expect(fileIssue).toContain('!= "${AUTOFIX_BOT}"');
+    expect(fileIssue).toContain('gh issue create');
   });
 });
