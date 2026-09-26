@@ -112,6 +112,12 @@ import {
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
+import {
+  notifyMemoryEnabledChange,
+  notifyMemoryFileChange,
+  registerMemoryChangedListener,
+  type MemoryChangedNotice,
+} from '../memory/memory-file-change.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
@@ -204,6 +210,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
+  ToolRegistryMock.prototype.stop = vi.fn().mockResolvedValue(undefined);
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
@@ -1278,6 +1285,131 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getMessageBus()).toBeUndefined();
       expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('memory change listener registration', () => {
+    it('releases its memory listener after ordinary shutdown', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hooks = config.getHookSystem()!;
+      vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+      const fire = vi.fn().mockResolvedValue({});
+      hooks.fireMemoryChangedEvent = fire;
+      const notify = () =>
+        notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+      try {
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+        await config.shutdown({ shutdownTelemetry: false });
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+      }
+    });
+
+    it('does not register a memory listener after shutdown during hook initialization', async () => {
+      const config = new Config({ ...baseParams });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(HookSystem.prototype.initialize).mockReturnValueOnce(gate);
+      const internal = config as unknown as {
+        shutdownResourcesOnce: () => Promise<void>;
+      };
+      const cleanup = vi.spyOn(internal, 'shutdownResourcesOnce');
+      const initialize = config.initialize();
+      try {
+        await vi.waitFor(() => expect(config.getHookSystem()).toBeDefined());
+        await config.shutdown({ shutdownTelemetry: false });
+        release();
+        await initialize;
+        await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+        await cleanup.mock.results[0].value;
+
+        const hooks = config.getHookSystem()!;
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+        const fire = vi.fn().mockResolvedValue({});
+        hooks.fireMemoryChangedEvent = fire;
+        expect(config.getMemoryHookDeliveryId()).toBeDefined();
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        expect(fire).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await initialize;
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(HookSystem.prototype.hasHooksForEvent).mockReturnValue(false);
+        cleanup.mockRestore();
+      }
+    });
+
+    it('assigns a hooks-disabled Config a delivery id that matches no registration', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      await config.initialize();
+
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(
+        config.getProjectRoot(),
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        // Hooks are disabled for this Config, so its id is registered
+        // nowhere and must not fall through to another session's listener.
+        expect(seen).toEqual([]);
+        // Control: an id-less toggle still reaches the newest registration.
+        await notifyMemoryEnabledChange(config.getProjectRoot(), true);
+        expect(seen).toHaveLength(1);
+      } finally {
+        unregister();
+      }
+    });
+
+    it('forwards the caller abort signal to the MemoryChanged hook firing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hookSystem = config.getHookSystem();
+      expect(hookSystem).toBeDefined();
+      vi.mocked(hookSystem!.hasHooksForEvent).mockReturnValue(true);
+      const fireMemoryChangedEvent = vi.fn().mockResolvedValue({});
+      (hookSystem as unknown as Record<string, unknown>)[
+        'fireMemoryChangedEvent'
+      ] = fireMemoryChangedEvent;
+
+      const signal = AbortSignal.abort();
+      await notifyMemoryFileChange(
+        path.join(config.getProjectRoot(), '.qwen', 'memory', 'MEMORY.md'),
+        config.getProjectRoot(),
+        'update',
+        config.getMemoryHookDeliveryId(),
+        signal,
+      );
+
+      // The caller's signal must reach the hook firing unchanged: an aborted
+      // caller (a finished /forget, a torn-down session) must not run the
+      // hook to completion — executeHook returns 'cancelled' for an
+      // already-aborted signal (covered in hookRunner tests).
+      expect(fireMemoryChangedEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ scope: 'project', operation: 'update' }),
+        signal,
+      );
     });
   });
 
@@ -15511,7 +15643,15 @@ describe('Model Switching and Config Updates', () => {
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
               eventName,
-              input: {},
+              input:
+                eventName === HookEventName.MemoryChanged
+                  ? {
+                      memory_scope: 'user',
+                      operation: 'update',
+                      paths: ['/memories/a.md'],
+                      relative_paths: ['a.md'],
+                    }
+                  : {},
             },
             MessageBusType.HOOK_EXECUTION_RESPONSE,
           );
@@ -15549,6 +15689,19 @@ describe('Model Switching and Config Updates', () => {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
     };
+
+    it('rejects malformed MemoryChanged payloads without firing hooks', async () => {
+      const fire = vi.fn().mockResolvedValue(undefined);
+      const response = await dispatch(
+        'fireMemoryChangedEvent',
+        fire,
+        'MemoryChanged',
+        { operation: 'Update' },
+        new AbortController().signal,
+      );
+      expect(fire).not.toHaveBeenCalled();
+      expect(response.success).toBe(false);
+    });
 
     // Events whose fire method returns the hook output itself, or undefined
     // when no hook is configured.

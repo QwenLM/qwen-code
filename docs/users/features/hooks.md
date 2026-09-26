@@ -353,52 +353,54 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                 | Triggered When                                                         | Matcher Target                                                   |
-| :-------------------- | :--------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `PreToolUse`          | Before tool execution                                                  | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)   |
-| `PostToolUse`         | After successful tool execution                                        | Tool id                                                          |
-| `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                          |
-| `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                              |
-| `UserPromptSubmit`    | Before supported model invocations                                     | None                                                             |
-| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                            |
-| `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                 |
-| `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)            |
-| `SessionDelete`       | After an explicitly selected session is deleted                        | None                                                             |
-| `MessageDisplay`      | Repeatedly, as the reply streams                                       | None (always fires)                                              |
-| `Stop`                | Before the turn ends                                                   | None (always fires)                                              |
-| `StopFailure`         | When an API error or loop detection ends the turn, instead of `Stop`   | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.) |
-| `SubagentStart`       | When subagent starts                                                   | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                    |
-| `SubagentStop`        | When subagent stops                                                    | Agent type                                                       |
-| `PreCompact`          | Before conversation compaction                                         | Trigger (`manual`, `auto`)                                       |
-| `PostCompact`         | After conversation compaction succeeds                                 | Trigger (`manual`, `auto`)                                       |
-| `Notification`        | When notifications are sent                                            | Type (`permission_prompt`, `idle_prompt`, `auth_success`)        |
-| `PermissionRequest`   | When permission dialog is shown                                        | Tool id                                                          |
-| `PermissionDenied`    | When AUTO-mode classification denies a tool call                       | Tool id                                                          |
-| `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
-| `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
-| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
+| Event                 | Triggered When                                                         | Matcher Target                                                       |
+| :-------------------- | :--------------------------------------------------------------------- | :------------------------------------------------------------------- |
+| `PreToolUse`          | Before tool execution                                                  | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.)       |
+| `PostToolUse`         | After successful tool execution                                        | Tool id                                                              |
+| `PostToolUseFailure`  | After tool execution fails                                             | Tool id                                                              |
+| `PostToolBatch`       | Once after every tool call in a batch has resolved                     | None (always fires)                                                  |
+| `UserPromptSubmit`    | Before supported model invocations                                     | None                                                                 |
+| `UserPromptExpansion` | After a slash command expands into a prompt, before the prompt is sent | Command name, without the leading `/`                                |
+| `SessionStart`        | When session starts or resumes                                         | Source (`startup`, `resume`, `clear`, `compact`)                     |
+| `SessionEnd`          | When session ends                                                      | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)                |
+| `SessionDelete`       | After an explicitly selected session is deleted                        | None                                                                 |
+| `MessageDisplay`      | Repeatedly, as the reply streams                                       | None (always fires)                                                  |
+| `Stop`                | Before the turn ends                                                   | None (always fires)                                                  |
+| `StopFailure`         | When an API error or loop detection ends the turn, instead of `Stop`   | Error type (`rate_limit`, `server_error`, `loop_detected`, etc.)     |
+| `SubagentStart`       | When subagent starts                                                   | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                        |
+| `SubagentStop`        | When subagent stops                                                    | Agent type                                                           |
+| `PreCompact`          | Before conversation compaction                                         | Trigger (`manual`, `auto`)                                           |
+| `PostCompact`         | After conversation compaction succeeds                                 | Trigger (`manual`, `auto`)                                           |
+| `Notification`        | When notifications are sent                                            | Type (`permission_prompt`, `idle_prompt`, `auth_success`)            |
+| `PermissionRequest`   | When permission dialog is shown                                        | Tool id                                                              |
+| `PermissionDenied`    | When AUTO-mode classification denies a tool call                       | Tool id                                                              |
+| `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                                  |
+| `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                                  |
+| `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                         |
+| `MemoryChanged`       | After managed memory documents change, or memory is turned on or off   | Relative path inside the memory root. The on/off toggle always fires |
 
 ### Matcher Patterns
 
 `matcher` is a regular expression used to filter trigger conditions.
 
-| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                                                                                                         |
-| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc.                                                                                          |
-| Tool Events         | `PostToolBatch`                                                                            | ❌ No           | N/A                                                                                                                                                    |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                                                                                                                   |
-| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`                                                                                                        |
-| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.                                                                                                   |
-| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                                                                                                                    |
-| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`                                                                                               |
-| Compact Events      | `PreCompact`, `PostCompact`                                                                | ✅ Regex        | Trigger: `manual`, `auto`                                                                                                                              |
-| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                                                                                                                    |
-| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                                                                                                                    |
-| Prompt Events       | `UserPromptExpansion`                                                                      | ✅ Regex        | Command name without the leading `/`, for example `init`                                                                                               |
-| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                                                                                                                    |
-| Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
-| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
-| Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
+| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                                                                                                                |
+| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc.                                                                                                 |
+| Tool Events         | `PostToolBatch`                                                                            | ❌ No           | N/A                                                                                                                                                           |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                                                                                                                          |
+| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`                                                                                                               |
+| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.                                                                                                          |
+| Session Events      | `SessionDelete`                                                                            | ❌ No           | N/A                                                                                                                                                           |
+| Notification Events | `Notification`                                                                             | ✅ Regex        | Type: `permission_prompt`, `idle_prompt`, `auth_success`                                                                                                      |
+| Compact Events      | `PreCompact`, `PostCompact`                                                                | ✅ Regex        | Trigger: `manual`, `auto`                                                                                                                                     |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                                                                                                                           |
+| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                                                                                                                           |
+| Prompt Events       | `UserPromptExpansion`                                                                      | ✅ Regex        | Command name without the leading `/`, for example `init`                                                                                                      |
+| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                                                                                                                           |
+| Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown`        |
+| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                           |
+| Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                                  |
+| Memory Events       | `MemoryChanged`                                                                            | ✅ Regex        | Relative path inside the memory root, for example `user/role.md` or `MEMORY.md`. The on/off toggle has no path and is delivered to every `MemoryChanged` hook |
 
 **Matcher Syntax:**
 
@@ -1469,6 +1471,57 @@ It fires when the session starts, when context files are reloaded during the ses
 **Output Options**:
 
 - **None** - InstructionsLoaded output and exit codes are ignored.
+
+#### MemoryChanged
+
+**Purpose**: Runs after a managed-memory document is created, updated, or deleted, and when managed auto-memory is turned on or off. Use it to mirror those documents somewhere else. The change is already on disk. Hook output and a hook failure do not roll it back. Read the file at `paths` yourself; the event does not include the file body. On `delete`, the file is already gone, so use `relative_paths` as the stable identity.
+
+It covers `write_file` and `edit` inside a managed memory root, `/forget`, and `MEMORY.md` index rebuilds. It does not cover scheduling files outside `memory/` (`meta.json`, `extract-cursor.json`, `consolidation.lock`).
+
+**Matcher**: Matches against each `relative_paths` entry. For example, `"matcher": "MEMORY\\.md$"` fires for index rebuilds. The on/off toggle has no path, so every `MemoryChanged` hook receives it. Ignore that event unless `enabled` is present.
+
+**Event-specific fields**:
+
+```json
+{
+  "paths": ["/abs/memory/user/role.md"],
+  "relative_paths": ["user/role.md"],
+  "memory_scope": "user",
+  "operation": "update"
+}
+```
+
+```json
+{
+  "paths": ["/abs/project/memory/a.md", "/abs/project/memory/b.md"],
+  "relative_paths": ["a.md", "b.md"],
+  "memory_scope": "project",
+  "workspace": "/abs/project",
+  "operation": "update"
+}
+```
+
+```json
+{
+  "paths": [],
+  "relative_paths": [],
+  "workspace": "/abs/project",
+  "enabled": false
+}
+```
+
+- `paths`: absolute paths of the documents in this change. One file is `[path]`. Files changed together are one array. `paths` is `[]` when memory is toggled.
+- `relative_paths`: the same documents, relative to the memory root and using `/`. This is the stable name of the document. It stays aligned with `paths`.
+- `memory_scope`: `user`, `project`, or `team`. Present for document changes. Omitted when memory is toggled.
+- `operation`: `create`, `update`, or `delete`. Present for document changes. Omitted when memory is toggled.
+- `workspace`: absolute workspace directory. Present for project and team memory, and for the on/off toggle. **Omitted for user-level memory.**
+- `enabled`: present only when managed auto-memory is turned on or off.
+
+`cwd` on the base input is the working directory. It is not the workspace. Use `workspace` when it is present.
+
+**Output Options**:
+
+- **None** - MemoryChanged output and exit codes are ignored.
 
 ## Hook Configuration
 

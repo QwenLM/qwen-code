@@ -31,6 +31,7 @@ import {
   scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
+import { notifyMemoryFileChange } from './memory-file-change.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 
@@ -478,7 +479,7 @@ export async function forgetManagedAutoMemoryMatches(
   projectRoot: string,
   matches: AutoMemoryForgetMatch[],
   now = new Date(),
-  options: { abortSignal?: AbortSignal } = {},
+  options: { abortSignal?: AbortSignal; memoryHookDeliveryId?: symbol } = {},
 ): Promise<AutoMemoryForgetResult> {
   options.abortSignal?.throwIfAborted();
   if (matches.length === 0) {
@@ -502,6 +503,30 @@ export async function forgetManagedAutoMemoryMatches(
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
   const touchedScopes = new Set<AutoMemoryStorageScope>();
+  const deletedPaths: string[] = [];
+  const updatedPaths: string[] = [];
+  const flushMemoryChanges = async () => {
+    if (deletedPaths.length > 0) {
+      const paths = deletedPaths.splice(0, deletedPaths.length);
+      await notifyMemoryFileChange(
+        paths,
+        projectRoot,
+        'delete',
+        options.memoryHookDeliveryId,
+        options.abortSignal,
+      );
+    }
+    if (updatedPaths.length > 0) {
+      const paths = updatedPaths.splice(0, updatedPaths.length);
+      await notifyMemoryFileChange(
+        paths,
+        projectRoot,
+        'update',
+        options.memoryHookDeliveryId,
+        options.abortSignal,
+      );
+    }
+  };
 
   // Group matches by file so we can do per-entry removal rather than
   // blindly deleting entire files (which would destroy unrelated entries in
@@ -524,6 +549,7 @@ export async function forgetManagedAutoMemoryMatches(
         // No frontmatter — delete the whole file.
         options.abortSignal?.throwIfAborted();
         await fs.unlink(filePath);
+        deletedPaths.push(filePath);
         removedEntries.push(...fileMatches);
         for (const m of fileMatches) touchedTopics.add(m.topic);
         touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
@@ -576,6 +602,7 @@ export async function forgetManagedAutoMemoryMatches(
       if (kept.length === 0) {
         options.abortSignal?.throwIfAborted();
         await fs.unlink(filePath);
+        deletedPaths.push(filePath);
       } else {
         const heading = getAutoMemoryBodyHeading(rawBody);
         const newBody = renderAutoMemoryBody(heading, kept);
@@ -585,6 +612,7 @@ export async function forgetManagedAutoMemoryMatches(
           `---\n${frontmatter}\n---\n\n${newBody}\n`,
           { encoding: 'utf-8' },
         );
+        updatedPaths.push(filePath);
       }
 
       removedEntries.push(...removedFileEntries);
@@ -593,7 +621,10 @@ export async function forgetManagedAutoMemoryMatches(
       }
       touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
     } catch (err) {
-      if (options.abortSignal?.aborted) throw err;
+      if (options.abortSignal?.aborted) {
+        await flushMemoryChanges();
+        throw err;
+      }
       debugLogger.warn(
         'Managed auto-memory forget skipped file after apply error:',
         { filePath },
@@ -601,13 +632,17 @@ export async function forgetManagedAutoMemoryMatches(
       );
     }
   }
+  await flushMemoryChanges();
 
   if (touchedScopes.has('project')) {
     try {
       options.abortSignal?.throwIfAborted();
       await bumpMetadata(projectRoot, now);
       options.abortSignal?.throwIfAborted();
-      await rebuildManagedAutoMemoryIndex(projectRoot);
+      await rebuildManagedAutoMemoryIndex(
+        projectRoot,
+        options.memoryHookDeliveryId,
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
@@ -619,7 +654,10 @@ export async function forgetManagedAutoMemoryMatches(
   if (touchedScopes.has('user')) {
     try {
       options.abortSignal?.throwIfAborted();
-      await rebuildUserAutoMemoryIndex();
+      await rebuildUserAutoMemoryIndex(
+        projectRoot,
+        options.memoryHookDeliveryId,
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
@@ -676,7 +714,10 @@ export async function forgetManagedAutoMemoryEntries(
     projectRoot,
     selection.matches,
     now,
-    { abortSignal: options.abortSignal },
+    {
+      abortSignal: options.abortSignal,
+      memoryHookDeliveryId: options.config?.getMemoryHookDeliveryId?.(),
+    },
   );
   return { ...result, query: trimmedQuery };
 }

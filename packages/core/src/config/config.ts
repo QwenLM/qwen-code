@@ -340,6 +340,10 @@ import {
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
+  memoryChangedNoticeFromHookInput,
+  registerMemoryChangedListener,
+} from '../memory/memory-file-change.js';
+import {
   type AutoMemoryIndexRead,
   readAutoMemoryIndexWithStats,
   readUserAutoMemoryIndexWithStats,
@@ -3083,6 +3087,8 @@ export class Config {
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
+  private unregisterMemoryChanged?: () => void;
+  private memoryHookDeliveryId?: symbol;
   private messageBus?: MessageBus;
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
@@ -3945,9 +3951,30 @@ export class Config {
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
     recordStartupEvent('config_initialize_hooks_start');
+    // A Config whose hooks stay disabled registers no listener below. Its
+    // delivery id must still be defined — and match no registration — so a
+    // memory write from it can never fall through to another session's
+    // listener via the workspace fallback.
+    this.memoryHookDeliveryId = Symbol('memory-hooks-inactive');
     if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
+      // Best-effort shutdown can finish while hook initialization is pending.
+      if (!this.shutdownRequested) {
+        this.unregisterMemoryChanged?.();
+        const memoryHookRegistration = registerMemoryChangedListener(
+          this.getProjectRoot(),
+          async (change, signal) => {
+            const hookSystem = this.hookSystem;
+            if (!hookSystem?.hasHooksForEvent('MemoryChanged')) {
+              return;
+            }
+            await hookSystem.fireMemoryChangedEvent(change, signal);
+          },
+        );
+        this.memoryHookDeliveryId = memoryHookRegistration.id;
+        this.unregisterMemoryChanged = memoryHookRegistration;
+      }
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -4175,6 +4202,16 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'MemoryChanged': {
+                const notice = memoryChangedNoticeFromHookInput(input);
+                if (!notice) {
+                  throw new Error('Invalid MemoryChanged hook input');
+                }
+                result = (
+                  await hookSystem.fireMemoryChangedEvent(notice, signal)
+                ).finalOutput;
+                break;
+              }
               case 'InstructionsLoaded':
                 result = await hookSystem.fireInstructionsLoadedEvent(
                   (input['file_path'] as string) || '',
@@ -4949,8 +4986,10 @@ export class Config {
         //     it self-corrects on the next successful rebuild. Log and sync on.
         let teamRootSecurityBlocked = false;
         try {
-          teamAutoMemoryIndex =
-            await rebuildTeamAutoMemoryIndex(teamProjectRoot);
+          teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
+            teamProjectRoot,
+            { deliveryId: this.getMemoryHookDeliveryId(), signal },
+          );
         } catch (err) {
           if (err instanceof TeamMemoryRootSecurityError) {
             teamRootSecurityBlocked = true;
@@ -4984,6 +5023,7 @@ export class Config {
           if (syncResult?.pulled) {
             teamAutoMemoryIndex = await rebuildTeamAutoMemoryIndex(
               teamProjectRoot,
+              { deliveryId: this.getMemoryHookDeliveryId(), signal },
             ).catch(() => teamAutoMemoryIndex);
           }
         }
@@ -7139,6 +7179,8 @@ export class Config {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
+      this.unregisterMemoryChanged?.();
+      this.unregisterMemoryChanged = undefined;
       if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
@@ -9884,6 +9926,15 @@ export class Config {
   getHookSystem(): HookSystem | undefined {
     if (this.shellExecutionSandbox) return undefined;
     return this.hookSystem;
+  }
+
+  /**
+   * Id of this config's memory-change registration. Derived configs inherit
+   * the config that initialized hooks, so a forked memory agent still
+   * attributes the event to that session.
+   */
+  getMemoryHookDeliveryId(): symbol | undefined {
+    return this.memoryHookDeliveryId;
   }
 
   /**

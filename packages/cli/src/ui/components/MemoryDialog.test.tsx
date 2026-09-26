@@ -17,6 +17,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
 } from '@qwen-code/qwen-code-core';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import { MemoryDialog } from './MemoryDialog.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -37,6 +38,10 @@ vi.mock('../hooks/useLaunchEditor.js', () => ({
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core/memory/memory-file-change.js', () => ({
+  notifyMemoryEnabledChange: vi.fn(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -625,5 +630,107 @@ describe('MemoryDialog', () => {
     // Reopen: a fresh mount must read the persisted value, not a stale snapshot.
     const second = render(<MemoryDialog onClose={vi.fn()} />);
     expect(second.lastFrame()).toContain('Auto-skill: on');
+  });
+
+  it('does not notify when a higher scope masks the workspace write', () => {
+    // A System-scope (or untrusted-workspace) override keeps the merged value
+    // at true no matter what the Workspace write requests, so toggling must
+    // not announce a change that did not take effect.
+    const merged = {
+      memory: {
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: false,
+        enableAutoSkill: false,
+        autoSkillConfirm: true,
+      },
+    };
+    const setValue = vi.fn(); // writes the workspace layer only
+    mockedUseSettings.mockReturnValue({ setValue, merged } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+    expect(lastFrame()).toContain('Auto-memory: on');
+
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    // list ↑ autoSkillConfirm ↑ autoSkill ↑ autoDream ↑ autoMemory
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Auto-memory: on');
+
+    pressKey({ name: 'return' });
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'memory.enableManagedAutoMemory',
+      false,
+    );
+    expect(vi.mocked(notifyMemoryEnabledChange)).not.toHaveBeenCalled();
+    expect(lastFrame()).toContain('Auto-memory: on');
+  });
+
+  it('notifies the effective merged value when the toggle takes effect', () => {
+    const deliveryId = Symbol('dialog-registration');
+    mockedUseConfig.mockReturnValue({
+      getWorkingDir: vi.fn(() => '/tmp/project'),
+      getProjectRoot: vi.fn(() => '/tmp/project'),
+      getBareMode: vi.fn(() => false),
+      isSafeMode: vi.fn(() => false),
+      getManagedAutoMemoryEnabled: vi.fn(() => true),
+      getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
+      isManagedMemoryAvailable: vi.fn(() => true),
+      getMemoryHookDeliveryId: vi.fn(() => deliveryId),
+      setAutoSkillEnabled,
+    } as never);
+    // setValue writes through to the merged view, like the real
+    // LoadedSettings recompute.
+    const merged = {
+      memory: {
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: false,
+        enableAutoSkill: false,
+        autoSkillConfirm: true,
+      },
+    };
+    const setValue = vi.fn((_scope: unknown, key: string, value: boolean) => {
+      if (key === 'memory.enableManagedAutoMemory') {
+        merged.memory.enableManagedAutoMemory = value;
+      }
+    });
+    mockedUseSettings.mockReturnValue({ setValue, merged } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'return' });
+
+    expect(vi.mocked(notifyMemoryEnabledChange)).toHaveBeenCalledWith(
+      '/tmp/project',
+      false,
+      deliveryId,
+    );
+    expect(lastFrame()).toContain('Auto-memory: off');
   });
 });

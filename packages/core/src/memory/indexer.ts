@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { notifyMemoryFileChange } from './memory-file-change.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
   getAutoMemoryIndexPath,
@@ -235,15 +236,19 @@ async function readAutoMemoryMetadata(
 
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
+  deliveryId?: symbol,
 ): Promise<string> {
   const [docs, metadata] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
     readAutoMemoryMetadata(projectRoot),
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
-  await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
-    encoding: 'utf-8',
-  });
+  await writeMemoryIndex(
+    projectRoot,
+    getAutoMemoryIndexPath(projectRoot),
+    content,
+    { deliveryId },
+  );
   return content;
 }
 
@@ -252,11 +257,14 @@ export async function rebuildManagedAutoMemoryIndex(
  * Mirrors {@link rebuildManagedAutoMemoryIndex} but uses the global root
  * and skips metadata (user memory has no per-project state file).
  */
-export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+export async function rebuildUserAutoMemoryIndex(
+  projectRoot: string,
+  deliveryId?: symbol,
+): Promise<string> {
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
-    encoding: 'utf-8',
+  await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content, {
+    deliveryId,
   });
   return content;
 }
@@ -289,6 +297,7 @@ export class TeamMemoryRootSecurityError extends Error {
  */
 export async function rebuildTeamAutoMemoryIndex(
   projectRoot: string,
+  options: { deliveryId?: symbol; signal?: AbortSignal } = {},
 ): Promise<string | null> {
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   if (!existsSync(teamRoot)) {
@@ -338,17 +347,52 @@ export async function rebuildTeamAutoMemoryIndex(
   );
   const content = buildTeamAutoMemoryIndex(ordered);
   const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
-  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
-  // its mtime and produce no-op commits that ping-pong between collaborators.
-  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
-  if (existing === content) {
-    return content;
-  }
   // noFollow: never follow a symlink at MEMORY.md itself — replace the link with
   // the regular index instead of writing through it to an attacker path.
-  await atomicWriteFile(indexPath, content, {
-    encoding: 'utf-8',
+  await writeMemoryIndex(projectRoot, indexPath, content, {
     noFollow: true,
+    deliveryId: options.deliveryId,
+    signal: options.signal,
   });
   return content;
+}
+
+async function writeMemoryIndex(
+  projectRoot: string,
+  indexPath: string,
+  content: string,
+  options: {
+    noFollow?: boolean;
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> {
+  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would
+  // churn its mtime and, for the committed team index, produce no-op commits
+  // that ping-pong between collaborators. Only ENOENT means 'absent': an
+  // existing but unreadable index is still rewritten (rename needs only
+  // directory write permission) and announced as 'update', not 'create'.
+  const existing = await fs
+    .readFile(indexPath, 'utf-8')
+    .catch((err: unknown) =>
+      (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null,
+    );
+  if (existing === content) {
+    return;
+  }
+  await atomicWriteFile(indexPath, content, {
+    encoding: 'utf-8',
+    ...(options.noFollow ? { noFollow: true } : {}),
+  });
+  await notifyMemoryFileChange(
+    indexPath,
+    projectRoot,
+    // The scaffold plants an EMPTY index (createDefaultAutoMemoryIndex)
+    // without notifying, so '' is 'absent' for the label: the first notice a
+    // consumer receives for the index must not be an update for a document
+    // it was never told was created.
+    existing === undefined || existing === '' ? 'create' : 'update',
+    options.deliveryId,
+    options.signal,
+  );
 }

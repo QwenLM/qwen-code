@@ -10,7 +10,11 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
-import { getAutoMemoryExtractCursorPath } from './paths.js';
+import { getAutoMemoryExtractCursorPath, getAutoMemoryRoot } from './paths.js';
+import {
+  registerMemoryChangedListener,
+  type MemoryChangedNotice,
+} from './memory-file-change.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -750,5 +754,54 @@ describe('auto-memory extraction', () => {
 
       expect(result.cursor.processedOffset).toBe(1);
     });
+  });
+
+  it('does not attribute documents landed by the instruction refresh to the extract window', async () => {
+    // The refresh can pull team memory (syncTeamMemory). If it ran inside
+    // the coalesced window, collaborator documents landing between the
+    // snapshots would be reported as this session's own changes.
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'user-memory-base',
+    );
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicFile = path.join(memoryRoot, 'project', 'release.md');
+    const pulledFile = path.join(memoryRoot, 'project', 'pulled.md');
+    vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(async () => {
+      await fs.mkdir(path.dirname(topicFile), { recursive: true });
+      await fs.writeFile(topicFile, 'topic\n');
+      return {
+        touchedTopics: ['project'],
+        touchedProjectScope: true,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      };
+    });
+    vi.mocked(refreshMemoryInstruction).mockImplementation(async () => {
+      await fs.writeFile(pulledFile, 'pulled\n');
+    });
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      });
+    } finally {
+      unregister();
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    }
+    expect(refreshMemoryInstruction).toHaveBeenCalled();
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['project/release.md'],
+      }),
+    ]);
   });
 });

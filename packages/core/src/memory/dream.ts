@@ -10,6 +10,7 @@ import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import { withCoalescedMemoryChanges } from './memory-file-change.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   AUTO_MEMORY_TYPES,
@@ -79,16 +80,27 @@ export async function runManagedAutoMemoryDream(
     );
   }
 
-  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {
-    suppressChatRecording: options.suppressChatRecording,
-  });
-  // Cancel-aware ordering:
-  //   1. If aborted before this point, return the agent's partial result
-  //      WITHOUT rebuilding the index — index rebuild can be expensive
-  //      and re-running a cancelled dream cycle next time will rebuild
-  //      against the latest topic files anyway.
-  //   2. If still alive, rebuild the index (informational, powers
-  //      recall) — but only when topics actually changed.
+  const agentResult = await withCoalescedMemoryChanges(
+    projectRoot,
+    config.getMemoryHookDeliveryId?.(),
+    async () => {
+      const result = await runDreamByAgent(projectRoot, config, abortSignal, {
+        suppressChatRecording: options.suppressChatRecording,
+      });
+      // Cancel-aware ordering:
+      //   1. If aborted before this point, return the agent's partial result
+      //      WITHOUT rebuilding the index — index rebuild can be expensive
+      //      and re-running a cancelled dream cycle next time will rebuild
+      //      against the latest topic files anyway.
+      //   2. If still alive, rebuild the index (informational, powers
+      //      recall) — but only when topics actually changed.
+      if (!abortSignal?.aborted && result.touchedTopics.length > 0) {
+        await rebuildManagedAutoMemoryIndex(projectRoot);
+      }
+      return result;
+    },
+    abortSignal,
+  );
   // Scheduler-gating metadata (`lastDreamAt`, `lastDreamSessionId`,
   // `lastDreamTouchedTopics`, `lastDreamStatus`) is intentionally NOT
   // written here — `MemoryManager.runDream` owns the atomic
@@ -97,9 +109,6 @@ export async function runManagedAutoMemoryDream(
   // could persist gating metadata for a record the manager is about
   // to mark `'cancelled'`.
   if (abortSignal?.aborted) return agentResult;
-  if (agentResult.touchedTopics.length > 0) {
-    await rebuildManagedAutoMemoryIndex(projectRoot);
-  }
   if (options.recordMetadata) {
     await updateDreamMetadataResult(
       projectRoot,

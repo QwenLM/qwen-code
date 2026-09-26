@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { HookEventHandler } from './hookEventHandler.js';
 import { HookRunner as RealHookRunner } from './hookRunner.js';
+import { SessionHooksManager as RealSessionHooksManager } from './sessionHooksManager.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookProgress } from '../confirmation-bus/types.js';
@@ -78,6 +79,7 @@ describe('HookEventHandler', () => {
 
     mockSessionHooksManager = {
       getMatchingHooks: vi.fn().mockReturnValue([]),
+      getMatchingHooksForSubjects: vi.fn().mockReturnValue([]),
       getHooksForEvent: vi.fn().mockReturnValue([]),
       hasSessionHooks: vi.fn().mockReturnValue(false),
       addSessionHook: vi.fn(),
@@ -284,6 +286,111 @@ describe('HookEventHandler', () => {
       expect(input.memory_type).toBe('local');
       expect(input.load_reason).toBe('include');
       expect(input.parent_file_path).toBe('/repo/QWEN.md');
+    });
+  });
+
+  describe('fireMemoryChangedEvent', () => {
+    it('omits workspace for user memory and operation for the on/off toggle', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireMemoryChangedEvent({
+        scope: 'user',
+        operation: 'update',
+        paths: ['/memories/user/role.md'],
+        relativePaths: ['user/role.md'],
+      });
+      await hookEventHandler.fireMemoryChangedEvent({
+        paths: [],
+        relativePaths: [],
+        workspace: '/repo',
+        enabled: false,
+      });
+
+      const inputs = (
+        mockHookRunner.executeHooksParallel as Mock
+      ).mock.calls.map((call) => call[2] as Record<string, unknown>);
+      expect(inputs[0]).toMatchObject({
+        hook_event_name: HookEventName.MemoryChanged,
+        paths: ['/memories/user/role.md'],
+        relative_paths: ['user/role.md'],
+        memory_scope: 'user',
+        operation: 'update',
+      });
+      expect(inputs[0]).not.toHaveProperty('workspace');
+      expect(inputs[0]).not.toHaveProperty('enabled');
+      expect(inputs[1]).toMatchObject({
+        hook_event_name: HookEventName.MemoryChanged,
+        paths: [],
+        relative_paths: [],
+        workspace: '/repo',
+        enabled: false,
+      });
+      expect(inputs[1]).not.toHaveProperty('operation');
+      expect(inputs[1]).not.toHaveProperty('memory_scope');
+    });
+
+    it('matches session hooks against every relative path, and all for the toggle', async () => {
+      const realSessionHooks = new RealSessionHooksManager();
+      const handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        realSessionHooks,
+      );
+      const sessionHook = {
+        type: HookType.Command,
+        command: 'echo session',
+      } as const;
+      realSessionHooks.addSessionHook(
+        'test-session-id',
+        HookEventName.MemoryChanged,
+        'MEMORY\\.md$',
+        sessionHook,
+      );
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // The on/off toggle carries no path: a matcher'd session hook, like a
+      // settings.json hook, must still run.
+      await handler.fireMemoryChangedEvent({
+        paths: [],
+        relativePaths: [],
+        workspace: '/repo',
+        enabled: false,
+      });
+      // A batched notice matches on any entry, not only the first.
+      await handler.fireMemoryChangedEvent({
+        scope: 'project',
+        operation: 'update',
+        paths: ['/repo/a.md', '/repo/MEMORY.md'],
+        relativePaths: ['project/a.md', 'MEMORY.md'],
+        workspace: '/repo',
+      });
+
+      const executed = (
+        mockHookRunner.executeHooksParallel as Mock
+      ).mock.calls.map((call) => call[0] as HookConfig[]);
+      expect(executed).toHaveLength(2);
+      for (const configs of executed) {
+        expect(configs).toContainEqual(
+          expect.objectContaining({ command: 'echo session' }),
+        );
+      }
     });
   });
 

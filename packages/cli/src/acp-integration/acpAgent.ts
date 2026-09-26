@@ -5,6 +5,7 @@
  */
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
@@ -9607,6 +9608,12 @@ class QwenAgent implements Agent {
         // possibly-stale cached `this.settings` and reading it back.
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
+        const previousEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        // Validate every key before writing any: setValue persists
+        // synchronously, so a mid-loop throw would leave a partial write
+        // that the toggle below can never announce — previousEnabled already
+        // holds the pre-write value and the throw skips the emit entirely.
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -9615,9 +9622,40 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
+        }
+        for (const key of QWEN_MEMORY_SETTING_KEYS) {
+          if (updates[key] === undefined) continue;
           settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
         this.adoptRequestSettings(settings, settingsCwd);
+        const effectiveEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (effectiveEnabled !== previousEnabled) {
+          // Fire-and-forget: the RPC response does not read the hook result,
+          // and awaiting delivery would block the control plane on the hook
+          // timeout. When the request names a session, attribute the toggle
+          // to that session's registration — the same id its MemoryChanged
+          // file events already carry. Without one, pass no id so the event
+          // falls back to the settings workspace's newest registration
+          // instead of the bootstrap Config's launch-directory id.
+          const sessionId = params['sessionId'];
+          const deliveryId =
+            typeof sessionId === 'string' && sessionId.length > 0
+              ? this.sessions
+                  .get(sessionId)
+                  ?.getConfig()
+                  .getMemoryHookDeliveryId?.()
+              : undefined;
+          if (deliveryId === undefined) {
+            void notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);
+          } else {
+            void notifyMemoryEnabledChange(
+              settingsCwd,
+              effectiveEnabled,
+              deliveryId,
+            );
+          }
+        }
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };

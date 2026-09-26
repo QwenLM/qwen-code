@@ -5278,6 +5278,7 @@ export type DaemonHookEventName =
   | 'TodoCreated'
   | 'TodoCompleted'
   | 'InstructionsLoaded'
+  | 'MemoryChanged'
   | (string & {});
 
 export type DaemonHookMatcherKind =
