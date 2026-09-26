@@ -5,9 +5,63 @@
  */
 
 import type {
+  ResponsesApiFunctionCallItem,
+  ResponsesApiFunctionCallOutputItem,
   ResponsesApiInputItem,
   ResponsesApiReasoningItem,
 } from './types.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('RESPONSES_REASONING_REJECTION');
+
+const TOOL_MEDIA_CAPTION = '(attached media from previous tool call)';
+
+/**
+ * True for the user message the converter flushes after a turn's tool outputs
+ * to carry tool-returned media: a content array whose first part is the
+ * caption. Detected positionally, the same way the converter emits it.
+ */
+function isToolMediaFollowUp(item: ResponsesApiInputItem | undefined): boolean {
+  if (
+    typeof item !== 'object' ||
+    item === null ||
+    !('type' in item) ||
+    item.type !== 'message' ||
+    !('role' in item) ||
+    item.role !== 'user'
+  ) {
+    return false;
+  }
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  const first = content[0] as { type?: unknown; text?: unknown };
+  return first?.type === 'input_text' && first?.text === TOOL_MEDIA_CAPTION;
+}
+
+/**
+ * The call_ids of the maximal run of `function_call` items immediately
+ * following `index`. The endpoint pairs a replayed reasoning item with the
+ * call group that follows it, so the reasoning and that run stand or fall
+ * as one unit (#11665).
+ */
+export function followingFunctionCallIds(
+  items: ResponsesApiInputItem[],
+  index: number,
+): string[] {
+  const callIds: string[] = [];
+  for (let i = index + 1; i < items.length; i++) {
+    const item = items[i];
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      item.type !== 'function_call'
+    ) {
+      break;
+    }
+    callIds.push((item as ResponsesApiFunctionCallItem).call_id);
+  }
+  return callIds;
+}
 
 /**
  * A 400 in which the endpoint named one replayed `input[N].id` as being over
@@ -168,10 +222,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Replace the reasoning items the endpoint will refuse with the ordinary
- * assistant messages their summaries carry, preserving position and leaving
- * every other item byte-exact and identical by reference. Returns `items`
- * itself when nothing is downgraded, so the caller can detect a no-op by
- * identity. Never mutates `items` or anything inside it.
+ * assistant messages their summaries carry, preserving position. The endpoint
+ * pairs a reasoning item with the function_call run that follows it, so a
+ * removed or downgraded reasoning item takes its call group and the group's
+ * outputs with it; every other item stays byte-exact and identical by
+ * reference. Returns `items` itself when nothing is downgraded, so the caller
+ * can detect a no-op by identity. Never mutates `items` or anything inside it.
  */
 export function downgradeRejectedReasoningItems(
   items: ResponsesApiInputItem[],
@@ -189,23 +245,117 @@ export function downgradeRejectedReasoningItems(
 
   const rewritten: ResponsesApiInputItem[] = [];
   let changed = false;
-  for (const item of items) {
+  // call_ids of function_calls removed together with their dropped or
+  // downgraded reasoning; their outputs must follow or the retry leaves an
+  // orphan output (#11665).
+  const droppedCallIds = new Set<string>();
+  // Original items the rewrite removed without any representation in the
+  // output; the bare-episode sweep below reads whether a kept reasoning
+  // item's follower is gone.
+  const removedOriginals = new Set<ResponsesApiInputItem>();
+  let droppedUnits = 0;
+  let justDroppedUnit = false;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (
+      typeof item === 'object' &&
+      item !== null &&
+      item.type === 'function_call_output' &&
+      'call_id' in item &&
+      droppedCallIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)
+    ) {
+      changed = true;
+      removedOriginals.add(item);
+      continue;
+    }
+    // A tool-media follow-up message captions media from a call the unit drop
+    // just removed; keeping it would retry a user message advertising an
+    // attachment whose tool call is nowhere in the request.
+    if (justDroppedUnit && isToolMediaFollowUp(item)) {
+      changed = true;
+      removedOriginals.add(item);
+      justDroppedUnit = false;
+      continue;
+    }
+    justDroppedUnit = false;
     if (!isReasoningItem(item) || !exceedsMax(item, maxLength)) {
       rewritten.push(item);
       continue;
     }
     changed = true;
     const summary = readSummaryTexts(item);
+    // The endpoint pairs the reasoning item with the function_call group
+    // that follows it, so removing the reasoning removes the whole group and
+    // its outputs. Keeping any member would retry into function_call without
+    // its required reasoning item, and every later send would repeat the
+    // failure (#11665).
+    const unitCallIds = followingFunctionCallIds(items, i);
+    if (unitCallIds.length > 0) {
+      for (const callId of unitCallIds) {
+        droppedCallIds.add(callId);
+      }
+      for (let k = 1; k <= unitCallIds.length; k++) {
+        removedOriginals.add(items[i + k]);
+      }
+      i += unitCallIds.length;
+      droppedUnits++;
+      justDroppedUnit = true;
+    }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
-    if (summary.length === 0) continue;
+    if (summary.length === 0) {
+      removedOriginals.add(item);
+      continue;
+    }
     rewritten.push({
       type: 'message',
       role: 'assistant',
       content: summary.join('\n'),
     });
   }
-  return changed ? rewritten : items;
+  // A kept reasoning item can still end up bare: two episodes replay
+  // adjacently, and when only the later one is rejected its unit drop removes
+  // the item the earlier episode was followed by. The endpoint pairs every
+  // replayed reasoning with what follows it, so a bare one 400s the retry
+  // the same way. Downgrade such an episode like a rejected one, keeping its
+  // summary text; an episode whose follower survived (even as a downgraded
+  // message) stays. Scan right to left so a chain of adjacent episodes
+  // settles in one pass.
+  const finalized: ResponsesApiInputItem[] = [];
+  for (let j = rewritten.length - 1; j >= 0; j--) {
+    const item = rewritten[j];
+    if (!isReasoningItem(item)) {
+      finalized.push(item);
+      continue;
+    }
+    const originalIndex = items.indexOf(item);
+    const successor =
+      originalIndex >= 0 && originalIndex + 1 < items.length
+        ? items[originalIndex + 1]
+        : undefined;
+    if (successor !== undefined && removedOriginals.has(successor)) {
+      changed = true;
+      const summary = readSummaryTexts(item);
+      if (summary.length > 0) {
+        finalized.push({
+          type: 'message',
+          role: 'assistant',
+          content: summary.join('\n'),
+        });
+      } else {
+        removedOriginals.add(item);
+      }
+      continue;
+    }
+    finalized.push(item);
+  }
+  finalized.reverse();
+  if (droppedUnits > 0) {
+    debugLogger.debug(
+      `Downgrade removed ${droppedUnits} reasoning/call unit(s); their tool calls and results are not part of the retry.`,
+    );
+  }
+  return changed ? finalized : items;
 }
 
 function exceedsMax(
