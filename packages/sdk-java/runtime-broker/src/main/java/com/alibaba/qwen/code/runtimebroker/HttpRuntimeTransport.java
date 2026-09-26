@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -630,7 +631,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         try {
             fields = JsonCodec.parseObject(bytes,
                     "Managed Runtime attestation");
-        } catch (RuntimeBrokerException exception) {
+        } catch (RuntimeBrokerException | IllegalArgumentException exception) {
             throw protocol("Managed Runtime attestation response is invalid.");
         }
         if (!fields.keySet().equals(RESPONSE_FIELDS)) {
@@ -697,10 +698,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        Object raw = response.get("protocolVersion");
-        if (!(raw instanceof Number number)
-                || new BigDecimal(number.toString())
-                        .compareTo(BigDecimal.valueOf(2)) != 0) {
+        BigDecimal version = exactNumber(response.get("protocolVersion"));
+        if (version == null
+                || version.compareTo(BigDecimal.valueOf(2)) != 0) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -708,15 +708,28 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        Object value = response.get(field);
-        if (!(value instanceof Number number)) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        BigDecimal value = exactNumber(response.get(field));
+        if (value != null) {
+            try {
+                long parsed = value.longValueExact();
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (ArithmeticException exception) {
+                // A fraction or a value beyond a long is not an epoch.
+            }
         }
-        long parsed = number.longValue();
-        if (number.doubleValue() != parsed || parsed <= 0) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        throw protocol("Managed Runtime attestation response is invalid.");
+    }
+
+    private static BigDecimal exactNumber(Object value) {
+        // A parsed Double or Float may be rounded and a Short or Byte wrapped,
+        // as with 40000000000000001E-16 or 65540S.
+        if (value instanceof Integer || value instanceof Long
+                || value instanceof BigInteger || value instanceof BigDecimal) {
+            return new BigDecimal(value.toString());
         }
-        return parsed;
+        return null;
     }
 
     private static boolean jsonContentType(String value) {
