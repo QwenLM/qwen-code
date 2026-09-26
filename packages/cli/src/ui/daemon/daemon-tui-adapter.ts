@@ -17,6 +17,7 @@ import {
   FINDING_SOURCES,
   REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { isAdvisorDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
@@ -330,6 +331,11 @@ function formatToolResultDisplay(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];
   }
+  if (isAdvisorDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
+  }
   if (
     isRecord(value) &&
     value['type'] === 'mcp_app' &&
@@ -339,7 +345,8 @@ function formatToolResultDisplay(
   }
   if (
     isRecord(value) &&
-    value['type'] === 'ask_user_question_answers' &&
+    (value['type'] === 'ask_user_question_answers' ||
+      value['type'] === 'shell_result') &&
     typeof value['text'] === 'string'
   ) {
     return sanitizeDisplayText(value['text']);

@@ -1080,6 +1080,43 @@
   gap: 4px;
 }
 
+/* The workspace and git chips, moved out of the toolbar into their own row
+   under the composer box so the composer stays about the prompt itself. The
+   4px inset plus the workspace chip's 8px padding lines their content up with the
+   editor's text. */
+.contextRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-top: -12px;
+  padding: 18px 4px 6px;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.contextRow button[data-web-shell-git-branch] {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--agent-gray-500);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.contextRow button[data-web-shell-git-branch]:hover,
+.contextRow button[data-web-shell-git-branch]:focus-visible {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.contextRow button[data-web-shell-git-branch] > svg {
+  display: none;
+}
+
 .toolbarLeading,
 .toolbarStart,
 .toolbarEnd,
@@ -2426,10 +2463,10 @@
   flex-direction: column;
   position: absolute;
   right: 0;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 8px - var(--chat-editor-search-shift, 0px));
   left: 0;
   z-index: 20;
-  max-height: min(320px, 50vh);
+  max-height: min(320px, 50vh, var(--chat-editor-search-room, 320px));
   padding: 8px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 12px;
@@ -2698,7 +2735,19 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .container {
-  --chat-editor-max-height: min(480px, 60dvh);
+  --chat-editor-composer-cap: min(480px, 60dvh);
+  --chat-editor-max-height: var(--chat-editor-composer-cap);
+}
+
+/* The workspace/Git row lives inside the capped box; without its height added
+   back, a soft keyboard leaves the attachments strip almost no room. The
+   height is measured because the row wraps on narrow viewports, and the 8px
+   is the pull-up the editing row gives up below it. */
+.editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
+  --chat-editor-max-height: calc(
+    var(--chat-editor-composer-cap) +
+      var(--chat-editor-context-row-height, 44px) + 8px
+  );
 }
 
 .editorShell[data-web-shell-mobile-composer] .uploadRowAction,
@@ -2752,6 +2801,11 @@
 .mobileEditingActions {
   flex-wrap: wrap;
   margin-top: -8px;
+}
+
+/* Pulled up under the context row it would cover the row's touch targets. */
+.mobileContextRow + .mobileEditingActions {
+  margin-top: 0;
 }
 
 .mobileEditingActions svg {

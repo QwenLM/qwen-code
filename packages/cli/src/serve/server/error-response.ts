@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -61,6 +62,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
@@ -411,7 +413,26 @@ export function sendBridgeError(
               err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
-    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (status === 500) {
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
+      recordExpectedBridgeError(
+        safeError,
+        {
+          ...ctx,
+          sessionId:
+            ctx?.sessionId ??
+            err.creationDiagnostic?.sessionId ??
+            err.sessionId,
+        },
+        daemonLog,
+      );
+    }
     if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
@@ -818,6 +839,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (isSessionStartupConfigError(err)) {
+    res.status(err.code === 'invalid_startup_config' ? 400 : 422).json({
+      error: err.message,
+      code: err.code,
+    });
+    return;
+  }
   if (err instanceof InvalidSessionScopeError) {
     // Same wire shape as the route-layer 400 (`server.ts` validates
     // body['sessionScope'] before calling the bridge). A direct embed
@@ -938,8 +966,9 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
-      if (kind === 'workflow_invalid_params') {
-        res.status(400).json({
+      const workflowStatus = workflowRequestErrorStatus(kind);
+      if (workflowStatus !== undefined) {
+        res.status(workflowStatus).json({
           error: errorMessage(err),
           code: kind,
         });
@@ -989,6 +1018,15 @@ export function sendBridgeError(
       if (kind === 'session_writer_unavailable') {
         res.status(503).json({
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_execution_engine_unavailable') {
+        res.status(409).json({
+          error:
+            'This session cannot be resumed with the current execution engine.',
           code: kind,
           errorKind: kind,
         });

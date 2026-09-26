@@ -147,6 +147,7 @@ const composerCoreState = vi.hoisted(() => ({
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
+  searchMode: false,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
   ingestFiles: vi.fn(),
@@ -287,7 +288,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         currentMode: 'default',
         sessionName: undefined,
         searchState: {
-          searchMode: false,
+          searchMode: composerCoreState.searchMode,
           searchQuery: '',
           searchMatches: [],
           searchActiveIndex: 0,
@@ -371,6 +372,7 @@ afterEach(() => {
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
+  composerCoreState.searchMode = false;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.ingestFiles.mockReset();
@@ -403,7 +405,14 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
-    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+    | 'contextChipPlacement'
+    | 'standaloneTargetSupported'
+    | 'onSelectStandaloneTarget'
+    | 'workspaceSelectionDisabled'
+    | 'selectedWorkspaceCwd'
+    | 'contextUsageAlwaysVisible'
+    | 'contextUsageControls'
+    | 'onOpenContextUsage'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -1731,6 +1740,181 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       ws!.compareDocumentPosition(git!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('ChatEditor context chip placement', () => {
+  const workspaceProps = {
+    workspaces: [
+      {
+        id: 'primary',
+        cwd: '/work/main',
+        label: 'main',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'api',
+        cwd: '/work/api',
+        label: 'api',
+        primary: false,
+        trusted: true,
+      },
+    ],
+    onSelectWorkspace: vi.fn(),
+  };
+  const bothChips = {
+    ...workspaceProps,
+    gitBranch: 'main',
+    visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+  };
+
+  it('keeps both chips in the toolbar by default', () => {
+    const container = renderChatEditor(bothChips);
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('moves both chips into the row under the composer', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(row).not.toBeNull();
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    expect(surface.contains(row)).toBe(false);
+    expect(row!.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(
+      row!.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    // Neither chip stays behind in the toolbar.
+    const toolbar = container.querySelector('[data-web-shell-toolbar-leading]');
+    expect(toolbar!.querySelector('button[aria-label="Workspace"]')).toBeNull();
+    expect(
+      toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the workspace to the header and keeps git in the toolbar', () => {
+    const container = renderChatEditor({
+      ...bothChips,
+      contextChipPlacement: 'header',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders the row for git alone when only the git action is visible', () => {
+    const container = renderChatEditor({
+      gitBranch: 'main',
+      visibleToolbarActions: ['gitBranch'],
+      contextChipPlacement: 'below',
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    );
+
+    expect(
+      row?.querySelector('[aria-label="Current Git branch: main"]'),
+    ).not.toBeNull();
+    expect(row?.querySelector('button[aria-label="Workspace"]')).toBeNull();
+  });
+
+  it('does not keep an empty row for standalone support without a callback', () => {
+    const props = {
+      ...workspaceProps,
+      workspaces: workspaceProps.workspaces.slice(0, 1),
+      standaloneTargetSupported: true,
+      visibleToolbarActions: ['workspace', 'gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+
+    rerenderChatEditor(container, {
+      ...props,
+      onSelectStandaloneTarget: vi.fn(),
+    });
+    expect(
+      container.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+
+    rerenderChatEditor(container, props);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+  });
+
+  it('follows controlled visibility without changing the workspace selection', () => {
+    const onSelectWorkspace = vi.fn();
+    const props = {
+      ...bothChips,
+      onSelectWorkspace,
+      selectedWorkspaceCwd: '/work/api',
+      workspaceSelectionDisabled: true,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(props);
+    const workspace = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Workspace"]',
+    );
+    expect(workspace?.textContent).toContain('api');
+    expect(workspace?.disabled).toBe(true);
+
+    for (const visibleToolbarActions of [
+      ['workspace'],
+      ['gitBranch'],
+      [],
+    ] as const) {
+      rerenderChatEditor(container, { ...props, visibleToolbarActions });
+      const row = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      );
+      expect(Boolean(row)).toBe(visibleToolbarActions.length > 0);
+      expect(
+        Boolean(row?.querySelector('button[aria-label="Workspace"]')),
+      ).toBe(visibleToolbarActions.some((action) => action === 'workspace'));
+      expect(Boolean(row?.querySelector('[data-web-shell-git-branch]'))).toBe(
+        visibleToolbarActions.some((action) => action === 'gitBranch'),
+      );
+    }
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('omits the row when neither chip is available', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      visibleToolbarActions: [],
+      contextChipPlacement: 'below',
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
   });
 });
 
@@ -3311,7 +3495,13 @@ describe('ChatEditor mobile composer actions', () => {
       cancelable: true,
     });
     previous.dispatchEvent(pointerDown);
-    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(pointerDown.defaultPrevented).toBe(false);
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
     composerCoreState.focus.mockClear();
     await clickButton('Previous input');
     await clickButton('Next input');
@@ -3320,6 +3510,46 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.focus).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(backend.textareaRef.current);
+  });
+
+  it('prevents mousedown default on the remaining migrated buttons', async () => {
+    mobileComposer('draft');
+    renderChatEditor({ visibleToolbarActions: [] });
+
+    const actions = document.querySelector(
+      '[data-web-shell-mobile-editing-actions]',
+    )!;
+    const historyButton = actions.querySelector<HTMLButtonElement>(
+      '[aria-label="Input history"]',
+    )!;
+    const shellButton = Array.from(actions.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Shell mode',
+    )!;
+
+    const expectMousedownPrevented = (button: HTMLButtonElement) => {
+      const pointerDown = new Event('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(pointerDown);
+      expect(pointerDown.defaultPrevented).toBe(false);
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      button.dispatchEvent(mouseDown);
+      expect(mouseDown.defaultPrevented).toBe(true);
+    };
+
+    expectMousedownPrevented(historyButton);
+    expectMousedownPrevented(shellButton);
+
+    await clickButton('Expand editor');
+    expectMousedownPrevented(
+      document.querySelector<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] [aria-label="Hide keyboard"]',
+      )!,
+    );
   });
 
   it('disables both history buttons when the composer is disabled', () => {
@@ -3487,6 +3717,246 @@ describe('ChatEditor mobile composer actions', () => {
       expect(document.activeElement).not.toBe(backend.textareaRef.current);
     } finally {
       document.removeEventListener('click', onClick);
+    }
+  });
+
+  function historyPanelFit(container: HTMLElement) {
+    const panel = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-history-search]',
+    )!.parentElement!.parentElement!;
+    return {
+      room: panel.style.getPropertyValue('--chat-editor-search-room'),
+      shift: panel.style.getPropertyValue('--chat-editor-search-shift'),
+    };
+  }
+
+  // Only the composer surface and hidden-overflow ancestors get a real top, so
+  // measuring any other node changes the result.
+  function mockComposerGeometry(geometry: {
+    composerTop: number;
+    clipTop: number;
+  }) {
+    return vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { top: geometry.composerTop } as DOMRect;
+        }
+        return {
+          top: this.style.overflowY === 'hidden' ? geometry.clipTop : -1000,
+        } as DOMRect;
+      });
+  }
+
+  type CapturedResizeObserver = {
+    callback: ResizeObserverCallback;
+    targets: Set<Element>;
+  };
+
+  // The harness ResizeObserver stub never fires, so re-measure paths wired
+  // through observe() are only reachable when the test invokes the callback.
+  function captureResizeObservers(): {
+    observers: CapturedResizeObserver[];
+    restore: () => void;
+  } {
+    const observers: CapturedResizeObserver[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly captured: CapturedResizeObserver;
+      constructor(callback: ResizeObserverCallback) {
+        this.captured = { callback, targets: new Set() };
+        observers.push(this.captured);
+      }
+      observe(target: Element) {
+        this.captured.targets.add(target);
+      }
+      unobserve(target: Element) {
+        this.captured.targets.delete(target);
+      }
+      disconnect() {
+        this.captured.targets.clear();
+      }
+    } as typeof ResizeObserver;
+    return {
+      observers,
+      restore: () => {
+        globalThis.ResizeObserver = original;
+      },
+    };
+  }
+
+  function fireResize(
+    observers: readonly CapturedResizeObserver[],
+    target: Element,
+  ): void {
+    for (const observer of observers) {
+      if (observer.targets.has(target)) {
+        observer.callback([], {} as ResizeObserver);
+      }
+    }
+  }
+
+  it('limits the history panel to the room above the composer', () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 0 });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel and keeps it below a clipping ancestor', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const settle = (dispatch: () => void) =>
+      act(async () => {
+        dispatch();
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container).room).toBe('174px');
+
+      // A header above the clipping pane leaves less than the minimum height,
+      // so the panel moves down over the composer instead of under the header.
+      container.style.overflowY = 'hidden';
+      geometry.clipTop = 120;
+      await settle(() => window.dispatchEvent(new Event('resize')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '96px',
+        shift: '42px',
+      });
+
+      geometry.composerTop = 300;
+      await settle(() => container.dispatchEvent(new Event('scroll')));
+      expect(historyPanelFit(container)).toEqual({
+        room: '172px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('re-measures the history panel when the composer itself resizes', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const geometry = { composerTop: 182, clipTop: 0 };
+    const rect = mockComposerGeometry(geometry);
+    const { observers, restore } = captureResizeObservers();
+    try {
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // The composer grows (a multi-line draft, a new attachment); the panel
+      // re-fits through the ResizeObserver on the container.
+      geometry.composerTop = 300;
+      await act(async () => {
+        fireResize(observers, surface);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '292px',
+        shift: '0px',
+      });
+    } finally {
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('fits the history panel to its rendered height, not its minimum', async () => {
+    mobileComposer('draft');
+    composerCoreState.searchMode = true;
+    const rect = mockComposerGeometry({ composerTop: 182, clipTop: 120 });
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('searchPanel') ? 70 : 0;
+      });
+    try {
+      const container = renderChatEditor({});
+      expect(historyPanelFit(container)).toEqual({
+        room: '174px',
+        shift: '0px',
+      });
+
+      // With no matches the panel is just the search bar (70px), so once the
+      // room drops to 54px the panel overlaps the composer by its own 16px
+      // overflow rather than the 42px the 96px minimum would charge. The
+      // re-measure arrives through the ResizeObserver on the panel, which a
+      // change in match count resizes without touching the container.
+      const panel = container.querySelector<HTMLElement>(
+        '[class*="searchPanel"]',
+      )!;
+      container.style.overflowY = 'hidden';
+      await act(async () => {
+        fireResize(observers, panel);
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      });
+      expect(historyPanelFit(container)).toEqual({
+        room: '70px',
+        shift: '16px',
+      });
+    } finally {
+      height.mockRestore();
+      rect.mockRestore();
+      restore();
+    }
+  });
+
+  it('adds the measured workspace row height to the composer cap', () => {
+    mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 92 : 0;
+      });
+    try {
+      // The branch usually arrives after the composer mounts.
+      const container = renderChatEditor({});
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('');
+      rerenderChatEditor(container, { gitBranch: 'main' });
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('92px');
+
+      // A long branch can wrap an already-mounted row; only the
+      // ResizeObserver refreshes the allowance then.
+      const row = surface.querySelector<HTMLElement>(
+        '[class*="mobileContextRow"]',
+      )!;
+      height.mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('mobileContextRow') ? 136 : 0;
+      });
+      act(() => fireResize(observers, row));
+      expect(
+        surface.style.getPropertyValue('--chat-editor-context-row-height'),
+      ).toBe('136px');
+    } finally {
+      height.mockRestore();
+      restore();
     }
   });
 

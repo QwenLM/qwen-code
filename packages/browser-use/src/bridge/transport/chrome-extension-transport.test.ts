@@ -13,6 +13,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   defaultChromeBridgeSocketPath,
   defaultChromeBridgeSocketDirectory,
   type BridgeRequest,
@@ -420,7 +421,7 @@ it.skipIf(process.platform === 'win32')(
     await expect(transport.start()).rejects.toMatchObject({
       code: 'BROWSER_DISCONNECTED',
       message: expect.stringContaining(
-        'Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry.',
+        'install the extension from https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph or enable it at chrome://extensions',
       ),
     });
     expect(transport.isConnected()).toBe(false);
@@ -432,6 +433,16 @@ it('explicit endpoint listing reports no browsers when nothing listens', async (
   await new Promise<void>((resolve) => f.server.close(() => resolve()));
   await expect(f.transport.profiles()).resolves.toEqual([]);
 });
+
+it.each(CHROME_EXTENSION_IDS)(
+  'connects to a Host greeting for extension %s',
+  async (extensionId) => {
+    const f = await fixture({ hello: { extensionId } });
+    f.transport.selectProfile('chrome:profile-a');
+    await f.transport.start();
+    expect(f.transport.isConnected()).toBe(true);
+  },
+);
 
 it.each([
   ['another extension', { extensionId: 'a'.repeat(32) }],

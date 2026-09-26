@@ -214,6 +214,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # actions/checkout reuses a leftover directory whose origin URL
       # matches and runs git (hooks included) inside it, so the trusted
@@ -407,6 +415,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # Remove .qwen/ and its recovery backup left by a previous job so
       # actions/checkout doesn't trip on restrictive permissions.
@@ -731,6 +747,13 @@ jobs:
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          test_runner=()
+          if [ "$(id -u)" -eq 0 ]; then
+            # Permission-denial fixtures must also work on root-run ECS lanes.
+            chown -R 0 "$GITHUB_WORKSPACE" "$HOME"
+            echo 'Dropping DAC override capabilities for root unit tests'
+            test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')
+          fi
           # ENOSPC has failed test steps mid-suite while the host looks
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
@@ -761,10 +784,10 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          npm run test:ci:workspaces -- "${retry_arg[@]}"
+          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
           RC=$?
           if [ "$RC" -eq 0 ]; then
-            npm run test:scripts -- "${retry_arg[@]}"
+            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
             RC=$?
           fi
           set -e
@@ -879,6 +902,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # Remove .qwen/ and its recovery backup left by a previous job so
       # actions/checkout doesn't trip on restrictive permissions.
@@ -1307,7 +1338,9 @@ jobs:
     # document performance budget on ECS, while both gates passed on hosted.
     # Keep this browser job hosted without relaxing its test assertions.
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 20
+    # 184 smoke tests plus ~7.5 min of setup now finish right at 20 min, so
+    # passing runs get cancelled in cleanup. Sharding is the real fix.
+    timeout-minutes: 30
     permissions:
       contents: 'read'
     steps:
@@ -1324,6 +1357,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # Keep this retained sweep pinned to the test job's hardened recovery
       # recipe, even while hosted. The `.qwen.root-orig` name's provenance
@@ -1466,23 +1507,23 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      - name: 'Install Playwright Chromium (hosted)'
+      - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         run: |-
-          node node_modules/playwright/cli.js install --with-deps chromium
+          node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
-      - name: 'Install Playwright Chromium (self-hosted)'
+      - name: 'Install Playwright Chromium and WebKit (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
         run: |-
-          node node_modules/playwright/cli.js install chromium
+          node node_modules/playwright/cli.js install chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium
+            node "${nested_cli}" install chromium webkit
           fi
 
       - name: 'Choose web-shell Playwright port'
@@ -1868,6 +1909,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
@@ -2089,6 +2138,14 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
@@ -2275,10 +2332,17 @@ jobs:
       # classifier makes above. The two-tree `git diff BASE HEAD` this replaced
       # is not the PR's diff: it reports everything the base gained since the
       # branch point as a change on the PR's side. #8132 added
-      # packages/desktop-shell, so every branch older than it saw 78 phantom
-      # desktop-shell paths, ran this job, and failed in a checkout of
-      # refs/pull/N/head that has no such directory.
-      - name: 'Detect desktop-shell changes'
+      # packages/desktop-shell (since renamed to packages/desktop), so every
+      # branch older than it saw 78 phantom desktop paths, ran this job, and
+      # failed in a checkout of refs/pull/N/head that has no such directory.
+      # The rename cuts the other way and is not caught by the guard below: a
+      # pre-rename head's files sit under packages/desktop-shell, which the
+      # path filter no longer matches, so the job skips and reports green
+      # having compiled nothing. Such a branch needs a rebase to be gated
+      # again. The Cargo.toml guard covers the remaining case -- a head the
+      # filter matched because ci.yml itself changed, with no crate at the
+      # new path.
+      - name: 'Detect desktop changes'
         id: 'filter'
         env:
           GH_TOKEN: '${{ github.token }}'
@@ -2289,7 +2353,7 @@ jobs:
             # `previous_filename` too: renaming a file out of the crate changes
             # it, and only the old path says so.
             if files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)')"; then
-              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml|\.github/workflows/desktop-release\.yml)' <<<"${files}"; then
+              if grep -Eq '^(packages/desktop/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml|\.github/workflows/desktop-release\.yml)' <<<"${files}"; then
                 changed=true
               else
                 changed=false
@@ -2301,12 +2365,12 @@ jobs:
           # Whatever the filter decided, a tree without the crate cannot have
           # regressed it, and cargo has no manifest to run against — the job
           # would report a missing working directory as a failure of the PR.
-          if [[ "${changed}" == "true" && ! -f packages/desktop-shell/src-tauri/Cargo.toml ]]; then
-            echo "::notice::packages/desktop-shell/src-tauri is absent from this head; nothing to compile."
+          if [[ "${changed}" == "true" && ! -f packages/desktop/src-tauri/Cargo.toml ]]; then
+            echo "::notice::packages/desktop/src-tauri is absent from this head; nothing to compile."
             changed=false
           fi
           echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
-          echo "desktop-shell changed: ${changed}"
+          echo "desktop changed: ${changed}"
 
       # cargo test links the Tauri/wry webview, so the WebKit/GTK dev headers
       # must be present (mirrors the Linux build job in desktop-release.yml).
@@ -2327,14 +2391,14 @@ jobs:
       - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
         if: "${{ steps.filter.outputs.changed == 'true' }}"
         with:
-          workspaces: 'packages/desktop-shell/src-tauri -> target'
+          workspaces: 'packages/desktop/src-tauri -> target'
 
       - name: 'Compile and test the desktop crate'
         if: "${{ steps.filter.outputs.changed == 'true' }}"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'cargo test --manifest-path src-tauri/Cargo.toml'
 
       - name: 'Run desktop release tests'
         if: "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'node scripts/test-release.js'

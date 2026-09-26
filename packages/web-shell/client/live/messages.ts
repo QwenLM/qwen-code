@@ -16,6 +16,15 @@ type LiveMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
+  'live.feed.unsupported': 'On-demand screenshots only',
+  'live.feed.idle': 'Screen ready for your call',
+  'live.feed.starting': 'Connecting live screen…',
+  'live.feed.streaming': 'Live screen · ask about what you see',
+  'live.feed.stopped': 'Live screen stopped',
+  'live.feed.error': 'Screen feed failed. Share again to retry.',
+  'live.more': 'More',
+  'live.captions': 'Captions',
+  'live.feed.keepOpen': 'Keep this page and call open for live screen sharing.',
   'live.title': 'Live Voice',
   'live.open': 'Open Live Voice',
   'live.manage': 'Manage active Live Voice',
@@ -29,6 +38,10 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'live.browser.connect': 'Talk in this browser',
   'live.browser.connecting': 'Connecting microphone…',
   'live.browser.requirement.host': 'This browser tab',
+  'live.browser.level': 'Microphone level',
+  'live.browser.levelMuted': 'Microphone muted',
+  'live.browser.levelDropping':
+    'Microphone is live, but audio is not reaching the daemon',
   'live.browser.requirement.runtime': 'Live runtime',
   'live.browser.takeOver': 'Take over in this tab',
   'live.browser.disconnect': 'Release microphone',
@@ -40,6 +53,13 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     'Another Web Shell tab is the microphone and speaker for Live Voice.',
   'live.browser.headphonesHint':
     'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.startScreenShare': 'Share screen',
+  'live.browser.stopScreenShare': 'Stop sharing screen',
+  'live.browser.sharing': 'Screen shared',
+  'live.browser.sharingNamed': (v) => `${v?.target ?? 'Screen'}`,
+  'live.browser.screenRequested':
+    'Qwen asked to see your screen. Share one to let it look.',
+  'live.browser.lookedAtScreen': 'Qwen looked at your screen.',
   'live.browser.closed.occupied':
     'Another Live Voice endpoint is already connected.',
   'live.browser.closed.supersededNative':
@@ -69,7 +89,13 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
   'settings.liveSetup.model': 'Realtime model',
   'settings.liveSetup.modelHint':
-    'Add a model with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) to choose it here.',
+    'Pick “Other model id…” to use any Realtime model.',
+  'settings.liveSetup.modelCustom': 'Other model id…',
+  'settings.liveSetup.endpoint': 'Realtime endpoint',
+  'settings.liveSetup.endpointHint':
+    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Leave empty for the default (Beijing).',
+  'settings.liveSetup.endpointFromRoute':
+    "Follows the base URL of the selected model's modelProviders route.",
   'settings.liveSetup.voice': 'Voice',
   'settings.liveSetup.voiceHint':
     'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
@@ -115,7 +141,7 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'live.unmuteOutput': 'Unmute speaker',
   'live.state.unavailable': 'Voice chat unavailable',
   'live.state.idle': 'Ready for voice chat',
-  'live.state.starting': 'Starting voice chat…',
+  'live.state.starting': 'Preparing voice chat…',
   'live.state.listening': 'Listening',
   'live.state.thinking': 'Thinking',
   'live.state.speaking': 'Speaking',
@@ -138,6 +164,15 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
 };
 
 export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
+  'live.feed.unsupported': '仅支持按需截图',
+  'live.feed.idle': '画面就绪，等待通话',
+  'live.feed.starting': '正在连接实时画面…',
+  'live.feed.streaming': '实时画面已连接，可直接询问',
+  'live.feed.stopped': '实时画面已停止',
+  'live.feed.error': '画面连接失败，请重新共享。',
+  'live.more': '更多',
+  'live.captions': '字幕',
+  'live.feed.keepOpen': '实时共享画面时，请保持页面和通话开启。',
   'live.title': '实时语音',
   'live.open': '打开实时语音',
   'live.manage': '管理正在进行的实时语音',
@@ -150,6 +185,9 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'live.browser.connect': '在此浏览器中通话',
   'live.browser.connecting': '正在连接麦克风…',
   'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.level': '麦克风音量',
+  'live.browser.levelMuted': '麦克风已静音',
+  'live.browser.levelDropping': '麦克风正常，但音频没有送达 daemon',
   'live.browser.requirement.runtime': 'Live 运行时',
   'live.browser.takeOver': '在此标签页接管',
   'live.browser.disconnect': '释放麦克风',
@@ -160,6 +198,12 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
     '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
   'live.browser.headphonesHint':
     '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.startScreenShare': '共享屏幕',
+  'live.browser.stopScreenShare': '停止共享屏幕',
+  'live.browser.sharing': '正在共享屏幕',
+  'live.browser.sharingNamed': (v) => `${v?.target ?? '屏幕'}`,
+  'live.browser.screenRequested': 'Qwen 想看你的屏幕，共享后它才能查看。',
+  'live.browser.lookedAtScreen': 'Qwen 查看了你的屏幕。',
   'live.browser.closed.occupied': '已有其他实时语音端连接。',
   'live.browser.closed.supersededNative':
     'Qwen Live Host 已从此标签页接管实时语音。',
@@ -186,8 +230,13 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.keyFromEnvMissing': (v) =>
     `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
   'settings.liveSetup.model': 'Realtime 模型',
-  'settings.liveSetup.modelHint':
-    '在用户设置（~/.qwen/settings.json）的 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
+  'settings.liveSetup.modelHint': '选“其他模型 id…”可填写任意 Realtime 模型。',
+  'settings.liveSetup.modelCustom': '其他模型 id…',
+  'settings.liveSetup.endpoint': 'Realtime 接入地址',
+  'settings.liveSetup.endpointHint':
+    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，留空使用默认地址（北京）。',
+  'settings.liveSetup.endpointFromRoute':
+    '跟随所选模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',
   'settings.liveSetup.voiceHint':
     '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',
@@ -233,7 +282,7 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'live.unmuteOutput': '取消扬声器静音',
   'live.state.unavailable': '实时语音不可用',
   'live.state.idle': '可以开始语音对话',
-  'live.state.starting': '正在开始语音对话…',
+  'live.state.starting': '正在准备语音对话…',
   'live.state.listening': '正在聆听',
   'live.state.thinking': '思考中',
   'live.state.speaking': '正在回答',

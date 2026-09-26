@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.24.1",
+  "private": true,
+  "version": "0.24.6",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -21,7 +22,7 @@
     "packages/channels/plugin-example",
     "integrations/external-context",
     "integrations/external-context-mem0",
-    "!packages/desktop-shell",
+    "!packages/desktop",
     "!packages/live-host",
     "!packages/mobile-shell"
   ],
@@ -30,12 +31,13 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.24.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.24.6"
   },
   "scripts": {
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
+    "dev:managed-agent-web": "npm --workspace packages/web-shell run dev -- --port 5174",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
@@ -43,7 +45,7 @@
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
-    "build:packages": "npm run build --workspaces",
+    "build:packages": "corepack pnpm -r run build",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
     "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present",
@@ -53,6 +55,10 @@
     "test:release:workspaces": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present -- --coverage.enabled=false",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
+    "test:e2e:managed-agent-server": "tsx scripts/run-managed-agent-server-e2e.ts",
+    "test:e2e:managed-session-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover",
+    "test:e2e:managed-inflight-failover": "tsx scripts/run-managed-agent-server-e2e.ts --inflight-failover",
+    "test:e2e:managed-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover",
     "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
     "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
@@ -194,6 +200,7 @@
     "@lydell/node-pty": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"

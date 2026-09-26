@@ -38,6 +38,7 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -133,6 +134,7 @@ import {
   type Extension,
 } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import * as sandboxPolicy from '../sandbox/runtime-shell-policy.js';
 import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
@@ -162,6 +164,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock.prototype, 'name', { value: toolName });
   Object.defineProperty(ToolMock, 'Name', {
     value: toolName,
     writable: true,
@@ -197,6 +200,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterTool = vi.fn();
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
@@ -2982,7 +2986,209 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('tool sandbox initialization', () => {
+    const parameters = () => ({
+      ...baseParams,
+      sandbox: undefined,
+      cwd: TARGET_DIR,
+      interactive: true,
+      bareMode: false,
+      enableAutoSkill: true,
+      shellExecutionSandbox: {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as const,
+      },
+    });
+
+    it('stops before recording, hooks, skills and registry setup when probing fails', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockRejectedValue(new Error('probe unavailable'));
+      try {
+        const config = new Config(parameters());
+        const record = vi.spyOn(
+          config as unknown as { activateChatRecording: () => unknown },
+          'activateChatRecording',
+        );
+        await expect(config.initialize()).rejects.toThrow('probe unavailable');
+        expect(record).not.toHaveBeenCalled();
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config(parameters());
+        const refreshExtensions = vi.spyOn(
+          config.getExtensionManager(),
+          'refreshCache',
+        );
+        await config.initialize();
+        expect(probe).toHaveBeenCalledWith(
+          config.getShellExecutionSandbox(),
+          undefined,
+        );
+        expect(HookSystem).not.toHaveBeenCalled();
+        expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+        expect(refreshExtensions).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+        expect(SkillManager.prototype.refreshCache).toHaveBeenCalled();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+          ToolNames.ASK_USER_QUESTION,
+        ]);
+        expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+      } finally {
+        probe.mockRestore();
+      }
+    });
+
+    it('omits user-interaction tools from the admitted headless registry', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue();
+      try {
+        const config = new Config({
+          ...parameters(),
+          interactive: false,
+          bareMode: true,
+        });
+        await config.initialize();
+        expect(
+          (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+            (call) => call[0],
+          ),
+        ).toEqual([
+          ToolNames.SHELL,
+          ToolNames.TASK_STOP,
+          ToolNames.READ_FILE,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+          ToolNames.MONITOR,
+          ToolNames.AGENT,
+          ToolNames.GLOB,
+          ToolNames.LS,
+        ]);
+      } finally {
+        probe.mockRestore();
+      }
+    });
+  });
+
   describe('derived Config ownership', () => {
+    it('preserves the shell sandbox ceiling and rejects relocation before state mutation', async () => {
+      const policy = {
+        workspace: path.resolve(TARGET_DIR),
+        installation: path.resolve('/installation'),
+        state: path.resolve('/sandbox-state'),
+        filesystem: 'workspace-write' as const,
+        network: 'closed' as 'closed' | 'open',
+      };
+      const parent = new Config({
+        ...baseParams,
+        sandbox: undefined,
+        cwd: TARGET_DIR,
+        bareMode: false,
+        interactive: true,
+        fileCheckpointingEnabled: true,
+        ideMode: true,
+        enableManagedAutoMemory: true,
+        enableManagedAutoDream: true,
+        enableTeamMemory: true,
+        enableTeamMemorySync: true,
+        agentTeamEnabled: true,
+        workflowsEnabled: true,
+        sessionWorkflowEnabled: true,
+        cronEnabled: true,
+        shellExecutionSandbox: policy,
+      });
+      const snapshot = parent.getShellExecutionSandbox();
+      policy.network = 'open';
+      expect(snapshot?.network).toBe('closed');
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(parent.getCoreTools()).toEqual([
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.MONITOR,
+        ToolNames.AGENT,
+        ToolNames.EXEC,
+        ToolNames.GLOB,
+        ToolNames.LS,
+        ToolNames.ASK_USER_QUESTION,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+      expect(parent.getBareMode()).toBe(false);
+      expect(parent.getIdeMode()).toBe(false);
+      expect(() => parent.setIdeMode(true)).toThrow('does not support IDE');
+      expect(parent.getDisableAllHooks()).toBe(true);
+      expect(parent.getHookSystem()).toBeUndefined();
+      expect(parent.getManagedAutoMemoryEnabled()).toBe(false);
+      expect(parent.isManagedMemoryAvailable()).toBe(false);
+      expect(parent.getManagedAutoDreamEnabled()).toBe(false);
+      expect(parent.getTeamMemoryEnabled()).toBe(false);
+      expect(parent.getTeamMemorySyncEnabled()).toBe(false);
+      expect(parent.getAutoSkillEnabled()).toBe(false);
+      expect(parent.isAgentTeamEnabled()).toBe(false);
+      expect(parent.isWorkflowsEnabled()).toBe(false);
+      expect(parent.isSessionWorkflowEnabled()).toBe(false);
+      expect(parent.isCronEnabled()).toBe(false);
+      expect(parent.isLspEnabled()).toBe(false);
+      expect(parent.getFileCheckpointingEnabled()).toBe(false);
+      expect(() => parent.enableFileCheckpointing()).toThrow('unavailable');
+      expect(() =>
+        parent.addMcpServers({ remote: { command: 'node' } }),
+      ).toThrow('does not support MCP');
+      expect(() =>
+        parent.addRuntimeMcpServer('remote', { command: 'node' }),
+      ).toThrow('does not support MCP');
+      await expect(
+        parent.reinitializeMcpServers({ remote: { command: 'node' } }),
+      ).rejects.toThrow('does not support MCP');
+      expect(parent.getMcpServers()).toEqual({});
+      expect(parent.getExtensions()).toEqual([]);
+      const fileService = parent.getFileSystemService();
+      expect(() => parent.setFileSystemService(fileService)).toThrow(
+        'delegated filesystem',
+      );
+      expect(parent.getFileSystemService()).toBe(fileService);
+      const child = deriveWorktreeConfig(
+        parent,
+        path.join(TARGET_DIR, 'child'),
+      );
+      expect(child.getShellExecutionSandbox()).toBe(snapshot);
+      expect(() => deriveWorktreeConfig(parent, '/other')).toThrow(
+        'admitted workspace',
+      );
+      await expect(parent.relocateWorkingDirectory('/other')).rejects.toThrow(
+        'admitted workspace',
+      );
+      expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
+    });
     it('keeps session approval independent of nested agent and worktree modes', () => {
       const parent = new Config({
         ...baseParams,
@@ -6709,6 +6915,158 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('registers and removes Advisor with the runtime model setting', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          llmClient: { setTools: typeof setTools };
+        }
+      ).llmClient = { setTools };
+      const registry = config.getToolRegistry();
+
+      await config.setAdvisorModel('advisor-model');
+
+      expect(config.getAdvisorModel()).toBe('advisor-model');
+      expect(registry.unregisterTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registry.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(setTools).toHaveBeenCalledTimes(1);
+
+      await config.setAdvisorModel('off');
+
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+      expect(setTools).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not disturb Advisor registration while the tool is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.ADVISOR],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      vi.mocked(registry.unregisterTool).mockClear();
+      vi.mocked(registry.registerFactory).mockClear();
+
+      const applied = await config.setAdvisorModel('advisor-model');
+
+      expect(applied).toBe(false);
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).not.toHaveBeenCalled();
+      expect(registry.registerFactory).not.toHaveBeenCalled();
+    });
+
+    it('does not register Advisor in safe mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        safeMode: true,
+      });
+
+      await config.initialize();
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it('shares the Advisor limit across derived configs and does not reset on toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      const child = Object.create(config) as Config;
+      expect(child.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      await config.setAdvisorModel('off');
+      await config.setAdvisorModel('advisor-model');
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      expect(config.getAdvisorUseCount()).toBe(1);
+    });
+
+    it('treats an Advisor limit of 0 as unlimited', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 0,
+      });
+      for (let i = 0; i < 3; i++) {
+        expect(config.tryConsumeAdvisorUse()).toBe(true);
+      }
+      expect(config.getAdvisorUseCount()).toBe(3);
+    });
+
+    it('resets the Advisor count when a new session starts', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      config.startNewSession('next-advisor-session');
+      expect(config.getAdvisorUseCount()).toBe(0);
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+    });
+
+    it('registers configured Advisor for ordinary subagent registries', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it.each([-1, 1.5, NaN, Infinity, '5'])(
+      'falls back to unlimited for invalid Advisor limit %s',
+      (advisorMaxUses) => {
+        const config = new Config({
+          ...baseParams,
+          advisorMaxUses: advisorMaxUses as number,
+        });
+        expect(config.getAdvisorMaxUses()).toBe(0);
+      },
+    );
+
+    it('defers Advisor when tools.eager omits it', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        eagerTools: [],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      expect(registry.registerPermissionDeferredFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.ensureTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      await config.setAdvisorModel('off');
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+    });
+
     it.each([
       ['interactive', { interactive: true }],
       ['ACP', { experimentalZedIntegration: true }],
@@ -9515,6 +9873,90 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  // #12029: the ratio alone means a large window never warns. 15% of a 1M
+  // window is 150,000 tokens of always-on context — an absolute ceiling is what
+  // makes the warning fire where the cost is actually paid.
+  it('warns about a large always-on context on a large window, naming the token bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(48_000), // ~12,000 tokens
+      generationConfig: { contextWindowSize: 1_000_000 },
+    });
+
+    const warnings = config.getWarnings();
+
+    expect(warnings).toContainEqual(
+      expect.stringContaining('uses about 12,000 tokens'),
+    );
+    // The bound that actually fired leads, and the window is still named so a
+    // reader can see how the budget was derived.
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "more than 10,000 tokens — the smaller of that and 15% of this model's 1,000,000 token context window",
+      ),
+    );
+    expect(warnings.join('\n')).not.toContain('more than 15%');
+  });
+
+  it('keeps naming the percentage when the ratio is the binding bound', async () => {
+    const config = new Config({
+      ...baseParams,
+      userMemory: 'a'.repeat(800), // 200 tokens, against 15% of 1,000
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining("more than 15% of this model's 1,000 token"),
+    );
+  });
+
+  // The author of an extension rule that was dropped has to be told, or the
+  // documented mechanism silently does nothing for them (#12030).
+  it('warns for each extension rule skipped for having no paths', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining(
+        'Extension rule charts:rules/always.md has no `paths:` and was skipped',
+      ),
+    );
+  });
+
+  // A refresh replaces the list rather than appending to it, or a session that
+  // reloads memory a few times shows the same warning several times over.
+  it('does not accumulate the same extension-rule warning across refreshes', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      ignoredExtensionRules: ['charts:rules/always.md'],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      config
+        .getWarnings()
+        .filter((warning) => warning.includes('charts:rules/always.md')),
+    ).toHaveLength(1);
+  });
+
   it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
     const config = new Config(baseParams);
 
@@ -11449,6 +11891,68 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('uses a main-session execution environment and disposes it once', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const dispose = vi
+        .spyOn(environment, 'dispose')
+        .mockResolvedValue(undefined);
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        todoWriteEnabled: true,
+        mcpServers: { local: { command: 'must-not-start' } },
+      });
+      expect(config.getExecutionEnvironment()).toBe(environment);
+      expect(config.getMcpServers()).toEqual({});
+      await config.createToolRegistry();
+      const registered = vi
+        .mocked(ToolRegistry.prototype.registerFactory)
+        .mock.calls.map(([name]) => name);
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.SHELL);
+      for (const name of [
+        ToolNames.STRUCTURED_OUTPUT,
+        ToolNames.WEB_FETCH,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
+        ToolNames.TODO_WRITE,
+      ])
+        expect(registered).toContain(name);
+      expect(registered).not.toContain(ToolNames.TASK_STOP);
+      expect(registered).not.toContain(ToolNames.NOTEBOOK_EDIT);
+      expect(registered).not.toContain(ToolNames.CREATE_SUB_SESSION);
+      await config.shutdownExecutionEnvironments();
+      await config.shutdownExecutionEnvironments();
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+    it('skips host project hooks, skills, extensions and memory during SSH initialization', async () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const config = new Config({
+        ...baseParams,
+        executionEnvironment: environment,
+        enableAutoSkill: true,
+      });
+      const refreshExtensions = vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      );
+      await config.initialize({ skipLlmInitialization: true });
+      await config.refreshHierarchicalMemory();
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(refreshExtensions).not.toHaveBeenCalled();
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      await config.shutdown();
+    });
+
     it('registers zoom_image unconditionally so it survives model switches', async () => {
       const config = new Config(baseParams);
       // A first-run / text-only session reports no image modality, yet the tool
@@ -12234,8 +12738,8 @@ describe('Server Config (config.ts)', () => {
       // Unlisted built-ins are NOT registered eagerly — their schemas are
       // never sent in the eager model request (#9827). But since #10075 they
       // are demoted to deferred rather than dropped: still registered, so
-      // they stay listed in /tools and loadable via ToolSearch instead of
-      // silently disappearing.
+      // they stay listed in /tools and reachable via ToolSearch + ToolCall
+      // instead of silently disappearing.
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
       expect(registered).not.toContain(ToolNames.GET_GOAL);

@@ -10,7 +10,8 @@ import { clearTimeout, setTimeout } from 'node:timers';
 import {
   CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
+  CHROME_WEB_STORE_URL,
   defaultChromeBridgeSocketPath,
   type BridgeEvent,
   type BridgeHello,
@@ -329,7 +330,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     } while (Date.now() < deadline);
     if (mismatch !== undefined) throw mismatch;
     throw disconnectedError(
-      `Qwen Chrome extension is not connected. Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry. ${errorMessage(lastError)}`,
+      `Qwen Chrome extension is not connected. Open Chrome and, in the profile you want to use, install the extension from ${CHROME_WEB_STORE_URL} or enable it at chrome://extensions, then retry. ${errorMessage(lastError)}`,
     );
   }
 
@@ -416,7 +417,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             }
             if (
               message.type !== 'hello' ||
-              message.extensionId !== CHROME_EXTENSION_ID ||
+              !CHROME_EXTENSION_IDS.includes(message.extensionId as string) ||
               message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
               typeof message.extensionInstanceId !== 'string' ||
               !message.extensionInstanceId ||

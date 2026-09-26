@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
@@ -302,9 +303,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool and invokes it through
+     * {@link ToolNames.TOOL_CALL}, keeping the declaration list stable. Mirrors
+     * the `shouldDefer` field described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -893,7 +894,10 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | ShellResultDisplay
   | string
+  | AdvisorReviewDisplay
+  | AdvisorAdviceDisplay
   | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
@@ -908,6 +912,73 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorAdviceDisplay {
+  type: 'advisor_advice';
+  model?: string;
+  text: string;
+}
+
+export type AdvisorDisplay = AdvisorReviewDisplay | AdvisorAdviceDisplay;
+
+export function isAdvisorDisplay(display: unknown): display is AdvisorDisplay {
+  return (
+    isAdvisorReviewDisplay(display) ||
+    (typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'advisor_advice' &&
+      'text' in display &&
+      typeof display.text === 'string')
+  );
+}
+
+export function formatAdvisorDisplay(display: AdvisorDisplay): string {
+  return display.type === 'advisor_advice'
+    ? display.text
+    : formatAdvisorReview(display);
+}
+
+export interface AdvisorReviewDisplay {
+  type: 'advisor_review';
+  model?: string;
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
+}
+
+export function isAdvisorReviewDisplay(
+  display: unknown,
+): display is AdvisorReviewDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'advisor_review' &&
+    'verdict' in display &&
+    typeof display.verdict === 'string' &&
+    'risks' in display &&
+    typeof display.risks === 'string' &&
+    'missingEvidence' in display &&
+    typeof display.missingEvidence === 'string' &&
+    'recommendation' in display &&
+    typeof display.recommendation === 'string'
+  );
+}
 
 export interface TeamResultDisplay {
   type: 'team_result';

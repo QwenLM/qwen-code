@@ -31,6 +31,7 @@ import {
   isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
+  resolveToolCallName,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 import {
@@ -1334,7 +1335,10 @@ export function transcriptBlocksToDaemonMessages(
       tool.args = permissionInfo.args;
     }
     if (
-      isSubAgentToolCall(tool) &&
+      (isSubAgentToolCall(tool) ||
+        /^(shell|bash|run_shell_command|execute_command)$/i.test(
+          tool.toolName,
+        )) &&
       isActiveToolStatus(tool.status) &&
       tool.endTime === undefined
     ) {
@@ -1582,7 +1586,7 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function daemonToolBlockToToolCall(
+export function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
 ): DaemonMessageToolCall {
@@ -1612,11 +1616,13 @@ function daemonToolBlockToToolCall(
     block.status === 'canceled';
   const forceBackgroundPending =
     isBackgroundAgent && (!safeToolProjection || !isComplete);
+  const toolName =
+    resolveToolCallName(block.toolName, block.rawInput) || 'unknown';
 
   return {
     callId: block.toolCallId,
-    toolName: block.toolName || 'unknown',
-    title: block.title,
+    toolName,
+    title: block.title === block.toolName ? toolName : block.title,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||
@@ -1643,7 +1649,11 @@ function getToolArgs(
   safeToolProjection: boolean,
 ): Record<string, unknown> | undefined {
   if (!safeToolProjection) {
-    return block.rawInput as Record<string, unknown> | undefined;
+    const rawInput = getRecord(block.rawInput);
+    return block.toolName === 'tool_call' &&
+      resolveToolCallName(block.toolName, rawInput) !== block.toolName
+      ? getRecord(rawInput?.['arguments'])
+      : rawInput;
   }
   return daemonToolPreviewToArgs(block.preview);
 }
@@ -1790,8 +1800,12 @@ function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
 
+  // `details` is the daemon's redacted JSON dump of the tool *input* whenever
+  // rawInput is present (see the SDK normalizer), so it is never a result:
+  // falling back to it renders the call's own arguments — `{}` for empty
+  // args — as the completed tool's output.
   if (!isCancelledStatus(block.status) || !block.details) {
-    return block.rawOutput ?? block.details;
+    return block.rawOutput;
   }
 
   if (
@@ -1820,6 +1834,7 @@ function daemonToolResultPreviewToOutput(
   preview: DaemonToolTranscriptBlock['resultPreview'],
 ): unknown {
   if (!preview) return undefined;
+  if (preview.kind === 'shell_result') return preview.result;
   if (preview.kind === 'question_answers') {
     return {
       type: 'ask_user_question_answers',

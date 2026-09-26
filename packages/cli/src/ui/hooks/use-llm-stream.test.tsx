@@ -57,6 +57,7 @@ import {
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import { useShellCommandProcessor } from './shellCommandProcessor.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -9027,6 +9028,75 @@ describe('useLlmStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('records a bridged Goal duplicate as bookkeeping without scheduling it', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-history',
+      revision: 1,
+      turnId: 'turn-history',
+    };
+    const args = { name: 'get_goal', arguments: {} };
+    const client = new MockedLlmClientClass(mockConfig);
+    client.getHistoryToolCallFingerprints = vi
+      .fn()
+      .mockReturnValue(
+        new Map([['tool-history', getToolCallFingerprint('tool_call', args)]]),
+      );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-history',
+              providerCallId: 'tool-history',
+              name: 'tool_call',
+              args,
+              isClientInitiated: false,
+              prompt_id: 'prompt-tui-history',
+              goalContext: permit,
+            },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          };
+        })(),
+      );
+
+    const { result } = renderTestHook([], client);
+
+    await act(async () => {
+      await result.current.submitQuery('run shell');
+    });
+
+    expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
+    expect(toolResultParts[0].functionResponse?.id).toBe('tool-history');
+    expect(toolResultParts[0].functionResponse?.response?.['error']).toContain(
+      'Duplicate provider tool call id "tool-history"',
+    );
+    expect(recordToolResult).toHaveBeenCalledWith(
+      toolResultParts,
+      expect.objectContaining({ executionStatus: 'not_started' }),
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('schedules an id-colliding tool call whose args differ from the handled call', async () => {
     const client = new MockedLlmClientClass(mockConfig);
     client.getHistoryToolCallFingerprints = vi
@@ -9195,6 +9265,98 @@ describe('useLlmStream', () => {
       expect.objectContaining({ callId: 'generated-1' }),
       expect.objectContaining({ callId: 'generated-2' }),
     ]);
+  });
+
+  it('commits streamed text before scheduling a tool continuation', async () => {
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Content,
+          value: 'I will ask the advisor before continuing.',
+        };
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: {
+            callId: 'advisor-call',
+            name: 'advisor',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-advisor',
+          },
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery('review this change');
+    });
+
+    const textCommitIndex = mockAddItem.mock.calls.findIndex(
+      ([item]) =>
+        item.type === 'gemini' &&
+        item.text === 'I will ask the advisor before continuing.',
+    );
+    expect(textCommitIndex).toBeGreaterThanOrEqual(0);
+    expect(mockAddItem.mock.invocationCallOrder[textCommitIndex]).toBeLessThan(
+      mockScheduleToolCalls.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('keeps a completed tool ahead of its streaming continuation', async () => {
+    const completedTool = {
+      request: {
+        callId: 'advisor-continuation',
+        name: 'advisor',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-advisor-continuation',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'advisor-continuation',
+        responseParts: [],
+        resultDisplay: 'advisor feedback',
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: { displayName: 'Advisor' },
+      invocation: { getDescription: () => 'Consult Advisor' },
+    } as unknown as TrackedCompletedToolCall;
+    let releaseContinuation!: () => void;
+    const heldContinuation = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
+    });
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Content,
+          value: 'Here is the final answer.',
+        };
+        await heldContinuation;
+      })(),
+    );
+    const { result } = renderTestHook([completedTool]);
+
+    let submitPromise: Promise<unknown> | undefined;
+    act(() => {
+      submitPromise = result.current.submitQuery(
+        completedTool.response.responseParts,
+        SendMessageType.ToolResult,
+      );
+    });
+
+    await waitFor(() => {
+      expect(
+        result.current.pendingHistoryItems.map((item) => item.type),
+      ).toEqual(['tool_group', 'gemini']);
+    });
+
+    await act(async () => {
+      releaseContinuation();
+      await submitPromise;
+    });
   });
 
   it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
@@ -16621,6 +16783,103 @@ describe('useLlmStream', () => {
     );
   });
 
+  // #11626: a queued submission carries the shell intent recorded when the
+  // user submitted it (submitQuery metadata), so the drain routes on the
+  // submit-time decision rather than the live shell-mode flag, which can
+  // flip while the entry waits in the queue.
+  describe('recorded shell intent routing', () => {
+    const renderWithShellMode = (shellModeActive: boolean) =>
+      renderHook(() =>
+        useLlmStream(
+          mockConfig.getLlmClient() as LlmClient,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          shellModeActive,
+          () => 'vscode' as EditorType,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          vi.fn(),
+          vi.fn(),
+          vi.fn(),
+          80,
+          24,
+        ),
+      );
+
+    it('routes to the shell when the entry was submitted in shell mode, even if shell mode is off at drain', async () => {
+      const handleShellCommand = vi.fn().mockReturnValue(true);
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      } as unknown as ReturnType<typeof useShellCommandProcessor>);
+
+      const { result } = renderWithShellMode(false);
+      await act(async () => {
+        await result.current.submitQuery(
+          'gh workflow list',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+
+      expect(handleShellCommand).toHaveBeenCalledWith(
+        'gh workflow list',
+        expect.any(AbortSignal),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('routes to the model when the entry was submitted outside shell mode, even if shell mode is on at drain', async () => {
+      const handleShellCommand = vi.fn().mockReturnValue(true);
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      } as unknown as ReturnType<typeof useShellCommandProcessor>);
+
+      const { result } = renderWithShellMode(true);
+      await act(async () => {
+        await result.current.submitQuery(
+          'queued while the model was responding',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: false },
+        );
+      });
+
+      expect(handleShellCommand).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalled();
+    });
+
+    // Producers that record no intent (remote input, restores without a
+    // recorded flag) keep the pre-fix behavior: route on the live flag.
+    it('routes on the live shell-mode flag when the entry recorded no intent', async () => {
+      const handleShellCommand = vi.fn().mockReturnValue(true);
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand,
+        activeShellPtyId: null,
+      } as unknown as ReturnType<typeof useShellCommandProcessor>);
+
+      const { result } = renderWithShellMode(true);
+      await act(async () => {
+        await result.current.submitQuery('ls -la', SendMessageType.UserQuery);
+      });
+
+      expect(handleShellCommand).toHaveBeenCalledWith(
+        'ls -la',
+        expect.any(AbortSignal),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Thought Reset', () => {
     it('should reset thought to null when starting a new prompt', async () => {
       // First, simulate a response with a thought
@@ -17053,6 +17312,23 @@ describe('useLlmStream', () => {
           repositoryRoot: '/test/dir',
         }),
       );
+    });
+
+    it('does not run host review-worktree cleanup in the tool sandbox', async () => {
+      mockConfig.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({ network: 'closed' });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'partial' };
+          throw new Error('stream failed in sandbox');
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('sandbox query');
+      });
+      expect(mockCleanupReviewWorktreeLeases).not.toHaveBeenCalled();
     });
 
     it('should clean up review lease when the stream throws', async () => {

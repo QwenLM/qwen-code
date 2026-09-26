@@ -1,0 +1,155 @@
+{
+  "contractVersion": 1,
+  "headers": {
+    "tenant": "X-Qwen-Tenant-Id",
+    "writerToken": "X-Qwen-Managed-Writer-Token"
+  },
+  "limits": {
+    "maxInlineResourceBytes": 65536,
+    "maxResourcesPerTransaction": 1024,
+    "maxTransactionBytes": 8388608,
+    "maxTransactionEvents": 256,
+    "minimumWriterTokenLength": 32,
+    "maximumWriterTokenLength": 512,
+    "minimumLeaseDurationMs": 1000,
+    "maximumLeaseDurationMs": 300000
+  },
+  "sessionKey": {
+    "tenantId": "tenant-fixture",
+    "workspaceId": "workspace-fixture",
+    "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+  },
+  "resources": [
+    {
+      "resourceId": "definition-1",
+      "kind": "managed-session-definition",
+      "schemaVersion": 1,
+      "utf8": "{\"model\":\"fixture\",\"温度\":0}",
+      "bytesBase64": "eyJtb2RlbCI6ImZpeHR1cmUiLCLmuKnluqYiOjB9",
+      "byteLength": 30,
+      "digest": "461919d7b3a57890026af59f1f4374dba47dd8a2ff66610a331b3e67de5370a7"
+    },
+    {
+      "resourceId": "root-snapshot-1",
+      "kind": "managed-session-root-snapshot",
+      "schemaVersion": 1,
+      "utf8": "{\"version\":1,\"messages\":[]}",
+      "bytesBase64": "eyJ2ZXJzaW9uIjoxLCJtZXNzYWdlcyI6W119",
+      "byteLength": 27,
+      "digest": "866aa33c6691ecab9f159e7209077f9e643b981cc9f437d03c6e49352d86dd52"
+    }
+  ],
+  "genesisTransaction": {
+    "records": [
+      {
+        "uuid": "engine-record",
+        "parentUuid": null,
+        "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+        "timestamp": "2026-09-22T00:00:00.000Z",
+        "type": "system",
+        "subtype": "session_execution_engine",
+        "cwd": "/workspace",
+        "version": "fixture",
+        "systemPayload": {
+          "version": 1,
+          "engine": "managed"
+        }
+      },
+      {
+        "uuid": "header-record",
+        "parentUuid": "engine-record",
+        "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+        "timestamp": "2026-09-22T00:00:00.001Z",
+        "type": "system",
+        "subtype": "managed_session_header_v1",
+        "cwd": "/workspace",
+        "version": "fixture",
+        "managedSession": {
+          "formatVersion": 1,
+          "minimumReader": "managed-session/1",
+          "sessionKey": {
+            "tenantId": "tenant-fixture",
+            "workspaceId": "workspace-fixture",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "engine": "managed",
+          "definitionRef": {
+            "resourceId": "definition-1",
+            "kind": "managed-session-definition",
+            "schemaVersion": 1,
+            "byteLength": 30,
+            "digest": "461919d7b3a57890026af59f1f4374dba47dd8a2ff66610a331b3e67de5370a7"
+          },
+          "rootSnapshotRef": {
+            "resourceId": "root-snapshot-1",
+            "kind": "managed-session-root-snapshot",
+            "schemaVersion": 1,
+            "byteLength": 27,
+            "digest": "866aa33c6691ecab9f159e7209077f9e643b981cc9f437d03c6e49352d86dd52"
+          },
+          "createdBy": "fixture"
+        }
+      }
+    ],
+    "jsonl": "{\"uuid\":\"engine-record\",\"parentUuid\":null,\"sessionId\":\"550e8400-e29b-41d4-a716-446655440000\",\"timestamp\":\"2026-09-22T00:00:00.000Z\",\"type\":\"system\",\"subtype\":\"session_execution_engine\",\"cwd\":\"/workspace\",\"version\":\"fixture\",\"systemPayload\":{\"version\":1,\"engine\":\"managed\"}}\n{\"uuid\":\"header-record\",\"parentUuid\":\"engine-record\",\"sessionId\":\"550e8400-e29b-41d4-a716-446655440000\",\"timestamp\":\"2026-09-22T00:00:00.001Z\",\"type\":\"system\",\"subtype\":\"managed_session_header_v1\",\"cwd\":\"/workspace\",\"version\":\"fixture\",\"managedSession\":{\"formatVersion\":1,\"minimumReader\":\"managed-session/1\",\"sessionKey\":{\"tenantId\":\"tenant-fixture\",\"workspaceId\":\"workspace-fixture\",\"sessionId\":\"550e8400-e29b-41d4-a716-446655440000\"},\"engine\":\"managed\",\"definitionRef\":{\"resourceId\":\"definition-1\",\"kind\":\"managed-session-definition\",\"schemaVersion\":1,\"byteLength\":30,\"digest\":\"461919d7b3a57890026af59f1f4374dba47dd8a2ff66610a331b3e67de5370a7\"},\"rootSnapshotRef\":{\"resourceId\":\"root-snapshot-1\",\"kind\":\"managed-session-root-snapshot\",\"schemaVersion\":1,\"byteLength\":27,\"digest\":\"866aa33c6691ecab9f159e7209077f9e643b981cc9f437d03c6e49352d86dd52\"},\"createdBy\":\"fixture\"}}\n",
+    "recordBytesBase64": "eyJ1dWlkIjoiZW5naW5lLXJlY29yZCIsInBhcmVudFV1aWQiOm51bGwsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjJUMDA6MDA6MDAuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoic2Vzc2lvbl9leGVjdXRpb25fZW5naW5lIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJmaXh0dXJlIiwic3lzdGVtUGF5bG9hZCI6eyJ2ZXJzaW9uIjoxLCJlbmdpbmUiOiJtYW5hZ2VkIn19CnsidXVpZCI6ImhlYWRlci1yZWNvcmQiLCJwYXJlbnRVdWlkIjoiZW5naW5lLXJlY29yZCIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjJUMDA6MDA6MDAuMDAxWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2hlYWRlcl92MSIsImN3ZCI6Ii93b3Jrc3BhY2UiLCJ2ZXJzaW9uIjoiZml4dHVyZSIsIm1hbmFnZWRTZXNzaW9uIjp7ImZvcm1hdFZlcnNpb24iOjEsIm1pbmltdW1SZWFkZXIiOiJtYW5hZ2VkLXNlc3Npb24vMSIsInNlc3Npb25LZXkiOnsidGVuYW50SWQiOiJ0ZW5hbnQtZml4dHVyZSIsIndvcmtzcGFjZUlkIjoid29ya3NwYWNlLWZpeHR1cmUiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAifSwiZW5naW5lIjoibWFuYWdlZCIsImRlZmluaXRpb25SZWYiOnsicmVzb3VyY2VJZCI6ImRlZmluaXRpb24tMSIsImtpbmQiOiJtYW5hZ2VkLXNlc3Npb24tZGVmaW5pdGlvbiIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjMwLCJkaWdlc3QiOiI0NjE5MTlkN2IzYTU3ODkwMDI2YWY1OWYxZjQzNzRkYmE0N2RkOGEyZmY2NjYxMGEzMzFiM2U2N2RlNTM3MGE3In0sInJvb3RTbmFwc2hvdFJlZiI6eyJyZXNvdXJjZUlkIjoicm9vdC1zbmFwc2hvdC0xIiwia2luZCI6Im1hbmFnZWQtc2Vzc2lvbi1yb290LXNuYXBzaG90Iiwic2NoZW1hVmVyc2lvbiI6MSwiYnl0ZUxlbmd0aCI6MjcsImRpZ2VzdCI6Ijg2NmFhMzNjNjY5MWVjYWI5ZjE1OWU3MjA5MDc3ZjllNjQzYjk4MWNjOWY0MzdkMDNjNmU0OTM1MmQ4NmRkNTIifSwiY3JlYXRlZEJ5IjoiZml4dHVyZSJ9fQo=",
+    "byteLength": 1145,
+    "recordDigest": "01f67f0e57d360e308957daeb8b3db4fec2dfc4f911249936c63bee3b1f6e50c",
+    "expectedRequest": {
+      "transactionId": "session.create:550e8400-e29b-41d4-a716-446655440000",
+      "operation": "session.create",
+      "commandId": "session.create:550e8400-e29b-41d4-a716-446655440000",
+      "contentDigest": "01f67f0e57d360e308957daeb8b3db4fec2dfc4f911249936c63bee3b1f6e50c",
+      "firstSequence": 0,
+      "lastSequence": 0,
+      "eventCount": 0,
+      "eventsDigest": null,
+      "previousCommitDigest": null,
+      "commitDigest": null,
+      "activationEpoch": 0,
+      "recordCount": 2
+    }
+  },
+  "errors": {
+    "writerConflict": {
+      "status": 409,
+      "code": "managed_session_writer_conflict"
+    },
+    "idempotencyConflict": {
+      "status": 409,
+      "code": "managed_session_idempotency_conflict"
+    },
+    "recoveryConflict": {
+      "status": 409,
+      "code": "managed_session_recovery_conflict"
+    },
+    "resourceMissing": {
+      "status": 409,
+      "code": "managed_session_resource_missing"
+    },
+    "resourceNotFound": {
+      "status": 404,
+      "code": "managed_session_resource_not_found"
+    },
+    "ossDisabled": {
+      "status": 501,
+      "code": "managed_session_oss_disabled"
+    },
+    "invalidRequest": {
+      "status": 400,
+      "code": "invalid_managed_session_store_request"
+    },
+    "payloadTooLarge": {
+      "status": 413,
+      "code": "managed_session_payload_too_large"
+    },
+    "journalCorrupt": {
+      "status": 500,
+      "code": "managed_session_journal_corrupt"
+    },
+    "headCorrupt": {
+      "status": 500,
+      "code": "managed_session_head_corrupt"
+    }
+  }
+}
