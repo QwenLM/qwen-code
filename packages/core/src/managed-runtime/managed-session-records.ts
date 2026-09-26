@@ -10,6 +10,8 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 
+export type { ManagedSessionJsonValue };
+
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 
