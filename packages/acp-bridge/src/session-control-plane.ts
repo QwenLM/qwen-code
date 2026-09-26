@@ -3898,7 +3898,7 @@ export function createSessionControlPlane(
   let lastRuntimeStop: BridgeRuntimeStopResult | undefined;
   let runtimeStop:
     | {
-        channel: ChannelInfo;
+        channels: readonly ChannelInfo[];
         promise: Promise<BridgeRuntimeStopResult>;
         completion: Promise<BridgeRuntimeStopResult>;
       }
@@ -4354,6 +4354,7 @@ export function createSessionControlPlane(
     const physical: HarnessChannel = {
       id: acpChannelId,
       executionEngine: engine,
+      runtimeEpoch: 0,
       lastUsedAt: Date.now(),
       channel,
       connection,
@@ -4473,6 +4474,7 @@ export function createSessionControlPlane(
         `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`,
       );
     }
+    const stoppedByRuntimeStop = runtimeStop?.channels.includes(info) === true;
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
       if (!sessEntry || sessEntry.channel !== info.channel) continue;
@@ -4486,13 +4488,11 @@ export function createSessionControlPlane(
       );
       try {
         sessEntry.events.publish({
-          type:
-            runtimeStop?.channel === info ? 'session_closed' : 'session_died',
+          type: stoppedByRuntimeStop ? 'session_closed' : 'session_died',
           data: {
             sessionId: sid,
-            reason:
-              runtimeStop?.channel === info ? 'client_close' : 'channel_closed',
-            ...(runtimeStop?.channel === info
+            reason: stoppedByRuntimeStop ? 'client_close' : 'channel_closed',
+            ...(stoppedByRuntimeStop
               ? {
                   cause: 'workspace_runtime_stop',
                   persistenceUnconfirmed: true,
@@ -5939,7 +5939,7 @@ export function createSessionControlPlane(
       }
       return idle();
     }
-    const requestRuntimeEpoch = harness.epoch;
+    const requestRuntimeEpoch = info.harness.runtimeEpoch;
     return await withWorkspaceStatusRead(info, async () => {
       let response = await withTimeout(
         Promise.race([
@@ -9089,6 +9089,7 @@ export function createSessionControlPlane(
   ): BridgeRuntimeStopResult {
     return {
       ...result,
+      channels: result.channels.map((channel) => ({ ...channel })),
       affectedSessionIds: [...result.affectedSessionIds],
       closedSessionIds: [...result.closedSessionIds],
       interruptedSessionIds: [...result.interruptedSessionIds],
@@ -9096,19 +9097,25 @@ export function createSessionControlPlane(
     };
   }
 
+  // Every live channel, workspace control first.
+  function runtimeStopTargets(): ChannelInfo[] {
+    const control = liveChannelInfo();
+    return liveChannelInfos().sort(
+      (a, b) => Number(b === control) - Number(a === control),
+    );
+  }
+
   function runtimeStopSnapshot(): BridgeRuntimeStopSnapshot {
-    const channels = liveChannelInfos();
-    const ci = channels[0];
+    const channels = runtimeStopTargets();
     const blockedReasons: string[] = [];
-    if (channels.length > 1) blockedReasons.push('multiple_engine_channels');
     if (
       shuttingDown ||
       runtimeStop ||
       [...harness.values()].some((c) => c.isDying)
     )
       blockedReasons.push('stopping');
-    if (!ci) blockedReasons.push('not_live');
-    else if (!ci.channel.registryReleased)
+    if (channels.length === 0) blockedReasons.push('not_live');
+    else if (channels.some((ci) => !ci.channel.registryReleased))
       blockedReasons.push('release_unavailable');
     if (
       [...harness.startups()].length ||
@@ -9119,14 +9126,18 @@ export function createSessionControlPlane(
       harness.pendingKeepAliveCount ||
       inFlightSessionIdReservations.size ||
       abandonedSessionIdReservations.size ||
-      (ci && (ci.sessionSpawnsInFlight || ci.pendingRestoreIds.size))
+      channels.some(
+        (ci) => ci.sessionSpawnsInFlight || ci.pendingRestoreIds.size,
+      )
     )
       blockedReasons.push('session_start_pending');
     if (
-      ci &&
-      (ci.harness.workspaceControlInFlight ||
-        ci.workspaceMcpDiscoveryInFlight ||
-        ci.workspaceMcpAuthenticationServerNames.size)
+      channels.some(
+        (ci) =>
+          ci.harness.workspaceControlInFlight ||
+          ci.workspaceMcpDiscoveryInFlight ||
+          ci.workspaceMcpAuthenticationServerNames.size,
+      )
     )
       blockedReasons.push('workspace_control_pending');
     if (
@@ -9138,8 +9149,20 @@ export function createSessionControlPlane(
     )
       blockedReasons.push('session_closing');
     return {
-      ...(ci ? { channelId: ci.id } : {}),
-      runtimeEpoch: harness.epoch,
+      ...(channels[0] ? { channelId: channels[0].id } : {}),
+      // Epochs are allocated monotonically, so a channel started after this
+      // snapshot always raises the newest one and stales its confirmation.
+      runtimeEpoch:
+        channels.length > 0
+          ? Math.max(...channels.map((ci) => ci.harness.runtimeEpoch))
+          : harness.epoch,
+      channels: channels.map((ci) => ({
+        channelId: ci.id,
+        runtimeEpoch: ci.harness.runtimeEpoch,
+        ...(ci.harness.executionEngine
+          ? { executionEngine: ci.harness.executionEngine }
+          : {}),
+      })),
       stopToken: runtimeStopToken,
       blockedReasons,
       sessions: [...byId.values()].map((entry) => {
@@ -9197,11 +9220,14 @@ export function createSessionControlPlane(
     ) {
       throw new WorkspaceRuntimeStopError('workspace_runtime_stop_blocked');
     }
-    const ci = liveChannelInfos()[0]!;
-    const released = ci.channel.registryReleased!;
+    const channels = runtimeStopTargets();
+    const released = Promise.all(
+      channels.map((ci) => ci.channel.registryReleased!),
+    );
     const receipt: BridgeRuntimeStopResult = {
-      channelId: ci.id,
-      runtimeEpoch: harness.epoch,
+      channelId: snapshot.channelId!,
+      runtimeEpoch: snapshot.runtimeEpoch,
+      channels: snapshot.channels.map((channel) => ({ ...channel })),
       stopToken: runtimeStopToken,
       state: 'stopping',
       stopped: false,
@@ -9216,7 +9242,7 @@ export function createSessionControlPlane(
     harness.cancelIdleTimer();
     const deadline = Date.now() + timeoutMs;
     const operation = {
-      channel: ci,
+      channels,
       promise: Promise.resolve(receipt),
       completion: Promise.resolve(receipt),
     };
@@ -9248,22 +9274,35 @@ export function createSessionControlPlane(
           } catch (error) {
             receipt.error =
               error instanceof Error ? error.message : String(error);
-            if (ci.harness.isDying || !harness.has(ci.harness)) {
+            const exited = channels.filter(
+              (ci) => ci.harness.isDying || !harness.has(ci.harness),
+            );
+            if (exited.length > 0) {
               // Root exit/transport failure can precede the owned descendants.
-              receipt.interruptedSessionIds = [...ids];
-              await released;
+              await Promise.all(
+                exited.map((ci) => ci.channel.registryReleased),
+              );
               receipt.remainingSessionIds = ids.filter((id) => byId.has(id));
+              receipt.interruptedSessionIds = ids.filter(
+                (id) =>
+                  receipt.interruptedSessionIds.includes(id) || !byId.has(id),
+              );
             }
             receipt.state = 'incomplete';
             return copyRuntimeStop(receipt);
           }
         }
-        try {
-          await harness.stopChannel(ci.harness);
-        } catch (error) {
+        const failure = (
+          await Promise.allSettled(
+            channels.map((ci) => harness.stopChannel(ci.harness)),
+          )
+        ).find((result) => result.status === 'rejected');
+        if (failure) {
           receipt.state = 'failed';
           receipt.error =
-            error instanceof Error ? error.message : String(error);
+            failure.reason instanceof Error
+              ? failure.reason.message
+              : String(failure.reason);
         }
         await released;
         receipt.state = 'stopped';
@@ -9271,6 +9310,13 @@ export function createSessionControlPlane(
         return copyRuntimeStop(receipt);
       } finally {
         if (runtimeStop === operation) runtimeStop = undefined;
+        // The stop cancelled idle timers; channels it left running return to
+        // the idle policy.
+        for (const ci of channels) {
+          if (!ci.harness.isDying && harness.has(ci.harness)) {
+            void harness.startIdleTimer(ci.harness, 'workspace runtime stop');
+          }
+        }
       }
     });
     let timer: ReturnType<typeof setTimeout>;
@@ -9655,6 +9701,7 @@ export function createSessionControlPlane(
         stopping ||
         reservedWork ||
         channels.some((info) => !harness.hasNoChannelWork(info.harness));
+      const control = liveChannelInfo();
       return {
         state: runtimeStop
           ? 'stopping'
@@ -9668,9 +9715,26 @@ export function createSessionControlPlane(
               ? 'active'
               : 'idle',
         runtimeLive,
-        runtimeEpoch: runtimeLive ? harness.epoch : sourceRuntimeEpoch,
+        runtimeEpoch: control
+          ? control.harness.runtimeEpoch
+          : sourceRuntimeEpoch,
         activeWork,
+        ...(executionEngines
+          ? {
+              workspaceControl: control
+                ? 'live'
+                : runtimeStop || harness.current?.isDying
+                  ? 'stopping'
+                  : harness.starting
+                    ? 'starting'
+                    : 'cold',
+            }
+          : {}),
       };
+    },
+
+    isWorkspaceControlLive() {
+      return liveChannelInfo() !== undefined;
     },
 
     getRuntimeStopSnapshot: runtimeStopSnapshot,
@@ -9692,7 +9756,7 @@ export function createSessionControlPlane(
       }
       return {
         channelId: info.id,
-        runtimeEpoch: harness.epoch,
+        runtimeEpoch: info.harness.runtimeEpoch,
         lastUsedAt: info.harness.lastUsedAt,
       };
     },

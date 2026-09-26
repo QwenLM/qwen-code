@@ -6552,6 +6552,72 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('wires every workspace service to workspace-control liveness', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-control-liveness-')),
+    );
+    const workspaces = ['primary', 'secondary', 'added'].map((name) => {
+      const cwd = path.join(tmpDir, name);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    // Another engine keeps the runtime live while workspace control is not.
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () =>
+        Object.assign(makeRuntimeBridge(), {
+          isWorkspaceControlLive: vi.fn().mockReturnValue(false),
+        }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const createWorkspaceService = vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces.slice(0, 2),
+        token: 'control-liveness-token',
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer control-liveness-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: workspaces[2] }),
+      });
+      expect(added.status).toBe(201);
+      const liveness = new Map(
+        createWorkspaceService.mock.calls.map(([deps]) => [
+          deps.boundWorkspace,
+          deps.isChannelLive?.(),
+        ]),
+      );
+      for (const cwd of workspaces) {
+        expect(liveness.get(canonicalizeWorkspace(cwd))).toBe(false);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('accepts an explicit zero channel idle timeout', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-idle-timeout-')),

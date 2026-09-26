@@ -518,9 +518,9 @@ export interface DaemonWorkspaceServiceDeps {
   workspaceSkillsStatusProvider?: WorkspaceSkillsStatusProvider;
 
   /**
-   * Returns whether the ACP channel is currently live. Used by
-   * `getWorkspaceEnvStatus` to populate the `acpChannelLive` field
-   * without requiring an ACP round-trip.
+   * Returns whether the workspace-control ACP channel (Legacy on a paired
+   * Bridge) is currently live. Used for preheat results, post-mutation
+   * refreshes and the `acpChannelLive` fields without an ACP round-trip.
    */
   isChannelLive?: () => boolean;
 

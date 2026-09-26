@@ -40,6 +40,7 @@ import type {
   SubscribeOptions,
 } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
+import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
   SessionArtifactInput,
   SessionArtifactMutationResult,
@@ -1014,9 +1015,19 @@ export interface BridgeRuntimeStopSession {
   hasRunningBackgroundTasks?: boolean;
 }
 
-export interface BridgeRuntimeStopResult {
+/** One live channel addressed by a workspace runtime stop. */
+export interface BridgeRuntimeStopChannel {
   channelId: string;
   runtimeEpoch: number;
+  executionEngine?: BridgeExecutionEngine;
+}
+
+export interface BridgeRuntimeStopResult {
+  /** The first stopped channel: workspace control when it was live. */
+  channelId: string;
+  /** The newest epoch among the stopped channels. */
+  runtimeEpoch: number;
+  channels: BridgeRuntimeStopChannel[];
   stopToken: string;
   state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
   stopped: boolean;
@@ -1028,9 +1039,18 @@ export interface BridgeRuntimeStopResult {
   error?: string;
 }
 
+/**
+ * A stop confirmation must echo `stopToken`, `channelId`, `runtimeEpoch` and
+ * the exact session IDs. Any channel started later raises `runtimeEpoch`, so a
+ * confirmation never reaches a channel or session it did not preview.
+ */
 export interface BridgeRuntimeStopSnapshot {
+  /** The first listed channel: workspace control when it is live. */
   channelId?: string;
+  /** The newest epoch among the listed channels. */
   runtimeEpoch: number;
+  /** Every live channel, workspace control first. */
+  channels: BridgeRuntimeStopChannel[];
   stopToken: string;
   blockedReasons: string[];
   sessions: BridgeRuntimeStopSession[];
@@ -1038,10 +1058,23 @@ export interface BridgeRuntimeStopSnapshot {
 }
 
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
+  /** Aggregate over every engine channel. */
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  /** Aggregate: some engine channel is live. */
   runtimeLive: boolean;
+  /**
+   * The workspace-control channel's own epoch while it is live; otherwise the
+   * epoch source's current value.
+   */
   runtimeEpoch: number;
+  /** Aggregate over every engine channel. */
   activeWork: boolean;
+  /**
+   * Lifecycle of the Legacy channel, which serves workspace control
+   * (workspace status and commands, MCP, Skills, preheat) on a paired Bridge.
+   * Omitted when the Bridge has one channel: the aggregate fields describe it.
+   */
+  workspaceControl?: 'cold' | 'starting' | 'live' | 'stopping';
 }
 
 export type BridgePendingInteraction =
@@ -2867,15 +2900,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   readonly userFacingSessionCount: number;
 
   /**
-   * Whether an ACP channel is currently live (spawned and not dying).
-   * Distinct from `sessionCount > 0`: a channel can be live with zero
+   * Whether an ACP channel of any engine is currently live (spawned and not
+   * dying). Distinct from `sessionCount > 0`: a channel can be live with zero
    * attached sessions during the cold-spawn window, and conversely a
-   * killed channel may briefly retain sessions before reaping. Consumers
-   * that need true channel liveness (e.g. the workspace service's
-   * `acpChannelLive` envelope field) must use this rather than the
-   * session count.
+   * killed channel may briefly retain sessions before reaping.
    */
   isChannelLive(): boolean;
+
+  /**
+   * Whether the channel that serves workspace control is live: Legacy on a
+   * paired Bridge. Consumers that talk to workspace control (the workspace
+   * service's `acpChannelLive` fields, preheat results) use this. Bridges that
+   * omit it have one channel, so `isChannelLive()` answers the same question.
+   */
+  isWorkspaceControlLive?(): boolean;
 
   /**
    * Atomic physical lifecycle snapshot. Optional only for compatibility with
