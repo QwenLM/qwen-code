@@ -128,10 +128,16 @@ describe('isConnectionLevelError', () => {
     },
   );
 
-  // Mid-transfer failures on an already-established, healthy connection: a
-  // fallback here would re-fetch a stalled-but-live https response over
-  // cleartext, doubling the worst-case wait for an ambiguous gain (same
-  // rationale as the ETIMEDOUT exclusion in fetch.ts).
+  // Two distinct exclusion classes, not one:
+  // - Name resolution (ENOTFOUND, EAI_AGAIN) fails before any socket exists.
+  //   The upgrade changes only the scheme, so the http fallback would
+  //   re-resolve the same hostname and cannot succeed — a guaranteed-fail
+  //   cleartext retry on every unresolvable host. EAI_AGAIN also already gets
+  //   one retry inside fetchWithPolicy (RETRYABLE_ERROR_CODES).
+  // - Mid-transfer failures on an already-established, healthy connection: a
+  //   fallback would re-fetch a stalled-but-live https response over
+  //   cleartext, doubling the worst-case wait for an ambiguous gain (same
+  //   rationale as the ETIMEDOUT exclusion in fetch.ts).
   it.each([
     'ENOTFOUND',
     'EAI_AGAIN',
