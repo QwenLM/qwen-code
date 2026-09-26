@@ -442,19 +442,15 @@ describe('navigateToDaemon', () => {
     expect(assigned.searchParams.get('daemon')).toBeNull();
   });
 
-  // Boot keeps a fragment token on the invalid-target path for recovery, and
-  // this escape hatch is the only recovery it offers — but the URL it assigns
-  // clears the hash, so the credential has to be persisted before the page
-  // turns over or the operator lands locked out of their own daemon.
-  it('salvages a URL credential when the escape hatch returns to the page origin', async () => {
+  // Boot keeps a fragment token on the invalid-target path for recovery, but
+  // returning to the page origin must not assign it to the page daemon.
+  it('does not persist a URL credential from a rejected daemon override', async () => {
     const { assign } = setupPage(
       'http://localhost:5173/app?daemon=ftp%3A%2F%2Fdaemon.example#token=url-secret',
     );
     const mod = await import('./daemon');
     expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
-    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
-      'url-secret',
-    );
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
     const assigned = new URL(assign.mock.calls[0]![0] as string);
     expect(assigned.searchParams.get('token')).toBeNull();
     expect(assigned.hash).toBe('');

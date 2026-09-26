@@ -377,25 +377,8 @@ export function navigateToDaemon(
   // just the same: this navigation stays in the same tab, so the entry would
   // survive and boot the next daemon into a split of sessions it has never had.
   clearSplitSessions();
-  // `nextUrl` drops `?token=` and clears the hash, so a credential that lives
-  // only in the URL cannot survive this navigation — and the invalid-target
-  // boot path deliberately leaves one there for recovery, with this escape
-  // hatch as its only exit. Salvage it under the page origin's key, and only
-  // when the page is not already pointed at some other daemon — a URL token
-  // belongs to the target in the address bar, never to a replacement.
-  if (
-    token === undefined &&
-    daemonOrigin === window.location.origin &&
-    daemonOrigin === previousDaemonOrigin
-  ) {
-    const fromUrl = readTokenFromLocation();
-    if (fromUrl) persistDaemonToken(fromUrl, daemonOrigin);
-  }
-  // Past this point the credential rides on storage alone, so ask the key this
-  // navigation lands on — not hasReloadSurvivableDaemonToken(), which answers
-  // for the target being left. With the write refused the switch would land
-  // unauthenticated while reporting success. An empty token means the daemon
-  // needs none, so there is nothing to lose.
+  // The fragment belongs to the rejected target, so do not persist it under
+  // the page origin's storage key when the escape hatch changes targets.
   if (
     token?.trim() &&
     readStoredDaemonToken(daemonTokenStorageKey(daemonOrigin)) === undefined
