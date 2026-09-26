@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,6 +52,22 @@ const cmdPath = (value: string): string =>
 mkdirSync(path.join(outsideRepo, '.git'), { recursive: true });
 mkdirSync(insideNested, { recursive: true });
 
+// A second independent checkout, opened as an additional trusted root in
+// the multi-root tests. Its path carries no Git word, like plainOutsidePath,
+// so a test using it cannot pass because `\bgit\b` matched the path.
+const secondRoot = path.join(temporaryRoot, 'second', 'project');
+const secondNested = path.join(secondRoot, 'src');
+mkdirSync(path.join(secondRoot, '.git'), { recursive: true });
+mkdirSync(secondNested, { recursive: true });
+// A directory inside the second root whose `.git` is a gitfile pointing at
+// the outside repo — discovery from here must resolve outside and be denied.
+const plantedGitfile = path.join(secondRoot, 'planted');
+mkdirSync(plantedGitfile, { recursive: true });
+writeFileSync(
+  path.join(plantedGitfile, '.git'),
+  `gitdir: ${cmdPath(outsideRepo)}/.git\n`,
+);
+
 function request(
   command: string,
   extraArguments: Record<string, unknown> = {},
@@ -63,6 +79,19 @@ function request(
     toolName: 'run_shell_command',
     arguments: { command, ...extraArguments },
     effectiveCwd,
+  } as ExternalToolGuardPrepareRequest;
+}
+
+// Same request, widened to a multi-root session by carrying additional
+// trusted roots alongside the single effectiveCwd.
+function requestWithRoots(
+  command: string,
+  additionalRoots: readonly string[],
+  extraArguments: Record<string, unknown> = {},
+): ExternalToolGuardPrepareRequest {
+  return {
+    ...request(command, extraArguments),
+    additionalRoots,
   } as ExternalToolGuardPrepareRequest;
 }
 
@@ -2367,6 +2396,49 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
         });
       }
     });
+
+    it('does not widen a narrowed sub-agent scope with the session additional roots', async () => {
+      // Multi-root: the session carries additionalRoots whose [0] is the
+      // primary checkout. A sub-agent isolated to its own worktree must NOT
+      // gain access to that checkout, or to a sibling worktree under it,
+      // just because they are opened roots — narrowing must win over
+      // widening. Without the narrowing guard this is the reachable defect.
+      const isolatedSessionId = `daemon-guard-${process.pid}-mr`;
+      const owned = GitWorktreeService.getWorktreesDir(isolatedSessionId);
+      const agentWorktree = path.join(owned, 'agent-a');
+      await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
+      const sibling = path.join(effectiveCwd, '.qwen', 'worktrees', 'agent-b');
+      await mkdir(sibling, { recursive: true });
+
+      const guard = createDaemonToolGuard();
+      const inWorktree = (command: string): ExternalToolGuardPrepareRequest =>
+        ({
+          ...request(command),
+          sessionId: isolatedSessionId,
+          invocationCwd: agentWorktree,
+          additionalRoots: [effectiveCwd],
+        }) as ExternalToolGuardPrepareRequest;
+      try {
+        // Its own worktree is still the boundary: work inside it is allowed.
+        await expect(
+          guard(inWorktree('cd src && git commit -m x')),
+        ).resolves.toEqual({ allowed: true });
+        // The primary checkout is an opened root, but the narrowed sub-agent
+        // must not reach back into it.
+        await expect(
+          guard(inWorktree(`git -C ${effectiveCwd} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+        // A sibling worktree under the primary checkout is unreachable too.
+        await expect(
+          guard(inWorktree(`git -C ${sibling} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+      } finally {
+        await rm(GitWorktreeService.getSessionDir(isolatedSessionId), {
+          recursive: true,
+          force: true,
+        });
+      }
+    });
   });
 
   it.each([
@@ -3228,5 +3300,115 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       reason: expect.stringContaining('without an active prompt binding'),
     });
     expect(externalGuard).not.toHaveBeenCalled();
+  });
+});
+
+describe('multi-root workspace (additional trusted roots)', () => {
+  it('allows a mutating Git command in an additional root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`git -C ${cmdPath(secondRoot)} commit -m x`, [
+          secondRoot,
+        ]),
+      ),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('still denies the same command when the folder is not an additional root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(requestWithRoots(`git -C ${cmdPath(secondRoot)} commit -m x`, [])),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(secondRoot),
+    });
+  });
+
+  it('allows Git discovered by walking up within the additional root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`cd ${cmdPath(secondNested)} && git commit -m x`, [
+          secondRoot,
+        ]),
+      ),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('denies a mutating Git command outside every opened root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`git -C ${cmdPath(outsideRepo)} reset --hard`, [
+          secondRoot,
+        ]),
+      ),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
+  });
+
+  it('denies a planted .git gitfile inside an additional root that points outside', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`cd ${cmdPath(plantedGitfile)} && git commit -m x`, [
+          secondRoot,
+        ]),
+      ),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('allows a model-supplied directory inside an additional root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots('git commit -m x', [secondRoot], {
+          directory: secondNested,
+        }),
+      ),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('denies a model-supplied directory outside every opened root', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots('git commit -m x', [secondRoot], {
+          directory: outsideRepo,
+        }),
+      ),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('keeps relocated read-only Git allowed regardless of roots', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`git -C ${cmdPath(secondRoot)} rev-parse HEAD`, []),
+      ),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('allows a command in the primary effective cwd when roots are present', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(
+        requestWithRoots(`cd ${cmdPath(insideNested)} && git status`, [
+          secondRoot,
+        ]),
+      ),
+    ).resolves.toEqual({ allowed: true });
   });
 });

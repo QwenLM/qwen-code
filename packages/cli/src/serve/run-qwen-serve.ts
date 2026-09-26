@@ -6093,6 +6093,11 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        // Multi-root: the primary runtime's trusted workspace list (the
+        // IDE's opened folders, trust-filtered) reaches the daemon tool
+        // guard, so a session bound to the primary cwd can run mutating
+        // Git in any opened folder while anything outside stays denied.
+        additionalRoots: boundWorkspaces,
         runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
         acquireMcpAuthentication,
         // Prompt terminal ledger: persisted beside the transcript so a
