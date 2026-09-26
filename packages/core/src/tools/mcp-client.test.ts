@@ -4051,3 +4051,205 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     });
   });
 });
+
+describe('McpClient transport retirement with the real SDK', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each([
+    ['late', true],
+    ['normal', true],
+    ['reject', true],
+    ['late', false],
+    ['normal', false],
+    ['reject', false],
+  ] as const)(
+    'retires an old transport when close is %s (pool close tracking: %s)',
+    async (closeMode, poolManaged) => {
+      const actual = await vi.importActual<
+        typeof import('@modelcontextprotocol/client')
+      >('@modelcontextprotocol/client');
+      const sdk = new actual.Client({ name: 'retirement-test', version: '1' });
+      const closed = vi.fn();
+      sdk.onclose = closed;
+      vi.mocked(ClientLib.Client).mockReturnValue(sdk);
+      const makeTransport = (mode: typeof closeMode): ClientLib.Transport => {
+        const transport: ClientLib.Transport = {
+          start: async () => {},
+          close: async () => {
+            if (mode === 'normal') transport.onclose?.();
+            if (mode === 'reject') throw new Error('close failed');
+          },
+          send: async (message) => {
+            if (
+              'method' in message &&
+              message.method === 'initialize' &&
+              'id' in message
+            ) {
+              queueMicrotask(() =>
+                transport.onmessage?.({
+                  jsonrpc: '2.0',
+                  id: message.id,
+                  result: {
+                    protocolVersion: '2025-03-26',
+                    capabilities: {},
+                    serverInfo: { name: 'fixture', version: '1' },
+                  },
+                }),
+              );
+            }
+          },
+        };
+        return transport;
+      };
+      const a = makeTransport(closeMode);
+      const b = makeTransport('normal');
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValueOnce(a as SdkClientStdioLib.StdioClientTransport)
+        .mockReturnValueOnce(b as SdkClientStdioLib.StdioClientTransport);
+      const client = new McpClient(
+        'retirement-test',
+        { command: 'node' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+        undefined,
+        { trackTransportClose: poolManaged },
+      );
+      try {
+        await client.connect();
+        const pending = sdk.ping().then(
+          () => 'unexpected success',
+          (error: Error) => error.message,
+        );
+        if (closeMode === 'reject')
+          await expect(client.disconnect()).rejects.toThrow('close failed');
+        else await client.disconnect();
+        expect(await pending).toBe('Connection closed');
+        expect(sdk.transport).toBeUndefined();
+        expect(closed).toHaveBeenCalledTimes(1);
+        await client.connect();
+        a.onclose?.();
+        a.onerror?.(new Error('late old error'));
+        expect(sdk.transport).toBe(b);
+        expect(a.onclose).toBeUndefined();
+        expect(a.onerror).toBeUndefined();
+        expect(a.onmessage).toBeUndefined();
+        expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+        expect(getMCPServerStatus('retirement-test')).toBe(
+          MCPServerStatus.CONNECTED,
+        );
+        expect(closed).toHaveBeenCalledTimes(1);
+        b.onclose?.();
+        expect(sdk.transport).toBeUndefined();
+        expect(client.getStatus()).toBe(
+          poolManaged
+            ? MCPServerStatus.DISCONNECTED
+            : MCPServerStatus.CONNECTED,
+        );
+        expect(getMCPServerStatus('retirement-test')).toBe(
+          poolManaged
+            ? MCPServerStatus.DISCONNECTED
+            : MCPServerStatus.CONNECTED,
+        );
+      } finally {
+        await client.disconnect();
+        removeMCPServerStatus('retirement-test');
+      }
+    },
+  );
+});
+
+describe('McpClient hung close deadlines', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    removeMCPServerStatus('hung-close-test');
+  });
+
+  it.each(['transport', 'client'] as const)(
+    'times out a hung %s close and retires outstanding SDK requests',
+    async (target) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const actual = await vi.importActual<
+        typeof import('@modelcontextprotocol/client')
+      >('@modelcontextprotocol/client');
+      const sdk = new actual.Client({ name: 'hung-close-test', version: '1' });
+      vi.mocked(ClientLib.Client).mockReturnValue(sdk);
+      const transport: ClientLib.Transport = {
+        start: async () => {},
+        close: async () => {
+          if (target === 'transport') await new Promise<void>(() => {});
+          transport.onclose?.();
+        },
+        send: async (message) => {
+          if (
+            'method' in message &&
+            message.method === 'initialize' &&
+            'id' in message
+          ) {
+            queueMicrotask(() =>
+              transport.onmessage?.({
+                jsonrpc: '2.0',
+                id: message.id,
+                result: {
+                  protocolVersion: '2025-03-26',
+                  capabilities: {},
+                  serverInfo: { name: 'fixture', version: '1' },
+                },
+              }),
+            );
+          }
+        },
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        transport as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'hung-close-test',
+        { command: 'node' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+        undefined,
+        { trackTransportClose: true },
+      );
+      await client.connect();
+      const outstanding = sdk.ping().then(
+        () => 'unexpected success',
+        (error: Error) => error.message,
+      );
+      if (target === 'client') {
+        vi.spyOn(sdk, 'close').mockImplementationOnce(
+          () => new Promise<void>(() => {}),
+        );
+      }
+      let result: 'pending' | 'resolved' | Error = 'pending';
+      const disconnect = client.disconnect().then(
+        () => {
+          result = 'resolved';
+        },
+        (error: Error) => {
+          result = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(result).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(
+            new RegExp(`Timed out after 3000ms: ${target}\\.close`),
+          ),
+        }),
+      );
+      await disconnect;
+      expect(await outstanding).toBe('Connection closed');
+      expect(sdk.transport).toBeUndefined();
+      expect(transport.onmessage).toBeUndefined();
+      expect(transport.onerror).toBeUndefined();
+      expect(transport.onclose).toBeUndefined();
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+    },
+  );
+});
