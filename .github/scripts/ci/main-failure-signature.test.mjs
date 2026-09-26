@@ -1475,6 +1475,144 @@ test('marker-shaped prose cannot block per-commit stub adoption', () => {
   );
 });
 
+test('whole-line prose markers do not change either arm of stub adoption', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const bridge = `<!-- ${workflowBridgeMarker('E2E Tests')} -->`;
+  const quote = `<!-- ${TEST_MARKER_PREFIX}quoted-head-line -->`;
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE })
+    .replace(bridge, '')
+    .concat(`\n## Investigation\n${quote}\n`);
+  for (const next of [analysis, analyzeLogs('E2E Tests', [VITEST_LOG])]) {
+    const body = renderIssueBody({
+      analysis: next,
+      occurrence: { ...OCCURRENCE, runId: '302' },
+      existingBody: stub,
+    });
+    assert.ok(body.includes(`## Investigation\n${quote}`));
+    assert.ok(body.includes('[run 301]'));
+    assert.equal(body.includes(bridge), next.tests.length === 0);
+    assert.equal(body.includes('## Failing tests'), next.tests.length > 0);
+    assert.equal(
+      body.includes('before any test result was'),
+      next.tests.length === 0,
+    );
+  }
+});
+
+test('unique noncanonical headers migrate only their human remainder', () => {
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  let body = renderIssueBody({ analysis, occurrence: OCCURRENCE }).replace(
+    '- Run ID: 301',
+    '\n- Maintainer note: preserve me\n- Run ID: 301',
+  );
+  body = body.replace('- Run:', '  - also reproduces locally\n- Run:');
+  for (const runId of ['302', '303', '304']) {
+    body = renderIssueBody({
+      analysis: analyzeLogs('E2E Tests', [VITEST_LOG]),
+      occurrence: { ...OCCURRENCE, runId },
+      existingBody: body,
+    });
+    assert.ok(body.includes('## Failing tests'));
+    assert.ok(!/^- (?:Workflow|Run|Run ID|Commit|Failed jobs):/m.test(body));
+    assert.equal(body.split('Test (windows-latest, Node 22.x)').length - 1, 1);
+    assert.equal(body.split('- Maintainer note: preserve me').length - 1, 1);
+    assert.equal(body.split('  - also reproduces locally').length - 1, 1);
+  }
+});
+
+test('foreign merges and adoption keep one failed-job section and human notes', () => {
+  for (const annotated of [false, true]) {
+    const stubAnalysis = analyzeLogs(
+      'E2E Tests',
+      ['npm error code ERESOLVE'],
+      [WINDOWS_JOB],
+    );
+    let body = renderIssueBody({
+      analysis: stubAnalysis,
+      occurrence: OCCURRENCE,
+    });
+    if (annotated) body = body.replace('- Run ID: 301', '\n- Run ID: 301');
+    body = renderIssueBody({
+      analysis: analyzeLogs(
+        'Qwen Code CI',
+        ['npm error code ERESOLVE'],
+        [MACOS_JOB],
+      ),
+      occurrence: { ...OCCURRENCE, runId: '302' },
+      existingBody: body,
+    });
+    body = body.replace(
+      '## Recurrences',
+      '  - also reproduces locally\n\n## Recurrences',
+    );
+    for (const [runId, analysis] of [
+      ['303', analyzeLogs('E2E Tests', [VITEST_LOG])],
+      [
+        '304',
+        analyzeLogs('SDK Python', ['npm error code ERESOLVE'], [WINDOWS_JOB]),
+      ],
+      ['305', analyzeLogs('E2E Tests', [VITEST_LOG])],
+    ]) {
+      body = renderIssueBody({
+        analysis,
+        occurrence: { ...OCCURRENCE, runId },
+        existingBody: body,
+      });
+      assert.equal((body.match(/## Previous failed jobs/g) ?? []).length, 1);
+      assert.equal(
+        body.split('Test (windows-latest, Node 22.x)').length - 1,
+        1,
+      );
+      assert.equal(body.split('  - also reproduces locally').length - 1, 1);
+      assert.ok(!body.includes('Qwen Code CI, last reported for run 302'));
+    }
+  }
+});
+
+test('fenced identity quotes remain prose across repeated per-commit merges', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const quote = `<!-- ${TEST_MARKER_PREFIX}quoted-fence -->`;
+  const note = `## Investigation\n\`\`\`text\n${quote}\n\`\`\``;
+  let body =
+    renderIssueBody({ analysis, occurrence: OCCURRENCE }) + '\n' + note;
+  for (const runId of ['302', '303']) {
+    body = renderIssueBody({
+      analysis,
+      occurrence: { ...OCCURRENCE, runId },
+      existingBody: body,
+    });
+    assert.ok(!body.split('\n\n')[0].includes(TEST_MARKER_PREFIX));
+    assert.ok(body.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+    assert.ok(body.includes(note));
+  }
+});
+
+test('adoption preserves unharvested SHA lines without duplicating harvested keys', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const first = `<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`;
+  const second = `<!-- ${LEGACY_MARKER_PREFIX}second-sha -->`;
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  for (const existingBody of [
+    '<!-- autofix:paused -->\n\n' + stub.replace(first, `${first}\n${second}`),
+    stub.replace(first, `${first}\nHuman separator\n${second}`),
+  ]) {
+    const body = renderIssueBody({
+      analysis: analyzeLogs('E2E Tests', [VITEST_LOG]),
+      occurrence: { ...OCCURRENCE, runId: '302' },
+      existingBody,
+    });
+    assert.ok(body.includes('## Failing tests'));
+    assert.ok(!body.includes('before any test result was'));
+    for (const marker of [first, second])
+      assert.equal(body.split(marker).length - 1, 1);
+    assert.ok(!body.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+  }
+});
+
 test('marker-shaped prose below recurrences cannot block per-commit stub adoption', () => {
   const stubAnalysis = analyzeLogs(
     'E2E Tests',
