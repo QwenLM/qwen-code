@@ -23969,6 +23969,42 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reports a channel that fails its handshake at warn', async () => {
+      const handle = makeChannel({
+        initializeThrows: new Error('initialize failed'),
+      });
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await expect(
+          bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).rejects.toThrow();
+
+        // The daemon kills the child itself here, so the exit counts as
+        // expected; the failed handshake must still keep it out of `info`.
+        await vi.waitFor(() =>
+          expect(diagnostics).toContainEqual({
+            line: expect.stringContaining('qwen serve: channel exited'),
+            level: 'warn',
+          }),
+        );
+        expect(
+          diagnostics.filter(
+            (d) => d.line.includes('channel exited') && d.level === 'info',
+          ),
+        ).toEqual([]);
+      } finally {
+        stderr.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('finishes channel teardown when the diagnostic sink throws', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({
@@ -23977,15 +24013,68 @@ describe('createAcpSessionBridge', () => {
           throw new Error('sink failed');
         },
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const iter = bridge.subscribeEvents(session.sessionId);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const iter = bridge.subscribeEvents(session.sessionId);
 
-      handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
-      const next = await iter[Symbol.asyncIterator]().next();
+        handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+        const next = await iter[Symbol.asyncIterator]().next();
 
-      expect(next.value?.type).toBe('session_died');
-      expect(bridge.sessionCount).toBe(0);
-      await bridge.shutdown();
+        expect(next.value?.type).toBe('session_died');
+        expect(bridge.sessionCount).toBe(0);
+        // The stderr breadcrumb must survive the throwing daemon.log sink.
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
+    it('tears down every session when the sink and the lifecycle listener both throw', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: () => {
+          throw new Error('sink failed');
+        },
+        sessionLifecycle: () => {
+          throw new Error('listener failed');
+        },
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(second.sessionId).not.toBe(first.sessionId);
+        const firstEvents = bridge
+          .subscribeEvents(first.sessionId)
+          [Symbol.asyncIterator]();
+        const secondEvents = bridge
+          .subscribeEvents(second.sessionId)
+          [Symbol.asyncIterator]();
+
+        handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+
+        expect((await firstEvents.next()).value?.type).toBe('session_died');
+        expect((await secondEvents.next()).value?.type).toBe('session_died');
+        expect(bridge.sessionCount).toBe(0);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('2 session(s) torn down'),
+        );
+      } finally {
+        stderr.mockRestore();
+        await bridge.shutdown();
+      }
     });
 
     it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {

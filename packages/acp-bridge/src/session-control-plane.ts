@@ -2447,7 +2447,13 @@ export function createSessionControlPlane(
       const message = `qwen serve: session lifecycle callback failed: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      opts.onDiagnosticLine?.(message, 'warn');
+      // Callers run this inside teardown loops, so a throwing sink must not
+      // escape and strand the remaining sessions.
+      try {
+        opts.onDiagnosticLine?.(message, 'warn');
+      } catch {
+        /* Best effort. */
+      }
       writeStderrLine(message);
     }
   };
@@ -4265,20 +4271,8 @@ export function createSessionControlPlane(
           ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
           : {}),
       });
-      const message = `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`;
-      // Clients such as the VS Code companion stop reading daemon stderr
-      // after startup, so the teardown reason must also reach daemon.log.
-      // A throwing sink must not skip the session teardown below.
-      try {
-        opts.onDiagnosticLine?.(
-          message,
-          channelExitExpected && !channelIsCondemned(info) ? 'info' : 'warn',
-        );
-      } catch {
-        /* Best effort. */
-      }
-      writeStderrLine(message);
     }
+    let tornDownCount = 0;
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
       if (!sessEntry) continue;
@@ -4336,6 +4330,32 @@ export function createSessionControlPlane(
       info.client.markSessionClosed(sid);
       if (defaultEntry === sessEntry) defaultEntry = undefined;
       sessEntry.events.close();
+      tornDownCount++;
+    }
+    if (!shuttingDown) {
+      // Written after the loop so the count is the sessions actually torn
+      // down, not the ones the channel listed.
+      const message = `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${tornDownCount} session(s) torn down)`;
+      // Clients such as the VS Code companion stop reading daemon stderr
+      // after startup, so the teardown reason must also reach daemon.log.
+      // `info` is reserved for a routine retirement: an exit after a failed
+      // handshake, a transport failure, a condemned channel or an unsettled
+      // abandonment is a failure even when the daemon initiated the kill.
+      // Only the level widens; `channelExitExpected` still feeds the
+      // lifecycle telemetry above unchanged.
+      const routineRetirement =
+        channelExitExpected &&
+        !channelIsCondemned(info) &&
+        info.harness.handshakeComplete &&
+        !info.harness.transportFailed &&
+        info.unsettledAbandonedRestores.size === 0 &&
+        info.unsettledAbandonedNewSessions.size === 0;
+      try {
+        opts.onDiagnosticLine?.(message, routineRetirement ? 'info' : 'warn');
+      } catch {
+        /* Best effort. */
+      }
+      writeStderrLine(message);
     }
   }
 
