@@ -96,22 +96,58 @@ exit 1
 set -euo pipefail
 target=''
 url=''
+attempts=1
+retry_delay=''
+retry_all_errors=false
+connect_timeout=''
+max_time=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '-o' ]; then
     shift
     target="$1"
+  elif [ "$1" = '--retry' ]; then
+    shift
+    attempts=$(( $1 + 1 ))
+  elif [ "$1" = '--retry-delay' ]; then
+    shift
+    retry_delay="$1"
+  elif [ "$1" = '--retry-all-errors' ]; then
+    retry_all_errors=true
+  elif [ "$1" = '--connect-timeout' ]; then
+    shift
+    connect_timeout="$1"
+  elif [ "$1" = '--max-time' ]; then
+    shift
+    max_time="$1"
   elif [[ "$1" == https://* ]]; then
     url="$1"
   fi
   shift
 done
 [ "$url" = 'https://assets.example.test/desktop/latest/desktop-latest.json' ]
-case "$OSS_FEED_STATE" in
-  current) printf '%s\n' '{"version":"1.2.3"}' > "$target" ;;
-  different) printf '%s\n' '{"version":"1.2.2"}' > "$target" ;;
-  malformed) printf '%s\n' '{' > "$target" ;;
-  missing) exit 1 ;;
-esac
+[ "$attempts" -eq 3 ]
+[ "$retry_delay" = '2' ]
+[ "$retry_all_errors" = true ]
+[ "$connect_timeout" = '15' ]
+[ "$max_time" = '60' ]
+attempt=0
+while :; do
+  attempt=$(( attempt + 1 ))
+  case "$OSS_FEED_STATE" in
+    current) printf '%s\n' '{"version":"1.2.3"}' > "$target"; exit 0 ;;
+    different) printf '%s\n' '{"version":"1.2.2"}' > "$target"; exit 0 ;;
+    malformed) printf '%s\n' '{' > "$target"; exit 0 ;;
+    missing) exit 1 ;;
+    flaky)
+      if [ "$attempt" -eq 1 ]; then
+        [ "$attempts" -ge 2 ] || exit 1
+        continue
+      fi
+      printf '%s\n' '{"version":"1.2.3"}' > "$target"
+      exit 0
+      ;;
+  esac
+done
 `,
   );
   chmodSync(join(bin, 'gh'), 0o755);
@@ -161,6 +197,10 @@ describe('Desktop OSS mirror workflow', () => {
         name === 'Check whether stable release is already published',
     );
     expect(published.id).toBe('published');
+    const stepNames = prepare.steps.map(({ name }) => name);
+    expect(stepNames.indexOf('Resolve version')).toBeLessThan(
+      stepNames.indexOf('Check whether stable release is already published'),
+    );
     expect(published.env).toMatchObject({
       ALIYUN_OSS_PUBLIC_BASE_URL:
         "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}",
@@ -169,11 +209,12 @@ describe('Desktop OSS mirror workflow', () => {
       RELEASE_CLOBBER: '${{ inputs.clobber }}',
       RELEASE_DRAFT: '${{ inputs.draft }}',
       RELEASE_DRY_RUN: '${{ inputs.dry_run }}',
-      RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}',
       RELEASE_PRERELEASE: '${{ inputs.prerelease }}',
       RELEASE_TAG: '${{ steps.version.outputs.tag }}',
       RELEASE_VERSION: '${{ steps.version.outputs.version }}',
     });
+    expect(published.env).not.toHaveProperty('RELEASE_ELECTRON_BRIDGE');
+    expect(published.run).not.toContain('$RELEASE_ELECTRON_BRIDGE');
     expect(published.run).toContain(
       '::notice::Desktop $RELEASE_VERSION is already published; skipping build, publish and sync-oss.',
     );
@@ -257,6 +298,11 @@ describe('Desktop OSS mirror workflow', () => {
       { OSS_FEED_STATE: 'malformed' },
       'already_published=false',
     ],
+    [
+      'OSS feed that recovers on retry',
+      { OSS_FEED_STATE: 'flaky' },
+      'already_published=true',
+    ],
     ['dry run', { RELEASE_DRY_RUN: 'true' }, 'already_published=false'],
     ['draft dispatch', { RELEASE_DRAFT: 'true' }, 'already_published=false'],
     [
@@ -270,12 +316,50 @@ describe('Desktop OSS mirror workflow', () => {
       'already_published=false',
     ],
     [
-      'Electron bridge dispatch',
+      'Electron bridge dispatch over a completed release',
       { RELEASE_ELECTRON_BRIDGE: 'true' },
-      'already_published=false',
+      'already_published=true',
     ],
   ])('reports %s conservatively', (_name, overrides, expected) => {
     expect(runAlreadyPublishedProbe(overrides).output).toBe(expected);
+  });
+
+  it.skipIf(!replayable).each([
+    [
+      'GitHub feed lags',
+      { GH_FEED_STATE: 'different' },
+      "the GitHub stable feed is '1.2.2', expected 1.2.3",
+    ],
+    [
+      'release is missing',
+      { RELEASE_STATE: 'missing' },
+      "release 'desktop-v1.2.3' could not be inspected",
+    ],
+    [
+      'release is not stable',
+      { RELEASE_STATE: 'draft' },
+      "release 'desktop-v1.2.3' is not a published stable release",
+    ],
+    [
+      'GitHub feed is missing',
+      { GH_FEED_STATE: 'missing' },
+      "the GitHub stable feed 'desktop-latest' has no readable desktop-latest.json",
+    ],
+    [
+      'OSS mirror lags',
+      { OSS_FEED_STATE: 'different' },
+      "the OSS mirror feed is '1.2.2', expected 1.2.3",
+    ],
+    [
+      'OSS mirror is unreachable',
+      { OSS_FEED_STATE: 'missing' },
+      'the OSS mirror feed could not be downloaded',
+    ],
+  ])('says why %s did not short-circuit', (_name, overrides, reason) => {
+    const { output, stdout } = runAlreadyPublishedProbe(overrides);
+    expect(output).toBe('already_published=false');
+    expect(stdout).toContain('::notice::Already-published check stopped:');
+    expect(stdout).toContain(reason);
   });
 
   it.skipIf(!replayable)('explains a successful short-circuit', () => {
