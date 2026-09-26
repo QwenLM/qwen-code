@@ -298,6 +298,21 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'Extension lifecycle telemetry resolves the proxy for its throwaway ' +
+        'Config from the workspace settings first and then from the daemon ' +
+        "process's own proxy environment (#12770).",
+      accesses: {
+        'key:HTTP_PROXY': 1,
+        'key:HTTPS_PROXY': 1,
+        'key:http_proxy': 1,
+        'key:https_proxy': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/routes/workspace-git-branches.ts',
     {
       reason:
