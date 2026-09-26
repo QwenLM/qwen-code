@@ -189,7 +189,7 @@ public final class JdbcRuntimeBindingRepository
             requireSlotIdentity(slot, expected.getRequest());
             RuntimeBindingRecord current = selectById(connection,
                     expected.getBindingId(), true);
-            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
             if (current == null || !current.sameIdentity(expected)
                     || current.getVersion() != expected.getVersion()
                     || !current.sameOperation(expected)
@@ -239,7 +239,7 @@ public final class JdbcRuntimeBindingRepository
             if (current == null || !current.isActive()) {
                 return null;
             }
-            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
             if (ownerId.equals(current.getOperationOwner())
                     && current.getOperationLeaseUntil().isAfter(now)) {
                 return current;
@@ -249,7 +249,7 @@ public final class JdbcRuntimeBindingRepository
                 return null;
             }
             RuntimeBindingRecord claimed = current.withOperation(ownerId,
-                    now.plus(duration),
+                    JdbcRepositorySupport.leaseUntil(now, duration),
                     current.getOperationGeneration() + 1)
                     .withVersion(current.getVersion() + 1);
             updateBinding(connection, claimed);
@@ -269,7 +269,7 @@ public final class JdbcRuntimeBindingRepository
             if (current == null || !current.isActive()) {
                 return null;
             }
-            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
             if (!ownerId.equals(current.getOperationOwner())
                     || operationGeneration
                             != current.getOperationGeneration()
@@ -277,7 +277,8 @@ public final class JdbcRuntimeBindingRepository
                 return null;
             }
             RuntimeBindingRecord renewed = current.withOperation(ownerId,
-                    now.plus(duration), operationGeneration)
+                    JdbcRepositorySupport.leaseUntil(now, duration),
+                    operationGeneration)
                     .withVersion(current.getVersion() + 1);
             updateBinding(connection, renewed);
             return renewed;

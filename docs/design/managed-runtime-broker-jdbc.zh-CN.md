@@ -41,11 +41,11 @@ Scope 身份使用确定性哈希表示，并始终与完整的租户级身份�
 
 ## 事务与并发语义
 
-创建 Binding 时会锁定 Scope slot，在事务内重新读取 Binding，并确保每个 Scope 只插入一个活动记录。Binding 更新同时使用已保存的 version 和 generation 作为 fencing 条件。操作租约使用数据库时钟，使竞争 JVM 不依赖彼此同步的本地时钟。JDBC adapter 会在查询中把数据库时钟转换为 Unix epoch，避免连接的会话时区偏移租约 instant，并将其归一化为整秒，使租约值经过会丢弃小数秒的 MySQL 兼容驱动后仍能一致地往返读取。
+创建 Binding 时会锁定 Scope slot，在事务内重新读取 Binding，并确保每个 Scope 只插入一个活动记录。Binding 更新同时使用已保存的 version 和 generation 作为 fencing 条件。操作租约使用数据库时钟，使竞争 JVM 不依赖彼此同步的本地时钟。JDBC adapter 会在查询中把数据库时钟转换为精确的 Unix epoch，避免连接的会话时区偏移租约 instant。租约判断使用该精确时钟，持久化的租约截止时间则向上取整到整秒，使其至少存活完整的配置时长，并在会丢弃小数秒的 MySQL 兼容驱动中保持一致的往返读取。
 
 创建 Session 时依赖数据库唯一约束，并在并发插入后重新读取胜出的记录。Session 的 CAS 更新会锁定当前行，校验预期 version 和 Binding generation，并拒绝把终态 Session 重新激活。SQL 失败会回滚事务并向调用方传播；不会静默回退到进程内状态。
 
-创建 Tool Execution 时使用唯一 SHA-256 key 保持数据库索引长度可控，同时保留并校验完整 idempotency key。变更操作会锁定 execution 行。CAS 更新和 `UNKNOWN` 对账校验调用方提供的不可变身份与 version；取消请求校验预期 version；dispatch claim 与续租校验各自适用的 owner、generation 和 lease fencing。租约判断使用数据库时钟。过期的 `DISPATCHING` claim 可以重新发放，因为物理执行尚未开始；过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 会进入 `UNKNOWN`，在显式对账结果完成它之前不得再次 dispatch。
+创建 Tool Execution 时使用唯一 SHA-256 key 保持数据库索引长度可控，同时保留并校验完整 idempotency key。变更操作会锁定 execution 行。CAS 更新和 `UNKNOWN` 对账校验调用方提供的不可变身份与 version；取消请求校验预期 version；dispatch claim 与续租校验各自适用的 owner、generation 和 lease fencing。Dispatch 租约与操作租约一样，使用精确数据库时钟做判断，并把持久化的截止时间向上取整到整秒。过期的 `DISPATCHING` claim 可以重新发放，因为物理执行尚未开始；过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 会进入 `UNKNOWN`，在显式对账结果完成它之前不得再次 dispatch。
 
 ## Schema 生命周期
 

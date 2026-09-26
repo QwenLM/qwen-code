@@ -29,22 +29,42 @@ class JdbcRepositorySupportTest {
     }
 
     @Test
-    void databaseClockUsesStorageSafePrecision() throws Exception {
+    void databaseClockProvidesPreciseAndStorageSafeReadings()
+            throws Exception {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:runtime-broker-clock-"
                 + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
 
         try (Connection connection = dataSource.getConnection()) {
+            assertDatabaseClock(JdbcRepositorySupport
+                    .databaseNowPrecise(connection));
             assertStorageSafeClock(
                     JdbcRepositorySupport.databaseNow(connection));
         }
     }
 
-    static void assertStorageSafeClock(Instant actual) {
-        assertEquals(0, actual.getNano());
+    @Test
+    void leaseDeadlineRoundsUpWithoutShorteningTheDuration() {
+        Instant fractional = Instant.parse("2026-09-20T00:00:00.750123Z");
+        assertEquals(Instant.parse("2026-09-20T00:00:02Z"),
+                JdbcRepositorySupport.leaseUntil(fractional,
+                        Duration.ofSeconds(1)));
+        Instant exact = Instant.parse("2026-09-20T00:00:00Z");
+        assertEquals(Instant.parse("2026-09-20T00:00:01Z"),
+                JdbcRepositorySupport.leaseUntil(exact,
+                        Duration.ofSeconds(1)));
+    }
+
+    static void assertDatabaseClock(Instant actual) {
+        assertEquals(0, actual.getNano() % 1_000);
         Duration drift = Duration.between(Instant.now(), actual).abs();
         assertTrue(drift.compareTo(Duration.ofSeconds(5)) < 0,
                 () -> "database clock drifted by " + drift);
+    }
+
+    static void assertStorageSafeClock(Instant actual) {
+        assertEquals(0, actual.getNano());
+        assertDatabaseClock(actual);
     }
 }
