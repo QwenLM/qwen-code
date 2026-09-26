@@ -6,6 +6,10 @@ import {
 } from 'react';
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_ZH,
+} from './settings/messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -2916,22 +2920,7 @@ const EN: Messages = {
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
     'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
-  'settings.models.editWindow': 'Edit context window',
-  'settings.models.windowHint':
-    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
-  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
-  'settings.models.saved': 'Saved',
   'model.setAdvisor': 'Set Advisor Model',
-  'settings.label.advisorModel': 'Advisor Model',
-  'settings.label.imageModel': 'Image Model',
-  'settings.label.voiceModel': 'Voice Model',
-  'settings.description.advisorModel':
-    'Model used to review recent conversation progress. Leave empty to use the main model.',
-  'settings.description.imageModel':
-    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
-  'settings.description.voiceModel':
-    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
-
   'model.setImage': 'Set Image Model',
   'model.useMain': 'Use main model',
   'model.disabled': 'Disabled',
@@ -3725,7 +3714,6 @@ const EN: Messages = {
   'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
-  'settings.title': 'Settings',
   'channels.title': 'Channels',
   'channels.description':
     'Connect Qwen Code to the places where your team already works.',
@@ -4027,40 +4015,6 @@ const EN: Messages = {
   'channels.editor.reloadLatest': 'Reload latest',
   'channels.editor.cancel': 'Cancel',
   'channels.editor.save': 'Save',
-  'settings.loading': 'Loading settings...',
-  'settings.empty': 'No settings available.',
-  'settings.footer':
-    '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
-  'settings.footer.edit': 'Enter Save  ESC Cancel',
-  'settings.footer.theme': '↑↓ Navigate  Enter Select  ESC Back',
-  'settings.scope.user': 'User',
-  'settings.scope.workspace': 'Workspace',
-  'settings.value.on': 'ON',
-  'settings.value.off': 'OFF',
-  'settings.action.edit': 'Edit',
-  'settings.action.select': 'Select',
-  'settings.action.save': 'Save',
-  'settings.modifiedIn': (v) => `(Modified in ${v?.scope ?? ''})`,
-  'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
-  'settings.invalidNumber': 'Invalid number',
-  'settings.requiresRestart': 'This change requires a restart to take effect.',
-  'settings.localControl.title': 'Local Control',
-  'settings.localControl.description':
-    'Continue this Qwen Code session from a phone on the same trusted network.',
-  'settings.localControl.on': 'On',
-  'settings.localControl.off': 'Off',
-  'settings.localControl.network': 'Local network',
-  'settings.localControl.selectNetwork': 'Choose a network',
-  'settings.localControl.qr': 'Local Control QR code',
-  'settings.localControl.enable': 'Turn on Local Control',
-  'settings.localControl.disable': 'Disconnect phone access',
-  'settings.localControl.encrypted': 'Encrypted',
-  'settings.localControl.unencrypted':
-    'Unencrypted — trusted networks only; re-enable after network changes',
-  'settings.localControl.awake': 'This Mac will stay awake',
-  'settings.localControl.maySleep': 'This Mac may sleep',
-  'settings.localControl.urlRedacted':
-    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
   'localControl.expires': (v) =>
     `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
@@ -4079,35 +4033,6 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'settings.models.title': 'Models',
-  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
-  'settings.models.credentialEnv': 'Key environment variable',
-  'settings.models.add': '+ Add Model',
-  'settings.models.addDisabled': 'Adding models is disabled by the host.',
-  'settings.models.setCurrent': 'Set current',
-  'settings.models.current': 'Current',
-  'settings.models.runtime': 'Runtime',
-  'settings.models.savedConfiguration': 'Saved configuration',
-  'settings.models.ambiguousWindow':
-    'Multiple configurations share this route. Its context window cannot be edited here.',
-  'settings.models.delete': 'Delete',
-  'settings.models.confirmDelete': 'Confirm',
-  'settings.models.cancel': 'Cancel',
-  'settings.models.empty': 'No configured models yet.',
-  'settings.models.loading': 'Loading models…',
-  'settings.models.deleteFailed': 'Failed to delete model',
-  'settings.models.runtimeSyncFailed':
-    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-  'settings.models.fallbacks.title': 'Model Fallbacks',
-  'settings.models.fallbacks.hint': (v) =>
-    `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
-  'settings.models.fallbacks.confirm': 'Confirm',
-  'settings.models.fallbacks.empty': 'No selectable models.',
-  'settings.models.fallbacks.saveFailed': 'Failed to save fallback models',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
-  'settings.corrupted': (v) =>
-    `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
     'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
@@ -4131,17 +4056,6 @@ const EN: Messages = {
     'Unable to enable or show notifications. Check your browser and system settings.',
   'browserNotifications.temporary':
     'This setting is saved for the current page only.',
-  'settings.label.ui.chatWidth': 'Chat width',
-  'settings.description.ui.chatWidth':
-    'Frontend-only chat content width. Stored in this browser.',
-  'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
-  'settings.description.ui.enableFollowupSuggestions':
-    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
-  'settings.option.ui.chatWidth.1000': 'Regular',
-  'settings.option.ui.chatWidth.wide': 'Ultra wide',
-  'settings.label.visionModel': 'Vision Model',
-  'settings.description.visionModel':
-    'Image-capable model used as the vision bridge. Leave empty to auto-select.',
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -4149,6 +4063,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
+  ...SETTINGS_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -6906,21 +6821,7 @@ const ZH: Messages = {
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
     '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
-  'settings.models.editWindow': '配置窗口大小',
-  'settings.models.windowHint':
-    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
-  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
-  'settings.models.saved': '已保存',
   'model.setAdvisor': '设置顾问模型',
-  'settings.label.advisorModel': '顾问模型',
-  'settings.label.imageModel': '生图模型',
-  'settings.label.voiceModel': '语音转写模型',
-  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
-  'settings.description.imageModel':
-    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
-  'settings.description.voiceModel':
-    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
-
   'model.setImage': '设置生图模型',
   'model.useMain': '使用主模型',
   'model.disabled': '不启用',
@@ -7655,7 +7556,6 @@ const ZH: Messages = {
   'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
-  'settings.title': '设置',
   'channels.title': '频道',
   'channels.description': '让 Qwen Code 在团队日常使用的平台中收发消息。',
   'channels.summary': (v) =>
@@ -7937,39 +7837,6 @@ const ZH: Messages = {
   'channels.editor.reloadLatest': '加载最新配置',
   'channels.editor.cancel': '取消',
   'channels.editor.save': '保存',
-  'settings.loading': '正在加载设置...',
-  'settings.empty': '暂无可用设置。',
-  'settings.footer': '↑↓ 导航  Enter 切换  Tab 切换作用域  r 刷新  ESC 关闭',
-  'settings.footer.edit': 'Enter 保存  ESC 取消',
-  'settings.footer.theme': '↑↓ 导航  Enter 选择  ESC 返回',
-  'settings.scope.user': '用户',
-  'settings.scope.workspace': '工作区',
-  'settings.value.on': '开',
-  'settings.value.off': '关',
-  'settings.action.edit': '编辑',
-  'settings.action.select': '选择',
-  'settings.action.save': '保存',
-  'settings.modifiedIn': (v) => `（已在${v?.scope ?? ''}中修改）`,
-  'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
-  'settings.invalidNumber': '无效数字',
-  'settings.requiresRestart': '此更改需要重启后才能生效。',
-  'settings.localControl.title': '本地控制',
-  'settings.localControl.description':
-    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
-  'settings.localControl.on': '已开启',
-  'settings.localControl.off': '关闭',
-  'settings.localControl.network': '本地网络',
-  'settings.localControl.selectNetwork': '选择网络',
-  'settings.localControl.qr': '本地控制二维码',
-  'settings.localControl.enable': '开启本地控制',
-  'settings.localControl.disable': '断开手机访问',
-  'settings.localControl.encrypted': '已加密',
-  'settings.localControl.unencrypted':
-    '未加密，仅限受信任网络；网络变化后请重新启用',
-  'settings.localControl.awake': '这台 Mac 将保持唤醒',
-  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
-  'settings.localControl.urlRedacted':
-    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
   'localControl.expires': (v) =>
     `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
@@ -7987,35 +7854,6 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'settings.models.title': '模型',
-  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
-  'settings.models.credentialEnv': '密钥环境变量',
-  'settings.models.add': '+ 增加模型',
-  'settings.models.addDisabled': '宿主已禁用添加模型。',
-  'settings.models.setCurrent': '设为当前',
-  'settings.models.current': '当前',
-  'settings.models.runtime': '运行时',
-  'settings.models.savedConfiguration': '已保存配置',
-  'settings.models.ambiguousWindow':
-    '多个配置共用此模型端点，无法在此修改窗口大小。',
-  'settings.models.delete': '删除',
-  'settings.models.confirmDelete': '确认删除',
-  'settings.models.cancel': '取消',
-  'settings.models.empty': '暂无配置的模型。',
-  'settings.models.loading': '正在加载模型…',
-  'settings.models.deleteFailed': '删除模型失败',
-  'settings.models.runtimeSyncFailed':
-    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
-  'settings.models.fallbacks.title': '模型回退',
-  'settings.models.fallbacks.hint': (v) =>
-    `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
-  'settings.models.fallbacks.confirm': '确认',
-  'settings.models.fallbacks.empty': '暂无可选模型。',
-  'settings.models.fallbacks.saveFailed': '保存回退模型失败',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
-  'settings.corrupted': (v) =>
-    `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
     '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
@@ -8033,108 +7871,12 @@ const ZH: Messages = {
   'browserNotifications.requesting': '等待你的授权…',
   'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
   'browserNotifications.temporary': '设置仅在当前页面有效。',
-  'settings.label.ui.chatWidth': '屏宽',
-  'settings.description.ui.chatWidth':
-    '纯前端的聊天内容宽度设置，保存在当前浏览器中。',
-  'settings.option.ui.chatWidth.1000': '常规',
-  'settings.option.ui.chatWidth.wide': '超宽',
-  'settings.category.General': '通用',
-  'settings.category.UI': '界面',
-  'settings.category.Privacy': '隐私',
-  'settings.category.Model': '模型',
-  'settings.category.Context': '上下文',
-  'settings.category.Tools': '工具',
-  'settings.category.Daemon': '守护进程',
-  'settings.category.Connections': '连接',
-  'settings.category.Experimental': '实验性',
-  'settings.category.Advanced': '高级',
-  'settings.label.general.enableAutoUpdate': '启用自动更新',
-  'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
-  'settings.label.general.showSessionRecap': '显示会话回顾',
-  'settings.description.general.showSessionRecap':
-    '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
-  'settings.label.general.sessionRecapAwayThresholdMinutes':
-    '会话回顾离开阈值（分钟）',
-  'settings.description.general.sessionRecapAwayThresholdMinutes':
-    '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
-  'settings.label.general.cleanupPeriodDays': '清理周期（天）',
-  'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
-  'settings.label.general.gitCoAuthor.commit': '归因：commit',
-  'settings.description.general.gitCoAuthor.commit':
-    '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
-  'settings.label.general.gitCoAuthor.pr': '归因：PR',
-  'settings.description.general.gitCoAuthor.pr':
-    '运行 gh pr create 时，在 PR 描述中追加 Qwen Code 归因行。',
-  'settings.label.general.language': '语言：界面',
-  'settings.description.general.language':
-    '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
-  'settings.description.general.preventSystemSleep':
-    '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
-  'settings.label.ui.theme': '主题',
-  'settings.description.ui.theme': '界面的颜色主题。',
-  'settings.label.ui.hideTips': '隐藏提示',
-  'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
-  'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
-  'settings.description.ui.enableWelcomeBack':
-    '回到有历史会话的项目时显示欢迎回来对话框。选择“开始新的聊天会话”后，在项目摘要变化前不会再次显示。',
-  'settings.label.ui.enableUserFeedback': '启用用户反馈',
-  'settings.description.ui.enableUserFeedback':
-    '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
-  'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
-  'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
-  'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
-  'settings.description.ui.shellOutputMaxLines':
-    '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
-  'settings.label.privacy.usageStatisticsEnabled': '启用使用统计',
-  'settings.description.privacy.usageStatisticsEnabled': '启用使用统计收集。',
-  'settings.label.fastModel': '快速模型',
-  'settings.description.fastModel':
-    '用于生成提示建议和推测执行的模型。留空则使用主模型。较小/更快的模型（例如 qwen3-coder-flash）可以降低延迟和成本。',
-  'settings.label.visionModel': '视觉模型',
-  'settings.description.visionModel':
-    '用于视觉桥接的图像能力模型。留空则自动选择。',
-  'settings.label.context.fileFiltering.respectGitIgnore': '遵守 .gitignore',
-  'settings.description.context.fileFiltering.respectGitIgnore':
-    '搜索时遵守 .gitignore 文件。',
-  'settings.label.context.fileFiltering.respectQwenIgnore': '遵守 .qwenignore',
-  'settings.description.context.fileFiltering.respectQwenIgnore':
-    '搜索时遵守 .qwenignore 文件。',
-  'settings.label.context.fileFiltering.enableFuzzySearch': '启用模糊搜索',
-  'settings.description.context.fileFiltering.enableFuzzySearch':
-    '搜索文件时启用模糊搜索。',
-  'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
-  'settings.description.tools.toolSearch.enabled':
-    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
-  'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
-  'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
-  'settings.label.policy.permissionStrategy': '权限协调策略',
-  'settings.description.policy.permissionStrategy':
-    '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
-  'settings.option.policy.permissionStrategy.first-responder': '先响应者',
-  'settings.option.policy.permissionStrategy.designated': '指定发起方',
-  'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
-  'settings.option.policy.permissionStrategy.local-only': '仅本机',
-  'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
-  'settings.description.experimental.enableCronTools':
-    '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
-  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
-  'settings.description.experimental.sessionWorkflow':
-    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
-  'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
-  'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
-  'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
-  'settings.description.agents.arena.preserveArtifacts':
-    '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
+  ...SETTINGS_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

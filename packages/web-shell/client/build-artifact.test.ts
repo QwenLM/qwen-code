@@ -426,6 +426,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('Talk in this browser');
   });
 
+  it('carries no settings strings and looks none up', () => {
+    // Same contract as the Live Voice stub above, for
+    // client/settings/messages.ts: a settings.* lookup here would render as
+    // its key name, and a settings.* entry left in i18n.tsx would ship in
+    // every exported document.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]settings\./);
+  });
+
   it('still carries what a transcript actually renders', () => {
     const bundle = readTranscriptBundle();
     expect(bundle).toContain('react-markdown');
