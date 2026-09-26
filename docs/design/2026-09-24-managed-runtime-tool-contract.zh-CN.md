@@ -24,7 +24,7 @@ owned Managed Runtime worker 在 attestation 之外增加三个工具操作—�
 
 ### 3.1 路由
 
-三个操作都在 `OWNED_MANAGED_RUNTIME_ROUTES` 中声明，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；`status` 与 `cancel` 的请求上限为 16 KiB。每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封。
+三个操作都在 `OWNED_MANAGED_RUNTIME_ROUTES` 中声明，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；`status` 与 `cancel` 的请求上限为 16 KiB。每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封；该通道的契约见[Managed 工具结果契约](2026-09-26-managed-tool-result-contract.zh-CN.md)，它通过 Tool v3 启用，这些 v2 信封保持不变。
 
 fixture 的请求头对象封闭为五个协议头。这约束的是 fixture 声明，不限制客户端或中间层添加的普通 HTTP 头。负面用例通过显式的省略或替换指令构造。
 
@@ -82,7 +82,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 6. Worker 实现
 
-合入的 attestation worker 现在在 `attest` 旁边挂载了这三个路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
+合入的 attestation worker 现在在 `attest` 旁边挂载了这三个路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。在 `managed-context/1` 的 boot v2 下，每个新调用改为在其 Session 已安装的实际目录中运行，并须先通过激活 gate；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
 
 契约之上的语义：
 

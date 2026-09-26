@@ -747,6 +747,13 @@ jobs:
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          test_runner=()
+          if [ "$(id -u)" -eq 0 ]; then
+            # Permission-denial fixtures must also work on root-run ECS lanes.
+            chown -R 0 "$GITHUB_WORKSPACE" "$HOME"
+            echo 'Dropping DAC override capabilities for root unit tests'
+            test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')
+          fi
           # ENOSPC has failed test steps mid-suite while the host looks
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
@@ -777,10 +784,10 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          npm run test:ci:workspaces -- "${retry_arg[@]}"
+          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
           RC=$?
           if [ "$RC" -eq 0 ]; then
-            npm run test:scripts -- "${retry_arg[@]}"
+            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
             RC=$?
           fi
           set -e
