@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  applyReplacementPreservingLineEndings,
   countOccurrences,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
@@ -206,5 +207,74 @@ describe('maybeAugmentOldStringForDeletion', () => {
     expect(
       maybeAugmentOldStringForDeletion(file, 'console.log("bye")\n', ''),
     ).toBe('console.log("bye")\n');
+  });
+});
+
+describe('applyReplacementPreservingLineEndings', () => {
+  /** The LF-normalized copy EditTool matches against. */
+  const normalized = (raw: string) => raw.replace(/\r\n/g, '\n');
+
+  const splice = (raw: string, oldString: string, newString: string) =>
+    applyReplacementPreservingLineEndings(
+      raw,
+      normalized(raw),
+      oldString,
+      newString,
+    );
+
+  it('leaves every line the edit did not touch byte-identical', () => {
+    expect(splice('one\ntwo\nthree\r\nfour\n', 'two', 'TWO')).toBe(
+      'one\nTWO\nthree\r\nfour\n',
+    );
+  });
+
+  it('gives inserted text the ending of the text it replaced', () => {
+    expect(splice('one\r\ntwo\r\nthree\r\n', 'two', 'TWO\nAGAIN')).toBe(
+      'one\r\nTWO\r\nAGAIN\r\nthree\r\n',
+    );
+  });
+
+  it('is a no-op on a file that is already uniformly LF', () => {
+    expect(splice('one\ntwo\nthree\n', 'two', 'TWO\nAGAIN')).toBe(
+      'one\nTWO\nAGAIN\nthree\n',
+    );
+  });
+
+  it('is a no-op on a file that is already uniformly CRLF', () => {
+    expect(splice('one\r\ntwo\r\nthree\r\n', 'two', 'TWO\r\nAGAIN')).toBe(
+      'one\r\nTWO\r\nAGAIN\r\nthree\r\n',
+    );
+  });
+
+  it('replaces every occurrence, each taking its own ending', () => {
+    expect(splice('a\nb\r\nc\nb\r\n', 'b', 'B')).toBe('a\nB\r\nc\nB\r\n');
+  });
+
+  it('keeps a multi-line replacement on one ending style', () => {
+    // The old string is matched against the normalized text, so it is spelled
+    // with LF here even though the file is CRLF.
+    expect(splice('one\r\ntwo\r\nthree\r\n', 'two\nthree', 'TWO')).toBe(
+      'one\r\nTWO\r\n',
+    );
+  });
+
+  it('handles a file with no trailing newline', () => {
+    expect(splice('one\r\ntwo', 'two', 'TWO\nAGAIN')).toBe(
+      'one\r\nTWO\r\nAGAIN',
+    );
+  });
+
+  it('returns the file unchanged when the old string is absent', () => {
+    expect(splice('one\ntwo\n', 'three', 'THREE')).toBe('one\ntwo\n');
+  });
+
+  it('returns the file unchanged for an empty old string', () => {
+    expect(splice('one\ntwo\n', '', 'inserted')).toBe('one\ntwo\n');
+  });
+
+  it('deletes a line without gluing it to the next one', () => {
+    expect(splice('one\r\ntwo\r\nthree\r\n', 'two\n', '')).toBe(
+      'one\r\nthree\r\n',
+    );
   });
 });

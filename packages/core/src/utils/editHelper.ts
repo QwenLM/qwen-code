@@ -475,3 +475,158 @@ export function extractEditSnippet(
     content: snippetLines.join('\n'),
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Line-ending preserving splice                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The line ending that follows `index` in `content`, or `null` when `index` is
+ * not immediately followed by a line break.
+ */
+function lineEndingAfter(content: string, index: number): string | null {
+  if (content.startsWith('\r\n', index)) {
+    return '\r\n';
+  }
+  if (content[index] === '\n') {
+    return '\n';
+  }
+  return null;
+}
+
+/**
+ * The line ending that most recently precedes `index` in `content`, or `null`
+ * when the text before `index` has no line break in it.
+ */
+function lineEndingBefore(content: string, index: number): string | null {
+  for (let i = index - 1; i >= 0; i--) {
+    if (content[i] === '\n') {
+      if (i > 0 && content[i - 1] === '\r') {
+        return '\r\n';
+      }
+      return '\n';
+    }
+  }
+  return null;
+}
+
+/**
+ * The line ending `content[end - 1]` ends with, when the span `content.slice(
+ * start, end)` itself finishes on a line break.
+ */
+function spanTrailingLineEnding(
+  content: string,
+  start: number,
+  end: number,
+): string | null {
+  if (end - 1 > start && content[end - 1] === '\n') {
+    if (content[end - 2] === '\r') {
+      return '\r\n';
+    }
+    return '\n';
+  }
+  return null;
+}
+
+/**
+ * Maps every offset in the LF-normalized `normalizedContent` back to the offset
+ * it came from in `rawContent`.
+ *
+ * Normalizing only ever removes the `\r` of a `\r\n`, so the mapping is
+ * monotonic and one pass is enough. Entry `i` is the raw offset that produced
+ * normalized offset `i`; the final entry is `rawContent.length`.
+ */
+function normalizedToRawOffsets(
+  rawContent: string,
+  normalizedLength: number,
+): number[] {
+  const offsets: number[] = new Array(normalizedLength + 1);
+  let normalizedIndex = 0;
+  for (let rawIndex = 0; rawIndex < rawContent.length; rawIndex++) {
+    if (rawContent[rawIndex] === '\r' && rawContent[rawIndex + 1] === '\n') {
+      // Normalization drops this `\r`, so the `\n` behind it keeps the
+      // normalized index the `\r` would have taken.
+      continue;
+    }
+    if (normalizedIndex < normalizedLength) {
+      offsets[normalizedIndex] = rawIndex;
+    }
+    normalizedIndex++;
+  }
+  // A match that runs to the end of the normalized text starts after the last
+  // character, which is the end of the raw text.
+  offsets[normalizedLength] = rawContent.length;
+  return offsets;
+}
+
+/**
+ * Applies the same replacement as `applyReplacement`, but splices the result
+ * into the bytes that were read instead of into the LF-normalized copy.
+ *
+ * `applyReplacement` runs on LF-normalized text so that matching and the
+ * confirmation diff are line-ending agnostic, and `prepareTextFileContent`
+ * re-expanded that text to one style per file. Between them, a file that mixes
+ * CRLF and LF had every terminator rewritten by an edit that touched one line:
+ * `detectLineEnding` answers `crlf` as soon as the file contains a single
+ * `\r\n`, and `ensureCrlfLineEndings` then converts every `\n`.
+ *
+ * Here the untouched prefix and suffix are copied verbatim from `rawContent`, so
+ * only the matched spans are replaced. Inserted text takes the line ending of
+ * the region it replaced — the span's own trailing break, else the break that
+ * follows it, else the one before it — so a uniformly-CRLF file does not gain
+ * LF lines. For a file that is already uniformly LF or uniformly CRLF the result
+ * is byte-identical to what the previous path produced.
+ *
+ * Matches are located in the normalized text and mapped back, so the spans are
+ * the same ones `safeLiteralReplace` would have replaced, including its
+ * replace-all behaviour.
+ */
+export function applyReplacementPreservingLineEndings(
+  rawContent: string,
+  normalizedContent: string,
+  oldString: string,
+  newString: string,
+): string {
+  if (oldString === '' || !normalizedContent.includes(oldString)) {
+    return rawContent;
+  }
+
+  const offsets = normalizedToRawOffsets(rawContent, normalizedContent.length);
+
+  let result = '';
+  let copiedUpTo = 0;
+  let searchFrom = 0;
+  for (;;) {
+    const matchAt = normalizedContent.indexOf(oldString, searchFrom);
+    if (matchAt === -1) {
+      break;
+    }
+    const matchEnd = matchAt + oldString.length;
+    const rawStart = offsets[matchAt];
+    let rawEnd = offsets[matchEnd];
+    // Normalization drops the `\r` of every CRLF, so a span can end up holding
+    // one. That `\r` is not part of the text being replaced — it is the first
+    // half of the break that follows the span — and leaving it out is what keeps
+    // the pair intact for the untouched tail.
+    while (
+      rawEnd > rawStart &&
+      rawContent[rawEnd - 1] === '\r' &&
+      rawContent[rawEnd] === '\n'
+    ) {
+      rawEnd--;
+    }
+
+    const ending =
+      spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
+      lineEndingAfter(rawContent, rawEnd) ??
+      lineEndingBefore(rawContent, rawStart) ??
+      '\n';
+    const inserted = newString.replace(/\r\n|\n/g, ending);
+
+    result += rawContent.slice(copiedUpTo, rawStart) + inserted;
+    copiedUpTo = rawEnd;
+    searchFrom = matchEnd;
+  }
+
+  return result + rawContent.slice(copiedUpTo);
+}

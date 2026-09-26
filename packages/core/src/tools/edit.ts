@@ -54,6 +54,7 @@ import type {
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
+  applyReplacementPreservingLineEndings,
   countOccurrences,
   extractEditSnippet,
   maybeAugmentOldStringForDeletion,
@@ -123,6 +124,12 @@ interface CalculatedEdit {
   sandboxFileVersion?: SandboxFileVersion | null;
   currentContent: string | null;
   newContent: string;
+  /**
+   * `newContent` with the file's own line endings restored, for the bytes that
+   * go to disk. Equal to `newContent` for a new file, and byte-identical to it
+   * for a file that is already uniformly LF or uniformly CRLF.
+   */
+  contentForWrite: string;
   occurrences: number;
   error?: { display: string; raw: string; type: ToolErrorType };
   isNewFile: boolean;
@@ -166,6 +173,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
     let useBOM = false;
+    let rawContent: string | null = null;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
     // Prior-read enforcement runs before any content is read so that
@@ -190,6 +198,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         return {
           currentContent: null,
           newContent: '',
+          contentForWrite: '',
           occurrences: 0,
           error: {
             display: decision.displayMessage,
@@ -219,6 +228,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         // Detect original line ending style before normalizing
         detectedLineEnding = detectLineEnding(fileInfo.content);
         // Normalize line endings to LF for consistent processing.
+        // `rawContent` keeps the bytes as read: the normalization above is for
+        // matching and the diff, and it must not reach disk (see
+        // applyReplacementPreservingLineEndings).
+        rawContent = fileInfo.content;
         currentContent = fileInfo.content.replace(/\r\n/g, '\n');
         fileExists = true;
         // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
@@ -259,6 +272,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         return {
           currentContent: null,
           newContent: '',
+          contentForWrite: '',
           occurrences: 0,
           error: {
             display: postDecision.displayMessage,
@@ -343,6 +357,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         )
       : (currentContent ?? '');
 
+    // The bytes that go to disk, spliced out of the content as read. For an
+    // edit to a file that mixes CRLF and LF, `newContent` above would hand the
+    // writer one style for the whole file and rewrite every terminator the edit
+    // never touched; this keeps each untouched line byte-identical.
+    const contentForWrite =
+      !error && !isNewFile && rawContent !== null && currentContent !== null
+        ? applyReplacementPreservingLineEndings(
+            rawContent,
+            currentContent,
+            finalOldString,
+            finalNewString,
+          )
+        : newContent;
+
     if (!error && fileExists && currentContent === newContent) {
       error = {
         display:
@@ -384,6 +412,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     return {
       currentContent,
       newContent,
+      contentForWrite,
       sandboxFileVersion,
       occurrences,
       error,
@@ -624,7 +653,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config,
           {
             path: this.params.file_path,
-            content: editData.newContent,
+            content: editData.contentForWrite,
             toolWriteOrigin: 'edit',
             _meta: {
               bom: useBOM,
@@ -638,12 +667,17 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config,
           {
             path: this.params.file_path,
-            content: editData.newContent,
+            content: editData.contentForWrite,
             toolWriteOrigin: 'edit',
             _meta: {
               bom: editData.bom,
               encoding: editData.encoding,
-              lineEnding: editData.lineEnding,
+              // No `lineEnding` here on purpose. `contentForWrite` already
+              // carries the file's own terminators, and
+              // `prepareTextFileContent` expands *every* `\n` when it is told
+              // the file is `crlf` — which `detectLineEnding` reports as soon as
+              // the file contains a single `\r\n`. Passing the verdict back
+              // would undo the splice above.
             },
           },
           editData.sandboxFileVersion,
