@@ -25,3 +25,47 @@ Build and test with:
 mvn test
 mvn checkstyle:check
 ```
+
+## Workspace binding package
+
+Keep `com.alibaba.qwen.code.runtimebroker.managedworkspace` on the JDK alone:
+no other Broker class, Spring, CLI internals or scheduler.
+
+Treat every caller-supplied Workspace ID and directory as untrusted input.
+Resolution reports one typed error, never lets an explicit selection fall
+back to the default Workspace, never falls back to a launch directory, and
+never reveals whether another tenant's Workspace exists. Keep missing, foreign and unreadable Workspaces on one throw site,
+and have API adapters return only the status, code and message of a
+`WorkspaceException`, never its stack trace. The working-directory rule is
+lexical; do not add filesystem checks there, because the Runtime verifies the
+directory where the files live.
+
+A decoder that builds a `ContextBinding` from text must accept only the ASCII
+form `[1-9][0-9]*`, at most 2^63−1, for the generation and the revision, as
+the TypeScript implementation does. `Long.parseLong` alone also accepts a
+sign, leading zeros and non-ASCII digits.
+
+A change to the directory rule or to the `ContextBinding` encoding must
+update, in the same change, the shared fixtures in
+`packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json`
+and `packages/cli/src/serve/managed-workspace-binding.ts`, so both languages
+keep producing the same bytes. The installation requests and receipts in
+`packages/cli/src/serve/contracts/managed-context-v1.fixtures.json` carry
+context digests computed with the same encoding, and
+`ManagedContextEnvelopeConformanceTest` recomputes them, so update them too.
+Compute new expected values with an implementation independent of both. Both
+fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose; read
+them with a parser that keeps such escapes, as Jackson does. `jq` rejects the
+files, and Go's `encoding/json` replaces the surrogates with U+FFFD.
+
+## Tool result contract
+
+The `managed-tool-result/1` fixtures live beside the TypeScript module that
+replays them, in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`.
+A change to the manifest, the segment rules or the Tool v3 routes updates the
+fixtures, the schema, `packages/core/src/managed-runtime/managed-tool-result.ts`
+and `ManagedToolResultConformanceTest` in the same change, with expected
+values computed by an implementation independent of both languages. A Java
+Tool v3 client must refuse a Tool v2 answer on a v3 route and never retry a
+refused v3 call through v2.
