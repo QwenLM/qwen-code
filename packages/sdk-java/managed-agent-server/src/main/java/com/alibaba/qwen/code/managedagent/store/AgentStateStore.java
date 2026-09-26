@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -25,6 +26,14 @@ public interface AgentStateStore {
             String title, List<Map<String, Object>> input,
             String payloadDigest);
 
+    Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection);
+
+    Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest);
+
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest);
@@ -49,7 +58,8 @@ public interface AgentStateStore {
 
     Optional<SessionRecord> findSessionById(String sessionId);
 
-    SessionPage listSessions(String tenantId, Long beforeUpdatedAt,
+    SessionPage listSessions(String tenantId, String actorId,
+            Long beforeUpdatedAt,
             String beforeSessionId, int limit);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,

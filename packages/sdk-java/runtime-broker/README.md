@@ -96,3 +96,16 @@ Both fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose,
 so read them with a parser that keeps such escapes, as Jackson does.
 The package uses only the JDK and no other Broker class, and nothing wires
 it into the Broker service yet.
+
+## Tool result contract
+
+`ManagedToolResultConformanceTest` consumes the `managed-tool-result/1`
+contract in
+`packages/core/src/managed-runtime/contracts/managed-tool-result-v1.fixtures.json`:
+the result manifest, segment pages, segment publication and the Tool v3
+routes that carry the versioned result envelope. It pins the constants,
+routes, closed key sets and error table, and recomputes every segment, seal
+and prefix digest; see
+[Managed Tool Result Contract](../../../docs/design/2026-09-26-managed-tool-result-contract.md).
+The fixtures carry unpaired surrogates as `\uXXXX` escapes on purpose too.
+No Java transport speaks Tool v3 yet.

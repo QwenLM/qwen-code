@@ -192,9 +192,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
-        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
+        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
+        'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
