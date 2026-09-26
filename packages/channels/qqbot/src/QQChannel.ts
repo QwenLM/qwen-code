@@ -1505,9 +1505,28 @@ export class QQChannel extends ChannelBase {
 
   private idleFlush(sessionId: string, reconnectId: number): void {
     if (this._reconnectId !== reconnectId) {
-      process.stderr.write(
-        `[QQ:${this.name}] idleFlush discarded (reconnect) session=${sanitizeLogText(sessionId, 32)}\n`,
-      );
+      const parked = this.streamState.get(sessionId);
+      if (this.pendingStreamDelete.has(sessionId) && parked?.buffer) {
+        // The generation bumped while a residual was parked and no further
+        // chunk will arrive to self-heal it, so discarding here would strand
+        // the text and leave pendingStreamDelete armed forever. Re-arm under
+        // the current generation; the re-armed timer carries that generation,
+        // so it only re-arms again if another bump happens.
+        if (parked.timer) clearTimeout(parked.timer);
+        const currentReconnectId = this._reconnectId;
+        parked.timer = setTimeout(() => {
+          this.idleFlush(sessionId, currentReconnectId);
+        }, QQChannel.IDLE_FLUSH_MS);
+        parked.timerReconnectId = currentReconnectId;
+        parked.timer.unref?.();
+        process.stderr.write(
+          `[QQ:${this.name}] idleFlush re-armed after reconnect session=${sanitizeLogText(sessionId, 32)}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `[QQ:${this.name}] idleFlush discarded (reconnect) session=${sanitizeLogText(sessionId, 32)}\n`,
+        );
+      }
       return;
     }
     const state = this.streamState.get(sessionId);
@@ -1880,10 +1899,11 @@ export class QQChannel extends ChannelBase {
     // already in fullText and must not be prepended too (R9-1).
     const stashed = this.streamOrphanBuffer.get(sessionId);
     if (stashed) stashed.pre = stashed.text;
-    // A stale entry belongs to an earlier turn; its parked flush chain will
-    // never settle again once the deletes below drop it and its timer, so its
-    // reply anchor has to be released here (expectedMsgId-gated, so a live
-    // turn's own anchor is untouched).
+    // A stale entry belongs to an earlier turn; when the deletes below drop it
+    // its parked flush chain can never settle again, so its reply anchor has
+    // to be released here (expectedMsgId-gated, so a live turn's own anchor is
+    // untouched). A stale entry kept by the branch below must NOT release: it
+    // still needs the anchor to deliver its residual.
     const staleMsgId =
       state && state.turn !== currentTurn ? state.msgId : undefined;
     if (state?.timer) {
@@ -1892,13 +1912,17 @@ export class QQChannel extends ChannelBase {
     }
     if (
       state &&
-      (this.flushingSessions.has(sessionId) ||
+      (state.buffer ||
+        this.flushingSessions.has(sessionId) ||
         this.pendingStreamDelete.has(sessionId))
     ) {
-      // Either a send is still in flight, or the turn is parked for teardown
-      // with its residual waiting on the idle timer. Keep the entry in both
-      // cases so the pending flush can still deliver the residual — deleting
-      // it here destroys that text with no other path able to re-deliver it.
+      // An unflushed residual must survive the boundary. The bridge emits this
+      // boundary immediately before the tool-call/permission event that
+      // QQChannel.onToolCall flushes that very buffer with, so deleting the
+      // entry here silently destroys the pre-tool text. A send still in flight
+      // or a turn parked for teardown has the same claim on its residual — no
+      // other path can re-deliver it. Keep the entry; the tool-call event (or
+      // the idle timer below) delivers it.
       // Do NOT arm pendingStreamDelete: for the in-flight case that flag means
       // "the turn is over", and for the parked case it is already armed. This
       // is a mid-turn window gap, so hand the residual to the idle timer
@@ -1993,6 +2017,11 @@ export class QQChannel extends ChannelBase {
       return;
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
+    // A streamState entry's buffer is authoritative whenever the entry exists:
+    // an empty one means the turn's text already went out as flushed segments.
+    // fullText is only the fallback for a turn that never created an entry and
+    // never flushed, so a buffered residual shadows the daemon task output the
+    // bridge picks.
     let remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
     // A live turn's stashed pre-boundary text must go out with the final text
     // only when a boundary cleared the bridge's collection since it was taken —

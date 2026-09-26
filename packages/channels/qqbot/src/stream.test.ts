@@ -1244,9 +1244,10 @@ describe('onResponseComplete', () => {
     expect((body.markdown as Record<string, string>).content).toBe('nothing');
   });
 
-  it('drops accumulated buffer at response boundary', async () => {
+  it('preserves the buffer a following tool call flushes at a response boundary (Fix B)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
       string,
       { msgId: string; timestamp: number }
@@ -1254,18 +1255,72 @@ describe('onResponseComplete', () => {
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
     onResponseChunk(ch, 'test-chat', 'intermediate ', 'sess-1');
 
+    // Production emits the boundary immediately before the tool-call event
+    // that flushAndTrack's caller (onToolCall) reads the buffer with, so the
+    // entry and its residual must survive the boundary rather than be deleted.
     onResponseBoundary(ch, 'test-chat', 'sess-1');
-
-    // A window gap between response windows must keep the reply anchor alive
-    // so the next window's fresh streamState entry reuses the same msgId.
+    const kept = streamState(ch).get('sess-1');
+    expect(kept).toBeDefined();
+    expect(kept!.buffer).toBe('intermediate ');
+    // A window gap between response windows must keep the reply anchor alive.
     expect(sessionAnchors.has('sess-1')).toBe(true);
 
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+    await drain();
+    expect(sentContents().filter((c) => c === 'intermediate ')).toHaveLength(1);
+
+    // The post-tool text completes the turn normally, and the pre-boundary
+    // text must not be re-sent alongside it.
+    onResponseChunk(ch, 'test-chat', 'final', 'sess-1');
     await onResponseComplete(ch, 'test-chat', 'final', 'sess-1');
 
+    const contents = sentContents();
+    expect(contents.filter((c) => c === 'intermediate ')).toHaveLength(1);
+    expect(contents.filter((c) => c === 'final')).toHaveLength(1);
     expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    // Exact total, not just the per-content counts above: an extra send
+    // anywhere in the boundary/keep path must fail this test.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('hands a pre-boundary buffer to the idle timer when no tool call follows (Fix B)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'intermediate ', 'sess-1');
+
+    // A plan update emits the boundary alone; the buffer must survive it and
+    // merge with the post-boundary chunk rather than be dropped.
+    onResponseBoundary(ch, 'test-chat', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('intermediate ');
+    onResponseChunk(ch, 'test-chat', 'final', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('intermediate final');
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    const contents = sentContents();
+    expect(contents.filter((c) => c === 'intermediate final')).toHaveLength(1);
+    expect(contents.some((c) => c.includes('intermediate intermediate'))).toBe(
+      false,
+    );
+
+    // The completion is a no-op: the idle flush already delivered the text.
+    await onResponseComplete(ch, 'test-chat', 'final', 'sess-1');
+    expect(
+      sentContents().filter((c) => c === 'intermediate final'),
+    ).toHaveLength(1);
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(flushingSessions.has('sess-1')).toBe(false);
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(flushedSessions.has('sess-1')).toBe(false);
+    // Exact total: the idle flush is the only send, and the completion after
+    // it is a no-op. An extra delivery anywhere in the path must fail.
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
-    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
-    expect((body.markdown as Record<string, string>).content).toBe('final');
   });
 
   it('clears an in-flight flush marker at response boundary', () => {
@@ -3760,6 +3815,54 @@ describe('stash ownership regressions', () => {
     vi.advanceTimersByTime(2000);
     await drain();
     expect(sentContents()).toContain('T1-resid ');
+  });
+
+  it('re-arms a parked residual whose idle timer a reconnect retired (Fix D)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    // Park a residual with a live idle timer: the head send is suspended,
+    // onResponseComplete parks the turn, and the residual arrives behind it.
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    let resolveSend!: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValueOnce(sendPromise);
+    onResponseChunk(ch, 'test-chat', 'T1-head ', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    onResponseChunk(ch, 'test-chat', 'T1-resid ', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T1-head T1-resid', 's1');
+    resolveSend(mockResponse(true));
+    await drain();
+
+    const parked = streamState(ch).get('s1')!;
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    expect(parked.buffer).toBe('T1-resid ');
+    expect(parked.timer).not.toBeNull();
+    expect(
+      (parked as unknown as { timerReconnectId?: number }).timerReconnectId,
+    ).toBe(chp['_reconnectId']);
+
+    // A state-preserving generation bump (re-entrant connect) retires that
+    // timer. No further chunk arrives, so without the re-arm the residual is
+    // stranded and the park stays armed forever.
+    chp['_reconnectId'] = (chp['_reconnectId'] as number) + 1;
+
+    vi.advanceTimersByTime(2000); // the old-generation timer fires
+    await drain();
+    // Exactly one live timer — the re-armed one. The retired generation's
+    // handle is gone, so a leak or a missing re-arm would change this count.
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(2000); // the re-armed timer fires
+    await drain();
+
+    expect(sentContents()).toContain('T1-resid ');
+    expect(pendingStreamDelete.has('s1')).toBe(false);
+    expect(streamState(ch).has('s1')).toBe(false);
   });
 
   it('a stale-drop does not release the in-flight flush marker, so no second send starts (R8-4)', async () => {
