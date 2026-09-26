@@ -126,6 +126,7 @@ describe('StandaloneRecents', () => {
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLeaveCurrentSession?: (sessionId: string) => Promise<boolean>;
       onNewSession?: () => void;
       onMutated?: () => void;
     } = {},
@@ -170,6 +171,7 @@ describe('StandaloneRecents', () => {
           onNewSession={options.onNewSession}
           renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
+          onLeaveCurrentSession={options.onLeaveCurrentSession}
           onError={onError}
           onRenameSession={onRenameSession}
           onMutated={onMutated}
@@ -178,6 +180,25 @@ describe('StandaloneRecents', () => {
       );
     });
     return { onError, onRenameSession, onMutated, renderSession };
+  }
+
+  function deleteRow(label: string): HTMLButtonElement {
+    const row = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === label,
+    )?.parentElement;
+    const button = Array.from(row?.querySelectorAll('button') ?? []).find(
+      (candidate) => candidate.textContent === 'sidebar.delete',
+    );
+    expect(button).toBeDefined();
+    return button!;
+  }
+
+  function dialogButton(label: string): HTMLButtonElement {
+    const button = Array.from(container.querySelectorAll('button')).findLast(
+      (candidate) => candidate.textContent === label,
+    );
+    expect(button).toBeDefined();
+    return button!;
   }
 
   it('lists only top-level active chats under No workspace', async () => {
@@ -486,6 +507,121 @@ describe('StandaloneRecents', () => {
     expect(container.textContent).not.toContain('Archived chat');
     expect(onMutated).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('leaves the current chat only after confirmation and waits before deleting it', async () => {
+    let finishLeave!: (left: boolean) => void;
+    const onLeaveCurrentSession = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishLeave = resolve;
+        }),
+    );
+    mocks.deleteSession.mockResolvedValue({
+      removed: ['active'],
+      notFound: [],
+      fileCleanupPending: [],
+      errors: [],
+    });
+    const { onMutated } = await render({
+      currentSessionId: 'active',
+      onLeaveCurrentSession,
+    });
+
+    await act(async () => deleteRow('Active chat').click());
+    expect(onLeaveCurrentSession).not.toHaveBeenCalled();
+    await act(async () => dialogButton('common.cancel').click());
+    expect(onLeaveCurrentSession).not.toHaveBeenCalled();
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain(
+      'sidebar.standaloneDeleteConfirm',
+    );
+
+    await act(async () => deleteRow('Active chat').click());
+    await act(async () => dialogButton('sidebar.delete').click());
+    expect(onLeaveCurrentSession).toHaveBeenCalledExactlyOnceWith('active');
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
+    expect(dialogButton('sidebar.delete').disabled).toBe(true);
+    expect(container.textContent).toContain('Active chat');
+
+    await act(async () => finishLeave(true));
+    expect(mocks.deleteSession).toHaveBeenCalledExactlyOnceWith(['active']);
+    expect(onMutated).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('Active chat');
+  });
+
+  it('keeps the current row when leaving fails', async () => {
+    const onLeaveCurrentSession = vi.fn().mockResolvedValue(false);
+    const { onError, onMutated } = await render({
+      currentSessionId: 'active',
+      onLeaveCurrentSession,
+    });
+
+    await act(async () => deleteRow('Active chat').click());
+    await act(async () => dialogButton('sidebar.delete').click());
+
+    expect(onLeaveCurrentSession).toHaveBeenCalledExactlyOnceWith('active');
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
+    expect(onMutated).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Active chat');
+    expect(container.textContent).toContain('sidebar.standaloneDeleteConfirm');
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current row visible and reports a refused delete', async () => {
+    const onLeaveCurrentSession = vi.fn().mockResolvedValue(true);
+    mocks.deleteSession.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      fileCleanupPending: [],
+      errors: [
+        { sessionId: 'active', code: 'session_busy', message: 'Still open' },
+      ],
+    });
+    const { onError, onMutated } = await render({
+      currentSessionId: 'active',
+      onLeaveCurrentSession,
+    });
+
+    await act(async () => deleteRow('Active chat').click());
+    await act(async () => dialogButton('sidebar.delete').click());
+
+    expect(mocks.deleteSession).toHaveBeenCalledExactlyOnceWith(['active']);
+    expect(onMutated).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Active chat');
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Still open' }),
+      'sidebar.standaloneActionFailed',
+    );
+  });
+
+  it('deletes a different chat without leaving the current one', async () => {
+    mocks.list.mockResolvedValue({
+      sessions: [
+        summary('active', 'Active chat'),
+        summary('other', 'Other chat'),
+      ],
+    });
+    mocks.deleteSession.mockResolvedValue({
+      removed: ['other'],
+      notFound: [],
+      fileCleanupPending: [],
+      errors: [],
+    });
+    const onLeaveCurrentSession = vi.fn().mockResolvedValue(true);
+    const { onMutated } = await render({
+      currentSessionId: 'active',
+      onLeaveCurrentSession,
+    });
+
+    await act(async () => deleteRow('Other chat').click());
+    await act(async () => dialogButton('sidebar.delete').click());
+
+    expect(onLeaveCurrentSession).not.toHaveBeenCalled();
+    expect(mocks.deleteSession).toHaveBeenCalledExactlyOnceWith(['other']);
+    expect(onMutated).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Active chat');
+    expect(container.textContent).not.toContain('Other chat');
   });
 
   it('ignores a second mutation while one is in flight', async () => {
