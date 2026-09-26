@@ -146,6 +146,16 @@ describe('cleanupStaleAgentWorktrees', () => {
 
     expect(removed).toBe(1);
   });
+
+  it('reads a directory with no .git of its own as dirty, not as the enclosing repo', async () => {
+    // A path inside a valid repo whose own .git is gone (a sweep's rm that
+    // threw partway): without the guard, git's upward discovery answers
+    // about the enclosing repo — which is clean here — and would read as
+    // "no work", authorizing the destructive sinks this predicate gates.
+    const orphan = path.join(repoRoot, 'orphaned-worktree');
+    await fs.mkdir(orphan);
+    await expect(worktreeHasWork(orphan)).resolves.toBe(true);
+  });
 });
 
 describe('worktreeHasWork', () => {

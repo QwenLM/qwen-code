@@ -77,9 +77,16 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
  *
  * Fail-closed: any read error counts as work, preserving the checkout.
+ * The `.git` access check exists because `runGit` does not pin the
+ * repository: without it, git's upward discovery from a path whose own
+ * `.git` is gone (a sweep's `fs.rm` that threw partway, a restore that
+ * dropped the link file) would answer about the *enclosing* repository —
+ * and a clean enclosing repo would read as "no work", authorizing the
+ * destructive sinks this predicate gates.
  */
 export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
   try {
+    await fs.access(path.join(worktreePath, '.git'));
     const stdout = await runGit(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
