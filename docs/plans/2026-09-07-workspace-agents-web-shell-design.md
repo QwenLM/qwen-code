@@ -1,5 +1,7 @@
 # Workspace agents in Web Shell — design direction
 
+> **Development handoff (2026-09-09):** The [Agent service architecture](../design/2026-09-09-agent-service-collaboration.md) and [successor plan](./2026-09-09-agent-service-collaboration-plan.md) now govern product entry and experimental gating: start from existing conversations, distinguish creating an Agent from connecting an existing service, and expose coordination only when enabled. The ledger-first navigation and cross-thread transcript assumptions below are historical; retain useful status, routing, accessibility, and rendering guidance where compatible with the successor.
+
 > For §5.2 step 9, written before any UI exists so the build does not start from a blank page or from whichever list component was nearest to hand.
 > Grounded in Multica's shipped UI, read at `multica-ai/multica@7a438bd5b`: `packages/views/issues/components/{issue-detail,execution-log-section,comment-trigger-chips,thread-nav-panel}.tsx` and `packages/views/issues/blocked-trigger-copy.ts`. Where this design diverges from theirs, the reason is stated.
 > Companion to [`2026-09-06-multi-agent-board-collaboration.md`](./2026-09-06-multi-agent-board-collaboration.md) and [`2026-09-07-workspace-agents-implementation-acceptance.md`](./2026-09-07-workspace-agents-implementation-acceptance.md).
@@ -41,8 +43,9 @@ A chat log with a status badge is what Slack, Linear and Multica's issue view al
 
 ## 4. Surfaces
 
-The existing Agents entry has two views: **Agents** and **Tasks**. They share
-one backend snapshot but are not stacked into one long page. This mirrors Multica's product boundaries without adding another shell
+The existing Agents entry has three views: **Agents**, **Tasks**, and
+**Runtime**. They share one backend snapshot but are not stacked into one long
+page. This mirrors Multica's product boundaries without adding another shell
 navigation system.
 
 ### 4.1 Roster, inside the existing Agents page
@@ -90,10 +93,9 @@ Threads
 
 ### 4.3 Runtime
 
-There is no Runtime view. Every Agent runs on the serving daemon, which is
-always available while the page is. The demo does not invent remote placement,
-heartbeat history, or process isolation. Those belong to a later runtime
-registry.
+The demo exposes the actual `local` binding and whether the serving daemon is
+online. It does not invent remote placement, heartbeat history, or process
+isolation. Those belong to a later runtime registry.
 
 ### 4.4 Thread view
 

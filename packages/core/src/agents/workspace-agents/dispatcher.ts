@@ -22,6 +22,7 @@ import { assembleAgentPrompt } from './prompt.js';
 import {
   generateRunId,
   isAgentAddressable,
+  isAgentLocal,
   listThreads,
   maxConcurrentRunsFor,
   readWorkspaceAgents,
@@ -272,7 +273,7 @@ async function rebookUndeliveredTriggers(
   );
 }
 
-async function rebookUndeliveredTriggersInTransaction(
+export async function rebookUndeliveredTriggersInTransaction(
   transaction: AgentStoreTransaction,
   threadId: string,
   runId: string,
@@ -426,7 +427,9 @@ export function selectCandidates(
       const agent = agents.find((candidate) => candidate.id === run.agentId);
       // A retired or disabled agent keeps its history and its name but takes
       // no new work; the roster entry survives so its old posts still read.
-      if (!agent || !isAgentAddressable(agent)) continue;
+      if (!agent || !isAgentAddressable(agent) || !isAgentLocal(agent)) {
+        continue;
+      }
       queued.push({ agent, thread, run });
     }
   }
@@ -679,11 +682,53 @@ async function reconcileInterruptedRuns(
   return records;
 }
 
+/**
+ * Ends cancellations no Agent Host is left to confirm.
+ *
+ * A host finishes a cancelled run when it next renews the lease. Once that
+ * lease has run out no host holds the run and none will pick it up, so the
+ * cancel would stay pending and keep the agent busy for good.
+ */
+async function settleOrphanedHostCancels(
+  projectRoot: string,
+  agents: readonly WorkspaceAgent[],
+  threads: readonly Thread[],
+  now: number,
+): Promise<DispatchRecord[]> {
+  const records: DispatchRecord[] = [];
+  for (const thread of threads) {
+    for (const run of thread.runs) {
+      if (run.status !== 'cancelling' || (run.lease?.expiresAt ?? 0) > now) {
+        continue;
+      }
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      if (!agent || isAgentLocal(agent)) continue;
+      await withAgentStoreTransaction(projectRoot, (transaction) =>
+        finishRunInTransaction(transaction, {
+          threadId: thread.id,
+          runId: run.id,
+          outcome: { status: 'cancelled', attempt: run.attempts },
+          now,
+        }),
+      );
+      records.push({
+        agentId: agent.id,
+        threadId: thread.id,
+        runId: run.id,
+        kind: 'cancelled',
+      });
+    }
+  }
+  return records;
+}
+
 async function deliverRunningInputs(
   projectRoot: string,
   port: AgentDispatchPort,
   workspaceId: string,
   agents: readonly WorkspaceAgent[],
+  /** Everyone a prompt may name as a peer, remote agents included. */
+  roster: readonly WorkspaceAgent[],
   threads: readonly Thread[],
   now: number,
 ): Promise<DispatchRecord[]> {
@@ -714,7 +759,7 @@ async function deliverRunningInputs(
             agent,
             run,
             thread,
-            roster: agents,
+            roster,
           });
           const through = thread.messages.find(
             (message) => message.sequence === prompt.contextThroughSequence,
@@ -835,14 +880,21 @@ export async function dispatchOnce(
   const now = options.now ?? Date.now();
   const workspace = await readAgentWorkspace(projectRoot);
   const agents = await readWorkspaceAgents(projectRoot);
+  const localAgents = agents.filter(isAgentLocal);
   let { threads } = await listThreads(projectRoot);
-  const records: DispatchRecord[] = [];
+  const records: DispatchRecord[] = await settleOrphanedHostCancels(
+    projectRoot,
+    agents,
+    threads,
+    now,
+  );
+  if (records.length > 0) ({ threads } = await listThreads(projectRoot));
 
   records.push(
     ...(await reconcileInterruptedRuns(
       projectRoot,
       port,
-      agents,
+      localAgents,
       threads,
       now,
     )),
@@ -853,6 +905,7 @@ export async function dispatchOnce(
       projectRoot,
       port,
       workspace.workspaceId,
+      localAgents,
       agents,
       threads,
       now,
@@ -860,7 +913,7 @@ export async function dispatchOnce(
   );
   ({ threads } = await listThreads(projectRoot));
 
-  for (const candidate of selectCandidates(agents, threads)) {
+  for (const candidate of selectCandidates(localAgents, threads)) {
     const { agent, thread, run } = candidate;
     const base = { agentId: agent.id, threadId: thread.id, runId: run.id };
     const sessionId = priorSessionId(thread, run);

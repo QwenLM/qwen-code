@@ -10,7 +10,7 @@ import type { ChatEditor } from '../ChatEditor';
 import type { WebShellAtProvider } from '../../customization';
 import type { useI18n } from '../../i18n';
 import { createThreadsHttpApi } from './ThreadsRoute';
-import { CONVERSATION_CONTEXT_PREFIX } from './agents-view-logic';
+import { CONVERSATION_CONTEXT_PREFIX, programLabel } from './agents-view-logic';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
@@ -140,6 +140,17 @@ export function useAgentChatEntry({
                   .map((agent) => ({
                     id: agent.id,
                     label: agent.name,
+                    // "Program · Runtime", as on the Agents page.
+                    subtitle: `${programLabel(
+                      agent.execution?.mode === 'managed-host'
+                        ? agent.execution.provider
+                        : undefined,
+                    )} · ${
+                      // An older daemon sends no runtime: it runs here.
+                      !agent.runtime || agent.runtime.kind === 'local'
+                        ? t('collab.agent.thisComputer')
+                        : agent.runtime.label
+                    }`,
                     description: t(`collab.agentStatus.${agent.status}`),
                     ...(agent.color ? { iconColor: agent.color } : {}),
                     insertText: `@${agent.name} `,

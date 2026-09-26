@@ -38,7 +38,7 @@ import { postMessageInTransaction } from './thread-actions.js';
 import { mentionToken } from './mentions.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
-type RunCloseRequest =
+export type RunCloseRequest =
   | { kind: 'waiting' }
   | { kind: 'blocked'; question: string }
   | { kind: 'review'; summary: string };
@@ -251,7 +251,7 @@ function enqueue(
  * written: a close that names a run the agent does not own, or a run that is
  * not executing, is a wiring or replay error, not a workflow event.
  */
-async function closeRunInTransaction(
+export async function closeRunInTransaction(
   transaction: AgentStoreTransaction,
   input: CloseRunInput,
 ): Promise<CloseRunResult> {

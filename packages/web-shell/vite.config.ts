@@ -197,6 +197,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
+      '/agent-hosts': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,

@@ -26,6 +26,18 @@ import type {
   AgentRunStepView,
 } from './agent-events';
 
+/** The programs an agent can be bound to on a joined runtime. */
+export const AGENT_PROGRAMS = ['qwen', 'codex', 'claude'] as const;
+export type AgentProgramView = (typeof AGENT_PROGRAMS)[number];
+
+export function programLabel(program: string | undefined): string {
+  return program === 'codex'
+    ? 'Codex'
+    : program === 'claude'
+      ? 'Claude Code'
+      : 'Qwen Code';
+}
+
 /**
  * Opens a thread body that carries the conversation it was started from. The
  * agents read it as-is; the chat view shows it folded instead of as a message.

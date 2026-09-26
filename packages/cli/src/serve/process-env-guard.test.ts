@@ -321,8 +321,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'Embedded server construction keeps a process-environment compatibility fallback. ' +
         'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
-        'by design: it governs work no session owns (a recovery sweep and the ' +
-        'dispatch timer), so it cannot be a per-session setting.',
+        'by design: it governs work no session owns (a recovery sweep, the dispatch ' +
+        'timer, the Host transport routes), so it cannot be a per-session setting.',
       accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
@@ -360,6 +360,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_LIVE_DIAGNOSTICS': 2,
         'key:QWEN_LIVE_DIAGNOSTICS_DIR': 1,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/workspace-agents/claude-host-session.ts',
+    {
+      reason:
+        'The Claude Code adapter is a child process of this host and needs a sanitized base environment, like the external-agent executors.',
+      accesses: { whole: 1 },
     },
   ],
 ]);

@@ -17,18 +17,108 @@
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOSTS_SCHEMA_VERSION = 1;
+export const LOCAL_AGENT_RUNTIME_ID = 'local';
+
+export interface AgentHost {
+  id: string;
+  name: string;
+  secretHash: string;
+  workspaceCwd: string;
+  providers: string[];
+  createdAt: number;
+  lastSeenAt?: number;
+}
+
+export type AgentHostView = Omit<AgentHost, 'secretHash'>;
+
+export interface AgentHostEnrollment {
+  tokenHash: string;
+  expiresAt: number;
+}
+
+export interface AgentHostsFile {
+  schemaVersion: typeof AGENT_HOSTS_SCHEMA_VERSION;
+  hosts: AgentHost[];
+  enrollment?: AgentHostEnrollment;
+}
+
+/**
+ * How much an external caller may ask of one agent.
+ *
+ * `analysis` is read-only work, which is what the plan opens first; `full`
+ * is everything that agent can do. Coarse on purpose — a scope nobody can
+ * read is a scope nobody enforces correctly.
+ */
+export type A2AGrantScope = 'analysis' | 'full';
+
+/**
+ * One external caller's permission to call one agent.
+ *
+ * Per agent, never per daemon: opening agent A says nothing about agent B, and
+ * a grant in one direction confers nothing in the other. The secret is stored
+ * only as a digest and never travels in a thread, a prompt, a tool argument
+ * or a log line.
+ */
+export interface A2AGrant {
+  callerId: string;
+  agentId: string;
+  scope: A2AGrantScope;
+  secretHash: string;
+  createdAt: number;
+  /** Absent means it does not expire on its own; revocation still applies. */
+  expiresAt?: number;
+}
 
 export interface AgentWorkspaceState {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   workspaceId: string;
   hostSessionId?: string;
   nextRunSequence: number;
+  /** External callers allowed in, and to which agent. Absent means none. */
+  callerGrants?: A2AGrant[];
 }
 
 export interface WorkspaceAgentsFile {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   agents: WorkspaceAgent[];
 }
+
+/** A program a runtime can run an agent with. */
+export type AgentProgram = 'qwen' | 'codex' | 'claude';
+
+/**
+ * How a host names each program in its advertised `providers`. The one table
+ * the host, the daemon's validation and pickup all read.
+ */
+export const AGENT_PROGRAM_LABELS: Readonly<Record<AgentProgram, string>> = {
+  qwen: 'Qwen Code ACP',
+  codex: 'Codex CLI',
+  claude: 'Claude Code ACP',
+};
+
+export function isAgentProgram(value: unknown): value is AgentProgram {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(AGENT_PROGRAM_LABELS, value)
+  );
+}
+
+export function hostOffersProgram(
+  host: { providers: readonly string[] },
+  program: AgentProgram,
+): boolean {
+  return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
+}
+
+export type WorkspaceAgentExecution =
+  | { mode: 'local' }
+  | {
+      mode: 'managed-host';
+      hostIds: string[];
+      /** The program to run on the host; the host's default when absent. */
+      provider?: AgentProgram;
+    };
 
 /**
  * A durable agent identity, scoped to one workspace.
@@ -94,6 +184,8 @@ export interface WorkspaceAgent {
    * Distinct from {@link queueLimit}, which bounds how much may wait.
    */
   maxConcurrentRuns?: number;
+  /** Where this workspace-scoped identity may execute. Absent means local. */
+  execution?: WorkspaceAgentExecution;
 }
 
 /**
@@ -217,6 +309,17 @@ export type ThreadRunStatus =
  * treat it as a crash and revive it. A stranded run waits for a person, who
  * decides whether to re-raise the work or drop it — the system does neither.
  */
+/** One Host's temporary hold on a run. */
+export interface RunLease {
+  hostId: string;
+  /** Minted fresh on every acquisition; never reused across attempts. */
+  leaseId: string;
+  /** The run attempt this lease is for. A later attempt invalidates it. */
+  attempt: number;
+  expiresAt: number;
+  acquiredAt: number;
+}
+
 export type RunCloseKind =
   | 'waiting'
   | 'blocked'
@@ -283,6 +386,16 @@ export interface ThreadRun {
    */
   usageBaselineTokens?: number;
   failureStage?: string;
+  /**
+   * The outbound Host currently holding this run, if any.
+   *
+   * A lease rather than an assignment: a Host on the far side of a NAT can
+   * vanish without saying so, and work has to become available again without
+   * a person intervening. What makes that safe is that re-leasing mints a new
+   * `leaseId` and the attempt moves on, so the vanished worker's late write is
+   * refused rather than overwriting whoever picked the work up next.
+   */
+  lease?: RunLease;
   /** Workspace-wide FIFO key. */
   queueSequence: number;
   /**
@@ -305,6 +418,36 @@ export interface ThreadRun {
  * it is a prompt-injection surface by construction; keeping it out of the
  * repo means it is never committed, pulled, or reviewed as if it were code.
  */
+/**
+ * Provenance of a thread raised by an external A2A caller.
+ *
+ * Lives on the thread rather than in an index of its own so there is one
+ * source of truth: an index would be a second write, and a second write is a
+ * thing that can disagree with the first about whether work was accepted.
+ * Lookup by `key` is a scan, which costs the same as the other store scans and
+ * cannot go stale.
+ */
+export interface ExternalIntake {
+  /**
+   * `externalRequestKey(callerId, targetAgentId, messageId)`. Written in the
+   * same transaction that accepts the work — a key written afterwards cannot
+   * answer whether a retry arriving mid-acceptance is the same request.
+   */
+  key: string;
+  /** Authenticated caller, from the transport. Scopes every read back. */
+  callerId: string;
+  targetAgentId: string;
+  /** `Message.messageId` as the caller minted it. */
+  messageId: string;
+  /**
+   * Digest of the submitted content. The protocol lets a caller reuse an id;
+   * this is what turns "same key, different content" into a refusal instead of
+   * a silent overwrite of work already accepted.
+   */
+  contentHash: string;
+  receivedAt: number;
+}
+
 export interface Thread {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   id: string;
@@ -326,6 +469,8 @@ export interface Thread {
   priority?: ThreadPriority;
   /** Agent that owns the thread when no message names someone explicitly. */
   assigneeAgentId?: string;
+  /** Set when an external A2A caller raised this thread; see {@link ExternalIntake}. */
+  externalIntake?: ExternalIntake;
   createdAt: number;
   /** {@link HUMAN_AUTHOR_ID} or an agent id. */
   createdBy: string;

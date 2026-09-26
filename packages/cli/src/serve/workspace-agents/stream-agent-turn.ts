@@ -20,6 +20,29 @@ export interface AgentTurnUpdate {
   steps?: AgentRunStep[];
 }
 
+/**
+ * Folds one ACP tool call update into a turn's step list and returns the
+ * latest steps, oldest first. Shared by every program that speaks ACP.
+ */
+export function recordToolStep(
+  steps: Map<string, AgentRunStep>,
+  update: {
+    toolCallId?: string;
+    title?: string | null;
+    status?: string | null;
+  },
+): AgentRunStep[] {
+  if (update.toolCallId) {
+    const previous = steps.get(update.toolCallId);
+    steps.set(update.toolCallId, {
+      id: update.toolCallId,
+      title: (update.title || previous?.title || '').slice(0, 200),
+      status: stepStatus(update.status ?? undefined, previous?.status),
+    });
+  }
+  return [...steps.values()].slice(-MAX_STEPS);
+}
+
 function stepStatus(
   status: string | undefined,
   previous: AgentRunStep['status'] | undefined,
@@ -102,18 +125,10 @@ export async function streamAgentTurn(
       update.sessionUpdate === 'tool_call' ||
       update.sessionUpdate === 'tool_call_update'
     ) {
-      if (update.toolCallId) {
-        const previous = steps.get(update.toolCallId);
-        steps.set(update.toolCallId, {
-          id: update.toolCallId,
-          title: (update.title || previous?.title || '').slice(0, 200),
-          status: stepStatus(update.status, previous?.status),
-        });
-      }
       report({
         stage: 'tool',
         detail: update.title ?? '',
-        steps: [...steps.values()].slice(-MAX_STEPS),
+        steps: recordToolStep(steps, update),
       });
     }
   }
