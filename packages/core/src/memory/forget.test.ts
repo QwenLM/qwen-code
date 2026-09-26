@@ -51,6 +51,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/tmp/auto/user/note.md',
         relativePath: 'user/note.md',
@@ -91,6 +95,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // 500 documents: the newest 499 are noise, the oldest one matches the
     // query. A plain recency slice would drop it; the bound must not.
     const docs = Array.from({ length: 499 }, (_, index) => ({
+      scope: 'project' as const,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       type: 'reference' as const,
       filePath: `/tmp/project/memory/reference/noise-${index}.md`,
       relativePath: `reference/noise-${index}.md`,
@@ -101,6 +109,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       mtimeMs: 1_000 + index,
     }));
     docs.push({
+      scope: 'project' as const,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       type: 'reference' as const,
       filePath: '/tmp/project/memory/reference/overflow.md',
       relativePath: 'reference/overflow.md',
@@ -137,6 +149,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // unselectable while recall can still inject it.
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 400 }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'reference' as const,
         filePath: `/tmp/project/memory/reference/proj-${index}.md`,
         relativePath: `reference/proj-${index}.md`,
@@ -149,6 +165,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     );
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 3 }, (_, index) => ({
+        scope: 'user' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'user' as const,
         filePath: `/tmp/user/memories/user/old-${index}.md`,
         relativePath: `user/old-${index}.md`,
@@ -177,6 +197,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
 
   it('falls back to the full uncapped candidate list when the model fails', async () => {
     const docs = Array.from({ length: 500 }, (_, index) => ({
+      scope: 'project' as const,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       type: 'reference' as const,
       filePath: `/tmp/project/memory/reference/noise-${index}.md`,
       relativePath: `reference/noise-${index}.md`,
@@ -187,6 +211,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       mtimeMs: 1_000 + index,
     }));
     docs.push({
+      scope: 'project' as const,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       type: 'reference' as const,
       filePath: '/tmp/project/memory/reference/overflow.md',
       relativePath: 'reference/overflow.md',
@@ -244,6 +272,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
             'utf-8',
           );
           return {
+            scope: 'project' as const,
+            category: 'uncategorized' as const,
+            keywords: [],
+            usageScenarios: [],
             type: 'reference' as const,
             filePath,
             relativePath: `reference/doc-${index}.md`,
@@ -317,6 +349,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       await fs.writeFile(userFile, fileContents, 'utf-8');
       vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
         {
+          scope: 'project' as const,
+          category: 'uncategorized' as const,
+          keywords: [],
+          usageScenarios: [],
           type: 'reference',
           filePath: projectFile,
           relativePath: 'reference/codeword.md',
@@ -329,6 +365,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       ]);
       vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
         {
+          scope: 'user' as const,
+          category: 'uncategorized' as const,
+          keywords: [],
+          usageScenarios: [],
           type: 'user',
           filePath: userFile,
           relativePath: 'user/codeword.md',
@@ -411,6 +451,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       await fs.writeFile(userFile, fileContents, 'utf-8');
       vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
         {
+          scope: 'project' as const,
+          category: 'uncategorized' as const,
+          keywords: [],
+          usageScenarios: [],
           type: 'reference',
           filePath: projectFile,
           relativePath: 'reference/codeword.md',
@@ -423,6 +467,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       ]);
       vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
         {
+          scope: 'user' as const,
+          category: 'uncategorized' as const,
+          keywords: [],
+          usageScenarios: [],
           type: 'user',
           filePath: userFile,
           relativePath: 'user/codeword.md',
@@ -466,6 +514,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // quota itself decides the split. Mutating the quota changes these counts.
     const makeDocs = (scope: 'user' | 'project', dir: string, base: number) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
@@ -507,6 +559,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       base: number,
     ) =>
       Array.from({ length: count }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
@@ -544,6 +600,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // newest entries instead.
     const matching = (scope: 'user' | 'project', dir: string) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
@@ -583,6 +643,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // recency comparator (the model path never runs here).
     const matching = (scope: 'user' | 'project', dir: string) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
@@ -624,6 +688,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // leave 50 entries undeleted after a model failure.
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 450 }, (_, index) => ({
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'reference' as const,
         filePath: `/tmp/project/memory/reference/match-${index}.md`,
         relativePath: `reference/match-${index}.md`,
@@ -669,6 +737,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
   it('indexes user and project candidates with scope-prefixed ids', async () => {
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'user' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/tmp/user/memories/user/note.md',
         relativePath: 'user/note.md',
@@ -681,6 +753,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     ]);
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'project',
         filePath: '/tmp/project/memory/user/note.md',
         relativePath: 'user/note.md',
@@ -732,6 +808,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
   it('limits destructive selection to the requested memory scope', async () => {
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'user' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/tmp/user/memories/user/shared.md',
         relativePath: 'user/shared.md',
@@ -744,6 +824,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     ]);
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'project',
         filePath: '/tmp/project/memory/project/local.md',
         relativePath: 'project/local.md',
@@ -806,6 +890,10 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'user' as const,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/tmp/user/memories/user/editor.md',
         relativePath: 'user/editor.md',

@@ -16,6 +16,10 @@ vi.mock('../utils/sideQuery.js', () => ({
 
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'user',
     filePath: '/tmp/user.md',
     relativePath: 'user.md',
@@ -26,6 +30,10 @@ const docs: ScannedAutoMemoryDocument[] = [
     mtimeMs: 1,
   },
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
@@ -231,6 +239,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     // collapsed them; keying by filePath (absolute, unique) must surface both.
     const dualScopeDocs: ScannedAutoMemoryDocument[] = [
       {
+        scope: 'project',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/qwen/projects/proj/memory/user/role.md',
         relativePath: 'user/role.md',
@@ -241,6 +253,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         mtimeMs: 1,
       },
       {
+        scope: 'user',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         type: 'user',
         filePath: '/qwen/memories/user/role.md',
         relativePath: 'user/role.md',

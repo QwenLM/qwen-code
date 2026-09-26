@@ -8484,20 +8484,8 @@ hello
 
     it('should not consume a prefetch replaced during the bounded wait', async () => {
       vi.useFakeTimers();
-      type RecallResult = {
-        prompt: string;
-        selectedDocs: Array<{
-          type: 'user';
-          filePath: string;
-          relativePath: string;
-          filename: string;
-          title: string;
-          description: string;
-          body: string;
-          mtimeMs: number;
-        }>;
-        strategy: 'model';
-      };
+      type RecallResult =
+        import('../memory/recall.js').RelevantAutoMemoryPromptResult;
       let settleRecall: ((value: RecallResult) => void) | undefined;
       const handle = {
         promise: new Promise<RecallResult>((resolve) => {

@@ -406,10 +406,16 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const t0 = Date.now();
   // User-level scan is best-effort: a read failure (EACCES, ELOOP) on
   // `~/.qwen/memories/` must not cancel the project-level scan, otherwise
-  // recall returns nothing at all for the rest of the session. Project-
-  // level scan failures still bubble — they're the only mandatory side.
+  // recall returns nothing at all for the rest of the session. Project
+  // roots are also best-effort so a broken compatibility root does not
+  // suppress the configured root.
   const [projectDocs, userDocs] = await Promise.all([
-    scanAllAutoMemoryTopicDocuments(projectRoot),
+    scanAllAutoMemoryTopicDocuments(
+      projectRoot,
+      undefined,
+      options.config?.isTrustedFolder?.() ?? true,
+      true,
+    ),
     scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
       debugLogger.warn(
         `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,

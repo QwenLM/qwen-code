@@ -35,6 +35,10 @@ vi.mock('./relevanceSelector.js', () => ({
 
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
@@ -45,6 +49,10 @@ const docs: ScannedAutoMemoryDocument[] = [
     mtimeMs: 3,
   },
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'project',
     filePath: '/tmp/project.md',
     relativePath: 'project.md',
@@ -55,6 +63,10 @@ const docs: ScannedAutoMemoryDocument[] = [
     mtimeMs: 2,
   },
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'user',
     filePath: '/tmp/user.md',
     relativePath: 'user.md',
@@ -68,6 +80,10 @@ const docs: ScannedAutoMemoryDocument[] = [
 
 const activeToolDocs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'reference',
     filePath: '/tmp/ata-tool.md',
     relativePath: 'ata-tool.md',
@@ -79,6 +95,10 @@ const activeToolDocs: ScannedAutoMemoryDocument[] = [
     mtimeMs: 4,
   },
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'reference',
     filePath: '/tmp/ata-gotcha.md',
     relativePath: 'ata-gotcha.md',
@@ -89,6 +109,10 @@ const activeToolDocs: ScannedAutoMemoryDocument[] = [
     mtimeMs: 6,
   },
   {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type: 'reference',
     filePath: '/tmp/ata-owner.md',
     relativePath: 'ata-owner.md',
@@ -108,6 +132,10 @@ function memoryDoc(
   body: string,
 ): ScannedAutoMemoryDocument {
   return {
+    scope: 'project',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     type,
     filePath: `/tmp/${filename}`,
     relativePath: filename,

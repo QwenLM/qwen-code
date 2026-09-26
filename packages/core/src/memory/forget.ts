@@ -129,6 +129,7 @@ async function listIndexedForgetCandidates(
   projectRoot: string,
   abortSignal?: AbortSignal,
   scope?: AutoMemoryStorageScope,
+  trustedProject = true,
 ): Promise<IndexedForgetCandidate[]> {
   abortSignal?.throwIfAborted();
   // Uncapped, to match the recall universe (recall.ts scans uncapped): an
@@ -141,7 +142,7 @@ async function listIndexedForgetCandidates(
   const [projectDocs, userDocs] = await Promise.all([
     scope === 'user'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
-      : scanAllAutoMemoryTopicDocuments(projectRoot),
+      : scanAllAutoMemoryTopicDocuments(projectRoot, undefined, trustedProject),
     scope === 'project'
       ? Promise.resolve<ScannedAutoMemoryDocument[]>([])
       : scanAllUserAutoMemoryTopicDocuments(),
@@ -429,6 +430,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
     projectRoot,
     options.abortSignal,
     options.scope,
+    options.config?.isTrustedFolder?.() ?? true,
   );
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
