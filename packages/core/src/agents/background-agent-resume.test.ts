@@ -1392,6 +1392,10 @@ describe('BackgroundAgentResumeService', () => {
 
       await service.resumeBackgroundAgent(agentId, 'continue');
 
+      // Without this the two negative rows pass vacuously: a resume that never
+      // reached createAgentHeadless renders no listing either.
+      expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+
       const options = subagentManager.createAgentHeadless.mock.calls[0]?.[2] as
         | { promptConfigOverrides?: { initialMessages?: unknown[] } }
         | undefined;
