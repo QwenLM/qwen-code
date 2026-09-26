@@ -53,6 +53,7 @@ export async function runHostedHarnessTextTurn(input: {
       skipMcpDiscovery: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      lenientToolWarmup: true,
     });
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
@@ -81,7 +82,16 @@ export async function runHostedHarnessTextTurn(input: {
       }
       return [];
     });
-    client.getChat().setHistory(history);
+    // Failed and cancelled turns have no assistant record. Omit their
+    // prompts even when later completed turns follow them in the journal.
+    client
+      .getChat()
+      .setHistory(
+        history.filter(
+          (entry, index) =>
+            entry.role !== 'user' || history[index + 1]?.role === 'model',
+        ),
+      );
     let text = '';
     let finished = false;
     for await (const event of client.sendMessageStream(

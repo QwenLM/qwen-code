@@ -18,6 +18,7 @@ import {
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import * as stdio from '../utils/stdioHelpers.js';
 
 const state = vi.hoisted(() => ({
   root: '',
@@ -96,6 +97,7 @@ describe('Hosted Harness no-tool session', () => {
     }));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
   });
 
@@ -279,7 +281,58 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('logs the failure cause while keeping the public turn error generic', async () => {
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    state.model.mockRejectedValueOnce(new Error('model initialization failed'));
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(async () => {
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_error',
+            promptId: PROMPT_ID,
+            data: {
+              sessionId: SESSION_ID,
+              promptId: PROMPT_ID,
+              code: 'hosted_turn_failed',
+              message: 'Hosted Harness turn failed.',
+            },
+          }),
+        ]),
+      );
+    });
+    expect(log).toHaveBeenCalledWith(
+      `qwen serve: Hosted Harness turn ${PROMPT_ID} failed: Error: model initialization failed`,
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   it('reports an aborted turn as cancelled to the Java event projector', async () => {
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     state.model.mockImplementationOnce(
       ({ signal }) =>
         new Promise<never>((_resolve, reject) => {
@@ -322,6 +375,7 @@ describe('Hosted Harness no-tool session', () => {
         ]),
       );
     });
+    expect(log).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 });

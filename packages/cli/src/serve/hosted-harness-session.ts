@@ -25,6 +25,7 @@ import type {
   ManagedSessionEvent,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 
@@ -441,9 +442,14 @@ export function registerHostedHarnessSessionRoutes(
                 message: { role: 'model', parts: [{ text: result.text }] },
               }),
             );
-          } catch {
+          } catch (cause) {
             state = abort.signal.aborted ? 'cancelled' : 'error';
             stopReason = state;
+            if (state === 'error') {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+              );
+            }
           }
           await session.managed.sink.write(
             record(session, req.params['id'], 'system', null, {
