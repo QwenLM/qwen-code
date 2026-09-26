@@ -21504,6 +21504,10 @@ export function App({
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }
+                          btwEnabled={
+                            Boolean(connection.sessionId) &&
+                            !hiddenCommands.has('btw')
+                          }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
                           onAttachmentPreview={openAttachmentPanel}
