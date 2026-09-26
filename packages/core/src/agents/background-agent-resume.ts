@@ -75,12 +75,8 @@ import {
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
 } from './runtime/agent-core.js';
-import {
-  skillRegistrationStatusFor,
-  toolConfigAllowsSkill,
-} from './runtime/subagent-plan-tool-policy.js';
+import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolMode } from '../tools/code-mode.js';
 import type {
   AgentExternalInput,
   PromptConfig,
@@ -120,49 +116,21 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
 
 /**
  * Returns true when the subagent's effective tool surface will include the
- * Skill tool — the answer `SubagentManager.createAgentHeadless()` reaches for
- * the same agent, so a resumed agent is shown the skill listing exactly when
- * its Config holds a SkillManager (#12424). Names are resolved the way
- * `convertToRuntimeConfig` resolves them, because the predicate matches
- * exactly and a definition may use a display name.
+ * Skill tool — the same answer `SubagentManager.createAgentHeadless()` reaches
+ * for the agent, so a resumed agent is shown the skill listing exactly when
+ * its Config holds a SkillManager (#12424).
  *
- * The parity above is only name resolution, and it is hand-maintained: this
- * helper rebuilds the `ToolConfig` itself instead of sharing
- * `convertToRuntimeConfig`, so neither of the two mappings it depends on is
- * shared with the launch path — the `tools` mapping, including the `['*']`
- * default standing in for a definition that declares none, and the
- * `disallowedTools` mapping. A change to either in `convertToRuntimeConfig`
- * does not propagate here and nothing fails when they drift; the resumed
- * listing just stops matching the manager `createAgentHeadless` hands the same
- * agent. Collapsing both into one shared mapping is the fix and stays
- * declined, so the drift is disclosed rather than removed. Any extraction must
- * stay throw-free on the shapes the resume path can present: this call sits
- * inside the resume `try`, whose `catch` logs, patches `lastError` and returns
- * `undefined`, so a throw here aborts a resume silently.
+ * Names are matched as written. The launch path resolves display names through
+ * `convertToRuntimeConfig` and this helper does not, so a definition that uses
+ * one can still drift — pre-existing, and outside #12424's measured scope.
  */
-async function subagentWillHaveSkillTool(
-  config: Config,
+function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
-): Promise<boolean> {
-  const manager = config.getSubagentManager();
-  const resolve = (names: string[] | undefined) =>
-    names?.length ? manager.resolveToolNames(names) : undefined;
-  return toolConfigAllowsSkill(
-    {
-      tools: (await resolve(subagentConfig?.tools)) ?? ['*'],
-      disallowedTools: await resolve(subagentConfig?.disallowedTools),
-    },
-    {
-      codeModeOnly: config.getToolMode?.() === ToolMode.CodeModeOnly,
-      // The listing is rendered from `activeAgentConfig` — the
-      // approval-override wrapper, which always resolves `getSkillManager()`
-      // to the session manager — so these inputs are the only gate on it
-      // here. They must carry the launch side's answers (the shared probe),
-      // or a resumed agent is announced skills its own Config was just
-      // stripped of the means to load.
-      skillRegistration: await skillRegistrationStatusFor(config),
-    },
-  );
+): boolean {
+  return toolConfigAllowsSkill({
+    tools: subagentConfig?.tools ?? ['*'],
+    disallowedTools: subagentConfig?.disallowedTools,
+  });
 }
 
 interface TranscriptRecovery {
@@ -1007,8 +975,7 @@ export class BackgroundAgentResumeService {
             ...(
               await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
-                includeAvailableSkillsReminder: await subagentWillHaveSkillTool(
-                  this.config,
+                includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
                 ),
               })

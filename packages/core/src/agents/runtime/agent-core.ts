@@ -604,10 +604,7 @@ export class AgentCore {
    * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    return toolConfigAllowsSkill(this.toolConfig, {
-      codeModeOnly:
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
-    });
+    return toolConfigAllowsSkill(this.toolConfig);
   }
 
   /**

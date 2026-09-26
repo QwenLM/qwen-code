@@ -120,13 +120,6 @@ describe('AgentCore skill-gate inputs', () => {
     ).canInvokeSkill.call(core, declared);
   }
 
-  /** The startup `<available_skills>` snapshot decision. */
-  function snapshot(core: AgentCore): boolean {
-    return (
-      core as unknown as { willHaveSkillTool: () => boolean }
-    ).willHaveSkillTool.call(core);
-  }
-
   describe('the gate combines both', () => {
     it('refuses when declared but not executable', async () => {
       // The fork Critical. Checking the two inputs separately is not enough:
@@ -169,6 +162,12 @@ describe('AgentCore skill-gate inputs', () => {
   // stale: an ordering was asserted, the mechanism changed, and the assertion
   // outlived it.
   describe('gate versus startup snapshot', () => {
+    function snapshot(core: AgentCore): boolean {
+      return (
+        core as unknown as { willHaveSkillTool: () => boolean }
+      ).willHaveSkillTool.call(core);
+    }
+
     it('announces at startup and refuses at the gate', async () => {
       // `toolConfig` names SKILL, but the permission layer kept it out of the
       // registry, so it is never declared.
@@ -250,19 +249,6 @@ describe('AgentCore skill-gate inputs', () => {
         expect(gate(core, await declaredNames(core))).toBe(false);
       },
     );
-
-    it('announces at startup for an exec-only CodeModeOnly agent', () => {
-      // makeCodeModeCore's runtimeContext is a real
-      // makeFakeConfig({ codeModeOnly: true }), so getToolMode() is live:
-      // this pins the { codeModeOnly } argument at the willHaveSkillTool
-      // call site (agent-core.ts), not just the predicate — dropping it
-      // answers false here because `exec` binds every surviving
-      // code-mode-callable tool, the Skill tool included. The gate cases
-      // above stay green either way.
-      expect(snapshot(makeCodeModeCore({ tools: [ToolNames.EXEC] }))).toBe(
-        true,
-      );
-    });
 
     it('prepares a fork policy when inherited declarations skip preparation', async () => {
       const core = makeCodeModeCore({

@@ -22,7 +22,6 @@ import {
   writeAgentMeta,
 } from './agent-transcript.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolMode } from '../tools/code-mode.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
@@ -99,7 +98,6 @@ describe('BackgroundAgentResumeService', () => {
           : null,
       ),
       createAgentHeadless: vi.fn(),
-      resolveToolNames: vi.fn(async (tools: string[]) => tools),
     };
     const hookSystem =
       options.hookSystem !== undefined
@@ -1303,93 +1301,17 @@ describe('BackgroundAgentResumeService', () => {
 
   // #12424: the resumed agent is shown the skill listing exactly when
   // createAgentHeadless leaves its Config a SkillManager.
-  it.each<
-    [
-      string,
-      { tools?: string[]; disallowedTools?: string[] },
-      boolean,
-      {
-        eagerHideSkillUnderCodeMode?: boolean;
-        codeModeOnly?: boolean;
-        skillRegistration?: 'deferred' | 'disabled';
-      }?,
-    ]
-  >([
+  it.each<[string, { tools?: string[]; disallowedTools?: string[] }, boolean]>([
     ['inherits every tool', {}, true],
     [
-      'disallows the Skill tool by display name',
-      { tools: ['*'], disallowedTools: ['Skill'] },
+      'disallows the Skill tool',
+      { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
       false,
     ],
     ['lists tools without skill', { tools: ['read_file'] }, false],
-    // Exercises the `tools`-side resolve() in subagentWillHaveSkillTool: the
-    // display name 'Skill' only matches the canonical ToolNames.SKILL after
-    // resolution, so this row goes red if that resolve call is dropped (the
-    // rows above either resolve nothing on the tools side or resolve only the
-    // blocklist).
-    ['lists tools by display name', { tools: ['read_file', 'Skill'] }, true],
-    // Exercises the `skillRegistration` input: the session's
-    // settings.tools.eager omits `skill` under CodeModeOnly, so the launch
-    // side withholds the manager and the resume listing must go dark too —
-    // the reminder is rendered from a wrapper that always holds the session
-    // manager, so this input is the only gate. Dropping it from
-    // subagentWillHaveSkillTool turns this row red while every row above
-    // stays green.
-    [
-      'inherits every tool while CodeModeOnly eager-hides the Skill tool',
-      {},
-      false,
-      { eagerHideSkillUnderCodeMode: true },
-    ],
-    // Exercises the `codeModeOnly` argument subagentWillHaveSkillTool threads
-    // into toolConfigAllowsSkill — the resume path is the third call site,
-    // and the rows above pin nothing: 1-4 run on a config with no tool mode
-    // at all, and the row above reaches its `false` through the registration
-    // probe. Deleting `codeModeOnly:` from that options object turns BOTH
-    // rows red (the exec-only one because the predicate then falls through to
-    // `!inheritsRegistry && !names.includes(SKILL)`, the disallowed-exec one
-    // because the exec bail never fires). The flag must patch getToolMode
-    // WITHOUT the deferral stub the row above uses, or the probe answers
-    // 'deferred' and re-vacuates both rows.
-    [
-      'lists only exec under CodeModeOnly',
-      { tools: [ToolNames.EXEC] },
-      true,
-      { codeModeOnly: true },
-    ],
-    [
-      'disallows exec under CodeModeOnly',
-      { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
-      false,
-      { codeModeOnly: true },
-    ],
-    // Exercises the THIRD registration verdict. `permissions.deny: ["skill"]`
-    // answers 'disabled', which the predicate refuses before consulting any
-    // declaration shape. Forwarding the probe as a boolean instead
-    // (`=== 'deferred' ? 'deferred' : undefined`) drops that verdict on the
-    // floor and this row goes red while every row above stays green — none of
-    // them stub anything but 'deferred'.
-    [
-      'inherits every tool while a deny rule unregisters the Skill tool',
-      {},
-      false,
-      { skillRegistration: 'disabled' },
-    ],
-    // Witnesses that the shared probe is mode-agnostic. This session stays in
-    // Direct mode, so re-gating `skillRegistrationStatusFor` on CodeModeOnly
-    // (the shape this round replaced) answers 'registered' here and the row
-    // goes red. The definition has to name `skill` WITHOUT either bridge
-    // half: an inheriting definition answers true under the real probe and
-    // under that gate alike, so it would witness nothing.
-    [
-      'lists skill without the bridge while the Skill tool is eager-hidden',
-      { tools: [ToolNames.READ_FILE, ToolNames.SKILL] },
-      false,
-      { skillRegistration: 'deferred' },
-    ],
   ])(
     'matches the launch-time skill listing when the definition %s',
-    async (_label, toolFields, expectListing, session) => {
+    async (_label, toolFields, expectListing) => {
       const sessionId = 'session-skill-listing';
       const agentId = 'agent-skill-listing';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1443,51 +1365,19 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager, config, permissionManager } =
-        createService({
-          skillManager: {
-            listSkills: vi.fn().mockResolvedValue([
-              {
-                name: 'auto-skill-demo',
-                description: 'Demo project skill',
-                level: 'project',
-                disableModelInvocation: false,
-              },
-            ]),
-            isSkillActive: vi.fn().mockReturnValue(true),
-          },
-        });
-      if (session?.eagerHideSkillUnderCodeMode) {
-        (config as unknown as { getToolMode: () => unknown }).getToolMode =
-          () => ToolMode.CodeModeOnly;
-        (
-          permissionManager as unknown as {
-            getToolRegistrationStatus: (name: string) => Promise<string>;
-          }
-        ).getToolRegistrationStatus = async (name) =>
-          name === ToolNames.SKILL ? 'deferred' : 'registered';
-      }
-      const registrationVerdict = session?.skillRegistration;
-      if (registrationVerdict) {
-        // Registration only — `getToolMode` is deliberately left alone, so
-        // these rows isolate the verdict from the mode the block above couples
-        // it to. Without them nothing distinguishes "the probe is forwarded
-        // verbatim" from "the probe is collapsed to a deferred boolean", and
-        // nothing pins the probe's mode-agnosticism in Direct mode.
-        (
-          permissionManager as unknown as {
-            getToolRegistrationStatus: (name: string) => Promise<string>;
-          }
-        ).getToolRegistrationStatus = async (name) =>
-          name === ToolNames.SKILL ? registrationVerdict : 'registered';
-      }
-      if (session?.codeModeOnly) {
-        // Mode only: no deferral stub, so the registration probe still
-        // answers 'registered' and these rows isolate the `codeModeOnly`
-        // argument.
-        (config as unknown as { getToolMode: () => unknown }).getToolMode =
-          () => ToolMode.CodeModeOnly;
-      }
+      const { service, subagentManager } = createService({
+        skillManager: {
+          listSkills: vi.fn().mockResolvedValue([
+            {
+              name: 'auto-skill-demo',
+              description: 'Demo project skill',
+              level: 'project',
+              disableModelInvocation: false,
+            },
+          ]),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        },
+      });
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',
@@ -1495,10 +1385,6 @@ describe('BackgroundAgentResumeService', () => {
         approvalMode: undefined,
         ...toolFields,
       } as never);
-      subagentManager.resolveToolNames.mockImplementation(
-        async (tools: string[]) =>
-          tools.map((tool) => (tool === 'Skill' ? ToolNames.SKILL : tool)),
-      );
       subagentManager.createAgentHeadless.mockResolvedValue({
         subagent,
         dispose: vi.fn().mockResolvedValue(undefined),
