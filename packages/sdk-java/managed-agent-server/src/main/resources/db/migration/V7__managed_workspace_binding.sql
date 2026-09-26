@@ -17,10 +17,12 @@ ALTER TABLE managed_agent_session ADD CONSTRAINT managed_workspace_binding_compl
                 AND workspace_config_ref IS NULL
                 AND workspace_policy_ref IS NULL)
             OR (workspace_id IS NOT NULL
+                AND workspace_generation IS NOT NULL
                 AND workspace_generation > 0
                 AND workspace_storage_id IS NOT NULL
                 AND cwd_relative IS NOT NULL
                 AND context_config_ref IS NOT NULL
+                AND context_revision IS NOT NULL
                 AND context_revision > 0
                 AND workspace_config_ref IS NOT NULL
                 AND workspace_policy_ref IS NOT NULL));

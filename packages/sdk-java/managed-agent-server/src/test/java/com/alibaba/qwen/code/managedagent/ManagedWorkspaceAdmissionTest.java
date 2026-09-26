@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -19,10 +20,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -48,6 +55,9 @@ class ManagedWorkspaceAdmissionTest {
 
     @Autowired
     private ManagedAgentStore store;
+
+    @Autowired
+    private ManagedAgentService service;
 
     @Test
     void publicCreationPinsSevenFieldBindingAndReplaysAfterRegistryChange()
@@ -80,7 +90,8 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(binding.getWorkspaceGeneration()).isEqualTo(1);
         assertThat(binding.getStorageId()).isEqualTo("storage-a");
         assertThat(binding.getContextRevision()).isEqualTo(1);
-        assertThat(binding.getContextConfigRef()).startsWith("sha256:");
+        assertThat(binding.getContextConfigRef()).isEqualTo(
+                "sha256:6ed28bc26a1bf7f36cb3943d200ca1352a29fcc5867683a8a62845f1d32d1cab");
         assertThat(binding.getContextDigest()).startsWith("sha256:");
         assertThat(jdbc.queryForObject("SELECT workspace_config_ref FROM"
                 + " managed_agent_session WHERE session_id = ?",
@@ -157,7 +168,13 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "actor-a"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"new title\"}"))
-                .andExpect(status().isConflict());
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(sessionId));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_command WHERE tenant_id = ?"
                         + " AND session_id = ?", Integer.class, tenant,
@@ -166,6 +183,18 @@ class ManagedWorkspaceAdmissionTest {
                         + " WHERE tenant_id = ? AND workspace_id = ?"
                         + " AND actor_id = ?", tenant, "ws-a",
                 "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        for (String suffix : List.of("/items", "/events")) {
+            mvc.perform(get("/v1/agents/sessions/" + sessionId + suffix)
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .principal(actor(tenant, "actor-a")))
+                    .andExpect(status().isNotFound());
+        }
+        mvc.perform(post("/api/agent/web-shell/v1/transcript/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", sessionId))))
+                .andExpect(status().isNotFound());
         mvc.perform(get("/v1/agents/sessions/" + sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a")))
@@ -189,6 +218,10 @@ class ManagedWorkspaceAdmissionTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"new title\"}"))
                 .andExpect(status().isNotFound());
+        assertThatThrownBy(() -> service.renameSession(tenant, "actor-a",
+                "invalid-rename", sessionId, ""))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("session_not_found"));
     }
 
     @Test
@@ -257,6 +290,11 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
+        assertThatThrownBy(() -> store.completeSessionMutation(tenant,
+                "RENAME", "rename", sessionId, SessionMutationKind.RENAME,
+                "new title", "boot"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_turn WHERE tenant_id = ?",
                 Integer.class, tenant)).isZero();
@@ -280,7 +318,7 @@ class ManagedWorkspaceAdmissionTest {
                                 {"idempotencyKey":"web-create",
                                  "agentId":"qwen-code","input":[],
                                  "workspace":{"workspaceId":"ws-a",
-                                              "cwdRelative":"."}}
+                                              "cwdRelative":"services/./api"}}
                                 """))
                 .andExpect(status().isAccepted())
                 .andReturn();
@@ -293,7 +331,8 @@ class ManagedWorkspaceAdmissionTest {
                         .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.workspace.workspaceId")
-                        .value("ws-a"));
+                        .value("ws-a"))
+                .andExpect(jsonPath("$.workspace.cwdRelative").value("services/api"));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a"))
@@ -310,6 +349,195 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsIdempotencyKeyReuseAcrossCreationShapes(boolean boundFirst)
+            throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        String unbound = "{\"agent_id\":\"qwen-code\"}";
+        String bound = """
+                {"agent_id":"qwen-code","workspace":{"workspace_id":"ws-a"}}
+                """;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String body = (attempt == 0) == boundFirst ? bound : unbound;
+            var response = mvc.perform(post("/v1/agents/sessions")
+                    .header(TenantContextFilter.HEADER, tenant)
+                    .header("Idempotency-Key", "same-key")
+                    .principal(actor(tenant, "actor-a"))
+                    .contentType(MediaType.APPLICATION_JSON).content(body));
+            if (attempt == 0) {
+                response.andExpect(status().isAccepted());
+            } else {
+                response.andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
+            }
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
+                + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentCreationShapesCannotBothCommit() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        CyclicBarrier start = new CyclicBarrier(2);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var futures = List.of(false, true).stream().map(bound -> executor.submit(() -> {
+                start.await();
+                try {
+                    if (bound) {
+                        store.insertWorkspaceSessionCommand(tenant, "actor-a", "key",
+                                "bound-digest", "qwen-code", null, List.of(), null,
+                                new WorkspaceSelection("ws-a", "."));
+                    } else {
+                        store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
+                                "legacy-digest", "qwen-code", null, List.of(), null);
+                    }
+                    return "created";
+                } catch (ApiException error) {
+                    return error.getCode();
+                }
+            })).toList();
+            assertThat(List.of(futures.get(0).get(5, TimeUnit.SECONDS),
+                    futures.get(1).get(5, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder("created", "idempotency_conflict");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
+                + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(1);
+    }
+
+    @Test
+    void changingWorkspaceIntentConflictsAndActorsKeepSeparateReceipts()
+            throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        register(tenant, "ws-b", "storage-b");
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        grant(tenant, "ws-b", "actor-a", true);
+        for (String actorId : List.of("actor-a", "actor-b")) {
+            mvc.perform(post("/v1/agents/sessions")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "same-key")
+                            .principal(actor(tenant, actorId))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"agent_id":"qwen-code",
+                                     "workspace":{"workspace_id":"ws-a"}}
+                                    """))
+                    .andExpect(status().isAccepted());
+        }
+        for (Map<String, String> workspace : List.of(
+                Map.of("workspace_id", "ws-b"),
+                Map.of("workspace_id", "ws-a", "cwd_relative", "src"))) {
+            mvc.perform(post("/v1/agents/sessions")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", "same-key")
+                            .principal(actor(tenant, "actor-a"))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.writeValueAsString(Map.of(
+                                    "agent_id", "qwen-code", "workspace", workspace))))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
+                + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(2);
+    }
+
+    @Test
+    void rejectsNullWorkspaceOnBothCreationRoutes() throws Exception {
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-null")
+                        .header("Idempotency-Key", "null")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"workspace\":null}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, "tenant-null")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agentId":"qwen-code","idempotencyKey":"null",
+                                 "workspace":null}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    @Test
+    void rejectsMissingGrantsCreateDenialAndRemovedWorkspace() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        var selection = new WorkspaceSelection("ws-a", ".");
+        assertCreateError(tenant, selection, "workspace_not_found");
+        grant(tenant, "ws-a", "actor-a", false);
+        assertCreateError(tenant, selection, "workspace_forbidden");
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+                + " WHERE tenant_id = ?", tenant);
+        assertCreateError(tenant, selection, "workspace_not_found");
+        jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE, can_create = TRUE"
+                + " WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'REMOVED'"
+                + " WHERE tenant_id = ?", tenant);
+        assertCreateError(tenant, selection, "workspace_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
+                + " WHERE tenant_id = ?", Integer.class, tenant)).isZero();
+    }
+
+    private void assertCreateError(String tenant, WorkspaceSelection selection,
+            String expected) {
+        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "key", "digest", "qwen-code", null, List.of(), null,
+                selection)).isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(expected));
+    }
+
+    @Test
+    void rejectsIncompleteBindingsAndIdentifiesDescriptorDrift() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        String session = store.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "key", "digest", "qwen-code", null, List.of(), null,
+                new WorkspaceSelection("ws-a", ".")).sessionId();
+        for (String column : List.of("workspace_generation", "context_revision")) {
+            assertThatThrownBy(() -> jdbc.update("UPDATE managed_agent_session SET "
+                    + column + " = NULL WHERE session_id = ?", session))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        }
+        jdbc.update("UPDATE managed_agent_session SET workspace_config_ref = 'changed'"
+                + " WHERE session_id = ?", session);
+        try {
+            assertThatThrownBy(() -> store.requireSession(tenant, session))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(session).hasMessageContaining(tenant);
+        } finally {
+            jdbc.update("UPDATE managed_agent_session SET workspace_config_ref = 'config-ws-a'"
+                    + " WHERE session_id = ?", session);
+        }
+    }
+
+    @Test
+    void invalidRegistryDataIsReportedAsServerFailure() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "invalid storage");
+        grant(tenant, "ws-a", "actor-a", true);
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "bad-registry")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code",
+                                 "workspace":{"workspace_id":"ws-a"}}
+                                """))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error.code").value("internal_error"));
     }
 
     private void register(String tenant, String id, String storageId) {

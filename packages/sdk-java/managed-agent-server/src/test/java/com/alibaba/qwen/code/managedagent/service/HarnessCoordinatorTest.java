@@ -76,6 +76,31 @@ class HarnessCoordinatorTest {
     }
 
     @Test
+    void boundCancellationNeverCallsTheLegacyHarness() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer warmer = mock(RuntimeWarmer.class);
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(
+                turn("tenant", "session", "turn", "prompt", "epoch", 1,
+                        "CANCELLING")));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1)));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), warmer, directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(store).requireSession("tenant", "session");
+            verifyNoInteractions(harness, warmer);
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
     void cancelsKnownSettledRecoveredRuntimeAndStreamsCancellation() {
         String tenantId = "tenant-recovery-cancel";
         String sessionId = "session-recovery-cancel";

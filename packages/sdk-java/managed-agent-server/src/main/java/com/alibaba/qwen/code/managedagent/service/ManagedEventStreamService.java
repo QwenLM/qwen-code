@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub.Delivery;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub.Subscription;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
@@ -40,18 +41,20 @@ public class ManagedEventStreamService {
 
     public SseEmitter publicStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        agentService.lastSequence(tenantId, actorId, sessionId);
+        SessionRecord session = agentService.requireReadableSession(
+                tenantId, actorId, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> streamPublic(emitter, tenantId, actorId, sessionId,
+        executor.execute(() -> streamPublic(emitter, actorId, session,
                 afterSequence));
         return emitter;
     }
 
     public SseEmitter webShellStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        agentService.lastSequence(tenantId, actorId, sessionId);
+        SessionRecord session = agentService.requireReadableSession(
+                tenantId, actorId, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> streamWebShell(emitter, tenantId, actorId, sessionId,
+        executor.execute(() -> streamWebShell(emitter, actorId, session,
                 afterSequence));
         return emitter;
     }
@@ -60,8 +63,10 @@ public class ManagedEventStreamService {
         return new SseEmitter(streamTimeout.toMillis());
     }
 
-    private void streamPublic(SseEmitter emitter, String tenantId,
-            String actorId, String sessionId, long initialSequence) {
+    private void streamPublic(SseEmitter emitter, String actorId,
+            SessionRecord session, long initialSequence) {
+        String tenantId = session.tenantId();
+        String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
@@ -70,23 +75,22 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                if (!stillReadable(emitter, closed, tenantId, actorId, sessionId)) {
+                if (!stillReadable(emitter, closed, actorId, session)) {
                     break;
                 }
                 if (reconcile) {
-                    List<PublicEvent> events = agentService.publicEvents(
-                            tenantId, actorId, sessionId, sequence, 100);
-                    for (PublicEvent event : events) {
-                        if (!event.terminal()
-                                && !stillReadable(emitter, closed, tenantId,
-                                        actorId, sessionId)) {
+                    List<EventRecord> events = agentService.streamEvents(
+                            session, sequence);
+                    for (EventRecord record : events) {
+                        PublicEvent event = agentService.publicEvent(record);
+                        if (!stillReadable(emitter, closed, actorId, session)) {
                             break;
                         }
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
                         sequence = event.sequence();
-                        if (event.terminal()) {
+                        if ("session.deleted".equals(event.type())) {
                             complete(emitter, closed);
                             break;
                         }
@@ -96,6 +100,9 @@ public class ManagedEventStreamService {
                     }
                     reconcile = false;
                 }
+                if (closed.get()) {
+                    break;
+                }
                 Delivery delivery = subscription.await(sequence,
                         waitDuration(heartbeatAt));
                 if (delivery.overflowed()) {
@@ -103,9 +110,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    if (!event.terminal()
-                            && !stillReadable(emitter, closed, tenantId,
-                                    actorId, sessionId)) {
+                    if (!stillReadable(emitter, closed, actorId, session)) {
                         break;
                     }
                     PublicEvent publicEvent = agentService.publicEvent(event);
@@ -113,7 +118,7 @@ public class ManagedEventStreamService {
                             .id(Long.toString(publicEvent.sequence()))
                             .name(publicEvent.type()).data(publicEvent));
                     sequence = publicEvent.sequence();
-                    if (event.terminal()) {
+                    if ("session.deleted".equals(event.type())) {
                         complete(emitter, closed);
                         break;
                     }
@@ -133,8 +138,10 @@ public class ManagedEventStreamService {
         }
     }
 
-    private void streamWebShell(SseEmitter emitter, String tenantId,
-            String actorId, String sessionId, long initialSequence) {
+    private void streamWebShell(SseEmitter emitter, String actorId,
+            SessionRecord session, long initialSequence) {
+        String tenantId = session.tenantId();
+        String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
@@ -143,23 +150,22 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                if (!stillReadable(emitter, closed, tenantId, actorId, sessionId)) {
+                if (!stillReadable(emitter, closed, actorId, session)) {
                     break;
                 }
                 if (reconcile) {
-                    List<WebShellEvent> events = agentService.webShellEvents(
-                            tenantId, actorId, sessionId, sequence, 100);
-                    for (WebShellEvent event : events) {
-                        if (!event.terminal()
-                                && !stillReadable(emitter, closed, tenantId,
-                                        actorId, sessionId)) {
+                    List<EventRecord> events = agentService.streamEvents(
+                            session, sequence);
+                    for (EventRecord record : events) {
+                        WebShellEvent event = agentService.webShellEvent(record);
+                        if (!stillReadable(emitter, closed, actorId, session)) {
                             break;
                         }
                         emitter.send(SseEmitter.event()
                                 .id(Long.toString(event.sequence()))
                                 .name(event.type()).data(event));
                         sequence = event.sequence();
-                        if (event.terminal()) {
+                        if ("session.deleted".equals(event.type())) {
                             complete(emitter, closed);
                             break;
                         }
@@ -169,6 +175,9 @@ public class ManagedEventStreamService {
                     }
                     reconcile = false;
                 }
+                if (closed.get()) {
+                    break;
+                }
                 Delivery delivery = subscription.await(sequence,
                         waitDuration(heartbeatAt));
                 if (delivery.overflowed()) {
@@ -176,9 +185,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    if (!event.terminal()
-                            && !stillReadable(emitter, closed, tenantId,
-                                    actorId, sessionId)) {
+                    if (!stillReadable(emitter, closed, actorId, session)) {
                         break;
                     }
                     WebShellEvent webEvent = agentService.webShellEvent(event);
@@ -186,7 +193,7 @@ public class ManagedEventStreamService {
                             .id(Long.toString(webEvent.sequence()))
                             .name(webEvent.type()).data(webEvent));
                     sequence = webEvent.sequence();
-                    if (event.terminal()) {
+                    if ("session.deleted".equals(event.type())) {
                         complete(emitter, closed);
                         break;
                     }
@@ -232,9 +239,9 @@ public class ManagedEventStreamService {
     }
 
     private boolean stillReadable(SseEmitter emitter, AtomicBoolean closed,
-            String tenantId, String actorId, String sessionId) {
+            String actorId, SessionRecord session) {
         try {
-            agentService.lastSequence(tenantId, actorId, sessionId);
+            agentService.requireReadGrant(session, actorId);
             return true;
         } catch (ApiException error) {
             if (error.getStatus() != HttpStatus.NOT_FOUND) {

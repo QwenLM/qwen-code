@@ -17,8 +17,8 @@ class WorkspaceSelectionTest {
                 """, false)).isEqualTo(new WorkspaceSelection("ws-a",
                 "services/api"));
         assertThat(parse("""
-                {"workspaceId":"ws-b"}
-                """, true)).isEqualTo(new WorkspaceSelection("ws-b", "."));
+                {"workspaceId":"ws-b","cwdRelative":"./services//api/."}
+                """, true)).isEqualTo(new WorkspaceSelection("ws-b", "services/api"));
         assertThat(parse("""
                 {"workspace_id":"ws-a","cwd_relative":"./A file/%2e%2e"}
                 """, false).cwdRelative()).isEqualTo("A file/%2e%2e");
@@ -41,9 +41,10 @@ class WorkspaceSelectionTest {
         }
         assertThatThrownBy(() -> new WorkspaceSelection("", "."))
                 .isInstanceOf(ApiException.class);
-        assertThat(new WorkspaceSelection("ws-😀", ".").workspaceId())
-                .isEqualTo("ws-😀");
-        for (String id : new String[] {"ws-\uD800", "ws-\uDC00",
+        assertThat(new WorkspaceSelection("a".repeat(128), ".").workspaceId())
+                .hasSize(128);
+        for (String id : new String[] {"ws-😀", "ws a", "ws/../x", "ws\0a",
+                "a".repeat(129), "ws-\uD800", "ws-\uDC00",
                 "ws-\uD800x", "ws-\uD800\uD800\uDC00"}) {
             assertThatThrownBy(() -> new WorkspaceSelection(id, "."))
                     .isInstanceOf(ApiException.class)
@@ -59,7 +60,7 @@ class WorkspaceSelectionTest {
     @Test
     void rejectsUnknownOrMalformedSelection() throws Exception {
         for (String json : new String[] {
-                "{}", "[]", "\"ws-a\"",
+                "null", "{}", "[]", "\"ws-a\"",
                 "{\"workspace_id\":null}",
                 "{\"workspace_id\":\"\"}",
                 "{\"workspaceId\":\"ws-a\"}",

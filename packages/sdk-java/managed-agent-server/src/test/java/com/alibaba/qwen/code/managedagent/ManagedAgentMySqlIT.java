@@ -56,6 +56,10 @@ class ManagedAgentMySqlIT {
                         + " updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 "mysql-upgrade", "session_upgrade", "qwen-code", "IDLE",
                 1L, 1L);
+        jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation,"
+                + " idempotency_key, request_digest, session_id, created_at)"
+                + " VALUES ('mysql-upgrade', 'CREATE_SESSION', 'legacy-key',"
+                + " 'legacy-digest', 'session_upgrade', 1)");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
@@ -66,6 +70,12 @@ class ManagedAgentMySqlIT {
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc));
+        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
+                "mysql-upgrade", "actor", "legacy-key", "bound-digest",
+                "qwen-code", null, List.of(), null,
+                new com.alibaba.qwen.code.managedagent.api.WorkspaceSelection("ws-a", ".")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         String tenant = "mysql-projection";
         List<Map<String, Object>> input = List.of(Map.of(
                 "type", "text", "text", "hello"));
@@ -406,6 +416,8 @@ class ManagedAgentMySqlIT {
     @Order(6)
     void workspaceActorAndCommandKeysStayCaseSensitiveOnMySql() {
         DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         ManagedWorkspaceRegistry registry = new ManagedWorkspaceRegistry(jdbc);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,

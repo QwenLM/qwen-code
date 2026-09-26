@@ -38,7 +38,8 @@ public class ManagedWorkspaceRegistry {
             return false;
         }
         return !jdbc.queryForList("SELECT 1 FROM managed_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = ? AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                + " WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                 + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(?, '!') AS BINARY(513))"
@@ -156,13 +157,18 @@ public class ManagedWorkspaceRegistry {
 
     private static WorkspaceRecord workspaceRow(String tenantId,
             String workspaceId, ResultSet result) throws SQLException {
-        return new WorkspaceRecord(tenantId, workspaceId,
-                result.getLong("workspace_generation"),
-                result.getString("storage_id"),
-                result.getString("display_name"),
-                WorkspaceState.valueOf(result.getString("state")),
-                result.getString("policy_ref"),
-                result.getString("config_ref"));
+        try {
+            return new WorkspaceRecord(tenantId, workspaceId,
+                    result.getLong("workspace_generation"),
+                    result.getString("storage_id"),
+                    result.getString("display_name"),
+                    WorkspaceState.valueOf(result.getString("state")),
+                    result.getString("policy_ref"),
+                    result.getString("config_ref"));
+        } catch (IllegalArgumentException error) {
+            throw new IllegalStateException("Invalid Workspace Registry row for "
+                    + workspaceId + " of tenant " + tenantId, error);
+        }
     }
 
     private static ApiException workspaceRequired() {

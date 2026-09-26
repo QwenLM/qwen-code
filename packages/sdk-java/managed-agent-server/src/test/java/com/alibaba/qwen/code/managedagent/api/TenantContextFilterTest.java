@@ -25,6 +25,7 @@ class TenantContextFilterTest {
                 TenantContextFilter.ATTRIBUTE);
         assertThat(context.requireActorId()).isEqualTo("actor-a");
         assertThat(context.tenantId()).isEqualTo("tenant-a");
+        assertThat(chain.getRequest()).isSameAs(request);
     }
 
     @Test
@@ -34,7 +35,9 @@ class TenantContextFilterTest {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
-            filter.doFilter(request, response, new MockFilterChain());
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(request, response, chain);
+            assertThat(chain.getRequest()).isSameAs(request);
             assertThat(response.getStatus()).isEqualTo(200);
             TenantContext context = (TenantContext) request.getAttribute(
                     TenantContextFilter.ATTRIBUTE);

@@ -214,8 +214,8 @@ public class ManagedAgentService {
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
-        String effectiveTitle = validRenameTitle(title);
         requireLegacyWorkspace(tenantId, actorId, sessionId);
+        String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
@@ -407,12 +407,6 @@ public class ManagedAgentService {
                 ? Long.toString(events.get(0).sequence()) : null;
         return new WebShellTranscript(List.of(), events, 0, olderCursor,
                 page.hasMore(), session.lastSequence());
-    }
-
-    public long lastSequence(String tenantId, String actorId,
-            String sessionId) {
-        return requireReadableSession(tenantId, actorId,
-                sessionId).lastSequence();
     }
 
     private List<EventRecord> events(String tenantId, String actorId,
@@ -635,15 +629,24 @@ public class ManagedAgentService {
         }
     }
 
-    private SessionRecord requireReadableSession(String tenantId,
+    SessionRecord requireReadableSession(String tenantId,
             String actorId, String sessionId) {
         SessionRecord session = requireVisibleSession(tenantId, sessionId);
-        if (session.workspace() != null && !workspaces.canRead(tenantId,
+        requireReadGrant(session, actorId);
+        return session;
+    }
+
+    void requireReadGrant(SessionRecord session, String actorId) {
+        if (session.workspace() != null && !workspaces.canRead(session.tenantId(),
                 actorId, session.workspace().getWorkspaceId())) {
             throw new ApiException(HttpStatus.NOT_FOUND,
                     "session_not_found", "The Session was not found.");
         }
-        return session;
+    }
+
+    List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
+        return store.findEvents(session.tenantId(), session.sessionId(),
+                afterSequence, 100);
     }
 
     private SessionRecord requireVisibleSession(String tenantId,
