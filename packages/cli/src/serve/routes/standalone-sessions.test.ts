@@ -10,6 +10,7 @@ import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES } from './transcript-query-validation.js';
 import {
   StandaloneSessionServiceError,
   type ListStandaloneSessionsOptions,
@@ -73,6 +74,22 @@ function createHarness({
       filename: 'session.md',
       mimeType: 'text/markdown; charset=utf-8',
       content: '# Session',
+    })),
+    getTurnIndexPage: vi.fn(async () => ({
+      v: 1 as const,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [],
+    })),
+    getTranscriptPage: vi.fn(async () => ({
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
     })),
     archive: vi.fn(async () => ({
       archived: [sessionId],
@@ -665,5 +682,379 @@ describe('standalone session routes', () => {
       retryable: false,
       sessionId,
     });
+  });
+
+  it('serves standalone turn-index pages', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?limit=10`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      v: 1,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [],
+    });
+    expect(service.getTurnIndexPage).toHaveBeenCalledWith(sessionId, {
+      limit: 10,
+    });
+  });
+
+  it('continues a frozen turn index', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?snapshot=snap-1&start=2&limit=10`,
+    );
+    expect(response.status).toBe(200);
+    expect(service.getTurnIndexPage).toHaveBeenCalledWith(sessionId, {
+      snapshot: 'snap-1',
+      start: 2,
+      limit: 10,
+    });
+  });
+
+  it('accepts a backward anchor within a frozen snapshot', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?beforeRecordId=rec-1&snapshot=snap-1`,
+    );
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      beforeRecordId: 'rec-1',
+      snapshot: 'snap-1',
+    });
+  });
+
+  it('rejects a standalone turn-index start without a snapshot', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?start=2`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTurnIndexPage).not.toHaveBeenCalled();
+  });
+
+  it('serves standalone transcript pages', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1&snapshot=snap-1&limit=50`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      atRecordId: 'rec-1',
+      snapshot: 'snap-1',
+      limit: 50,
+    });
+  });
+
+  it('rejects a standalone transcript anchor without a snapshot', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('forwards standalone transcript direction to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=backward`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      direction: 'backward',
+    });
+  });
+
+  it('rejects an unsupported standalone transcript direction', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=forward`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects direction combined with another transcript anchor', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?direction=backward&cursor=cur-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects a bare transcript snapshot without an anchor', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?snapshot=snap-1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_transcript_cursor');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('forwards a cursor-only transcript read to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?cursor=cur-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      cursor: 'cur-1',
+    });
+  });
+
+  it('forwards a beforeRecordId-only transcript read to the service', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?beforeRecordId=rec-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenCalledWith(sessionId, {
+      beforeRecordId: 'rec-1',
+    });
+  });
+
+  it('returns the full transcript page envelope and disables caching', async () => {
+    const { app, service } = createHarness();
+    const page = {
+      v: 1 as const,
+      sessionId,
+      events: [
+        {
+          v: 1 as const,
+          type: 'session_update' as const,
+          data: { update: { kind: 'x' } },
+        },
+      ],
+      hasMore: true,
+      nextCursor: 'next-cursor',
+      targetRecordId: 'rec-9',
+      hasOlder: true,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-02T00:00:00.000Z',
+    };
+    service.getTranscriptPage.mockResolvedValueOnce(page as never);
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-9&snapshot=snap-1`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual(page);
+  });
+
+  it('round-trips a transcript cursor into the next request', async () => {
+    const { app, service } = createHarness();
+    service.getTranscriptPage.mockResolvedValueOnce({
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: true,
+      nextCursor: 'next-cursor',
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-02T00:00:00.000Z',
+    } as never);
+
+    const first = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1&snapshot=snap-1`,
+    );
+    expect(first.status).toBe(200);
+    const nextCursor = first.body.nextCursor as string;
+
+    const second = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?cursor=${nextCursor}`,
+    );
+    expect(second.status).toBe(200);
+    expect(service.getTranscriptPage).toHaveBeenNthCalledWith(2, sessionId, {
+      cursor: 'next-cursor',
+    });
+  });
+
+  it('returns a partial transcript without a continuation cursor', async () => {
+    const { app, service } = createHarness();
+    const page = {
+      v: 1 as const,
+      sessionId,
+      events: [],
+      hasMore: false,
+      partial: true as const,
+      replayError: 'replay failed',
+    };
+    service.getTranscriptPage.mockResolvedValueOnce(page as never);
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(page);
+    expect(response.body.nextCursor).toBeUndefined();
+    expect(response.body.hasMore).toBe(false);
+  });
+
+  it.each(['', '?compactedReplayMode=full'])(
+    'preserves full replay frames with query %s',
+    async (query) => {
+      const { app, service } = createHarness();
+      const events = [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            status: 'in_progress',
+            _meta: { shellProgress: { chunks: ['x'] } },
+          },
+        },
+      ];
+      service.getTranscriptPage.mockResolvedValueOnce({
+        v: 1,
+        sessionId,
+        events,
+        hasMore: false,
+      } as never);
+      const response = await request(app).get(
+        `/standalone/sessions/${sessionId}/transcript${query}`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.events).toEqual(events);
+    },
+  );
+
+  it.each(['transcript', 'turn-index'] as const)(
+    'rejects an oversized %s response',
+    async (route) => {
+      const { app, service } = createHarness();
+      const oversized = 'x'.repeat(WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES + 1);
+      if (route === 'transcript') {
+        service.getTranscriptPage.mockResolvedValueOnce({
+          v: 1,
+          sessionId,
+          events: [{ v: 1, type: 'session_update', data: { text: oversized } }],
+          hasMore: false,
+        } as never);
+      } else {
+        service.getTurnIndexPage.mockResolvedValueOnce({
+          v: 1,
+          sessionId,
+          snapshot: 'snap-1',
+          totalTurns: 1,
+          start: 0,
+          turns: [{ label: oversized }],
+        } as never);
+      }
+      const response = await request(app).get(
+        `/standalone/sessions/${sessionId}/${route}`,
+      );
+      expect(response.status).toBe(413);
+      expect(response.body).toMatchObject({
+        code: 'transcript_page_too_large',
+        sessionId,
+        maxBytes: WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES,
+      });
+    },
+  );
+
+  it('rejects an invalid standalone transcript compactedReplayMode', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?compactedReplayMode=condensed`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_compacted_replay_mode');
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('projects compactedReplayMode=summary onto the response events', async () => {
+    const { app, service } = createHarness();
+    // An in-progress tool-call frame carrying shellProgress metadata is a
+    // fixed point of neither the drop rule nor the strip rule: the summary
+    // replay drops it, so the projected response carries no events. Asserting
+    // the concrete projected shape (not `summarizeReplay(events)`) means a
+    // revert of the route's summary branch to `page.events` flips this red.
+    const events = [
+      {
+        v: 1 as const,
+        type: 'session_update' as const,
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            status: 'in_progress',
+            _meta: { shellProgress: { chunks: ['x'] } },
+          },
+        },
+      },
+    ] as never;
+    service.getTranscriptPage.mockResolvedValueOnce({
+      v: 1 as const,
+      sessionId,
+      events,
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    });
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?compactedReplayMode=summary`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toEqual([]);
+  });
+
+  it('rejects unknown query keys on the transcript route', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/transcript?bogus=1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown query keys on the turn-index route', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get(
+      `/standalone/sessions/${sessionId}/turn-index?bogus=1`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.getTurnIndexPage).not.toHaveBeenCalled();
   });
 });

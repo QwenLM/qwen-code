@@ -436,6 +436,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_export',
       'standalone_sessions_v1',
       'standalone_session_options_v1',
+      'standalone_session_transcript_v1',
       'session_transcript',
       'session_transcript_pagination',
       'session_turn_navigation',
@@ -566,6 +567,92 @@ describe('qwen serve — transcript paging route', () => {
     fetch(`${base}/session/${sessionId}/transcript${query}`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
+
+  it('round-trips standalone turn snapshots and transcript cursors through the real daemon', async () => {
+    const session = await client.createStandaloneSession();
+    const { sessionId, workspaceCwd } = session;
+    // Flush creation metadata before appending persisted history without a model call.
+    await client.getStandaloneSessionTurnIndexPage(sessionId);
+    const projectDir = Storage.runWithRuntimeBaseDir(
+      path.join(homeDir, '.qwen'),
+      workspaceCwd,
+      () => new Storage(workspaceCwd).getProjectDir(),
+    );
+    const filePath = path.join(projectDir, 'chats', `${sessionId}.jsonl`);
+    const records = [
+      chatRecord(sessionId, 'u1', null, 'standalone first prompt'),
+      chatRecord(sessionId, 'a1', 'u1', 'standalone first answer'),
+      chatRecord(sessionId, 'u2', 'a1', 'standalone second prompt'),
+      chatRecord(sessionId, 'a2', 'u2', 'standalone second answer'),
+    ].map((record) => ({ ...record, cwd: workspaceCwd }));
+    appendFileSync(
+      filePath,
+      records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    );
+
+    const index = await client.getStandaloneSessionTurnIndexPage(sessionId, {
+      limit: 1,
+    });
+    expect(index.totalTurns).toBe(2);
+    expect(index.start).toBe(1);
+    expect(index.turns.map((turn) => turn.turnId)).toEqual(['u2']);
+    const continuation = await client.getStandaloneSessionTurnIndexPage(
+      sessionId,
+      {
+        snapshot: index.snapshot,
+        start: 0,
+        limit: 1,
+      },
+    );
+    expect(continuation.start).toBe(0);
+    expect(continuation.turns.map((turn) => turn.turnId)).toEqual(['u1']);
+
+    const anchored = await client.getStandaloneSessionTranscriptPage(
+      sessionId,
+      {
+        atRecordId: 'u2',
+        snapshot: index.snapshot,
+        limit: 1,
+      },
+    );
+    expect(anchored.sessionId).toBe(sessionId);
+    expect(anchored.targetRecordId).toBe('u2');
+    expect(anchored.events.length).toBeGreaterThan(0);
+    expect(JSON.stringify(anchored.events)).toContain(
+      'standalone second prompt',
+    );
+    expect(anchored.hasMore).toBe(true);
+    expect(anchored.nextCursor).toEqual(expect.any(String));
+    const next = await client.getStandaloneSessionTranscriptPage(sessionId, {
+      cursor: anchored.nextCursor!,
+      limit: 1,
+    });
+    expect(next.events.length).toBeGreaterThan(0);
+    expect(next.events).not.toEqual(anchored.events);
+    expect(JSON.stringify(next.events)).toContain('standalone second answer');
+    expect(next.hasMore).toBe(false);
+    expect(next.nextCursor).toBeUndefined();
+    const older = await client.getStandaloneSessionTranscriptPage(sessionId, {
+      beforeRecordId: 'u2',
+      snapshot: index.snapshot,
+      limit: 2,
+    });
+    expect(older.events.length).toBeGreaterThan(0);
+    expect(older.events).not.toEqual(anchored.events);
+    expect(JSON.stringify(older.events)).toContain('standalone first prompt');
+    expect(JSON.stringify(older.events)).toContain('standalone first answer');
+
+    const tampered = `${index.snapshot[0] === 'A' ? 'B' : 'A'}${index.snapshot.slice(1)}`;
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(sessionId, {
+        snapshot: tampered,
+        start: 1,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_transcript_cursor' },
+    });
+  }, 90_000);
 
   it('serves persisted transcript pages through the SDK helper', async () => {
     const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';

@@ -23,9 +23,7 @@ import {
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
-  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
-  SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
@@ -86,6 +84,25 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
+import {
+  WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
+  TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR,
+  isConflictingTranscriptAnchorCombination,
+  parseReplayMode,
+  parseTranscriptCursorQuery,
+  parseTranscriptDirectionQuery,
+  parseTranscriptLimitQuery,
+  parseTranscriptRecordBoundaryQuery,
+  parseTranscriptSnapshotQuery,
+  parseTranscriptStartQuery,
+  parseTranscriptTurnAnchorQuery,
+  serializeWorkspaceTranscriptResponse,
+  workspaceTranscriptCursorExceedsLimit,
+  serializeWorkspaceTranscriptResponseForTesting,
+  workspaceTranscriptCursorExceedsLimitForTesting,
+} from './transcript-query-validation.js';
+export { serializeWorkspaceTranscriptResponseForTesting };
+export { workspaceTranscriptCursorExceedsLimitForTesting };
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isValidSessionId,
@@ -294,18 +311,6 @@ interface RegisterSessionRoutesDeps {
   >;
 }
 
-// Chosen cap for one serialized transcript response, kept proportional to
-// the core expanded-page ceiling so the two cannot drift arbitrarily. This
-// is not a derived guarantee: a single aggregated record can exceed any
-// page budget (the reader always takes at least one record so pagination
-// cannot dead-end), and replayed SessionUpdate objects are not a fixed
-// multiple of their source records. A page this route cannot serialize
-// returns transcript_page_too_large for that anchor.
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
-  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
-const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
-const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
-  'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
@@ -509,147 +514,6 @@ export function describePromptTurnFailure(err: unknown): string {
   return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
-function parseTranscriptLimitQuery(
-  rawLimit: unknown,
-  res: Response,
-): number | undefined | null {
-  if (rawLimit === undefined) return undefined;
-  if (typeof rawLimit !== 'string' || rawLimit.trim() === '') {
-    res.status(400).json({
-      error: '`limit` must be a positive integer',
-      code: 'invalid_transcript_limit',
-    });
-    return null;
-  }
-  if (!/^\d+$/.test(rawLimit)) {
-    res.status(400).json({
-      error: '`limit` must be a positive integer',
-      code: 'invalid_transcript_limit',
-    });
-    return null;
-  }
-  const limit = Number(rawLimit);
-  if (
-    !Number.isSafeInteger(limit) ||
-    limit < 1 ||
-    limit > SESSION_TRANSCRIPT_MAX_LIMIT
-  ) {
-    res.status(400).json({
-      error: `\`limit\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
-      code: 'invalid_transcript_limit',
-      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
-    });
-    return null;
-  }
-  return limit;
-}
-
-function parseTranscriptCursorQuery(
-  rawCursor: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawCursor === undefined) return undefined;
-  if (typeof rawCursor !== 'string' || rawCursor.trim() === '') {
-    res.status(400).json({
-      error: '`cursor` must be a non-empty string',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawCursor;
-}
-
-function parseTranscriptDirectionQuery(
-  rawDirection: unknown,
-  res: Response,
-): 'backward' | undefined | null {
-  if (rawDirection === undefined) return undefined;
-  if (rawDirection !== 'backward') {
-    res.status(400).json({
-      error: '`direction` must be `backward`',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawDirection;
-}
-
-function parseTranscriptSnapshotQuery(
-  rawSnapshot: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawSnapshot === undefined) return undefined;
-  if (typeof rawSnapshot !== 'string' || rawSnapshot.trim() === '') {
-    res.status(400).json({
-      error: '`snapshot` must be a non-empty string',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawSnapshot;
-}
-
-function parseTranscriptStartQuery(
-  rawStart: unknown,
-  res: Response,
-): number | undefined | null {
-  if (rawStart === undefined) return undefined;
-  if (typeof rawStart !== 'string' || !/^\d+$/.test(rawStart)) {
-    res.status(400).json({
-      error: '`start` must be a non-negative integer',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  const start = Number(rawStart);
-  if (!Number.isSafeInteger(start)) {
-    res.status(400).json({
-      error: '`start` must be a non-negative safe integer',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return start;
-}
-
-function parseTranscriptRecordBoundaryQuery(
-  rawBoundary: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawBoundary === undefined) return undefined;
-  if (
-    typeof rawBoundary !== 'string' ||
-    rawBoundary.trim() === '' ||
-    rawBoundary.length > 200
-  ) {
-    res.status(400).json({
-      error: '`beforeRecordId` must be a non-empty record id',
-      code: 'invalid_transcript_cursor',
-    });
-    return null;
-  }
-  return rawBoundary;
-}
-
-function parseTranscriptTurnAnchorQuery(
-  rawAnchor: unknown,
-  res: Response,
-): string | undefined | null {
-  if (rawAnchor === undefined) return undefined;
-  if (
-    typeof rawAnchor !== 'string' ||
-    rawAnchor.trim() === '' ||
-    rawAnchor.length > 200
-  ) {
-    res.status(400).json({
-      error: '`atRecordId` must be a non-empty record id',
-      code: 'invalid_turn_anchor',
-    });
-    return null;
-  }
-  return rawAnchor;
-}
-
 function parseHistoryPageSize(
   body: Record<string, unknown>,
   res: Response,
@@ -670,58 +534,6 @@ function parseHistoryPageSize(
   }
   return value as number;
 }
-
-function parseReplayMode(
-  body: Record<string, unknown>,
-  res: Response,
-  key: 'liveReplayMode' | 'compactedReplayMode' | 'eventDetailMode',
-): 'full' | 'summary' | undefined | null {
-  const value = body[key];
-  if (value === undefined) return undefined;
-  if (value !== 'full' && value !== 'summary') {
-    res.status(400).json({
-      error: `\`${key}\` must be \`full\` or \`summary\``,
-      code:
-        key === 'liveReplayMode'
-          ? 'invalid_live_replay_mode'
-          : key === 'compactedReplayMode'
-            ? 'invalid_compacted_replay_mode'
-            : 'invalid_event_detail_mode',
-    });
-    return null;
-  }
-  return value;
-}
-
-function workspaceTranscriptCursorExceedsLimit(
-  cursor: string,
-  maxBytes = WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES,
-): boolean {
-  return Buffer.byteLength(cursor) > maxBytes;
-}
-
-export const workspaceTranscriptCursorExceedsLimitForTesting =
-  workspaceTranscriptCursorExceedsLimit;
-
-function serializeWorkspaceTranscriptResponse(
-  result: unknown,
-  sessionId: string,
-  maxBytes = WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES,
-): string {
-  const serialized = JSON.stringify(result);
-  const responseBytes = Buffer.byteLength(serialized);
-  if (responseBytes > maxBytes) {
-    throw new SessionTranscriptPageTooLargeError(
-      sessionId,
-      responseBytes,
-      maxBytes,
-    );
-  }
-  return serialized;
-}
-
-export const serializeWorkspaceTranscriptResponseForTesting =
-  serializeWorkspaceTranscriptResponse;
 
 function transcriptSnapshotUnavailableError(sessionId: string): Error & {
   data: { errorKind: 'transcript_snapshot_unavailable'; sessionId: string };
@@ -5699,20 +5511,13 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
-      (direction !== undefined &&
-        (cursor !== undefined ||
-          beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (cursor !== undefined &&
-        (beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (atRecordId !== undefined &&
-        (beforeRecordId !== undefined || snapshot === undefined)) ||
-      (snapshot !== undefined &&
-        atRecordId === undefined &&
-        beforeRecordId === undefined)
+      isConflictingTranscriptAnchorCombination({
+        direction,
+        cursor,
+        beforeRecordId,
+        atRecordId,
+        snapshot,
+      })
     ) {
       res.status(400).json({
         error: 'Invalid transcript cursor and anchor combination',
@@ -5823,20 +5628,13 @@ export function registerSessionRoutes(
     const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
     if (snapshot === null) return;
     if (
-      (direction !== undefined &&
-        (cursor !== undefined ||
-          beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (cursor !== undefined &&
-        (beforeRecordId !== undefined ||
-          atRecordId !== undefined ||
-          snapshot !== undefined)) ||
-      (atRecordId !== undefined &&
-        (beforeRecordId !== undefined || snapshot === undefined)) ||
-      (snapshot !== undefined &&
-        atRecordId === undefined &&
-        beforeRecordId === undefined)
+      isConflictingTranscriptAnchorCombination({
+        direction,
+        cursor,
+        beforeRecordId,
+        atRecordId,
+        snapshot,
+      })
     ) {
       res.status(400).json({
         error: 'Invalid transcript cursor and anchor combination',

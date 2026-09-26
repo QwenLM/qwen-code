@@ -278,6 +278,7 @@ import { parseSseStream } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
+  STANDALONE_SESSION_TRANSCRIPT_CAPABILITY,
   STANDALONE_SESSIONS_CAPABILITY,
   isStandaloneCreationOutcomeUnknown,
   isStandaloneSessionNotFoundError,
@@ -290,6 +291,8 @@ import {
   parseStandaloneMetadataResult,
   parseStandaloneSession,
   parseStandaloneSessionOptions,
+  parseStandaloneTranscriptPage,
+  parseStandaloneTurnIndexPage,
   parseUnarchiveStandaloneSessionsResult,
   type CreateStandaloneSessionOptions,
   type DaemonArchiveStandaloneSessionsResult,
@@ -1338,9 +1341,12 @@ export class DaemonClient {
     );
   }
 
-  async requireCapability(capability: string): Promise<void> {
+  async requireCapability(
+    capability: string,
+    mode: 'fresh' | 'cached' = 'fresh',
+  ): Promise<void> {
     let supported: boolean;
-    if (capability === 'session_source_metadata') {
+    if (mode === 'cached' || capability === 'session_source_metadata') {
       while (
         this.capabilitiesRequest ||
         !this.capabilityFeatures ||
@@ -3128,6 +3134,42 @@ export class DaemonClient {
     );
   }
 
+  async getStandaloneSessionTurnIndexPage(
+    sessionId: string,
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'GET /standalone/sessions/:id/turn-index';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/turn-index${turnIndexPageSuffix(opts)}`,
+      route,
+      (response) => parseStandaloneTurnIndexPage(response, route, normalized),
+      {
+        clientId: opts.clientId,
+        preflight: 'cached',
+        capability: STANDALONE_SESSION_TRANSCRIPT_CAPABILITY,
+      },
+    );
+  }
+
+  async getStandaloneSessionTranscriptPage(
+    sessionId: string,
+    opts: DaemonSessionTranscriptPageOptions = {},
+  ): Promise<DaemonSessionTranscriptPage> {
+    const normalized = sessionId.toLowerCase();
+    const route = 'GET /standalone/sessions/:id/transcript';
+    return await this.standaloneJsonRequest(
+      `/standalone/sessions/${urlEncode(normalized)}/transcript${transcriptPageSuffix(opts)}`,
+      route,
+      (response) => parseStandaloneTranscriptPage(response, route, normalized),
+      {
+        clientId: opts.clientId,
+        preflight: 'cached',
+        capability: STANDALONE_SESSION_TRANSCRIPT_CAPABILITY,
+      },
+    );
+  }
+
   async archiveStandaloneSessions(
     sessionIds: string[],
   ): Promise<DaemonArchiveStandaloneSessionsResult> {
@@ -3167,11 +3209,22 @@ export class DaemonClient {
       body?: unknown;
       clientId?: string;
       timeoutMs?: number;
+      // Read-only poll paths (turn-index/transcript paging) use a cached
+      // capability preflight: a fresh probe on every read would double the
+      // request volume of the hot navigation loop while the cache is valid.
+      // A failed refresh still rejects the read before contacting its route.
+      preflight?: 'fresh' | 'cached';
+      // Route-specific capability tag; defaults to the standalone baseline.
+      capability?: string;
     } = {},
   ): Promise<T> {
-    await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    const { preflight, capability, ...rest } = options;
+    await this.requireCapability(
+      capability ?? STANDALONE_SESSIONS_CAPABILITY,
+      preflight ?? 'fresh',
+    );
     const response = await this.jsonRequest<unknown>(path, route, {
-      ...options,
+      ...rest,
       mode: 'rest',
     });
     return parse(response, route);
