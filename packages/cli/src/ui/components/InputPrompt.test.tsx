@@ -20,7 +20,16 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
-import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  type Mock,
+} from 'vitest';
+import chalk from 'chalk';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
@@ -70,6 +79,17 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
+
+const mockShouldRenderSoftwareCursor = vi.hoisted(() => vi.fn(() => true));
+
+vi.mock('../utils/software-cursor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/software-cursor.js')>();
+  return {
+    ...actual,
+    shouldRenderSoftwareCursor: mockShouldRenderSoftwareCursor,
+  };
+});
 vi.mock('../voice/voice-recorder.js', () => ({
   createVoiceRecorder: vi.fn(),
 }));
@@ -219,6 +239,7 @@ describe('InputPrompt', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockShouldRenderSoftwareCursor.mockReturnValue(true);
     mockedSavePromptStash.mockReturnValue(true);
     mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
@@ -4001,6 +4022,54 @@ describe('InputPrompt', () => {
         lines.find((l) => l.includes(renderSoftwareCursor(' '))),
       ).not.toBeUndefined();
       unmount();
+    });
+
+    describe('software cursor suppression', () => {
+      const originalChalkLevel = chalk.level;
+
+      beforeEach(() => {
+        chalk.level = 3;
+      });
+
+      afterEach(() => {
+        chalk.level = originalChalkLevel;
+      });
+
+      it('should drop cursor styling when the software cursor is suppressed mid-line', async () => {
+        mockShouldRenderSoftwareCursor.mockReturnValue(false);
+        mockBuffer.text = 'hello world';
+        mockBuffer.lines = ['hello world'];
+        mockBuffer.viewportVisualLines = ['hello world'];
+        mockBuffer.visualCursor = [0, 3]; // cursor on the second 'l'
+
+        const { stdout, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        const frame = stdout.lastFrame();
+        expect(frame).toContain('hello world');
+        expect(frame).not.toContain(renderSoftwareCursor('l'));
+        unmount();
+      });
+
+      it('should keep a plain trailing cell when the software cursor is suppressed at end of line', async () => {
+        mockShouldRenderSoftwareCursor.mockReturnValue(false);
+        mockBuffer.text = 'hello';
+        mockBuffer.lines = ['hello'];
+        mockBuffer.viewportVisualLines = ['hello'];
+        mockBuffer.visualCursor = [0, 5]; // cursor after 'o'
+
+        const { stdout, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        const frame = stdout.lastFrame();
+        expect(frame).toContain(`hello \u200B`);
+        expect(frame).not.toContain(renderSoftwareCursor(' '));
+        unmount();
+      });
     });
   });
 
