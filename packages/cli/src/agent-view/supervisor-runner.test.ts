@@ -30,6 +30,26 @@ import {
   writeAgentViewSessionState,
 } from './supervisor-store.js';
 
+const { handlerOptions } = vi.hoisted(() => ({
+  handlerOptions: [] as Array<Record<string, unknown>>,
+}));
+
+// Records the options the production supervisor is constructed with, while
+// returning the real handler, so every other test here keeps exercising it.
+vi.mock('./supervisor-process.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./supervisor-process.js')>();
+  return {
+    ...actual,
+    createAgentViewSupervisorHandler: (
+      options: Parameters<typeof actual.createAgentViewSupervisorHandler>[0],
+    ) => {
+      handlerOptions.push(options as unknown as Record<string, unknown>);
+      return actual.createAgentViewSupervisorHandler(options);
+    },
+  };
+});
+
 const cleanupDirs: string[] = [];
 const cleanupServers: AgentViewSupervisorServerHandle[] = [];
 const cleanupSupervisors: Array<() => Promise<void>> = [];
@@ -401,6 +421,25 @@ describe('Agent View supervisor runner', () => {
     await supervisorPromise;
 
     await expectSupervisorUnreachable(socketPath, authToken);
+  });
+
+  it('builds the production supervisor without the worker-ready wait', async () => {
+    // Nothing in the CLI sends the `{ type: 'ready' }` worker event that
+    // wait resolves on — `reportAgentViewWorkerState` and
+    // `startAgentViewWorkerHeartbeat` have no callers outside their own
+    // module — so the default made every dispatch burn the full 15s
+    // worker-ready timeout, then kill the PTY host it had just spawned and
+    // mark the session failed. `qwen --bg` could never print a session id.
+    // Turning the wait off also flips the dispatch to `promptInArgv`, so
+    // the prompt rides the worker's argv instead of a sideband control
+    // queue that nothing drains either.
+    const { globalDir } = await makeSupervisorPath();
+    handlerOptions.length = 0;
+
+    await runTestSupervisor({ globalDir });
+
+    expect(handlerOptions).toHaveLength(1);
+    expect(handlerOptions[0]).toMatchObject({ waitForWorkerReady: false });
   });
 });
 

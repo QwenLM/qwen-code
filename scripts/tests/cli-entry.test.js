@@ -170,6 +170,89 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
+  it('hands the post-update relaunch command line to cmd.exe verbatim', async () => {
+    // #12687: the ""…"" idiom only reaches cmd intact when the spawn passes
+    // windowsVerbatimArguments — otherwise Node's MSVCRT escaping rewrites
+    // every embedded quote as \" and cmd /s rule 2 strips the line down to
+    // a literal \"\"path\"\" program name, which is exactly the reporter's
+    // error. The standalone Windows shim stamps an un-normalized
+    // bin\..\bin launcher path, so the fixture carries one.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher =
+      'C:\\Users\\test\\AppData\\Local\\qwen-code\\qwen-code\\bin\\..\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    try {
+      await import('../cli-entry.js?verbatim-cmd-relaunch');
+      // First spawn is the managed-update child (exit 44), second is the
+      // relaunch through the standalone shim. The interpreter mirrors the
+      // production `process.env['ComSpec'] ?? 'cmd.exe'` so the assertion
+      // also holds on a real Windows host, where ComSpec is always set.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      expect(spawnSyncMock).toHaveBeenLastCalledWith(
+        process.env['ComSpec'] ?? 'cmd.exe',
+        ['/d', '/s', '/c', `""${launcher}""`],
+        expect.objectContaining({
+          stdio: 'inherit',
+          windowsVerbatimArguments: true,
+        }),
+      );
+    } finally {
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
+  it('refuses a verbatim cmd relaunch when the launcher has cmd metacharacters', async () => {
+    // windowsVerbatimArguments drops Node's escaping safety net, so a
+    // launcher path containing cmd metacharacters would be re-tokenized
+    // into extra commands. The update itself already landed at that point,
+    // so the entry must skip the relaunch instead of spawning a malformed
+    // command line.
+    const inheritedShim = process.env.QWEN_CODE_LAUNCHER_PATH;
+    const launcher = 'C:\\evil&whoami\\bin\\qwen.cmd';
+    process.env.QWEN_CODE_LAUNCHER_PATH = launcher;
+    existsSyncMock.mockImplementation((p) => p === launcher);
+    let spawnCount = 0;
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => {
+      spawnCount += 1;
+      return spawnCount === 1
+        ? { status: 44, signal: null }
+        : { status: 0, signal: null };
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await import('../cli-entry.js?unsafe-cmd-launcher');
+      // Only the managed-update child ran; no cmd.exe relaunch followed.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('next run'),
+      );
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      stderrSpy.mockRestore();
+      spawnSyncMock.mockImplementation(spawnImpl);
+      existsSyncMock.mockImplementation(() => false);
+      if (inheritedShim === undefined)
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
   it('leaves the startup version unset when package metadata is unreadable', async () => {
     const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
     delete process.env.QWEN_CODE_STARTUP_VERSION;
@@ -365,6 +448,68 @@ describe('scripts/cli-entry.js production entry', () => {
         process.removeListener('exit', hook);
       } finally {
         delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      }
+    });
+
+    it('defers a --bg launch to cli.js instead of exiting on its version token', async () => {
+      // `qwen --bg -v "$TASK"`: the version token is one of that launch's
+      // prompt words. Intercepting it here printed a version and exited 0
+      // before cli.js ever ran, so a wrapper's `qwen --bg -v "$TASK" &&
+      // notify` reported success with no session started.
+      process.argv = [
+        'node',
+        'scripts/cli-entry.js',
+        '--bg',
+        '-v',
+        'audit the release',
+      ];
+      process.env.CLI_VERSION = '9.9.9';
+      const writes = [];
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(String(chunk));
+          return true;
+        });
+      try {
+        await import('../cli-entry.js?bg-version-token');
+
+        expect(writes).not.toContain('9.9.9\n');
+        expect(exitSpy).not.toHaveBeenCalledWith(0);
+        // The launch reached cli.js, which owns the --bg gate, with every
+        // token intact.
+        expect(process.argv.slice(1)).toEqual([
+          cliPath,
+          '--bg',
+          '-v',
+          'audit the release',
+        ]);
+      } finally {
+        writeSpy.mockRestore();
+        delete process.env.CLI_VERSION;
+      }
+    });
+
+    it('still fast-paths a plain version request', async () => {
+      // The --bg deferral is narrow: an argv with no --bg token keeps the
+      // in-process fast path, so the fix cannot cost every `qwen --version`.
+      process.argv = ['node', 'scripts/cli-entry.js', '--version'];
+      process.env.CLI_VERSION = '9.9.9';
+      const writes = [];
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(String(chunk));
+          return true;
+        });
+      try {
+        await import('../cli-entry.js?plain-version');
+
+        expect(writes).toContain('9.9.9\n');
+        expect(exitSpy).toHaveBeenCalledWith(0);
+      } finally {
+        writeSpy.mockRestore();
+        delete process.env.CLI_VERSION;
       }
     });
   });

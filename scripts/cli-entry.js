@@ -46,13 +46,43 @@ function isInProcessFastPath() {
     return true;
   }
   if (first === undefined || first.startsWith('-')) {
+    if (hasBackgroundFlagToken()) {
+      return false;
+    }
     return hasFlag('--help', '-h') || hasFlag('--version', '-v');
+  }
+  return false;
+}
+
+// True when argv carries a `--bg`-shaped token before any `--`.
+//
+// A background launch is decided by cli.js, which owns the real gate: it
+// knows the boolean off spellings, every other flag's value slot, and where
+// the prompt starts. This wrapper only has to avoid swallowing the launch
+// into a fast path that exits before cli.js runs — intercepting the version
+// token of `qwen --bg -v "$TASK"` printed a version and exited 0, so a
+// wrapper's `&& notify` reported success with nothing running.
+//
+// The test is therefore deliberately coarser than the gate's: any
+// `--bg`-shaped token defers to cli.js, including the off spellings that
+// are not a launch. Over-approximating only costs the fast path — cli.js
+// still prints the version for `qwen --bg=false --version` — whereas
+// re-deriving the off-value grammar here would be a ninth copy of it.
+function hasBackgroundFlagToken() {
+  for (const arg of cliArgs) {
+    if (arg === '--') {
+      return false;
+    }
+    if (arg === '--bg' || arg.startsWith('--bg=')) {
+      return true;
+    }
   }
   return false;
 }
 
 const isTopLevelVersion =
   (cliArgs[0] === undefined || cliArgs[0].startsWith('-')) &&
+  !hasBackgroundFlagToken() &&
   hasFlag('--version', '-v');
 
 if (isTopLevelVersion && process.env['CLI_VERSION']) {
@@ -307,6 +337,11 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
+  // cmd.exe metacharacters. Mirrors UNSAFE_CMD_CHARS in
+  // packages/cli/src/ui/standalone-update.ts — kept local because this
+  // plain-ESM entry ships in the standalone package and cannot import the
+  // TypeScript sources.
+  const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
   const entryPath = resolve(process.argv[1]);
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
   const launchEnv = { ...process.env };
@@ -369,12 +404,38 @@ if (isInProcessFastPath()) {
     // its own version instead of inheriting the old process's session version.
     delete relaunchEnv['QWEN_CODE_STARTUP_VERSION'];
     delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
+    if (
+      process.platform === 'win32' &&
+      launcher.endsWith('.cmd') &&
+      UNSAFE_CMD_CHARS.test(launcher)
+    ) {
+      // The cmd.exe relaunch below hands its command line over verbatim
+      // (windowsVerbatimArguments), which drops Node's escaping safety net:
+      // a launcher path with cmd metacharacters would be re-tokenized into
+      // extra commands. The update itself already landed, so skip the
+      // relaunch instead of spawning a malformed command line.
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
+      process.exit(0);
+      // Unreachable in production; keeps tests with a mocked exit honest.
+      return;
+    }
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')
         ? spawnSync(
             process.env['ComSpec'] ?? 'cmd.exe',
             ['/d', '/s', '/c', `""${launcher}""`],
-            { stdio: 'inherit', env: relaunchEnv },
+            // cmd.exe does not understand Node's MSVCRT argv escaping: it
+            // rewrites every embedded quote of the ""…"" idiom as \", and
+            // cmd /s rule 2 then strips the line down to a literal
+            // \"\"path\"\" program name (#12687). Hand the line over
+            // verbatim, as shellExecutionService already does for cmd.
+            {
+              stdio: 'inherit',
+              env: relaunchEnv,
+              windowsVerbatimArguments: true,
+            },
           )
         : spawnSync(launcher, [], {
             stdio: 'inherit',

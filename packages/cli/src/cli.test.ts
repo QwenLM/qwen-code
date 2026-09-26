@@ -1487,14 +1487,18 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
     });
 
-    it('reads the attached --bg=<prompt> form through the same intercept', async () => {
-      mocks.runBackgroundDispatch.mockResolvedValue(0);
-
+    it('leaves an attached --bg=<value> to the parser', async () => {
+      // `bg` is declared `type: 'boolean'`, and yargs-parser reads an
+      // attached value as that boolean rather than as a prompt — measured
+      // on the installed 21.1.1, `--bg=audit` is `bg: false` with `audit`
+      // as the positional. So the attached spelling is an ordinary launch,
+      // and the gate must not claim it: intercepting attached values is
+      // what let a padded or empty OFF spelling dispatch a real agent and
+      // certify it with exit 0.
       await runCliEntry(['--bg=audit']);
 
-      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
-      expect(process.exitCode).toBe(0);
-      expect(mocks.main).not.toHaveBeenCalled();
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalled();
     });
 
     it('reports the usage for a bare --bg', async () => {
@@ -1566,9 +1570,9 @@ describe('runCliEntry', () => {
       // spelling this gate's own reader supports. The whole-argv help scan
       // matched it and fell through to top-level help: exit 0, prompt
       // dropped, no session, no diagnostic, while every other unsupported
-      // flag in the same position is declined by name with exit 1. Only the
-      // ATTACHED spelling keeps the whole-argv scan, because it carries its
-      // prompt inside its own token and consumes no positional words.
+      // flag in the same position is declined by name with exit 1. So the
+      // help scan stops AT the flag: beyond it, every token is a prompt
+      // word and none of them is a help request.
       await runCliEntry([BACKGROUND_FLAG, 'add', '--help', 'section']);
 
       expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
@@ -1585,26 +1589,6 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('does not honor -h');
-    });
-
-    it('declines a --help typed as an attached --bg prompt word instead of hijacking the launch', async () => {
-      // The shell splits `qwen --bg=audit add a --help section to the
-      // README`, so `--help` is its own argv word among the trailing
-      // positionals that `readBackgroundPrompt` joins behind the attached
-      // prompt. Keying the help scan on the flag's token FORM scanned the
-      // whole argv and matched that prompt word, falling through to
-      // top-level help: exit 0, prompt dropped, no session, no diagnostic
-      // — while the bare spelling of the identical prompt declined by name
-      // with exit 1. The scan must stop at the first prompt word after the
-      // attached flag, so the prompt-word `--help` declines like the bare
-      // form's.
-      await runCliEntry(['--bg=audit', 'add', '--help', 'section']);
-
-      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
-      expect(mocks.main).not.toHaveBeenCalled();
-      expect(process.exitCode).toBe(1);
-      expect(stderr.join('')).toContain('does not honor --help');
-      expect(stderr.join('')).toContain('after --');
     });
 
     it('declines a version token typed as a --bg prompt word instead of printing the version', async () => {
@@ -1656,10 +1640,15 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
-    it('reads the boolean on spelling as the bare flag, not as a prompt word', async () => {
+    it('reads a space-separated true as the flag value, not as a prompt word', async () => {
+      // yargs-parser consumes exactly `true`/`false` as a boolean flag's
+      // space-separated value, and this intercept runs before the parser,
+      // so it has to consume them the same way: `qwen --bg true "audit the
+      // release"` is the flag switched on with that prompt, not a prompt
+      // whose first word happens to be "true".
       mocks.runBackgroundDispatch.mockResolvedValue(0);
 
-      await runCliEntry([`${BACKGROUND_FLAG}=true`, 'audit the release']);
+      await runCliEntry([BACKGROUND_FLAG, 'true', 'audit the release']);
 
       expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
         'audit the release',
@@ -1667,24 +1656,16 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
     });
 
-    it('scopes the help scan the same way for --bg=true as for a bare --bg', async () => {
-      // The whole-argv help scan belongs to the spelling that carries its
-      // prompt INSIDE the token (`--bg=<prompt>`), because that token
-      // consumes no positional words. `--bg=true` means the bare flag, so
-      // the tokens after it are prompt words exactly as after `--bg` — a
-      // help token among them is declined by name, not honored as a
-      // top-level help request that silently drops the prompt.
-      await runCliEntry([
-        `${BACKGROUND_FLAG}=true`,
-        'add',
-        '--help',
-        'section',
-      ]);
+    it('leaves a space-separated false to the parser instead of dispatching', async () => {
+      // The unquoted-variable wrapper form `qwen --bg $ENABLED "$TASK"`
+      // with ENABLED=false. Reading `false` as the first prompt word
+      // dispatched a real agent on `false audit the release` — supervisor
+      // started, session recorded, quota burned — and certified it with
+      // exit 0, where the parser itself starts no session at all.
+      await runCliEntry([BACKGROUND_FLAG, 'false', 'audit the release']);
 
       expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
-      expect(mocks.main).not.toHaveBeenCalled();
-      expect(process.exitCode).toBe(1);
-      expect(stderr.join('')).toContain('does not honor --help');
+      expect(mocks.main).toHaveBeenCalled();
     });
 
     it('leaves an internal supervisor flag named by a positional launch to the parser', async () => {
@@ -1732,6 +1713,7 @@ describe('runCliEntry', () => {
     // declare must sit in the gate set — a new alias that misses it
     // silently dispatches the subcommand launch as a prompt.
     const { authCommand } = await import('./commands/auth.js');
+    const { batchCommand } = await import('./commands/batch.js');
     const { boardCommand } = await import('./commands/board.js');
     const { channelCommand } = await import('./commands/channel.js');
     const { extensionsCommand } = await import('./commands/extensions.js');
@@ -1745,6 +1727,7 @@ describe('runCliEntry', () => {
 
     const commandModules = [
       authCommand,
+      batchCommand,
       boardCommand,
       channelCommand,
       extensionsCommand,
@@ -2475,6 +2458,7 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['authCommand', 'auth'],
+      ['batchCommand', 'batch'],
       ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
