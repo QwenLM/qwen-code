@@ -44,6 +44,7 @@ import type {
  *   implemented.
  */
 export type ServeMode = 'http-bridge' | 'native';
+export type ServeProfile = 'default' | 'hosted-harness';
 
 export type ServeChannelSelection =
   | { mode: 'all' }
@@ -58,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Deployment boundary for provider selection and exposed surfaces. */
+  profile?: ServeProfile;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience). On a non-loopback bind with neither this option
@@ -339,6 +342,21 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
+  experimentalManagedAgents?: boolean;
+  /** Expose the private authenticated Tool-only Runtime worker protocol. */
+  experimentalManagedRuntimeWorker?: boolean;
+  experimentalManagedRuntimeAutoLocal?: boolean;
+  /** Use a remote Runtime worker origin instead of the local provider. */
+  experimentalManagedRuntimeUrl?: string;
+  /** Bearer credential used only for the remote Runtime worker. */
+  experimentalManagedRuntimeToken?: string;
+  /** Java Runtime Broker origin used only by the Hosted Harness profile. */
+  managedRuntimeBrokerUrl?: string;
+  /** Service credential used only for Harness-to-Broker calls. */
+  managedRuntimeBrokerToken?: string;
+  /** Deployment-generated digest for the Hosted Harness private contract. */
+  hostedHarnessCapabilityDigest?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -426,8 +444,19 @@ export interface ServeOptions {
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
+export interface HostedHarnessCapabilities {
+  readonly protocolVersions: {
+    readonly current: 1;
+    readonly supported: readonly [1];
+  };
+  readonly bootId: string;
+  readonly capabilityDigest: string;
+}
+
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.

@@ -135,6 +135,7 @@ export function createServeFeatures(
       const currentAcpHttpEnabled =
         acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
       return getAdvertisedServeFeatures(undefined, {
+        hostedHarness: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:

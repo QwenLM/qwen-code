@@ -8,6 +8,7 @@ on:
     paths:
       - 'packages/sdk-java/**'
       - 'packages/core/src/config/approval-modes.json'
+      - 'packages/core/src/managed-runtime/contracts/managed-session-store-v1.fixtures.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
@@ -27,6 +28,7 @@ on:
     paths:
       - 'packages/sdk-java/**'
       - 'packages/core/src/config/approval-modes.json'
+      - 'packages/core/src/managed-runtime/contracts/managed-session-store-v1.fixtures.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
@@ -185,7 +187,7 @@ jobs:
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
   mysql-integration:
-    name: 'Runtime Broker MariaDB / Java 21'
+    name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     services:
@@ -211,7 +213,10 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
           cache: 'maven'
-          cache-dependency-path: 'packages/sdk-java/runtime-broker/pom.xml'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Run Runtime Broker MySQL integration tests'
@@ -222,6 +227,22 @@ jobs:
           mvn --batch-mode --no-transfer-progress -Pmysql-integration
           -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test?allowPublicKeyRetrieval=true&useSSL=false'
           -Dmysql.user=root -Dmysql.password=runtime-broker clean verify
+
+      - name: 'Install Managed Agent dependencies'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+
+      - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
+        working-directory: 'packages/sdk-java/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration
+          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false'
+          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'

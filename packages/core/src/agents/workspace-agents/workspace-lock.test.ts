@@ -14,12 +14,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 const PROJECT_ROOT = '/agent-workspace-lock-test';
 
 function runWorker(runtimeDir: string, count: number): Promise<number[]> {
-  const tsx = path.resolve(process.cwd(), '../../node_modules/.bin/tsx');
   const worker = fileURLToPath(
     new URL('./workspace-lock-worker.ts', import.meta.url),
   );
   return new Promise((resolve, reject) => {
-    const child = spawn(tsx, [worker], {
+    const child = spawn(process.execPath, ['--import', 'tsx', worker], {
       env: {
         ...process.env,
         AGENT_LOCK_RUNTIME_DIR: runtimeDir,

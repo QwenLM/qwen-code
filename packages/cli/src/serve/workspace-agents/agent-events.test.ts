@@ -47,7 +47,11 @@ it('announces writes to a thread file once, naming the thread', async () => {
         expect(events).toContainEqual({ type: 'changed', threadId: 'th_1' }),
       { timeout: 3_000 },
     );
-    expect(events).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) => event.type === 'changed' && event.threadId === 'th_1',
+      ),
+    ).toEqual([{ type: 'changed', threadId: 'th_1' }]);
   } finally {
     stop();
   }

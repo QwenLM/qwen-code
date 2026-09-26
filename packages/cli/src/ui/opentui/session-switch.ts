@@ -137,6 +137,7 @@ export async function handleResumeSession(
   try {
     const cwd = config.getTargetDir();
     const sessionService = new SessionService(cwd);
+    sessionService.assertLegacySessionExecution(sessionId);
     const sessionData = await sessionService.loadSession(sessionId);
     if (!sessionData) {
       // Nothing was replayed — close this attempt's unarmed transaction.
