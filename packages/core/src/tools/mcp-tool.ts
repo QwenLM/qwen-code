@@ -938,13 +938,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (signal.aborted) return undefined;
       const cause = getErrorMessage(error);
-      // Credit the deadline to the key that produced it: a discarded
-      // non-numeric override must not be named, and without an explicit App
-      // timeout the deadline came from the general `timeout` (or its 10 s
-      // default), so that is the setting the operator can actually change.
+      // Raising the general timeout cannot exceed the App resource ceiling.
       const timeoutKey =
-        typeof configuredTimeoutMs === 'number' &&
-        Number.isFinite(configuredTimeoutMs)
+        (typeof configuredTimeoutMs === 'number' &&
+          Number.isFinite(configuredTimeoutMs)) ||
+        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS
           ? 'appResourceTimeoutMs'
           : 'timeout';
       const reason =

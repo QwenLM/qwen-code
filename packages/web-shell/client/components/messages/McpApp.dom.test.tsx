@@ -122,6 +122,116 @@ function renderApp(
 }
 
 describe('McpApp host lifetime', () => {
+  it.each([
+    'sendSandboxResourceReady',
+    'sendToolInput',
+    'sendToolResult',
+  ] as const)('revokes the App bridge after %s fails', async (handoff) => {
+    let rejectHandoff!: (error: Error) => void;
+    appBridgeMocks[handoff].mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectHandoff = reject;
+        }),
+    );
+    const callTool = vi.fn((_request: unknown, _signal: AbortSignal) =>
+      Promise.resolve({ content: [] }),
+    );
+    const { container, rerender } = renderApp(appDisplay());
+    const wrap = (display: McpAppDisplay) => (
+      <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppToolsContext.Provider>
+    );
+    rerender(wrap(appDisplay()));
+    const bridge = appBridgeMocks.last!;
+    const invoke = bridge.oncalltool!;
+    await act(async () => {
+      bridge.onsandboxready?.();
+      bridge.oninitialized?.();
+    });
+    await invoke(
+      { name: 'before-failure' },
+      { signal: new AbortController().signal },
+    );
+    const activeSignal = callTool.mock.calls[0][1];
+    appBridgeMocks.close.mockClear();
+    await act(async () => {
+      rejectHandoff(new Error('fixture handoff failed'));
+    });
+    const snapshot = {
+      closed: appBridgeMocks.close.mock.calls.length,
+      src: container.querySelector('iframe')?.getAttribute('src'),
+      registered: typeof bridge.oncalltool === 'function',
+      aborted: activeSignal.aborted,
+    };
+    await invoke(
+      { name: 'after-failure' },
+      { signal: new AbortController().signal },
+    ).catch(() => undefined);
+    expect({ ...snapshot, calls: callTool.mock.calls.length }).toEqual({
+      closed: 1,
+      src: null,
+      registered: false,
+      aborted: true,
+      calls: 1,
+    });
+  });
+
+  it('ignores a stale handoff rejection after a replacement App is mounted', async () => {
+    let rejectHandoff!: (error: Error) => void;
+    appBridgeMocks.sendToolResult.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectHandoff = reject;
+        }),
+    );
+    const callTool = vi.fn().mockResolvedValue({ content: [] });
+    const { container, rerender } = renderApp(appDisplay());
+    const wrap = (display: McpAppDisplay) => (
+      <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppToolsContext.Provider>
+    );
+    rerender(wrap(appDisplay()));
+    const oldBridge = appBridgeMocks.last!;
+    await act(async () => {
+      oldBridge.onsandboxready?.();
+      oldBridge.oninitialized?.();
+    });
+    rerender(
+      wrap(
+        appDisplay({
+          html: '<main>Replacement</main>',
+          resourceUri: 'ui://demo/replacement',
+        }),
+      ),
+    );
+    const replacement = appBridgeMocks.last!;
+    await act(async () => {
+      replacement.onsandboxready?.();
+      replacement.oninitialized?.();
+    });
+    const src = container.querySelector('iframe')?.getAttribute('src');
+    appBridgeMocks.close.mockClear();
+    await act(async () => {
+      rejectHandoff(new Error('stale fixture handoff'));
+    });
+    await replacement.oncalltool!(
+      { name: 'current' },
+      { signal: new AbortController().signal },
+    );
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(src);
+    expect(container.querySelector('iframe')?.style.display).not.toBe('none');
+    expect(container.textContent).not.toContain('Demo result');
+    expect(callTool).toHaveBeenCalledOnce();
+    expect(appBridgeMocks.close).not.toHaveBeenCalled();
+  });
+
   it('does not rebuild AppBridge when display is a new object with the same fields', async () => {
     const { rerender } = renderApp(appDisplay());
     await act(async () => {

@@ -2229,13 +2229,25 @@ describe('DiscoveredMCPTool', () => {
         mcpTimeout: undefined,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'timeout',
+        expectedKey: 'appResourceTimeoutMs',
       },
       {
         mcpTimeout: 60_000,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'timeout',
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 600_000,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 10_000,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
       },
       {
         mcpTimeout: 500,

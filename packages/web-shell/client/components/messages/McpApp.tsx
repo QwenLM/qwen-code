@@ -258,7 +258,10 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     }
 
     const failInitialization = () => {
+      if (!active || mountGenerationRef.current !== generation) return;
       active = false;
+      clearTimeout(readyTimeout);
+      bridge.oncalltool = undefined;
       appAbort.abort();
       iframe.removeAttribute('src');
       bridgeRef.current = null;
@@ -284,7 +287,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
           html: resource.html,
           ...(resource.csp ? { csp: resource.csp } : {}),
         })
-        .catch((reason: unknown) => setError(String(reason)));
+        .catch(failInitialization);
     };
     bridge.oninitialized = () => {
       if (!active) return;
@@ -293,8 +296,10 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       const resource = displayRef.current;
       void bridge
         .sendToolInput({ arguments: resource.toolArguments })
-        .then(() => bridge.sendToolResult(resource.toolResult))
-        .catch((reason: unknown) => setError(String(reason)));
+        .then(() => {
+          if (active) return bridge.sendToolResult(resource.toolResult);
+        })
+        .catch(failInitialization);
     };
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (
@@ -315,11 +320,12 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       .then(() => {
         if (active) iframe.src = sandboxUrl;
       })
-      .catch((reason: unknown) => setError(String(reason)));
+      .catch(failInitialization);
 
     return () => {
       active = false;
       clearTimeout(readyTimeout);
+      bridge.oncalltool = undefined;
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
