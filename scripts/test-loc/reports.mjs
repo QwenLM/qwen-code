@@ -461,7 +461,8 @@ export function compareFaults(before, after) {
           result.totalTests > 0 &&
           natural(result.failedTests) &&
           result.failedTests <= result.totalTests &&
-          (result.healthFailures === undefined ||
+          ((report.planSha256 === undefined &&
+            result.healthFailures === undefined) ||
             natural(result.healthFailures)),
         `Missing fault execution evidence: ${result.sha}`,
       );

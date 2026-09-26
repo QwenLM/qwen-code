@@ -69,6 +69,7 @@ const faults = (status = 'detected') => ({
       totalTests: 2,
       failedTests: status === 'detected' ? 1 : 0,
       exit: status === 'detected' ? 1 : 0,
+      healthFailures: 0,
     },
   ],
 });
@@ -247,43 +248,50 @@ test('coverage reports switched branch outcomes and incomplete branch shapes', (
 });
 
 test('mutation comparison rejects empty, incomplete, duplicate or different samples', () => {
-  assert.throws(() => compareMutations({ files: {} }, mutation()), /Empty/);
+  const expected = { expected: mutation() };
   assert.throws(
-    () => compareMutations(mutation(), mutation('Pending')),
+    () => compareMutations({ files: {} }, mutation(), expected),
+    /Empty/,
+  );
+  assert.throws(
+    () => compareMutations(mutation(), mutation('Pending'), expected),
     /Unfinished/,
   );
   const changed = mutation();
   changed.files['src/example.ts'].mutants[0].replacement = 'true';
   assert.throws(
-    () => compareMutations(mutation(), changed),
+    () => compareMutations(mutation(), changed, expected),
     /sample sets differ/,
   );
   const changedSource = mutation();
   changedSource.files['src/example.ts'].source = 'false;';
   assert.throws(
-    () => compareMutations(mutation(), changedSource),
+    () => compareMutations(mutation(), changedSource, expected),
     /source sets differ/,
   );
   const duplicate = mutation();
   duplicate.files['src/example.ts'].mutants.push(
     duplicate.files['src/example.ts'].mutants[0],
   );
-  assert.throws(() => compareMutations(mutation(), duplicate), /Duplicate/);
-  assert.equal(
-    compareMutations(mutation(), mutation(), { expected: mutation() }).ok,
-    true,
+  assert.throws(
+    () => compareMutations(mutation(), duplicate, expected),
+    /Duplicate/,
   );
+  assert.equal(compareMutations(mutation(), mutation(), expected).ok, true);
   assert.equal(
-    compareMutations(mutation(), mutation('Survived')).lostKills.length,
+    compareMutations(mutation(), mutation('Survived'), expected).lostKills
+      .length,
     1,
   );
   assert.equal(
-    compareMutations(mutation(), mutation('Timeout')).inconclusive.length,
+    compareMutations(mutation(), mutation('Timeout'), expected).inconclusive
+      .length,
     1,
   );
   const noCoverage = compareMutations(
     mutation('Survived'),
     mutation('NoCoverage'),
+    expected,
   );
   assert.deepEqual(noCoverage.statusCounts, {
     before: { Survived: 1 },
@@ -292,16 +300,24 @@ test('mutation comparison rejects empty, incomplete, duplicate or different samp
   assert.equal(noCoverage.statusChanges[0].after, 'NoCoverage');
   assert.equal(noCoverage.ok, false);
   assert.equal(
-    compareMutations(mutation('NoCoverage'), mutation('NoCoverage')).ok,
+    compareMutations(mutation('NoCoverage'), mutation('NoCoverage'), expected)
+      .ok,
     false,
   );
   for (const status of ['CompileError', 'Ignored']) {
-    assert.equal(
-      compareMutations(mutation('Survived'), mutation(status)).ok,
-      false,
-    );
+    const before = mutation('Survived');
+    const retained = mutation().files['src/example.ts'].mutants[0];
+    retained.replacement = 'null';
+    before.files['src/example.ts'].mutants.push(retained);
+    const after = structuredClone(before);
+    after.files['src/example.ts'].mutants[0].status = status;
+    const comparison = compareMutations(before, after, { expected: before });
+    assert.equal(comparison.sampleComplete, true);
+    assert.deepEqual(comparison.executions, { before: 2, after: 1 });
+    assert.equal(comparison.inconclusive.length, 1);
+    assert.equal(comparison.ok, false);
     assert.throws(
-      () => compareMutations(mutation(status), mutation(status)),
+      () => compareMutations(mutation(status), mutation(status), expected),
       /No executable mutation sample/,
     );
   }
@@ -332,6 +348,26 @@ test('fault infrastructure failures cannot become missed or retained detections'
   missing.results[0].failedTests = 1;
   missing.results[0].healthFailures = -1;
   assert.throws(() => compareFaults(faults(), missing), /execution evidence/);
+});
+
+test('frozen faults require complete healthy-run counts for every executed record', () => {
+  for (const status of ['detected', 'missed']) {
+    for (const count of [undefined, -1, 0.5]) {
+      const invalid = faults(status);
+      if (count === undefined) delete invalid.results[0].healthFailures;
+      else invalid.results[0].healthFailures = count;
+      assert.throws(
+        () => compareFaults(invalid, invalid),
+        /Missing fault execution evidence/,
+      );
+    }
+  }
+  const legacy = faults();
+  delete legacy.planSha256;
+  delete legacy.results[0].healthFailures;
+  const observation = compareFaults(legacy, legacy);
+  assert.equal(observation.ok, false);
+  assert.equal(observation.sampleComplete, false);
 });
 
 test('fault exclusions require identical reasons and healthy executions remain separate', () => {
