@@ -33,27 +33,22 @@ vi.mock('node:https', () => ({
   get: vi.fn(),
 }));
 
-vi.mock('./github.js', () => ({
-  isSupportedArchiveUrl: vi.fn((url: string) => {
-    try {
-      const parsedUrl = new URL(url);
-      const pathname = parsedUrl.pathname.toLowerCase();
-      return (
-        parsedUrl.protocol === 'https:' &&
-        (pathname.endsWith('.zip') || pathname.endsWith('.tar.gz'))
-      );
-    } catch {
-      return false;
-    }
-  }),
-  parseGitHubRepoForReleases: vi.fn((url: string) => {
-    const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
-    if (match) {
-      return { owner: match[1], repo: match[2] };
-    }
-    throw new Error('Not a GitHub URL');
-  }),
-}));
+vi.mock('./github.js', async (importOriginal) => {
+  // Real pure URL predicates (isSupportedArchiveUrl / isArchiveShapedUrl):
+  // they do no I/O, so there is nothing to isolate and the suite that owns
+  // the new policy asserts against the actual classifier, not a copy.
+  const actual = await importOriginal<typeof import('./github.js')>();
+  return {
+    ...actual,
+    parseGitHubRepoForReleases: vi.fn((url: string) => {
+      const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
+      if (match) {
+        return { owner: match[1], repo: match[2] };
+      }
+      throw new Error('Not a GitHub URL');
+    }),
+  };
+});
 
 describe('parseInstallSource', () => {
   beforeEach(() => {
@@ -195,6 +190,103 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('https://example.com/releases/extension.zip');
       expect(result.type).toBe('archive-url');
       expect(result.pluginName).toBe('my-plugin');
+    });
+
+    it('should reject http archive URLs with an actionable error', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should reject http archive URLs even when a query string hides the extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip?token=1'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should reject an uppercase HTTP scheme with an archive extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('HTTP://example.com/releases/extension.tar.gz'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should reject http archive URLs when a fragment follows the extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('http://example.com/releases/extension.zip#v1'),
+      ).rejects.toThrow('Archive URLs must use https://');
+    });
+
+    it('should redact credentials in the https-required error', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource(
+          'http://user:ghp_s3cr3t@example.com/releases/extension.zip',
+        ),
+      ).rejects.toThrow(
+        'http://***REDACTED***@example.com/releases/extension.zip',
+      );
+    });
+  });
+
+  describe('HTTP URL parsing', () => {
+    it('should still parse plain http git URLs as git installs', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('http://example.com:8080/repo');
+
+      expect(result.source).toBe('http://example.com:8080/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should keep non-http git transports with archive-shaped paths installable', async () => {
+      // isArchiveShapedUrl is scheme-agnostic, so an sso:// URL whose
+      // pathname ends in an archive extension is archive-shaped — but the
+      // insecure-scheme rejection narrows to http:// only, because isGitUrl
+      // admits other non-https transports that may legitimately serve git
+      // repositories with such names. This case discriminates on that
+      // conjunct: deleting the startsWith('http://') guard turns it red.
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('sso://git.corp/team/tools.zip');
+
+      expect(result.source).toBe('sso://git.corp/team/tools.zip');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should keep unparseable http URLs on the git path instead of throwing Invalid URL', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('http://exa mple.com/plugin.zip');
+
+      expect(result.type).toBe('git');
+      expect(result.source).toBe('http://exa mple.com/plugin.zip');
+    });
+
+    it('should mention the git-remote reading for http URLs that end in an archive extension', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      // Only the git@/SSH remote (or a local clone into a non-archive-named
+      // directory) actually reaches the git path — an https:// URL with an
+      // archive pathname is classified as an archive download first — so the
+      // message must not recommend it. The assertion pins the message
+      // end-to-end (^…$): appends (M10), mid-message insertions and any
+      // rewording that re-adds an https:// recommendation all go red here.
+      await expect(
+        parseInstallSource('http://example.com:8080/team/tools.zip'),
+      ).rejects.toThrow(
+        /^Archive URLs must use https:\/\/ \(got [^)]*\)\. Re-download the archive from an HTTPS URL — or, if this is a Git repository whose name ends in an archive extension, use its git@\/SSH remote, or clone it into a directory whose name does not end in \.zip or \.tar\.gz and install from that local path\.$/,
+      );
     });
   });
 

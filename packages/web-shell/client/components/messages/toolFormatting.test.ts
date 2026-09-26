@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  extractRawOutputText,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -397,6 +398,34 @@ describe('toolFormatting', () => {
         }),
       ),
     ).toBe('3 line(s)');
+  });
+
+  it('extracts free-form Advisor advice without JSON wrappers', () => {
+    expect(
+      extractRawOutputText({
+        type: 'advisor_advice',
+        model: 'advisor-model',
+        text: 'Check the retry boundary.',
+      }),
+    ).toBe('Check the retry boundary.');
+  });
+
+  it('formats structured Advisor output as readable markdown', () => {
+    const advisor = tool({
+      toolName: 'advisor',
+      rawOutput: {
+        type: 'advisor_review',
+        verdict: 'Sound approach.',
+        risks: 'Retry handling is unclear.',
+        missingEvidence: 'No integration result.',
+        recommendation: 'Run the integration test.',
+      },
+    });
+
+    expect(extractRawOutputText(advisor.rawOutput)).toContain(
+      '## Verdict\nSound approach.',
+    );
+    expect(getToolResultSummary(advisor)).toBe('Sound approach.');
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {
