@@ -114,9 +114,10 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 ### 5.3 真实请求
 
 一个场景通过 MockMvc 在假 Harness 上调用每个非 `planned` 的 operation：公共 API
-上的一个已完成 Turn、一次输入与一次取消、改名、归档、取消归档与删除；WebShell
-适配层上的创建、列表、查询、transcript、提交、取消与 SSE 流；以及跨租户 `404` 和
-幂等 `409` 错误。每次调用检查：
+上的一个已完成 Turn、一次输入与一次取消、改名、归档、对已归档 Session 的一次查询
+与一次列表、取消归档与删除；WebShell 适配层上带首条消息与不带首条消息的创建、
+列表、查询、transcript、提交、取消与 SSE 流；以及跨租户 `404` 和幂等 `409` 错误。
+每次调用检查：
 
 - 测试发送的请求体符合请求 schema；
 - 状态码是 spec 对该调用期望的状态码；
@@ -170,7 +171,7 @@ override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D2                         | 所有 Session 响应缺 `agent_revision` 与 `capabilities`；record 缺 `replay_floor_sequence`、`snapshot_through_sequence` 与 `PublicTurn.input_item_id`；`CreateSessionRequest` 缺 `agent_revision`；WebShell 命令不回传 `X-Request-Id`；record 中仍有 `WebShellStreamRequest.limit`；输入块只接受 `text`，不接受契约中的 `input_text`。 |
 | D3                         | 公共与 WebShell 事件（JSON 与 SSE）缺 `schema_version`、`projection_version`、`item_id` 与 `content_part_id`；事件与 transcript 分页对大于 100 的 `limit` 返回 `400 invalid_limit`。                                                                                                                                                  |
-| 生命周期工作               | `archive` 与 `DELETE` 返回 `200`，而不是带命令 operation 的 `202`；`DeletedSession` 没有 schema。                                                                                                                                                                                                                                     |
+| 生命周期工作               | `archive` 与 `DELETE` 返回 `200`，而不是带命令 operation 的 `202`；`DeletedSession` 没有 schema；已归档的 Session 读回时 `status` 为 `"archived"`，而契约的状态枚举没有该值（v1.10 用计划中的 `archived_at` 表示归档）。                                                                                                              |
 | Workspace 上下文（W0d/W2） | 两个入口上 Session 的 `workspace` 都缺 `context_revision` 与 `state`。                                                                                                                                                                                                                                                                |
 
 输入类型不一致不在 issue 列出的差异中，是 5.3 的请求校验发现的。服务端的
@@ -198,7 +199,23 @@ override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 
 ## 10. 后续工作
 
 D2 与 D3 可以并行开始。各自关闭第 7 节中属于自己的差异，然后按 issue 的定义把
-对应路由改为 `implemented`。
+对应路由改为 `implemented`。差异文件无法记录这些切片必须修复的全部内容：
+
+- **未声明的错误响应（D2）。** 若干 `partial` operation 没有声明服务端实际返回的
+  错误状态码：WebShell transcript 与会话列表的 `404 session_not_found` 和
+  `400 invalid_limit`，公共事件查询的 `400 invalid_limit`，以及 WebShell 提交与
+  取消的 `400`/`404`。spec 未声明的状态码，测试不会校验其响应体，因此 D2 在加入
+  `request_id` 时一并补上这些响应。
+- **符合 schema 的语义问题（D3）。** 事件分页已满时仍返回 `has_more: false` 与
+  `next_cursor: null`。该响应符合 schema，差异文件无法记录，必须由 D3 自己的测试
+  覆盖。
+- **绑定 Workspace 的 Session。** 绑定 W0b workspace 的 Session 读回时缺
+  `context_revision` 与 `state`。四行 `record … WorkspaceContext` 已间接覆盖；
+  Workspace 上下文切片应在场景中加入对已绑定 Session 的读取。
+- **与 W0d 的合入顺序。** W0d 映射了 v1.13 中标为 `planned` 的 workspace 路由，
+  新增了 spec 中没有的 WebShell `workspaces/get` 路由，并加入了生成器按
+  `planned` 剔除的 Session `workspace` 字段。后合入的一方负责把这些路由和字段改为
+  `partial`、补上缺失的路由，并重新生成 TypeScript 类型。
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml

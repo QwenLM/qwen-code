@@ -282,6 +282,11 @@ class ManagedAgentApiContractTest {
                 post("/v1/agents/sessions/{id}/archive", sessionId)
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-archive"), null);
+        exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null);
+        exchange(drift, "listSessions", 200, get("/v1/agents/sessions")
+                .param("limit", "100").header(TENANT, tenant), null);
         exchange(drift, "unarchiveSession", 200,
                 post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TENANT, tenant)
@@ -356,7 +361,17 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\",\"limit\":1000}"
                         .formatted(webSessionId));
 
-        for (String id : List.of(sessionId, cancelledId, webSessionId)) {
+        String webInputId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"contract-trace","idempotencyKey":"contract-web-input",
+                 "agentId":"qwen-code","input":[{"type":"text","text":"hello"}]}
+                """)).get("sessionId").asText();
+        awaitMaterialized(tenant, webInputId);
+
+        for (String id : List.of(sessionId, cancelledId, webSessionId,
+                webInputId)) {
             exchange(drift, "deleteSession", 202,
                     delete("/v1/agents/sessions/{id}", id)
                             .header(TENANT, tenant)

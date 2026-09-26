@@ -42,6 +42,7 @@ request postSessionEvent: / oneOf
 request postSessionEvent: / required turn_id
 request postSessionEvent: /input/*/type enum
 request postSessionEvent: /type const
+request webShellCreateSession: /input/*/type enum
 request webShellSubmitTurn: /input/*/type enum
 
 # D3: event versions and top-level Item and Part identity.
@@ -67,6 +68,10 @@ response webShellTranscript: expected 200, got 400 invalid_limit
 record DeletedSession has no schema
 response archiveSession: expected 202, got 200
 response deleteSession: expected 202, got 200
+# An archived Session reads back with status "archived", which the contract's
+# status enum lacks; v1.10 models archive with archived_at instead.
+response getSession 200: /status enum
+response listSessions 200: /data/*/status enum
 
 # Workspace context (W0d/W2, outside Stage D): the Session workspace lacks its
 # context revision and state.

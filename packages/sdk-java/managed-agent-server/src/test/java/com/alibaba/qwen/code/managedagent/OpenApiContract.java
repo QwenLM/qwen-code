@@ -11,7 +11,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,18 +48,19 @@ final class OpenApiContract {
 
     List<Operation> operations() {
         List<Operation> operations = new ArrayList<>();
-        spec.get("paths").fields().forEachRemaining(path ->
-                path.getValue().fields().forEachRemaining(method -> {
-                    if (METHODS.contains(method.getKey())) {
-                        JsonNode node = method.getValue();
-                        operations.add(new Operation(
-                                method.getKey().toUpperCase(),
-                                path.getKey(),
-                                node.get("operationId").asText(),
-                                node.path(STATUS).asText("implemented"),
-                                node));
-                    }
-                }));
+        for (Map.Entry<String, JsonNode> path
+                : spec.get("paths").properties()) {
+            for (Map.Entry<String, JsonNode> method
+                    : path.getValue().properties()) {
+                if (METHODS.contains(method.getKey())) {
+                    JsonNode node = method.getValue();
+                    operations.add(new Operation(
+                            method.getKey().toUpperCase(), path.getKey(),
+                            node.get("operationId").asText(),
+                            node.path(STATUS).asText("implemented"), node));
+                }
+            }
+        }
         return operations;
     }
 
@@ -90,11 +90,10 @@ final class OpenApiContract {
                     .substring(1)), properties);
             return;
         }
-        Iterator<Map.Entry<String, JsonNode>> fields =
-                schema.path("properties").fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> field = fields.next();
-            properties.put(field.getKey(), planned(field.getValue()));
+        for (Map.Entry<String, JsonNode> field
+                : schema.path("properties").properties()) {
+            properties.merge(field.getKey(), planned(field.getValue()),
+                    Boolean::logicalAnd);
         }
         for (String combinator : List.of("oneOf", "allOf")) {
             for (JsonNode member : schema.path(combinator)) {

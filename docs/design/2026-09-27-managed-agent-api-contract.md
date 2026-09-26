@@ -126,9 +126,10 @@ with both the input and the cancellation event.
 
 One scenario drives every non-`planned` operation through MockMvc against the
 fake Harness: a completed Turn, an input and a cancellation, rename, archive,
-unarchive and delete on the public API; create, query, get, transcript,
-submit, cancel and the SSE stream on the WebShell adapter; and cross-tenant
-`404` and idempotency `409` errors. For each exchange it checks that:
+a get and a list of the archived Session, unarchive and delete on the public
+API; create with and without a first message, query, get, transcript, submit,
+cancel and the SSE stream on the WebShell adapter; and cross-tenant `404` and
+idempotency `409` errors. For each exchange it checks that:
 
 - the request body the test sends is valid against the request schema;
 - the status is the one the spec expects for that call;
@@ -189,7 +190,7 @@ the generator reads only `stdout.hasBasic`, which 7.2.0 also provides.
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | D2                         | `agent_revision` and `capabilities` missing from every Session response; `replay_floor_sequence`, `snapshot_through_sequence` and `PublicTurn.input_item_id` missing from the records; `agent_revision` missing from `CreateSessionRequest`; no `X-Request-Id` on WebShell commands; `WebShellStreamRequest.limit` still in the record; input blocks accept only `text`, not the contract's `input_text`. |
 | D3                         | `schema_version`, `projection_version`, `item_id` and `content_part_id` missing from public and WebShell events, in JSON and SSE; event and transcript pages reject `limit` above 100 with `400 invalid_limit`.                                                                                                                                                                                           |
-| Lifecycle work             | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema.                                                                                                                                                                                                                                                                                            |
+| Lifecycle work             | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema; an archived Session reads back with `status: "archived"`, which the contract's status enum lacks (v1.10 models archiving with the planned `archived_at`).                                                                                                                                  |
 | Workspace context (W0d/W2) | The Session `workspace` lacks `context_revision` and `state` on both surfaces.                                                                                                                                                                                                                                                                                                                            |
 
 The input type mismatch was not in the issue's list; the request validation in
@@ -220,7 +221,27 @@ WebShell client sends `text`, so both must change together in D2.
 ## 10. Follow-up
 
 D2 and D3 can start in parallel. Each closes its gaps from section 7 and then
-moves its routes to `implemented`, as the issue defines.
+moves its routes to `implemented`, as the issue defines. The gap file cannot
+hold everything those slices must fix:
+
+- **Undeclared error responses (D2).** Several `partial` operations do not
+  declare error statuses that the server returns: `404 session_not_found` and
+  `400 invalid_limit` on the WebShell transcript and session query,
+  `400 invalid_limit` on the public event query, and `400`/`404` on WebShell
+  submit and cancel. The test does not validate a body whose status the spec
+  does not declare, so D2 adds these responses together with `request_id`.
+- **Schema-valid semantics (D3).** A full event page returns
+  `has_more: false` and `next_cursor: null`. The response matches the schema,
+  so no gap line can record it, and D3's own tests must cover it.
+- **Workspace-bound Sessions.** A Session bound to a W0b workspace reads back
+  without `context_revision` and `state`. The four `record … WorkspaceContext`
+  lines cover this indirectly; the workspace-context slice should add a read of
+  a bound Session to the scenario.
+- **Merge order with W0d.** W0d maps the workspace routes that v1.13 marks
+  `planned`, adds the WebShell `workspaces/get` route that the spec lacks, and
+  adds the Session `workspace` field that the generator strips as `planned`.
+  Whichever change lands second marks those routes and fields `partial`, adds
+  the missing route, and regenerates the TypeScript types.
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml
