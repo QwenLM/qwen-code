@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.24.0",
+  "private": true,
+  "version": "0.24.6",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -21,20 +22,22 @@
     "packages/channels/plugin-example",
     "integrations/external-context",
     "integrations/external-context-mem0",
-    "!packages/desktop-shell",
-    "!packages/live-host"
+    "!packages/desktop",
+    "!packages/live-host",
+    "!packages/mobile-shell"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.24.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.24.6"
   },
   "scripts": {
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
+    "dev:managed-agent-web": "npm --workspace packages/web-shell run dev -- --port 5174",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
@@ -43,7 +46,7 @@
     "build-and-start": "npm run build && npm run start",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
-    "build:packages": "npm run build --workspaces",
+    "build:packages": "corepack pnpm -r run build",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
     "test": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test --workspaces --if-present",
@@ -53,13 +56,18 @@
     "test:release:workspaces": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present -- --coverage.enabled=false",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
+    "test:e2e:managed-agent-server": "tsx scripts/run-managed-agent-server-e2e.ts",
+    "test:e2e:managed-session-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover",
+    "test:e2e:managed-inflight-failover": "tsx scripts/run-managed-agent-server-e2e.ts --inflight-failover",
+    "test:e2e:managed-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover",
     "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
     "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
+    "test:integration:hosted:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --config ./vitest.hosted.config.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
@@ -84,7 +92,7 @@
     "smoke:sdk:python": "python3 packages/sdk-python/scripts/smoke_real.py",
     "build:sdk:python": "python3 -m build packages/sdk-python",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
-    "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci && npm run check:serve-fast-path-bundle",
+    "preflight": "npm run clean && corepack pnpm install --frozen-lockfile && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci && npm run check:serve-fast-path-bundle",
     "postinstall": "patch-package",
     "prepare": "node scripts/prepare.js",
     "prepare:package": "node scripts/prepare-package.js",
@@ -129,12 +137,20 @@
   "devDependencies": {
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
+    "@qwen-code/acp-bridge": "file:packages/acp-bridge",
+    "@qwen-code/channel-base": "file:packages/channels/base",
+    "@qwen-code/qwen-code": "file:packages/cli",
+    "@qwen-code/qwen-code-core": "file:packages/core",
+    "@qwen-code/sdk": "file:packages/sdk-typescript",
+    "@qwen-code/web-shell": "file:packages/web-shell",
+    "@qwen-code/web-templates": "file:packages/web-templates",
     "@types/chrome": "^0.1.32",
     "@types/jsdom": "^28.0.3",
     "@types/marked": "^5.0.2",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/node": "20.19.1",
     "@types/proper-lockfile": "^4.1.4",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
@@ -174,7 +190,8 @@
     "typescript-eslint": "^8.30.1",
     "vitest": "^3.2.4",
     "yaml": "^2.8.1",
-    "yargs": "^17.7.2"
+    "yargs": "^17.7.2",
+    "zod": "3.25.76"
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
@@ -185,6 +202,7 @@
     "@lydell/node-pty": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"

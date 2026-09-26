@@ -132,6 +132,11 @@ describe('normalize', () => {
     expect(normalize('model-v1.1')).toBe('model');
   });
 
+  it('should keep the DeepSeek V4 generation suffix the limit table keys on', () => {
+    expect(normalize('deepseek-v4')).toBe('deepseek-v4');
+    expect(normalize('deepseek-v4.1')).toBe('deepseek-v4.1');
+  });
+
   it('should remove suffix version numbers w/o "v" prefix only if they are preceded by another dash', () => {
     expect(normalize('model-test-1.1')).toBe('model-test');
     expect(normalize('gpt-4.1')).toBe('gpt-4.1');
@@ -263,8 +268,16 @@ describe('tokenLimit', () => {
 
   describe('DeepSeek', () => {
     it('should return 1M for DeepSeek V4 models', () => {
+      expect(tokenLimit('deepseek-v4')).toBe(1000000);
       expect(tokenLimit('deepseek-v4-flash')).toBe(1000000);
       expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
+    });
+
+    it('should return 1M/384K for the official API deepseek-flash name', () => {
+      // api.deepseek.com serves V4 flash as `deepseek-flash`; the DashScope
+      // spelling `deepseek-v4.1-flash` is rejected by the official endpoint.
+      expect(tokenLimit('deepseek-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-flash', 'output')).toBe(384000);
     });
 
     it('should return 128K for DeepSeek models', () => {
@@ -474,6 +487,7 @@ describe('tokenLimit with output type', () => {
 
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
+      expect(tokenLimit('deepseek-v4', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-v4-flash', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-v4-pro', 'output')).toBe(384000);
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);

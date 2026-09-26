@@ -91,7 +91,7 @@ import { scanWorkflowScriptShape } from '../../agents/runtime/workflow-script-sh
 import {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringSurface,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   WORKFLOW_AUTHORING_SKILL_NAME,
   type WorkflowAuthoringReference,
   type WorkflowAuthoringSurface,
@@ -99,6 +99,7 @@ import {
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
+  NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from '../../agents/workflow-resume-call.js';
 
@@ -233,7 +234,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'first changed/missing call onward runs live. Pass the `scriptPath` ' +
         'the original run returned and the same `args`. Editing a saved ' +
         'workflow changes future runs too, so copy it for run-specific edits. ' +
-        'Replay requires a journal; without one, every agent() call runs live. ' +
+        'A run whose journal is not on disk has nothing to resume and is ' +
+        'refused; call again without `resumeFromRunId` to start over. ' +
         'The journal keys hash each agent() ' +
         "call's prompt and opts, not the script text, so post-processing can " +
         'change without losing the cache.',
@@ -866,7 +868,9 @@ function buildRunTrailer(
       ? { nameOnly: true, resumeName: entry?.resumeName }
       : {}),
   });
-  if (resume && includeResume) {
+  // A resume replays the run's journal, so a run that wrote none is not
+  // offered one: the call would be refused.
+  if (resume && includeResume && handle.journalPath) {
     // A name-only resume call is built from the name, not the path, so the
     // path is read only when the run has one.
     const scriptPath = handle.scriptPath;
@@ -886,13 +890,14 @@ function buildRunTrailer(
             !isGeneratedWorkflowScriptPath(config, scriptPath))
         ? 'this reads the saved workflow; copy it before making a run-specific change'
         : 'edit that generated copy first if the script needs to change';
-    const journalAdvice = handle.journalPath
-      ? 'the journal replays the longest unchanged prefix of agent() calls, and the first changed call onward runs live'
-      : 'no journal was written for this run, so every agent() call runs live';
-    lines.push(`resume: ${resume} — ${pathAdvice}; ${journalAdvice}.`);
+    lines.push(
+      `resume: ${resume} — ${pathAdvice}; the journal replays the longest unchanged prefix of agent() calls, and the first changed call onward runs live.`,
+    );
     if (hasUninlinableResumeArgs({ runId: handle.runId, args })) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  } else if (resume && includeResume) {
+    lines.push(NO_JOURNAL_NO_RESUME_NOTE);
   }
   // A script that threw has to be rewritten, and the model may have written
   // it without reading the reference — the description only points at it. The
@@ -1553,7 +1558,7 @@ const WORKFLOW_TOOL_RUNTIME_NAME_ONLY = withReplacements(
 );
 
 /** Appended to the pointer when a `tools.eager` allowlist defers the Skill tool. */
-const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
 
 /**
  * Leads the inlined reference. The reference is written for sessions that can
@@ -1699,7 +1704,7 @@ function buildWorkflowAuthoringHint(
     case 'pointer-via-tool-search':
       // The retry moment is exactly when the model reaches for the Skill tool,
       // so the detour the description names has to be repeated here.
-      return `${loadSkill} ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+      return `${loadSkill} ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
     case 'inline':
       return "hint: See the authoring reference in this tool's description, fix the script, and retry.";
     case 'withheld':

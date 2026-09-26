@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type {
   Config,
   ToolCallRequestInfo,
@@ -30,8 +31,9 @@ import {
   isShellProgressData,
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
+import type { ResolvedGeneratorForModel } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
 import * as path from 'node:path';
-import { useCallback, useState, useMemo } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
@@ -118,6 +120,26 @@ export function useReactToolScheduler(
     TrackedToolCall[]
   >([]);
 
+  // useLlmStream passes inline callbacks, so identities change every render.
+  // Recreating CoreToolScheduler then would drop an in-flight batch's queue
+  // and let a later schedule() run in parallel on a fresh idle instance.
+  const onCompleteRef = useRef(onComplete);
+  const getPreferredEditorRef = useRef(getPreferredEditor);
+  const onEditorCloseRef = useRef(onEditorClose);
+  const onToolResultFullTurnModelRef = useRef(onToolResultFullTurnModel);
+
+  useLayoutEffect(() => {
+    onCompleteRef.current = onComplete;
+    getPreferredEditorRef.current = getPreferredEditor;
+    onEditorCloseRef.current = onEditorClose;
+    onToolResultFullTurnModelRef.current = onToolResultFullTurnModel;
+  }, [
+    onComplete,
+    getPreferredEditor,
+    onEditorClose,
+    onToolResultFullTurnModel,
+  ]);
+
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
       // Shell liveness heartbeats are for headless consumers; the TUI
@@ -142,9 +164,9 @@ export function useReactToolScheduler(
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
     async (completedToolCalls) => {
-      await onComplete(completedToolCalls);
+      await onCompleteRef.current(completedToolCalls);
     },
-    [onComplete],
+    [],
   );
 
   const toolCallsUpdateHandler: ToolCallsUpdateHandler = useCallback(
@@ -204,18 +226,18 @@ export function useReactToolScheduler(
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
-        getPreferredEditor,
-        onEditorClose,
-        onToolResultFullTurnModel,
+        getPreferredEditor: () => getPreferredEditorRef.current(),
+        onEditorClose: () => onEditorCloseRef.current(),
+        // Always wrap: Core treats a missing callback as false, and a later
+        // render may introduce onToolResultFullTurnModel on the same instance.
+        onToolResultFullTurnModel: (model: string) =>
+          onToolResultFullTurnModelRef.current?.(model) ?? false,
       }),
     [
       config,
       outputUpdateHandler,
       allToolCallsCompleteHandler,
       toolCallsUpdateHandler,
-      getPreferredEditor,
-      onEditorClose,
-      onToolResultFullTurnModel,
     ],
   );
 
@@ -225,8 +247,49 @@ export function useReactToolScheduler(
       signal: AbortSignal,
       modelOverride?: string,
     ) => {
+      const requests = Array.isArray(request) ? request : [request];
+      const isQueuedCancellation = (error: unknown) =>
+        signal.aborted &&
+        error instanceof Error &&
+        error.message === 'Tool call cancelled while in queue.';
+      const completeAsCancelled = async () => {
+        const reason =
+          '[Operation Cancelled] Reason: Tool call cancelled before execution.';
+        const cancelledCalls: CompletedToolCall[] = requests.map(
+          (toolRequest) => ({
+            status: 'cancelled',
+            request: toolRequest,
+            response: {
+              callId: toolRequest.callId,
+              responseParts: convertToFunctionErrorResponse(
+                toolRequest.name,
+                toolRequest.callId,
+                reason,
+                reason,
+              ),
+              resultDisplay: undefined,
+              error: undefined,
+              errorType: undefined,
+              executionStatus: 'not_started',
+              contentLength: reason.length,
+            },
+            durationMs: 0,
+          }),
+        );
+        await allToolCallsCompleteHandler(cancelledCalls);
+      };
+
       if (!modelOverride?.endsWith('\0')) {
         void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (isQueuedCancellation(error)) {
+            void completeAsCancelled().catch((completionError: unknown) => {
+              debugLogger.error(
+                'Tool cancellation completion failed:',
+                completionError,
+              );
+            });
+            return;
+          }
           if (signal.aborted) return;
           debugLogger.error(
             `Tool scheduling failed: ${
@@ -236,15 +299,10 @@ export function useReactToolScheduler(
         });
         return;
       }
+      // Declared outside the detached task so the terminal handler below can
+      // name the batch it failed to complete.
       void (async () => {
-        try {
-          const runtimeView = await config
-            .getBaseLlmClient()
-            .resolveForModel(modelOverride.slice(0, -1), {
-              failClosed: true,
-            });
-          await scheduler.schedule(request, signal, runtimeView);
-        } catch (error) {
+        const completeAsSchedulingError = async (error: unknown) => {
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
@@ -252,7 +310,6 @@ export function useReactToolScheduler(
           );
           const message =
             'Full-turn tool scheduling failed. The tool was not executed.';
-          const requests = Array.isArray(request) ? request : [request];
           const completedCalls: CompletedToolCall[] = requests.map(
             (toolRequest) => {
               const toolError = new Error(message);
@@ -279,9 +336,60 @@ export function useReactToolScheduler(
           );
           setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
           await allToolCallsCompleteHandler(completedCalls);
+        };
+
+        // A fail-closed runtime-model resolution is a scheduling failure,
+        // never a user cancellation, so it gets its own `try`: even when the
+        // signal aborts in the same window it must still land on the error
+        // path (and its log line) rather than vanish into the cancellation
+        // branch below.
+        let runtimeView: ResolvedGeneratorForModel;
+        try {
+          runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(modelOverride.slice(0, -1), {
+              failClosed: true,
+            });
+        } catch (error) {
+          await completeAsSchedulingError(error);
           return;
         }
-      })();
+
+        try {
+          await scheduler.schedule(request, signal, runtimeView);
+        } catch (error) {
+          // The busy scheduler rejects a queued request once its signal
+          // aborts, which is a cancellation rather than a scheduling failure.
+          // Completing it as `cancelled` — instead of returning early — still
+          // runs the caller's completion path, the only place that releases
+          // the batch and continuation ownership registered for these
+          // callIds. An aborted signal alone is not enough: any other
+          // rejection is a real scheduling failure and must keep its
+          // `errorType`, so this matches the exact Core queue rejection
+          // (see `CoreToolScheduler.schedule`).
+          if (isQueuedCancellation(error)) {
+            await completeAsCancelled();
+            return;
+          }
+          await completeAsSchedulingError(error);
+        }
+      })().catch((error: unknown) => {
+        // Terminal handler for the detached task: the completion callbacks
+        // above are caller-supplied and may reject. Containing that here
+        // keeps a rejected completion from surfacing as an unhandled
+        // rejection, and deliberately does not retry or complete the batch a
+        // second time. Keep the stack and the callIds in the line: they are
+        // the only way to tie it back to a turn.
+        const detail =
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error);
+        debugLogger.error(
+          `Full-turn tool completion failed for callIds ${requests
+            .map((toolRequest) => toolRequest.callId)
+            .join(', ')}: ${detail}`,
+        );
+      });
     },
     [allToolCallsCompleteHandler, config, scheduler],
   );
@@ -365,8 +473,10 @@ export function mapToDisplay(
       let renderOutputAsMarkdown = false;
 
       if (
-        trackedCall.status === 'error' ||
+        (trackedCall.status === 'error' &&
+          trackedCall.request.name !== ToolNames.ADVISOR) ||
         trackedCall.tool === undefined ||
+        !('invocation' in trackedCall) ||
         trackedCall.invocation === undefined
       ) {
         displayName =

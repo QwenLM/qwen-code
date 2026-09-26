@@ -9,6 +9,7 @@ import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
+  getRelaunchExecArgv,
 } from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -16,6 +17,13 @@ interface RelaunchOptions {
   afterSpawn?: () => void;
   childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
+  replaceProcess?: boolean;
+  /**
+   * `.env` files or `settings.env` injected values after this process's
+   * modules (and Node itself, e.g. NODE_EXTRA_CA_CERTS) read the environment,
+   * so only a fresh image sees them.
+   */
+  environmentChangedSinceBoot?: boolean;
 }
 
 export async function relaunchOnExitCode(
@@ -52,29 +60,72 @@ export async function relaunchAppInChildProcess(
     return;
   }
 
-  const runner = () => {
-    let updateOnExitRequested = false;
-
-    // process.argv is [node, script, ...args]
-    // We want to construct [ ...nodeArgs, script, ...scriptArgs]
-    const script = process.argv[1];
-    const scriptArgs = process.argv.slice(2);
-
-    const nodeArgs = [
-      ...process.execArgv,
-      ...additionalNodeArgs,
-      script,
-      ...additionalScriptArgs,
-      ...scriptArgs,
-    ];
-    const newEnv: NodeJS.ProcessEnv = {
+  const script = process.argv[1];
+  const scriptArgs = process.argv.slice(2);
+  const nodeArgs = [
+    ...getRelaunchExecArgv(),
+    ...additionalNodeArgs,
+    script,
+    ...additionalScriptArgs,
+    ...scriptArgs,
+  ];
+  const createChildEnv = (): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
     };
-    if (newEnv['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
-      newEnv['ELECTRON_RUN_AS_NODE'] = '1';
+    if (env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
+      env['ELECTRON_RUN_AS_NODE'] = '1';
     }
+    return env;
+  };
+
+  // `afterSpawn` runs once `createChildEnv()` has already snapshotted the
+  // environment, so it only ever scrubbed the *parent's* copy for the next
+  // relaunch iteration or subprocess — never the child's. Process replacement
+  // inherits that same snapshot and leaves no parent behind, so there is
+  // nothing for the hook to protect on this path.
+  if (
+    options?.replaceProcess &&
+    typeof process.execve === 'function' &&
+    !['win32', 'os400'].includes(process.platform)
+  ) {
+    // With no new Node or script arguments and no environment change since
+    // boot, the replacement image would be this process booted a second
+    // time: continue in place instead.
+    // `childEnv` only carries state (env provenance) that a fresh image must
+    // re-read and this process already holds, so only the no-relaunch guard
+    // is published.
+    if (
+      additionalNodeArgs.length === 0 &&
+      additionalScriptArgs.length === 0 &&
+      !options?.environmentChangedSinceBoot
+    ) {
+      process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+      return;
+    }
+    try {
+      return process.execve(
+        process.execPath,
+        [process.execPath, ...nodeArgs],
+        createChildEnv(),
+      );
+    } catch (error) {
+      // Fall back when the runtime supports execve but the replacement
+      // fails; surface the reason so a persistent failure (e.g. E2BIG) is
+      // visible instead of silently voiding the optimization.
+      writeStderrLine(
+        `Process replacement failed, using a supervised relaunch instead: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  const runner = () => {
+    let updateOnExitRequested = false;
+    const newEnv = createChildEnv();
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();

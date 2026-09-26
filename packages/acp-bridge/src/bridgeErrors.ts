@@ -23,6 +23,7 @@
  * httpAcpBridge.ts re-export shim.
  */
 
+import { RequestError } from '@agentclientprotocol/sdk';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
@@ -104,6 +105,44 @@ export class SessionNotFoundError extends Error {
   }
 }
 
+/**
+ * A caller-supplied session ID that a paired Bridge rejects before dispatch.
+ * Direct ACP callers still see invalid params (-32602); hosts map `errorKind`
+ * to 400 `invalid_session_id` or 409 `session_id_conflict`. An invalid ID is
+ * not echoed back.
+ */
+export class RequestedSessionIdRejectedError extends RequestError {
+  override readonly name = 'RequestedSessionIdRejectedError';
+
+  constructor(
+    readonly errorKind: 'invalid_session_id' | 'session_id_conflict',
+    readonly sessionId?: string,
+  ) {
+    super(
+      -32602,
+      errorKind === 'invalid_session_id'
+        ? 'Invalid params: Requested session ID is invalid'
+        : `Invalid params: Session ${sessionId} is already live`,
+      errorKind === 'invalid_session_id'
+        ? { errorKind }
+        : { errorKind, sessionId },
+    );
+  }
+}
+
+/** Managed sessions cannot be branched or forked into side tasks. */
+export class ManagedSessionBranchUnsupportedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} runs on the Managed execution engine, which does not support branching`,
+    );
+    this.name = 'ManagedSessionBranchUnsupportedError';
+    this.sessionId = sessionId;
+  }
+}
+
 export class SessionArchivedError extends Error {
   readonly sessionId: string;
 
@@ -162,9 +201,9 @@ export class SessionArchivingError extends Error {
  *
  * `restore_in_progress` is the ordinary case: a restore is running and the
  * caller can retry shortly. `awaiting_abandoned_cleanup` means the public
- * caller already received a timeout, but the non-cancellable ACP registration
- * request (and its cleanup) has not settled yet — retrying at the ordinary
- * cadence just re-hits the fence, so clients must back off much further.
+ * caller already received a timeout or registration failure, but registration
+ * or cleanup has not settled yet. Its conservative backoff is not an estimate
+ * of when cleanup will complete.
  */
 export type RestoreInProgressReason =
   | 'restore_in_progress'
@@ -205,7 +244,7 @@ export class RestoreInProgressError extends Error {
         : `session/${activeAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned registration has not settled yet; retry ${retryTarget} once cleanup completes`
+        ? `Session "${sessionId}" has an abandoned registration from ${activeTarget} whose cleanup has not settled yet; retry ${retryTarget} once cleanup completes`
         : activeAction === 'spawn'
           ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
           : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
@@ -751,5 +790,20 @@ export class McpAuthenticationInProgressError extends Error {
   constructor() {
     super('Another MCP authentication is already in progress');
     this.name = 'McpAuthenticationInProgressError';
+  }
+}
+
+export class WorkspaceRuntimeStopError extends Error {
+  constructor(
+    readonly code:
+      | 'workspace_runtime_stop_stale'
+      | 'workspace_runtime_stop_blocked',
+  ) {
+    super(
+      code === 'workspace_runtime_stop_stale'
+        ? 'The workspace changed. Refresh and confirm the affected sessions again.'
+        : 'The workspace cannot be stopped while other runtime work is pending.',
+    );
+    this.name = 'WorkspaceRuntimeStopError';
   }
 }

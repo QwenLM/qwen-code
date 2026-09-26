@@ -66,7 +66,6 @@ import {
 import { collectSessionTurnState } from './session-turn-state.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -89,6 +88,30 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
+
+/** A v2 goal_state payload with the given objective, as the runtime journals it. */
+function goalStatePayload(objective: string, recordId = 'cursor') {
+  return {
+    v: 2 as const,
+    cause: 'create' as const,
+    snapshot: {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: `goal-${objective.replace(/\W+/g, '-')}`,
+        revision: 1,
+        objective,
+        status: 'active' as const,
+        evidenceCursor: { recordId },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    },
+  };
+}
 
 describe('SessionTranscriptReader', () => {
   let runtimeDir: string;
@@ -1727,20 +1750,10 @@ describe('SessionTranscriptReader', () => {
     const inheritedGoal: ChatRecord = {
       ...record('goal', 'a1', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'goal' },
-      systemPayload: {
-        rawCommand: '/goal inherited goal',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'inherited goal',
-          },
-        ],
-      },
+      systemPayload: goalStatePayload('inherited goal'),
     };
     await writeRecords([
       inheritedUser,
@@ -1792,29 +1805,17 @@ describe('SessionTranscriptReader', () => {
     const visibleGoal: ChatRecord = {
       ...record('visible-goal', null, ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
-      systemPayload: {
-        rawCommand: '/goal visible goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'visible goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('visible goal'),
     };
     const hiddenGoal: ChatRecord = {
       ...record('hidden-goal', 'visible-goal', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'hidden-goal' },
-      systemPayload: {
-        rawCommand: '/goal hidden goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'hidden goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('hidden goal'),
     };
     await writeRecords([
       record('u0', null, 'older prompt'),
@@ -2253,6 +2254,8 @@ describe('SessionTranscriptReader', () => {
         },
       },
     };
+    // A goal_status card from a build before #7895 is history, not a
+    // recovery candidate: it is neither normalized nor carried.
     const legacy: ChatRecord = {
       ...record('legacy', 'u1', ''),
       type: 'system',
@@ -2303,15 +2306,6 @@ describe('SessionTranscriptReader', () => {
     });
     expect(projection?.runtime.goalRecoverySourceUuid).toBe('valid-goal');
     expect(projection?.runtime.goalRecords).toEqual([
-      expect.objectContaining({
-        uuid: 'legacy',
-        systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'legacy goal' },
-          ],
-        },
-      }),
       expect.objectContaining({ uuid: 'valid-goal', systemPayload: validGoal }),
       expect.objectContaining({ uuid: 'malformed-goal', systemPayload: null }),
     ]);
@@ -2419,202 +2413,6 @@ describe('SessionTranscriptReader', () => {
       'qwen-code.daemon.session_restore.index_cache_state',
       'hit',
     );
-  });
-
-  it('retains the determining legacy Goal candidate for a recent live page', async () => {
-    const legacyGoal: ChatRecord = {
-      ...record('goal', null, ''),
-      type: 'system',
-      subtype: 'slash_command',
-      message: undefined,
-      systemPayload: {
-        rawCommand: '/goal keep the live goal visible',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'keep the live goal visible',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    await writeRecords([
-      legacyGoal,
-      record('u1', 'goal', 'one'),
-      record('a1', 'u1', 'one answer'),
-      record('u2', 'a1', 'two'),
-      record('a2', 'u2', 'two answer'),
-    ]);
-
-    const projection = await new SessionTranscriptReader(
-      workspaceDir,
-    ).readLiveRestoreProjection(sessionId, {
-      replay: {
-        kind: 'recent',
-        limit: 2,
-        hideInheritedHistory: false,
-      },
-    });
-
-    expect(projection?.replay?.records.map((item) => item.uuid)).toEqual([
-      'u2',
-      'a2',
-    ]);
-    expect(projection?.goalRecoverySourceUuid).toBe('goal');
-    expect(projection?.goalRecords).toEqual([
-      expect.objectContaining({ uuid: 'goal', subtype: 'slash_command' }),
-    ]);
-  });
-
-  it('projects a pending Goal checkpoint window without a full-loader fallback', async () => {
-    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
-    const cursor: ChatRecord = {
-      ...record('cursor', null, ''),
-      type: 'system',
-      subtype: 'goal_runtime',
-      message: undefined,
-    };
-    const evidence = Array.from({ length: 80 }, (_, index) => ({
-      ...record(
-        `a-evidence-${index}`,
-        index === 0 ? 'cursor' : `a-evidence-${index - 1}`,
-        `evidence ${index}`,
-      ),
-      provenance: 'assistant_output' as const,
-      goalContext: permit,
-    }));
-    const fragmentedEvidence: ChatRecord = {
-      ...evidence[0]!,
-      message: { role: 'model', parts: [{ text: 'fragment tail' }] },
-    };
-    const compression: ChatRecord = {
-      ...record('compression', evidence.at(-1)!.uuid, ''),
-      type: 'system',
-      subtype: 'chat_compression',
-      message: undefined,
-      systemPayload: {
-        compressedHistory: [
-          { role: 'user', parts: [{ text: 'summary' }] },
-          { role: 'model', parts: [{ text: 'summary result' }] },
-        ],
-      } as ChatRecord['systemPayload'],
-    };
-    const goalPayload: GoalStateRecordPayloadV2 = {
-      v: 2,
-      cause: 'turn_finished',
-      snapshot: {
-        v: 2,
-        activity: 'idle',
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'verify the result',
-          status: 'active',
-          evidenceCursor: { recordId: 'cursor' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      },
-      checkpointPending: {
-        permit,
-        recordUuid: evidence.at(-1)!.uuid,
-      },
-    };
-    const goalState: ChatRecord = {
-      ...record('goal-state', 'compression', ''),
-      type: 'system',
-      subtype: 'goal_state',
-      message: undefined,
-      systemPayload: goalPayload,
-    };
-    const filePath = await writeRecords([
-      cursor,
-      evidence[0]!,
-      fragmentedEvidence,
-      ...evidence.slice(1),
-      compression,
-      goalState,
-    ]);
-    let buildCount = 0;
-    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
-      if (builtPath === filePath) buildCount++;
-    });
-
-    const service = new SessionService(workspaceDir, {
-      runtimeBaseDir: runtimeDir,
-    });
-    const [loaded, projection] = await Promise.all([
-      service.loadSession(sessionId),
-      service.readRestoreProjection(sessionId, {
-        replay: { kind: 'none' },
-      }),
-    ]);
-    const expected = buildGoalEvidenceCheckpointWindow({
-      records: loaded!.conversation.messages,
-      goal: goalPayload.snapshot.goal!,
-      permit,
-    });
-
-    expect(projection?.runtime.goalCheckpointWindow).toEqual(expected);
-    expect(projection?.runtime.goalCheckpointWindow).toMatchObject({
-      shouldCheckpoint: true,
-      truncated: false,
-    });
-    expect(projection?.runtime.goalCheckpointWindow?.evidence).toHaveLength(80);
-    expect(projection?.runtime.goalCheckpointWindow?.evidence[0]?.content).toBe(
-      'evidence 0\nfragment tail',
-    );
-    expect(buildCount).toBe(1);
-  });
-
-  it('defers unavailable pending Goal evidence to runtime recovery', async () => {
-    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
-    const evidence = {
-      ...record('evidence', null, 'result'),
-      provenance: 'assistant_output' as const,
-      goalContext: permit,
-    };
-    const goalState: ChatRecord = {
-      ...record('goal-state', 'evidence', ''),
-      type: 'system',
-      subtype: 'goal_state',
-      message: undefined,
-      systemPayload: {
-        v: 2,
-        cause: 'turn_finished',
-        snapshot: {
-          v: 2,
-          activity: 'idle',
-          goal: {
-            goalId: permit.goalId,
-            revision: permit.revision,
-            objective: 'verify the result',
-            status: 'active',
-            evidenceCursor: { recordId: 'missing-cursor' },
-            turnCount: 1,
-            activeTimeMs: 0,
-            tokensUsed: 0,
-            createdAt: 1,
-            updatedAt: 2,
-          },
-        },
-        checkpointPending: { permit, recordUuid: evidence.uuid },
-      } satisfies GoalStateRecordPayloadV2,
-    };
-    await writeRecords([evidence, goalState]);
-
-    const projection = await new SessionTranscriptReader(
-      workspaceDir,
-    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
-
-    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
-    expect(projection?.runtime.goalRecords).toHaveLength(1);
-    expect(projection?.runtime.goalRecords[0]?.uuid).toBe('goal-state');
   });
 
   it('keeps backward pages within a normal user turn boundary', async () => {
@@ -3523,7 +3321,13 @@ describe('SessionTranscriptReader', () => {
     await reader.readPage(longSessionId);
     const longEstimate = getSessionTranscriptIndexCacheStatsForTest().byteSize;
 
-    expect(longEstimate - shortEstimate).toBeGreaterThan(80 * 1024);
+    // The background task id is retained per record and counted. The Goal
+    // context on the same records is not: the index kept a Goal evidence hint
+    // only to pre-build checkpoint windows, which no longer exist, so an
+    // 8 KB goal id and turn id must not grow the cache.
+    const growth = longEstimate - shortEstimate;
+    expect(growth).toBeGreaterThan(8 * 1024);
+    expect(growth).toBeLessThan(40 * 1024);
   });
 
   it('does not let an evicted pending build overwrite a newer cache entry', async () => {
@@ -4590,6 +4394,23 @@ describe('SessionTranscriptReader', () => {
         systemPayload: { displayText: 'Scheduled review' },
       } as ChatRecord;
     }
+
+    it('exposes the admitted prompt identity before a turn result is recorded', async () => {
+      await writeRecords([
+        {
+          ...record('u1', null, 'same prompt'),
+          daemonPromptId: 'active-prompt',
+        },
+      ]);
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId, { limit: 10 });
+      expect(page.turns).toHaveLength(1);
+      expect(page.turns[0]).toMatchObject({
+        turnId: 'u1',
+        promptId: 'active-prompt',
+      });
+    });
 
     it('builds stable sparse pages and projects only public previews', async () => {
       const attachmentToken = '@attachment:///file-1';
