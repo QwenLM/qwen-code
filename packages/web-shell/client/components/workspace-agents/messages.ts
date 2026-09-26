@@ -80,9 +80,11 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace.',
   'collab.share.scope': 'What they may ask for',
   'collab.share.scope.analysis': 'Read-only: look at the code and answer',
-  'collab.share.scope.analysisHint': 'The agent cannot change files for them.',
+  'collab.share.scope.analysisHint':
+    'The agent cannot change project files for them.',
   'collab.share.scope.full': 'Everything this agent can do',
-  'collab.share.scope.fullHint': 'Same as you asking it directly.',
+  'collab.share.scope.fullHint':
+    'Currently the same read-only access. Neither option allows project-file edits.',
   'collab.share.create': 'Create link',
   'collab.share.endpoint': 'A2A endpoint',
   'collab.share.token': 'Token',
@@ -450,9 +452,10 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里。',
   'collab.share.scope': '对方能让它做什么',
   'collab.share.scope.analysis': '只读：看代码、回答问题',
-  'collab.share.scope.analysisHint': 'Agent 不会替对方改文件。',
+  'collab.share.scope.analysisHint': 'Agent 不会替对方修改项目文件。',
   'collab.share.scope.full': '这个 Agent 能做的一切',
-  'collab.share.scope.fullHint': '和你直接找它一样。',
+  'collab.share.scope.fullHint':
+    '当前两种选项都是只读权限，都不能修改项目文件。',
   'collab.share.create': '生成分享',
   'collab.share.endpoint': 'A2A 地址',
   'collab.share.token': '令牌',
