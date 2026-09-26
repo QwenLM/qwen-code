@@ -28,21 +28,29 @@ import { DialogShell } from './DialogShell';
 import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
 import { GitHubPrsContent } from './GitHubPrsDialog';
+import { GitWorktreesContent } from './GitWorktreesDialog';
 import styles from './GitDialog.module.css';
 
-export type GitDialogView = 'diff' | 'log' | 'prs' | 'commit';
+export type GitDialogView = 'diff' | 'log' | 'prs' | 'worktrees' | 'commit';
 
 const GITHUB_PRS_FEATURE = 'workspace_github_prs';
+const GIT_WORKTREES_FEATURE = 'workspace_git_worktrees';
 
 const TITLE_KEYS: Record<GitDialogView, string> = {
   diff: 'gitDiff.title',
   log: 'gitLog.title',
   prs: 'githubPrs.title',
+  worktrees: 'gitWorktrees.title',
   commit: 'gitCommit.title',
 };
 
 /** Tabs visible in the tab bar — commit is a mode, not a regular tab. */
-const TAB_VIEWS: Exclude<GitDialogView, 'commit'>[] = ['diff', 'log', 'prs'];
+const TAB_VIEWS: Exclude<GitDialogView, 'commit'>[] = [
+  'diff',
+  'log',
+  'prs',
+  'worktrees',
+];
 const MAX_SUMMARY_CHARS = 3500;
 
 export function GitDialog({
@@ -51,6 +59,8 @@ export function GitDialog({
   initialView,
   sessionId,
   resolveSessionForWorkspace,
+  onOpenSession,
+  onNewWorktreeSession,
   onClose,
 }: {
   workspaceCwd: string;
@@ -61,6 +71,10 @@ export function GitDialog({
     cwd: string,
     forceCreate?: boolean,
   ) => Promise<string | undefined>;
+  /** Worktrees tab: switch to a session that lives in a worktree. */
+  onOpenSession?: (sessionId: string) => void;
+  /** Worktrees tab: start a new session in a fresh worktree. */
+  onNewWorktreeSession?: () => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -68,9 +82,13 @@ export function GitDialog({
   const { client, capabilities } = useWorkspace();
   const prsSupported =
     capabilities?.features?.includes(GITHUB_PRS_FEATURE) === true;
-  const tabViews = prsSupported
-    ? TAB_VIEWS
-    : TAB_VIEWS.filter((v) => v !== 'prs');
+  const worktreesSupported =
+    capabilities?.features?.includes(GIT_WORKTREES_FEATURE) === true;
+  const tabViews = TAB_VIEWS.filter(
+    (v) =>
+      (v !== 'prs' || prsSupported) &&
+      (v !== 'worktrees' || worktreesSupported),
+  );
   const [view, setView] = useState(initialView);
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
@@ -644,6 +662,13 @@ export function GitDialog({
             <GitLogContent
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              onSubtitleChange={setSubtitle}
+            />
+          ) : clampedTab === 'worktrees' ? (
+            <GitWorktreesContent
+              workspaceCwd={workspaceCwd}
+              onOpenSession={onOpenSession}
+              onNewWorktreeSession={onNewWorktreeSession}
               onSubtitleChange={setSubtitle}
             />
           ) : (

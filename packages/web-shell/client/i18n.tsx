@@ -57,6 +57,8 @@ const EN: Messages = {
   'capacityChoice.resume': 'Resume conversation',
   'capacityChoice.blocked.stopping': 'Stopping',
   'capacityChoice.blocked.not_live': 'No live ACP',
+  'capacityChoice.blocked.multiple_engine_channels':
+    'Multiple execution engines are running',
   'capacityChoice.blocked.release_unavailable':
     'Owned process release cannot be observed',
   'capacityChoice.blocked.session_start_pending':
@@ -96,6 +98,42 @@ const EN: Messages = {
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
+  'managed.title': 'Managed Agents',
+  'managed.sessions': 'Managed sessions',
+  'managed.conversation': 'Managed conversation',
+  'managed.new': 'New managed task',
+  'managed.refresh': 'Refresh',
+  'managed.empty': 'No managed tasks yet.',
+  'managed.loading': 'Loading…',
+  'managed.more': 'Load more',
+  'managed.prompt': 'Message the managed agent',
+  'managed.runtime': 'Environment',
+  'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
+  'managed.send': 'Send',
+  'managed.sending': 'Submitting…',
+  'managed.elapsed': (v) => `${v?.seconds ?? 0}s elapsed`,
+  'managed.runningHint':
+    'This turn is running. Sending another message is paused.',
+  'managed.retry': 'Retry the same request',
+  'managed.cancel': 'Cancel turn',
+  'managed.uncertain':
+    'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.newRequired': 'Start a new task to send another message.',
+  'managed.truncated': '[Details truncated]',
+  'managed.phase.admitted': 'Accepted',
+  'managed.phase.runtime_starting': 'Preparing environment',
+  'managed.phase.agent_running': 'Thinking / responding',
+  'managed.phase.waiting_runtime': 'Waiting for environment',
+  'managed.phase.tool_running': 'Executing tool',
+  'managed.phase.cancelling': 'Cancelling',
+  'managed.phase.completed': 'Completed',
+  'managed.phase.failed': 'Failed',
+  'managed.phase.cancelled': 'Cancelled',
+  'managed.runtime.unknown': 'Unknown',
+  'managed.runtime.starting': 'Preparing',
+  'managed.runtime.ready': 'Ready',
+  'managed.runtime.failed': 'Preparation failed',
+
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -122,6 +160,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.worktrees': 'Worktrees…',
   'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
@@ -266,6 +305,69 @@ const EN: Messages = {
   'gitLog.allBranches': 'All branches',
   'gitLog.search': 'Search message, author, or hash',
   'gitLog.noMatches': 'No commits match',
+  'gitWorktrees.title': 'Worktrees',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} worktrees`,
+  'gitWorktrees.loading': 'Loading worktrees…',
+  'gitWorktrees.error': 'Failed to load worktrees',
+  'gitWorktrees.unavailable': 'Git is not available for this workspace',
+  'gitWorktrees.empty': 'No worktrees',
+  'gitWorktrees.noMatches': 'No worktrees match',
+  'gitWorktrees.filter': 'Filter by path or branch',
+  'gitWorktrees.newSession': 'New worktree session…',
+  'gitWorktrees.main': 'main',
+  'gitWorktrees.current': 'this workspace',
+  'gitWorktrees.detached': 'detached HEAD',
+  'gitWorktrees.bare': 'bare',
+  'gitWorktrees.locked': 'locked',
+  'gitWorktrees.prunable': 'stale',
+  'gitWorktrees.clean': 'clean',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} change(s)`,
+  'gitWorktrees.statusError': 'status unavailable',
+  'gitWorktrees.remove': 'Remove',
+  'gitWorktrees.removeLabel': (v) => `Remove worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': 'Removing…',
+  'gitWorktrees.cancel': 'Cancel',
+  'gitWorktrees.confirm':
+    'Remove this worktree? Its directory is deleted from disk; the branch is kept.',
+  'gitWorktrees.confirmStale':
+    'Remove this stale entry? Git stops tracking worktrees it can no longer find. Whatever is left in its directory stays; the bookkeeping git keeps for it does not.',
+  'gitWorktrees.confirmDetached':
+    'Remove this worktree? Its directory is deleted from disk. It is on a detached HEAD, so there is no branch to keep.',
+  'gitWorktrees.blockedDirty': (v) =>
+    `${v?.count ?? 0} uncommitted change(s) would be discarded.`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} running session(s) would lose their checkout.`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `Could not read where ${v?.count ?? 0} running session(s) are working. Any working here would lose their checkout.`,
+  'gitWorktrees.blockedUnknown':
+    'The working tree could not be checked for uncommitted changes, and any there would be discarded.',
+  'gitWorktrees.blockedOperation': (v) =>
+    `An unfinished ${v?.operation ?? 'git'} would be lost.`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `No branch keeps the commits here; ${String(v?.head ?? '').slice(0, 7)} would be left for git to collect.`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason
+      ? `This worktree is locked: ${v.reason}`
+      : 'This worktree is locked.',
+  'gitWorktrees.blockedRefused': 'Git refused to remove this worktree.',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `The workspace ${v.name} lives in this worktree, so removing it would take the workspace too. Remove the workspace first.`
+      : 'A registered workspace lives in this worktree, so removing it would take the workspace too. Remove the workspace first.',
+  'gitWorktrees.blockedSubmodules':
+    'A submodule of this worktree keeps a repository of its own, and removing the worktree deletes that repository too.',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    'Whether a submodule of this worktree keeps a repository of its own could not be checked. If one does, removing the worktree deletes it too.',
+  'gitWorktrees.refreshFailed':
+    'The list could not be refreshed, so it may be out of date.',
+  'gitWorktrees.removeAnyway': 'Remove anyway',
+  'gitWorktrees.removeFailed': 'Failed to remove the worktree',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git no longer tracks ${v?.name ?? ''}, but its directory is still on disk.`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `Removing ${v?.name ?? ''} was refused while you were looking elsewhere: ${v.reason}`
+      : `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -930,6 +1032,9 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated base overhead',
+  'contextUsage.estimatedUsage': 'Estimated usage, including the conversation',
+  'contextUsage.usageEstimatedWithConversation':
+    'No provider usage yet. The estimates below include the conversation.',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -1161,7 +1266,8 @@ const EN: Messages = {
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
   'daemon.usage.dailySessionsSub': 'active session counts per day',
-  'delete.cannotCurrent': 'Cannot delete the current active session.',
+  'delete.cannotCurrent':
+    'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,
@@ -1629,6 +1735,7 @@ const EN: Messages = {
   'sidebar.sessionSource.channels': 'Channels',
   'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
+  'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
@@ -1808,7 +1915,10 @@ const EN: Messages = {
   'sidebar.deleteFailed': 'Failed to delete session',
   'sidebar.newSessionFailed': 'Failed to create a new chat',
   'sidebar.switchFailed': 'Failed to switch session',
-  'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
+  'sidebar.currentDeleteDisabled':
+    'The current session is running and cannot be deleted',
+  'sidebar.currentStandaloneDeleteDisabled':
+    'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
@@ -2035,6 +2145,31 @@ const EN: Messages = {
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
+  'turnCalls.open': 'View tool calls',
+  'turnCalls.title': 'Tool calls',
+  'turnCalls.count': (v) => `${v?.count ?? 0} tool calls`,
+  'turnCalls.tool': 'Tool call',
+  'turnCalls.elapsed': (v) => `Elapsed: ${v?.duration ?? ''}`,
+  'turnCalls.startedAt': (v) => `Start time: ${v?.time ?? ''}`,
+  'turnCalls.endedAt': (v) => `End time: ${v?.time ?? ''}`,
+  'turnCalls.empty': 'No tool call records for this turn',
+  'turnCalls.arguments': 'Arguments',
+  'turnCalls.result': 'Result',
+  'turnCalls.other': 'Other',
+  'turnCalls.completed': 'Completed',
+  'turnCalls.unknown': 'Unknown status',
+  'turnCalls.loading': 'Loading this turn’s call records…',
+  'turnCalls.loadError': 'Could not load all call records for this turn.',
+  'turnCalls.indexError': 'Could not refresh the prompt list.',
+  'turnCalls.unresolved':
+    'Could not locate this prompt in the session history. Try refreshing.',
+  'turnCalls.running': 'Running',
+  'turnCalls.pending': 'Pending',
+  'turnCalls.cancelled': 'Cancelled',
+  'turnCalls.filter': 'Filter by tool type',
+  'turnCalls.prompt': 'Prompt',
+  'turnCalls.refresh': 'Refresh',
+  'turnCalls.all': 'All tools',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -4041,6 +4176,7 @@ const ZH: Messages = {
   'capacityChoice.resume': '恢复会话',
   'capacityChoice.blocked.stopping': '正在停止',
   'capacityChoice.blocked.not_live': '没有运行中的 ACP',
+  'capacityChoice.blocked.multiple_engine_channels': '多个执行引擎正在运行',
   'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
   'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
   'capacityChoice.blocked.workspace_control_pending':
@@ -4072,6 +4208,40 @@ const ZH: Messages = {
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
+  'managed.title': '托管 Agent',
+  'managed.sessions': '托管会话',
+  'managed.conversation': '托管会话内容',
+  'managed.new': '新建托管任务',
+  'managed.refresh': '刷新',
+  'managed.empty': '暂无托管任务。',
+  'managed.loading': '加载中…',
+  'managed.more': '加载更多',
+  'managed.prompt': '向托管 Agent 发送消息',
+  'managed.runtime': '执行环境',
+  'managed.unavailable': '当前 daemon 未启用托管 Agent。',
+  'managed.send': '发送',
+  'managed.sending': '提交中…',
+  'managed.elapsed': (v) => `已用时 ${v?.seconds ?? 0} 秒`,
+  'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
+  'managed.retry': '重试同一请求',
+  'managed.cancel': '取消本轮',
+  'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.newRequired': '请新建任务后发送消息。',
+  'managed.truncated': '[详情已截断]',
+  'managed.phase.admitted': '已接收',
+  'managed.phase.runtime_starting': '环境准备中',
+  'managed.phase.agent_running': '思考／生成中',
+  'managed.phase.waiting_runtime': '等待执行环境',
+  'managed.phase.tool_running': '执行工具中',
+  'managed.phase.cancelling': '取消中',
+  'managed.phase.completed': '已完成',
+  'managed.phase.failed': '失败',
+  'managed.phase.cancelled': '已取消',
+  'managed.runtime.unknown': '未知',
+  'managed.runtime.starting': '准备中',
+  'managed.runtime.ready': '已就绪',
+  'managed.runtime.failed': '准备失败',
+
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -4098,6 +4268,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.worktrees': '管理 Worktree…',
   'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
@@ -4234,6 +4405,64 @@ const ZH: Messages = {
   'gitLog.allBranches': '全部分支',
   'gitLog.search': '搜索提交信息、作者或哈希',
   'gitLog.noMatches': '没有匹配的提交',
+  'gitWorktrees.title': 'Worktree',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} 个 worktree`,
+  'gitWorktrees.loading': '加载 worktree 中…',
+  'gitWorktrees.error': '加载 worktree 失败',
+  'gitWorktrees.unavailable': '此工作区不可用 Git',
+  'gitWorktrees.empty': '没有 worktree',
+  'gitWorktrees.noMatches': '没有匹配的 worktree',
+  'gitWorktrees.filter': '按路径或分支过滤',
+  'gitWorktrees.newSession': '新建 worktree 会话…',
+  'gitWorktrees.main': '主工作树',
+  'gitWorktrees.current': '当前工作区',
+  'gitWorktrees.detached': '游离 HEAD',
+  'gitWorktrees.bare': '裸仓库',
+  'gitWorktrees.locked': '已锁定',
+  'gitWorktrees.prunable': '已失效',
+  'gitWorktrees.clean': '干净',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} 处改动`,
+  'gitWorktrees.statusError': '状态不可用',
+  'gitWorktrees.remove': '删除',
+  'gitWorktrees.removeLabel': (v) => `删除 worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': '删除中…',
+  'gitWorktrees.cancel': '取消',
+  'gitWorktrees.confirm': '删除这个 worktree？其目录会从磁盘删除，分支保留。',
+  'gitWorktrees.confirmStale':
+    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree。目录里剩下的东西会保留，但 git 为它保存的记录不会。',
+  'gitWorktrees.confirmDetached':
+    '删除这个 worktree？其目录会从磁盘删除。它处于游离 HEAD，因此没有分支可留。',
+  'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} 个运行中的会话将失去其检出。`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `无法读取 ${v?.count ?? 0} 个运行中会话所在的位置。若有会话在这里，将失去其检出。`,
+  'gitWorktrees.blockedUnknown':
+    '无法检查该工作树是否有未提交改动，若有也将一并丢弃。',
+  'gitWorktrees.blockedOperation': (v) =>
+    `尚未完成的 ${v?.operation ?? 'git'} 操作将会丢失。`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `没有分支保住这里的提交；${String(v?.head ?? '').slice(0, 7)} 将被 git 回收。`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason ? `该 worktree 已加锁：${v.reason}` : '该 worktree 已加锁。',
+  'gitWorktrees.blockedRefused': 'Git 拒绝删除这个 worktree。',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `工作区 ${v.name} 就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。`
+      : '有已注册的工作区就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。',
+  'gitWorktrees.blockedSubmodules':
+    '该 worktree 的子模块有自己的仓库，删除这个 worktree 会把那个仓库一并删掉。',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    '无法确认该 worktree 的子模块是否有自己的仓库。如果有，删除这个 worktree 会把它一并删掉。',
+  'gitWorktrees.refreshFailed': '列表未能刷新，可能已过时。',
+  'gitWorktrees.removeAnyway': '仍然删除',
+  'gitWorktrees.removeFailed': '删除 worktree 失败',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git 已不再跟踪 ${v?.name ?? ''}，但它的目录仍在磁盘上。`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了：${v.reason}`
+      : `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4254,7 +4483,7 @@ const ZH: Messages = {
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
   'toolName.exec': '执行代码',
-  'toolName.edit': '编辑',
+  'toolName.edit': '编辑文件',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
   'toolName.zoom_image': '图片放大',
@@ -4268,6 +4497,7 @@ const ZH: Messages = {
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': '智能体',
+  'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -4931,6 +5161,9 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '基础开销估算',
+  'contextUsage.estimatedUsage': '估算用量（含对话）',
+  'contextUsage.usageEstimatedWithConversation':
+    '尚未收到 provider 用量。下方估算包含对话。',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -5158,7 +5391,7 @@ const ZH: Messages = {
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
   'daemon.usage.dailySessionsSub': '每日活跃会话数',
-  'delete.cannotCurrent': '无法删除当前活动会话。',
+  'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,
@@ -5582,6 +5815,7 @@ const ZH: Messages = {
   'sidebar.sessionSource.channels': '频道',
   'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
+  'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -5746,7 +5980,9 @@ const ZH: Messages = {
   'sidebar.deleteFailed': '删除会话失败',
   'sidebar.newSessionFailed': '创建新对话失败',
   'sidebar.switchFailed': '切换会话失败',
-  'sidebar.currentDeleteDisabled': '不能删除当前会话',
+  'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
+  'sidebar.currentStandaloneDeleteDisabled':
+    '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
@@ -5952,6 +6188,30 @@ const ZH: Messages = {
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
+  'turnCalls.open': '查看工具调用',
+  'turnCalls.title': '工具调用',
+  'turnCalls.count': (v) => `共 ${v?.count ?? 0} 次工具调用`,
+  'turnCalls.tool': '工具调用',
+  'turnCalls.elapsed': (v) => `耗时：${v?.duration ?? ''}`,
+  'turnCalls.startedAt': (v) => `开始时间：${v?.time ?? ''}`,
+  'turnCalls.endedAt': (v) => `结束时间：${v?.time ?? ''}`,
+  'turnCalls.empty': '本轮没有工具调用记录',
+  'turnCalls.arguments': '参数',
+  'turnCalls.result': '结果',
+  'turnCalls.other': '其他',
+  'turnCalls.completed': '已完成',
+  'turnCalls.unknown': '状态未知',
+  'turnCalls.loading': '正在加载工具调用记录…',
+  'turnCalls.loadError': '未能加载本轮完整调用记录。',
+  'turnCalls.indexError': '未能刷新提示词列表。',
+  'turnCalls.unresolved': '未能在会话历史中定位这条提示词，请尝试刷新。',
+  'turnCalls.running': '运行中',
+  'turnCalls.pending': '等待中',
+  'turnCalls.cancelled': '已取消',
+  'turnCalls.filter': '按工具类型筛选',
+  'turnCalls.prompt': '提示词',
+  'turnCalls.refresh': '刷新',
+  'turnCalls.all': '全部工具',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',

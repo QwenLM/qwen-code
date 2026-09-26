@@ -83,6 +83,7 @@ import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
@@ -583,6 +584,7 @@ type CoreToolCallResponseInfo = ToolCallResponseInfo & {
 
 export type ErroredToolCall = {
   status: 'error';
+  invocation?: AnyToolInvocation;
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
@@ -1373,6 +1375,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1997,6 +2000,7 @@ export class CoreToolScheduler {
             request: currentCall.request,
             status: 'error',
             tool: toolInstance,
+            invocation,
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
             ...(durationMs !== undefined
@@ -6141,7 +6145,7 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );

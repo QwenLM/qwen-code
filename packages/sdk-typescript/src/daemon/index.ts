@@ -96,6 +96,7 @@ export {
   type DaemonUnarchiveStandaloneSessionsResult,
   type RestoreStandaloneSessionRequest,
 } from './standalone-sessions.js';
+export { DaemonStartupConfigError } from './session-startup-config.js';
 export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -549,6 +550,10 @@ export type {
   DaemonGitTagInfo,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
+  DaemonGitWorktree,
+  DaemonGitWorktreesResult,
+  DaemonGitWorktreeStatus,
+  DaemonGitWorktreeRemoveResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
@@ -608,6 +613,7 @@ export type {
   DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionToolCalls,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexEntry,
@@ -839,6 +845,8 @@ export type {
   SetModelResult,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
+  SessionStartupConfigApplied,
   SetSessionLanguageResult,
   SetUserLanguageResult,
   KnownDaemonSessionArtifactChangeAction,

@@ -54,7 +54,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Mock } from 'vitest';
 import yargs from 'yargs';
 import {
@@ -405,11 +405,19 @@ describe('fix-delta', () => {
     git('add', '-A');
     git('commit', '-qm', 'two dirs');
     git('sparse-checkout', 'set', '--cone', 'in');
+    // Premise: the checkout IS sparse — the out-of-cone file left the disk.
+    expect(existsSync(join(repo, 'out', 'b.ts'))).toBe(false);
     runSnapshot();
     mkdirSync(join(repo, 'elsewhere'));
     writeFileSync(join(repo, 'elsewhere', 'new.ts'), 'n\n');
     runSince();
     expect(hunks()).toContain('diff --git a/elsewhere/new.ts');
+    // The out-of-cone file is absent from disk at BOTH moments, so both
+    // captures record it absent (the snapshot tree lacks it) — no phantom
+    // deletion in the hunks.
+    expect(
+      git('ls-tree', '-r', '--name-only', record().tree).split('\n'),
+    ).not.toContain('out/b.ts');
     expect(hunks()).not.toContain('out/b.ts');
   });
 
@@ -452,6 +460,21 @@ describe('fix-delta', () => {
       /`Binary files … differ`, without its content/,
     );
     expect(FIX_DELTA_SCOPE).toMatch(/Git LFS\) as its filtered form/);
+    expect(FIX_DELTA_SCOPE).toMatch(
+      /changes the ignore rules brings what they hid in as additions \(a hidden nested repository as its gitlink\)/,
+    );
+  });
+
+  it('holds to the scope line: a fix that drops an ignore rule brings the files it hid in as additions', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ngen/\n');
+    git('commit', '-qam', 'ignore gen');
+    mkdirSync(join(repo, 'gen'));
+    writeFileSync(join(repo, 'gen', 'out.js'), 'generated\n');
+    runSnapshot();
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    runSince();
+    expect(hunks()).toContain('diff --git a/.gitignore b/.gitignore');
+    expect(hunks()).toContain('diff --git a/gen/out.js b/gen/out.js');
   });
 
   it('holds to the scope line: a tracked family path is not captured, and a binary-attributed file has no content hunk', () => {
@@ -580,6 +603,22 @@ describe('fix-delta', () => {
     expect(moved).toBeDefined();
     expect(moved).toContain(before.slice(0, 12));
     expect(moved).toContain(git('rev-parse', 'HEAD').slice(0, 12));
+    // …and the line says so, rather than that a committed change is missing.
+    expect(moved).toContain('so a committed edit is in them');
+  });
+
+  it('misses a gitignored file a commit in the window started tracking, as the HEAD-moved line says', () => {
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n*.env\n');
+    git('commit', '-qam', 'ignore env files');
+    runSnapshot();
+    writeFileSync(join(repo, 'dev.env'), 'TOKEN=1\n');
+    git('add', '-f', 'dev.env');
+    git('commit', '-qm', 'track dev.env');
+    runSince();
+    expect(hunks()).not.toContain('dev.env');
+    expect(
+      stderr().find((l) => l.includes('HEAD moved between the two moments')),
+    ).toContain('a gitignored file a commit started tracking is not');
   });
 
   it('works under an unborn HEAD, recording null and disclosing the first commit', () => {
@@ -690,7 +729,9 @@ describe('fix-delta', () => {
       '--out',
       snapshotFile(),
     ]);
-    expect(record().root).toBe(repo);
+    // Normalized: git prints forward slashes on Windows, realpathSync
+    // backslashes.
+    expect(resolve(record().root)).toBe(resolve(repo));
     writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
     await cli().parseAsync([
       'fix-delta',

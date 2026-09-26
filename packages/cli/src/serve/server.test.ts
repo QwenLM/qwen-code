@@ -37,6 +37,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
   invalidateWorkspaceSessionListCache,
@@ -600,6 +601,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'daemon_status',
   'capabilities',
   'session_create',
+  'session_startup_config',
   'session_id_override',
   'session_scope_override',
   'session_load',
@@ -701,6 +703,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_git_worktrees',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -763,6 +766,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'session_create') {
+      return [feature, 'hosted_harness_private_v1'];
+    }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
     }
@@ -788,6 +794,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
+      f !== 'workspace_git_worktrees' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -832,6 +839,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_init',
   'workspace_github_setup',
   'workspace_github_prs',
+  'workspace_git_worktrees',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
@@ -3442,6 +3450,18 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'hosted_harness_private_v1') {
+          expect(predicate({ hostedHarness: true })).toBe(true);
+          expect(predicate({ hostedHarness: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { hostedHarness: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'require_auth') {
           expect(predicate({ requireAuth: true })).toBe(true);
           expect(predicate({ requireAuth: false })).toBe(false);
@@ -5559,6 +5579,22 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
+    });
+
+    it('refuses scheduled task sessions in the Hosted Harness profile', () => {
+      expect(() =>
+        createServeApp(
+          {
+            ...baseOpts,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          undefined,
+          { manageScheduledTaskSessions: true },
+        ),
+      ).toThrow('cannot manage scheduled task sessions');
     });
 
     it('advertises workspace generation only when the primary bridge supports it', async () => {
@@ -13838,6 +13874,290 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rolls back the persisted recording after a definite startup rejection so the caller id stays retryable', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const writeRecording = async () => {
+        // The spawn's model leg persists its transcript record before the
+        // selection is rejected and the bridge closes the live session.
+        const chatsDir = path.join(
+          new Storage(WS_BOUND).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, `${sessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${sessionId}-user-1`,
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'model switch' }] },
+            cwd: WS_BOUND,
+          })}\n`,
+        );
+      };
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          if (req.startupConfig !== undefined) {
+            await writeRecording();
+            throw Object.assign(new Error('unsupported effort'), {
+              code: 'startup_config_rejected',
+            });
+          }
+          return {
+            sessionId: req.sessionId ?? 'fake-startup-rollback',
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-startup-rollback',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(rejected.status).toBe(422);
+      expect(rejected.body.code).toBe('startup_config_rejected');
+      await expect(
+        service.findSessionIdIgnoringCase(sessionId),
+      ).resolves.toBeUndefined();
+
+      const retry = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId });
+      expect(retry.status).toBe(200);
+      expect(retry.body.sessionId).toBe(sessionId);
+    });
+
+    it('rolls back the persisted recording after a definite startup rejection when the daemon generated the id', async () => {
+      // The caller sent no sessionId, so only the rejection's own
+      // `sessionId` can name the recording the spawn persisted before the
+      // selection was rejected.
+      const spawnedId = '550e8400-e29b-41d4-a716-446655440099';
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${spawnedId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${spawnedId}-user-1`,
+              parentUuid: null,
+              sessionId: spawnedId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+            sessionId: spawnedId,
+          });
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const rejected = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(rejected.status).toBe(422);
+      expect(rejected.body.code).toBe('startup_config_rejected');
+      expect(bridge.killCalls).toEqual([
+        { sessionId: spawnedId, opts: { requireZeroAttaches: true } },
+      ]);
+      await expect(
+        service.findSessionIdIgnoringCase(spawnedId),
+      ).resolves.toBeUndefined();
+    });
+
+    it('keeps the persisted recording when a startup failure outcome is uncertain', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${sessionId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${sessionId}-user-1`,
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw new Error('transport closed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+      expect(res.status).toBe(500);
+      await expect(service.findSessionIdIgnoringCase(sessionId)).resolves.toBe(
+        sessionId,
+      );
+    });
+
+    it('still answers the definite 422 when the recording rollback fails', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440002';
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+          });
+        },
+        killImpl: async () => {
+          throw new Error('storage unavailable');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+
+      // A failed rollback must not downgrade the definite rejection to the
+      // uncertain 500 path; the id may stay occupied, so warn instead.
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('startup_config_rejected');
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+        { sessionId, error: 'storage unavailable' },
+      );
+    });
+
+    it('still answers the definite 422 and warns when the recording rollback is refused', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-4466554400a1';
+      const daemonLog = fakeDaemonLog();
+      let spawned = false;
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          spawned = true;
+          const chatsDir = path.join(
+            new Storage(WS_BOUND).getProjectDir(),
+            'chats',
+          );
+          await fsp.mkdir(chatsDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(chatsDir, `${sessionId}.jsonl`),
+            `${JSON.stringify({
+              uuid: `${sessionId}-user-1`,
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'model switch' }] },
+              cwd: WS_BOUND,
+            })}\n`,
+          );
+          throw Object.assign(new Error('unsupported effort'), {
+            code: 'startup_config_rejected',
+          });
+        },
+        // The orphan kill is refused (the session stays live), so the
+        // helper removes nothing and reports the refusal by returning false.
+        killImpl: async () => false,
+        summaryImpl: (id) => {
+          if (!spawned) throw new SessionNotFoundError(id);
+          return {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: true,
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+      const service = new SessionService(WS_BOUND);
+
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId,
+          startupConfig: {
+            modelServiceId: 'gpt-5.4(openai)',
+            reasoningEffort: 'high',
+          },
+        });
+
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('startup_config_rejected');
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+        { sessionId },
+      );
+      await expect(service.findSessionIdIgnoringCase(sessionId)).resolves.toBe(
+        sessionId,
+      );
+    });
+
     it('503 when persisted session state cannot be inspected', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -14319,6 +14639,35 @@ describe('createServeApp', () => {
       expect(bridge.calls).toEqual([
         { workspaceCwd: WORK_A, modelServiceId: 'qwen-prod' },
       ]);
+    });
+
+    it('forwards startupConfig and rejects conflicts before spawning', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const startupConfig = {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high',
+      };
+      const response = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a', startupConfig });
+      expect(response.status).toBe(200);
+      expect(bridge.calls).toEqual([{ workspaceCwd: WORK_A, startupConfig }]);
+      for (const body of [
+        { startupConfig, sessionScope: 'single' },
+        { startupConfig, modelServiceId: 'legacy' },
+        { startupConfig: { reasoningEffort: 'high' } },
+        { startupConfig: { ...startupConfig, persist: true } },
+      ]) {
+        const rejected = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', ...body });
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.code).toBe('invalid_startup_config');
+      }
+      expect(bridge.calls).toHaveLength(1);
     });
 
     it('passes through a valid `sessionScope` to the bridge (#4175 PR 5)', async () => {
@@ -30390,6 +30739,237 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('reads tool calls only from the qualified persisted workspace without attaching ACP', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa1';
+      const secondaryCwd = path.join(wsDir, 'secondary-tools');
+      await fsp.mkdir(secondaryCwd);
+      await writeTranscriptSession(
+        sid,
+        'active',
+        wsDir,
+        'primary private text',
+      );
+      await writeTranscriptSession(
+        sid,
+        'active',
+        secondaryCwd,
+        'selected workspace prompt',
+      );
+      const primary = fakeBridge();
+      const secondary = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge: primary,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge: primary,
+          }),
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'secondary-tools',
+            workspaceCwd: secondaryCwd,
+            primary: false,
+            bridge: secondary,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.body).toMatchObject({
+        v: 1,
+        sessionId: sid,
+        turnId: `${sid}-user-1`,
+        events: expect.any(Array),
+      });
+      expect(JSON.stringify(response.body)).toContain(
+        'selected workspace prompt',
+      );
+      expect(JSON.stringify(response.body)).not.toContain(
+        'primary private text',
+      );
+      expect(response.body).not.toHaveProperty('nextCursor');
+      expect(response.body).not.toHaveProperty('hasMore');
+      const replayFailure = vi
+        .spyOn(toolCallsReader, 'readSessionToolCalls')
+        .mockRejectedValueOnce(
+          new toolCallsReader.SessionToolCallsReplayError(),
+        );
+      try {
+        const failed = await request(app)
+          .get(
+            `/workspaces/secondary-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(failed.status).toBe(500);
+        expect(failed.body.code).toBe('tool_calls_replay_incomplete');
+      } finally {
+        replayFailure.mockRestore();
+      }
+
+      for (const bridge of [primary, secondary]) {
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+        expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+        expect(bridge.flushSessionTranscriptCalls).toHaveLength(0);
+      }
+      const unknown = await request(app)
+        .get(
+          `/workspaces/unknown-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unknown.status).not.toBe(200);
+      expect(JSON.stringify(unknown.body)).not.toContain(
+        'primary private text',
+      );
+    });
+
+    it('flushes an already loaded session before freezing the tool calls snapshot', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa4';
+      await writeTranscriptSession(sid);
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 0,
+          hasTurnError: false,
+        }),
+        flushSessionTranscriptImpl: async () => {
+          const base = {
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:01.000Z',
+          };
+          await fsp.appendFile(
+            path.join(
+              new Storage(wsDir).getProjectDir(),
+              'chats',
+              `${sid}.jsonl`,
+            ),
+            [
+              {
+                ...base,
+                uuid: 'flushed-call',
+                parentUuid: `${sid}-user-1`,
+                type: 'assistant',
+                message: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        args: { file_path: '/flushed' },
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                ...base,
+                uuid: 'flushed-result',
+                parentUuid: 'flushed-call',
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  parts: [
+                    {
+                      functionResponse: {
+                        id: 'flushed',
+                        name: 'read_file',
+                        response: { output: 'flushed output' },
+                      },
+                    },
+                  ],
+                },
+                toolCallResult: {
+                  callId: 'flushed',
+                  responseParts: [],
+                  resultDisplay: 'flushed output',
+                },
+              },
+            ]
+              .map((record) => JSON.stringify(record))
+              .join('\n') + '\n',
+          );
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'flushed-tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      const response = await request(app)
+        .get(
+          `/workspaces/flushed-tools/session/${sid}/tool-calls?turnId=${sid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(response.body)).toContain('flushed output');
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.loadCalls).toHaveLength(0);
+      expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('requires a persisted turn anchor for tool calls and rejects archived sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa2';
+      const archivedSid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaa3';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(archivedSid, 'archived');
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'tools',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge,
+          }),
+        ]),
+      });
+      for (const suffix of [
+        '',
+        '?turnId=',
+        '?turnId=a&turnId=b',
+        '?turnId=missing',
+      ]) {
+        const response = await request(app)
+          .get(`/workspaces/tools/session/${sid}/tool-calls${suffix}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_turn_anchor');
+      }
+      const archived = await request(app)
+        .get(
+          `/workspaces/tools/session/${archivedSid}/tool-calls?turnId=${archivedSid}-user-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(archived.status).toBe(409);
+      expect(archived.body.code).toBe('session_archived');
+      expect(bridge.loadCalls).toHaveLength(0);
     });
 
     it('flushes the first live backward workspace transcript page', async () => {

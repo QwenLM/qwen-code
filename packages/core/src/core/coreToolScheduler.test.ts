@@ -24,6 +24,8 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   ApprovalMode,
@@ -1175,6 +1177,77 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it.each(['success', 'error', 'cancelled'] as const)(
+    'preserves each %s call start when telemetry is constructed later',
+    async (status) => {
+      let now = 1_760_000_000_000;
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const telemetry = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue(undefined);
+      let controller = new AbortController();
+      const tool = new MockTool({
+        name: 'timed_tool',
+        execute: async () => {
+          now += 4_000;
+          if (status === 'error') throw new Error('execution failed');
+          if (status === 'cancelled') controller.abort();
+          return { llmContent: 'done', returnDisplay: 'done' };
+        },
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([[tool.name, tool]]),
+        });
+      const completed: CompletedToolCall[] = [];
+      try {
+        for (const [index, startedAt] of [
+          1_760_000_000_000, 1_760_000_010_000,
+        ].entries()) {
+          now = startedAt;
+          controller = new AbortController();
+          onAllToolCallsComplete.mockClear();
+          await scheduler.schedule(
+            {
+              callId: `timed-${index}`,
+              name: tool.name,
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'timed-prompt',
+            },
+            controller.signal,
+          );
+          await vi.waitFor(() =>
+            expect(onAllToolCallsComplete).toHaveBeenCalled(),
+          );
+          const call = onAllToolCallsComplete.mock
+            .calls[0][0][0] as CompletedToolCall;
+          expect(call).toMatchObject({
+            status,
+            startTime: startedAt,
+            durationMs: 4_000,
+          });
+          completed.push(call);
+        }
+        now += 60_000;
+        expect(
+          completed.map((call) => {
+            const event = new ToolCallEvent(call);
+            return [event.started_at_ms, event.duration_ms];
+          }),
+        ).toEqual([
+          [1_760_000_000_000, 4_000],
+          [1_760_000_010_000, 4_000],
+        ]);
+        const { startTime: _startTime, ...legacy } = completed[0]!;
+        expect(new ToolCallEvent(legacy).started_at_ms).toBeUndefined();
+      } finally {
+        telemetry.mockRestore();
+        clock.mockRestore();
+      }
+    },
+  );
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
     boundaryDiagnosticsEnabled.value = true;
@@ -13828,6 +13901,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       throw new Error('expected an errored tool call');
     }
     expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
+    expect(completedCall.invocation?.getDescription()).toBe(
+      'A mock tool invocation for mockTool',
+    );
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
