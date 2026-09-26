@@ -1,24 +1,23 @@
 # models.dev 模型目录交付计划
 
-状态：实现位于 PR #11959，交付验证进行中。原设计 PR #9851 的有效内容已收录到[双语设计文档](../design/2026-08-23-models-dev-registry.md)。
+状态：实现与本地验证完成，远程检查跟随 PR #11959 的最终提交。原纯设计 PR #9851 已被[双语设计文档](../design/2026-08-23-models-dev-registry.md)替代并关闭。
 
-## 范围
+## 最终范围
 
 内置裁剪目录、后台刷新、ETag 与 24 小时缓存、镜像及关闭开关、上下文/输出/模态查询与正则回退。不引入 effort 元数据迁移、provider-aware 解析、跨进程锁或定时服务。
 
-## 本轮收尾
-
-- 修正归一化冲突策略：带日期和 provider 前缀的条目也参与比较，有分歧就回退。
+- 所有归一化候选都参与冲突检查，有分歧就回退，包括带日期和 provider 前缀的条目。
 - 拒绝非正安全整数 token 上限及非布尔模态。
-- 在目录读取时纠正 Sonnet 4.5 已退役的 1M beta 数据，保留 200,000 默认上限。
-- 重新生成内置快照，补真实目录参与模型配置解析的回归验证。
-- 合并最新 main，取得已有的导出体积预算修复；不在本 PR 改动无关构建代码。
-- 将设计、实现与验证结果集中到本 PR，关闭被替代的纯文档 PR #9851。
+- 纠正 Sonnet 4.5 已退役的 1M beta 数据，保留 200,000 默认上限。
+- qwen3.8-max 的 PDF 不自动从目录启用；内置和刷新数据均受此约束。用户可针对验证过的 endpoint 显式设置 `generationConfig.modalities.pdf`。
+- 移除未发布的 `model.customCatalog` 及其进程全局叠加状态，避免首轮不生效和跨 Config 串用。私有/离线模型继续使用现有 `modelProviders`，不读取自定义目录缓存。
 
-## 尚未解决
+## 验收
 
-`model.customCatalog` 在 CLI 模型解析之后才装载，首轮会话仍使用旧值；其进程全局状态会被另一个 Config 覆盖。交付前需要选择：移除此新设置，继续用现有 `modelProviders` 显式配置私有模型；或扩展实现，将自定义目录放入会话解析作用域并补真实多 Config 验证。不能仅提前调用刷新来掩盖隔离缺陷。
+真实 Config 验证覆盖 settings 和 modelProviders 两条路径：第一个会话首次初始化及认证后即得到显式 context=12,345、pdf=true；第二个会话使用默认 context=1,000,000、pdf 未启用，且不改变第一个会话。目录开关和真实缓存节流保持正常。
 
-DashScope PDF 尚无真实 endpoint 验证，当前机器缺少配置引用的凭证。官方协议文档可核对序列化格式，但不能替代实际识别测试。
+定向测试、build、typecheck、lint、两轮复核及远程 CI 结果记录在[验证记录](../verification/models-dev-catalog/README.md)和 PR 评论。已知不可靠的默认行为通过收窄范围移除，不以缺少凭证的 live 测试冒充通过。
 
-具体结果见[验证记录](../verification/models-dev-catalog/README.md)。在作用域问题处理、最终 CI 通过及 endpoint 验证缺口得到明确处置前，不将 PR 标记为可交付。
+## 后续边界
+
+自定义目录如需恢复，应从会话作用域模型解析设计入手，不重新引入全局 source。自动启用 Qwen PDF 需要 provider/协议作用域能力解析和真实识别验证。两者均不属于本 PR 的交付承诺。

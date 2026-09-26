@@ -8,18 +8,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { normalize } from '../core/tokenLimits.js';
-import {
-  atomicWriteFileSync,
-  atomicWriteJSON,
-} from '../utils/atomicFileWrite.js';
+import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  getCustomModelCatalogCachePath,
   getModelCatalogCachePath,
   invalidateModelCatalog,
   isModelCatalogDisabled,
   parseModelCatalog,
-  setCustomModelCatalogSource,
   type ModelCatalog,
   type ModelCatalogEntry,
 } from './model-catalog.js';
@@ -147,10 +142,9 @@ export function trimModelsDevCatalog(
   api: ModelsDevApi,
   fetchedAt: string,
   source: string = MODELS_DEV_URL,
-  providers: readonly string[] = MODELS_DEV_PROVIDERS,
 ): ModelCatalog {
   const candidates = new Map<string, ModelCatalogEntry[]>();
-  for (const provider of providers) {
+  for (const provider of MODELS_DEV_PROVIDERS) {
     for (const model of Object.values(api[provider]?.models ?? {})) {
       if (typeof model.id !== 'string' || !servesAgentTurns(model)) {
         continue;
@@ -178,34 +172,6 @@ export function trimModelsDevCatalog(
   return { source, fetchedAt, models: sortedModels(agreed) };
 }
 
-/**
- * Projects a `model.customCatalog` document: either the trimmed shape
- * (`{ models: { id: entry } }`, ids normalized here) or a models.dev-style
- * payload, from which every provider present is read since the file is the
- * user's own selection.
- */
-export function projectCustomCatalog(
-  raw: unknown,
-  fetchedAt: string,
-  source: string,
-): ModelCatalog {
-  const models = (raw as { models?: unknown } | null)?.models;
-  if (models && typeof models === 'object') {
-    const parsed = parseModelCatalog({ fetchedAt, models });
-    return {
-      source,
-      fetchedAt,
-      models: sortedModels(
-        Object.entries(parsed?.models ?? {}).map(
-          ([id, entry]) => [normalize(id), entry] as const,
-        ),
-      ),
-    };
-  }
-  const api = (raw ?? {}) as ModelsDevApi;
-  return trimModelsDevCatalog(api, fetchedAt, source, Object.keys(api));
-}
-
 async function readCacheFile(
   cachePath: string,
 ): Promise<ModelCatalog | undefined> {
@@ -218,11 +184,7 @@ async function readCacheFile(
   }
 }
 
-async function refreshRemote(
-  url: string,
-  cachePath: string,
-  project: (raw: unknown, fetchedAt: string) => ModelCatalog,
-): Promise<void> {
+async function refreshRemote(url: string, cachePath: string): Promise<void> {
   const cached = await readCacheFile(cachePath);
   const reusable = cached?.source === url ? cached : undefined;
   if (
@@ -244,7 +206,11 @@ async function refreshRemote(
   if (response.status === 304 && reusable) {
     next = { ...reusable, fetchedAt };
   } else if (response.ok) {
-    next = project(await response.json(), fetchedAt);
+    next = trimModelsDevCatalog(
+      (await response.json()) as ModelsDevApi,
+      fetchedAt,
+      url,
+    );
     const etag = response.headers.get('etag');
     if (etag) {
       next.etag = etag;
@@ -260,27 +226,6 @@ async function refreshRemote(
   );
 }
 
-/**
- * A custom catalog given as a file is re-read synchronously on every start
- * so the first model resolution of the session already sees it — offline
- * users have nothing else to fall back on.
- */
-function materializeLocalCatalog(source: string): void {
-  const cachePath = getCustomModelCatalogCachePath();
-  const catalog = projectCustomCatalog(
-    JSON.parse(fs.readFileSync(source, 'utf8')),
-    new Date().toISOString(),
-    source,
-  );
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-  atomicWriteFileSync(cachePath, JSON.stringify(catalog, null, 2));
-  invalidateModelCatalog();
-}
-
-function isUrl(source: string): boolean {
-  return /^https?:\/\//.test(source);
-}
-
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -288,47 +233,23 @@ function describe(error: unknown): string {
 let inFlight: Promise<void> | undefined;
 
 /**
- * Best-effort background refresh of the models.dev cache and, when
- * configured, the custom catalog. Never throws and never blocks: callers
- * fire it once the proxy dispatcher is installed and carry on; the bundled
- * snapshot covers every run until the caches land.
+ * Best-effort background refresh. Call after installing the proxy dispatcher;
+ * the bundled snapshot covers startup while the request is in flight.
  */
-export function refreshModelCatalog(customSource?: string): Promise<void> {
-  setCustomModelCatalogSource(customSource);
-  if (isModelCatalogDisabled()) {
+export function refreshModelCatalog(): Promise<void> {
+  if (
+    isModelCatalogDisabled() ||
+    process.env[MODEL_CATALOG_REFRESH_ENV] === 'off'
+  ) {
     return Promise.resolve();
   }
-  if (customSource && !isUrl(customSource)) {
-    try {
-      materializeLocalCatalog(customSource);
-    } catch (error) {
-      debugLogger.debug(
-        `Custom model catalog ${customSource} skipped: ${describe(error)}`,
-      );
-    }
-  }
-  inFlight ??= (async () => {
-    if (process.env[MODEL_CATALOG_REFRESH_ENV] !== 'off') {
-      const url = process.env[MODEL_CATALOG_URL_ENV] || MODELS_DEV_URL;
-      await refreshRemote(url, getModelCatalogCachePath(), (raw, fetchedAt) =>
-        trimModelsDevCatalog(raw as ModelsDevApi, fetchedAt, url),
-      ).catch((error: unknown) => {
-        debugLogger.debug(`Model catalog refresh skipped: ${describe(error)}`);
-      });
-    }
-    if (customSource && isUrl(customSource)) {
-      await refreshRemote(
-        customSource,
-        getCustomModelCatalogCachePath(),
-        (raw, fetchedAt) => projectCustomCatalog(raw, fetchedAt, customSource),
-      ).catch((error: unknown) => {
-        debugLogger.debug(
-          `Custom model catalog refresh skipped: ${describe(error)}`,
-        );
-      });
-    }
-  })().finally(() => {
-    inFlight = undefined;
-  });
+  const url = process.env[MODEL_CATALOG_URL_ENV] || MODELS_DEV_URL;
+  inFlight ??= refreshRemote(url, getModelCatalogCachePath())
+    .catch((error: unknown) => {
+      debugLogger.debug(`Model catalog refresh skipped: ${describe(error)}`);
+    })
+    .finally(() => {
+      inFlight = undefined;
+    });
   return inFlight;
 }

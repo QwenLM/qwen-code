@@ -1,7 +1,7 @@
 ---
 title: '数据驱动的模型元数据目录（models.dev）'
 date: '2026-08-23'
-status: '已在 PR #11959 实现；验证进行中'
+status: '已在 PR #11959 实现'
 ---
 
 # 数据驱动的模型元数据目录
@@ -30,6 +30,8 @@ status: '已在 PR #11959 实现；验证进行中'
 
 按 provider 查询需要修改模型解析契约及其调用方，留待后续，不用“第一个 provider 优先”近似实现。快照生成与运行时刷新使用同一套投影。
 
+草稿中新增的 `model.customCatalog` 已移除：它的加载时机晚于首轮会话解析，进程全局状态还会在 Config 实例之间串用。私有或离线模型覆盖继续使用已有的 `modelProviders` generation 配置，不读取新增的自定义缓存文件。
+
 ## 存储与刷新
 
 裁剪后的 JSON 快照随 CLI 发布，生成体积预算为 200 KiB。后台刷新在代理初始化之后启动，超时为十秒，缓存间隔为 24 小时，通过 ETag 条件请求重新验证，在 `Storage.getGlobalQwenDir()` 下原子写入缓存。并发刷新共享进行中的请求。失败保留原有可用数据，仅记录 debug 日志。
@@ -40,6 +42,6 @@ status: '已在 PR #11959 实现；验证进行中'
 
 定向测试覆盖缓存选择、非法条目、冲突拒绝、别名归一化、逐字段回退、纠正、刷新节流和失败处理。真实来源冒烟还需覆盖内置目录开关对照和真实 models.dev 刷新；mock fetch 无法证明上游数据准确。
 
-[DashScope PDF 文档](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) 说明 qwen3.8-max 在北京和新加坡支持通过 Chat Completions 使用 `file_data` 与 `filename` 传入 PDF，并明确排除 Responses API 的 PDF 传递。文档与 converter 一致不等于真实 endpoint 验证：凭证是否可用、是否实际识别 PDF，需要分别记录。
+[DashScope PDF 文档](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) 说明 qwen3.8-max 在北京和新加坡支持通过 Chat Completions 使用 `file_data` 与 `filename` 传入 PDF，并明确排除 Responses API 的 PDF 传递。因此目录不自动启用 qwen3.8-max 的 PDF。查询纠正同时覆盖内置和刷新的数据；用户可针对已验证 endpoint 显式配置 `generationConfig.modalities.pdf`。图片、视频能力和其他模型保持不变。自动推断 PDF 留待查询能识别 endpoint 和协议并完成真实识别测试后启用。
 
-命令、结果和剩余交付门槛统一记录在[验证记录](../verification/models-dev-catalog/README.md)。最终 head 必须通过必要检查，未验证的 endpoint 路径必须在 PR 描述中明确保留。
+命令、结果和剩余交付门槛统一记录在[验证记录](../verification/models-dev-catalog/README.md)。最终 head 必须通过必要检查，PR 描述必须区分显式 PDF 配置与目录默认值。

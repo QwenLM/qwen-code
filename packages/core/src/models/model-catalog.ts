@@ -37,11 +37,6 @@ export function getModelCatalogCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'model-registry.json');
 }
 
-/** Materialized copy of the `model.customCatalog` setting's URL or file. */
-export function getCustomModelCatalogCachePath(): string {
-  return path.join(Storage.getGlobalQwenDir(), 'model-registry.custom.json');
-}
-
 function isEntry(value: unknown): value is ModelCatalogEntry {
   if (!value || typeof value !== 'object') {
     return false;
@@ -85,20 +80,6 @@ export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
 }
 
 let loaded: ModelCatalog | undefined;
-let customSource: string | undefined;
-
-/**
- * Records the `model.customCatalog` setting. The custom cache file is applied
- * only while its `source` matches, so a changed or removed setting cannot
- * leave a stale overlay behind.
- */
-export function setCustomModelCatalogSource(source: string | undefined): void {
-  if (source !== customSource) {
-    customSource = source;
-    loaded = undefined;
-  }
-}
-
 function readCache(cachePath: string): ModelCatalog | undefined {
   try {
     return parseModelCatalog(JSON.parse(fs.readFileSync(cachePath, 'utf8')));
@@ -107,18 +88,9 @@ function readCache(cachePath: string): ModelCatalog | undefined {
   }
 }
 
-function overlay(base: ModelCatalog, custom: ModelCatalog): ModelCatalog {
-  const models = { ...base.models };
-  for (const [id, entry] of Object.entries(custom.models)) {
-    models[id] = { ...models[id], ...entry };
-  }
-  return { ...base, models };
-}
-
 /**
  * The refreshed cache wins only when it is newer than the snapshot bundled
- * with this build, so upgrading the CLI never serves stale cached data. The
- * custom catalog, when configured, is layered on top per model and field.
+ * with this build, so upgrading the CLI never serves stale cached data.
  */
 export function loadModelCatalog(): ModelCatalog {
   if (!loaded) {
@@ -140,11 +112,7 @@ export function loadModelCatalog(): ModelCatalog {
         },
       };
     }
-    const custom = customSource
-      ? readCache(getCustomModelCatalogCachePath())
-      : undefined;
-    loaded =
-      custom && custom.source === customSource ? overlay(base, custom) : base;
+    loaded = base;
   }
   return loaded;
 }
@@ -163,5 +131,13 @@ export function lookupModelCatalog(
   if (isModelCatalogDisabled()) {
     return undefined;
   }
-  return loadModelCatalog().models[model];
+  const entry = loadModelCatalog().models[model];
+  // DashScope PDF support depends on endpoint and protocol (not Responses).
+  // Keep it opt-in through explicit model configuration until scoped lookup.
+  if (model === 'qwen3.8-max' && entry?.modalities?.pdf) {
+    const modalities = { ...entry.modalities };
+    delete modalities.pdf;
+    return { ...entry, modalities };
+  }
+  return entry;
 }

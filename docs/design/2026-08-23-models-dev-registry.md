@@ -1,7 +1,7 @@
 ---
 title: 'Data-Driven Model Metadata Registry (models.dev)'
 date: '2026-08-23'
-status: 'implemented in PR #11959; verification in progress'
+status: 'implemented in PR #11959'
 ---
 
 # Data-Driven Model Metadata Registry
@@ -30,6 +30,8 @@ Model identifiers use the existing normalization rules. All entries that normali
 
 Provider-aware lookup would require changing the model-resolution contract and its callers. It is deferred rather than approximated by first-provider precedence. Regeneration and runtime refresh use the same projection.
 
+The draft-only `model.customCatalog` option was removed: it loaded too late for the first session and introduced process-global state that leaked across Config instances. Private/offline model overrides use the existing `modelProviders` generation settings. No new custom-cache file is read.
+
 ## Storage and refresh
 
 A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. Refresh starts in the background after proxy initialization, uses a ten-second timeout and a 24-hour cache interval, revalidates with ETag, and atomically writes the cache under `Storage.getGlobalQwenDir()`. Concurrent refreshes share an in-flight request. Failure leaves the previous data usable and is logged only at debug level.
@@ -40,6 +42,6 @@ A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. 
 
 Focused tests cover cache selection, malformed entries, conflict rejection, alias normalization, per-field fallback, corrections, refresh throttling and failure. Real-source smoke checks must additionally cover the bundled on/off behavior and a live models.dev refresh; a mocked fetch cannot validate upstream facts.
 
-[DashScope's PDF reference](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) documents qwen3.8-max PDF support through Chat Completions in Beijing and Singapore using `file_data` plus `filename`. It explicitly excludes Responses API PDF delivery. Documentation agreement with the converter is not a live endpoint test: record credential availability and actual PDF recognition separately.
+[DashScope's PDF reference](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) documents qwen3.8-max PDF support through Chat Completions in Beijing and Singapore using `file_data` plus `filename`. It explicitly excludes Responses API PDF delivery. The catalog therefore does not automatically enable PDF for qwen3.8-max. A lookup correction applies to both bundled and refreshed data; users can explicitly configure `generationConfig.modalities.pdf` for a verified endpoint. The image/video capabilities and other models remain unchanged. Enabling automatic PDF inference is deferred until lookup can account for the endpoint and protocol, with a live recognition test.
 
-The [verification record](../verification/models-dev-catalog/README.md) owns commands, results, and remaining delivery gates. Required checks must pass on the final head, and any unverified endpoint path must remain explicit in the PR description.
+The [verification record](../verification/models-dev-catalog/README.md) owns commands, results, and remaining delivery gates. Required checks must pass on the final head, and explicit PDF opt-in must remain distinguishable from catalog defaults in the PR description.

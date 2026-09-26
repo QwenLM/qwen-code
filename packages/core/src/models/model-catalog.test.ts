@@ -12,13 +12,11 @@ import { AuthType } from '../core/contentGenerator.js';
 import { resolveModelConfig } from './modelConfigResolver.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
-  getCustomModelCatalogCachePath,
   getModelCatalogCachePath,
   invalidateModelCatalog,
   loadModelCatalog,
   lookupModelCatalog,
   parseModelCatalog,
-  setCustomModelCatalogSource,
 } from './model-catalog.js';
 
 const FAR_FUTURE = '9999-01-01T00:00:00.000Z';
@@ -55,14 +53,12 @@ describe('model catalog', () => {
     previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
     process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
     delete process.env['QWEN_CODE_MODELS_DEV'];
-    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
   });
 
   afterEach(() => {
     restoreEnv('QWEN_HOME', previousHome);
     restoreEnv('QWEN_CODE_MODELS_DEV', previousSwitch);
-    setCustomModelCatalogSource(undefined);
     invalidateModelCatalog();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -112,42 +108,6 @@ describe('model catalog', () => {
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
   });
 
-  it('layers the custom catalog over the base per model and field', () => {
-    writeJson(getCustomModelCatalogCachePath(), {
-      source: '/etc/qwen/models.json',
-      fetchedAt: LONG_AGO,
-      models: {
-        [bundledId]: { context: 1 },
-        'custom-model': { output: 2 },
-      },
-    });
-    setCustomModelCatalogSource('/etc/qwen/models.json');
-
-    expect(lookupModelCatalog(bundledId)).toEqual({
-      ...bundledEntry,
-      context: 1,
-    });
-    expect(lookupModelCatalog('custom-model')).toEqual({ output: 2 });
-    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
-  });
-
-  it('ignores a custom cache whose source no longer matches the setting', () => {
-    writeJson(getCustomModelCatalogCachePath(), {
-      source: '/etc/qwen/old.json',
-      fetchedAt: LONG_AGO,
-      models: { 'custom-model': { output: 2 } },
-    });
-
-    setCustomModelCatalogSource('/etc/qwen/new.json');
-    expect(lookupModelCatalog('custom-model')).toBeUndefined();
-
-    setCustomModelCatalogSource(undefined);
-    expect(lookupModelCatalog('custom-model')).toBeUndefined();
-
-    setCustomModelCatalogSource('/etc/qwen/old.json');
-    expect(lookupModelCatalog('custom-model')).toEqual({ output: 2 });
-  });
-
   it('uses real bundled defaults without overriding explicit model settings', () => {
     const sources = {
       authType: AuthType.USE_OPENAI,
@@ -174,6 +134,33 @@ describe('model catalog', () => {
     });
     process.env['QWEN_CODE_MODELS_DEV'] = 'off';
     expect(resolveModelConfig(sources).config.contextWindowSize).toBe(262144);
+  });
+
+  it('requires explicit Qwen PDF support for both bundled and refreshed data', () => {
+    const sources = {
+      authType: AuthType.USE_OPENAI,
+      cli: {},
+      settings: {},
+      env: { OPENAI_MODEL: 'qwen3.8-max' },
+    };
+    expect(resolveModelConfig(sources).config.modalities).toMatchObject({
+      image: true,
+      video: true,
+    });
+    expect(resolveModelConfig(sources).config.modalities?.pdf).toBeUndefined();
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://models.dev/api.json',
+      fetchedAt: FAR_FUTURE,
+      models: { 'qwen3.8-max': { modalities: { image: true, pdf: true } } },
+    });
+    invalidateModelCatalog();
+    expect(resolveModelConfig(sources).config.modalities?.pdf).toBeUndefined();
+    expect(
+      resolveModelConfig({
+        ...sources,
+        settings: { generationConfig: { modalities: { pdf: true } } },
+      }).config.modalities?.pdf,
+    ).toBe(true);
   });
 
   it('keeps Sonnet 4.5 at its default API limit even after a refresh', () => {
