@@ -1538,7 +1538,7 @@ describe('MemoryPressureMonitor', () => {
           getChat: () => ({
             getHistoryShallow: () => toolHistory,
             setHistory: vi.fn(),
-            getCompletedToolCallIds: () => new Set<string>(),
+            getCompletedToolCallIds: () => [],
           }),
         },
       });
@@ -1603,7 +1603,7 @@ describe('MemoryPressureMonitor', () => {
           getChat: () => ({
             getHistoryShallow: () => toolHistory,
             setHistory: vi.fn(),
-            getCompletedToolCallIds: () => new Set<string>(),
+            getCompletedToolCallIds: () => [],
           }),
         },
       });
