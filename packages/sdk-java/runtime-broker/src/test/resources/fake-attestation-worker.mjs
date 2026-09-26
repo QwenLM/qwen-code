@@ -174,17 +174,19 @@ const server = createServer((request, response) => {
 server.listen(port, '127.0.0.1', () => {
   const address = server.address();
   const host = foreignUrl ? '172.16.1.234' : '127.0.0.1';
+  const ready = {
+    type: 'ready',
+    version: args.includes('--ready-v1') ? 1 : bootVersion,
+    ...(bootVersion === 2 ? { managedContext: MANAGED_CONTEXT } : {}),
+    runtimeInstanceId: boot.runtimeInstanceId,
+    runtimeIncarnation: boot.runtimeIncarnation,
+    leaseId: boot.leaseId,
+    epoch: boot.epoch,
+    url: `http://${host}:${address.port}`,
+  };
+  const encoded = JSON.stringify(ready);
   process.stdout.write(
-    `${JSON.stringify({
-      type: 'ready',
-      version: bootVersion,
-      ...(bootVersion === 2 ? { managedContext: MANAGED_CONTEXT } : {}),
-      runtimeInstanceId: boot.runtimeInstanceId,
-      runtimeIncarnation: boot.runtimeIncarnation,
-      leaseId: boot.leaseId,
-      epoch: boot.epoch,
-      url: `http://${host}:${address.port}`,
-    })}\n`,
+    `${args.includes('--ready-cr') ? encoded.replace('"runtimeInstanceId":"', '"runtimeInstanceId":"\r') : encoded}\n`,
   );
 });
 

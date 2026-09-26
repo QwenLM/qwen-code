@@ -211,6 +211,55 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void refusesAnIllFormedRuntimeSessionIdBeforeResolvingTheScope() {
+        AtomicInteger resolutions = new AtomicInteger();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> {
+                    resolutions.incrementAndGet();
+                    return CompletableFuture.completedFuture(SCOPE);
+                },
+                ignored -> CompletableFuture.completedFuture(LEASE),
+                new FakeTransport());
+        try {
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.acquire(HARNESS_SESSION, "s\uD800",
+                            "bootstrap"));
+            assertEquals(0, resolutions.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    void refusesAnIllFormedExecutionReferenceIdentity() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        RuntimeBrokerService service = readyService(transport);
+        try {
+            service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                    .toCompletableFuture().get(1, TimeUnit.SECONDS);
+            // The JSON writer would send each of these as "p?".
+            for (String field : List.of("promptId", "callId",
+                    "argsDigest")) {
+                Map<String, Object> reference = reference("args-1");
+                reference.put(field, "p\uD800");
+                IllegalArgumentException failure = assertThrows(
+                        IllegalArgumentException.class,
+                        () -> service.createExecution("key-" + field,
+                                HARNESS_SESSION, RUNTIME_SESSION,
+                                (String) reference.get("promptId"),
+                                (String) reference.get("callId"),
+                                (String) reference.get("argsDigest"),
+                                reference));
+                assertTrue(failure.getMessage().contains("well-formed"),
+                        field);
+            }
+            assertEquals(0, transport.executions.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
     void executionLedgerDispatchesOnePhysicalExecutionPerKey()
             throws Exception {
         FakeTransport transport = new FakeTransport();

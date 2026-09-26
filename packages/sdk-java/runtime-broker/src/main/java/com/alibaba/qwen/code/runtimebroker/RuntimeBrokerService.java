@@ -166,8 +166,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ensureOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
-                "runtimeSessionId");
+        String runtimeId = referenceId(runtimeSessionId, "runtimeSessionId");
         ensureHarnessActive(harnessId);
         return resolveScope(harnessId).thenCompose(scope -> {
             ensureHarnessActive(harnessId);
@@ -228,10 +227,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 UUID.randomUUID().toString(), key,
                 session.binding.bindingId, session.binding.generation(),
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
-                BrokerValues.requireId(turnId, "turnId"),
-                BrokerValues.requireId(toolCallId, "toolCallId"),
-                BrokerValues.requireId(requestDigest, "requestDigest"),
+                referenceId(runtimeSessionId, "runtimeSessionId"),
+                referenceId(turnId, "turnId"),
+                referenceId(toolCallId, "toolCallId"),
+                referenceId(requestDigest, "requestDigest"),
                 BrokerValues.immutableMap(reference));
         ToolExecutionRecord persisted = executionRepository.findOrCreate(
                 candidate);
@@ -957,6 +956,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw new IllegalArgumentException(name + " is required");
         }
         return value;
+    }
+
+    /**
+     * An identity the Runtime keys on: the Session ID and the execution
+     * reference's promptId, callId, and argsDigest. The JSON writer sends an
+     * unpaired surrogate as '?', so two of these could reach one entry.
+     */
+    private static String referenceId(String value, String name) {
+        return BrokerValues.requireWellFormed(
+                BrokerValues.requireId(value, name), name);
     }
 
     private static Throwable unwrap(Throwable error) {

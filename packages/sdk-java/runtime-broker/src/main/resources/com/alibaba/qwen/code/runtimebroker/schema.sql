@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     provisioner_kind VARCHAR(512) NOT NULL,
     placement_domain VARCHAR(512) NOT NULL,
     runtime_template_digest VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     last_generation BIGINT NOT NULL,
     active_binding_id VARCHAR(512),
     CONSTRAINT uq_runtime_binding_isolation UNIQUE (isolation_key)
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     provisioner_kind VARCHAR(512) NOT NULL,
     placement_domain VARCHAR(512) NOT NULL,
     runtime_template_digest VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     runtime_generation BIGINT NOT NULL,
     binding_state VARCHAR(32) NOT NULL,
     provision_request_id VARCHAR(512),

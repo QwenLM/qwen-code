@@ -26,6 +26,20 @@ final class BrokerValues {
         return value;
     }
 
+    /**
+     * Text without an unpaired surrogate: the JSON writer turns one into
+     * '?', so two identifiers could reach the Runtime as one.
+     */
+    static String requireWellFormed(String value, String name) {
+        if (value.codePoints().anyMatch(point ->
+                point >= Character.MIN_SURROGATE
+                        && point <= Character.MAX_SURROGATE)) {
+            throw new IllegalArgumentException(name
+                    + " must be well-formed text");
+        }
+        return value;
+    }
+
     static URI requireOrigin(URI value, String name) {
         if (value == null
                 || (!("http".equalsIgnoreCase(value.getScheme()))
