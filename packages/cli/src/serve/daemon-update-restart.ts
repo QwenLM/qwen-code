@@ -22,7 +22,11 @@ export function createDaemonUpdateRestarter(options: {
   getPort: () => number;
   close: () => Promise<void>;
 }): ((launcher: string) => Promise<void>) | undefined {
-  const execve = process.execve?.bind(process);
+  const execve = (
+    process as typeof process & {
+      execve?: (file: string, args: string[], env: NodeJS.ProcessEnv) => never;
+    }
+  ).execve?.bind(process);
   const argv = normalizeServeFastPathArgv(options.argv);
   if (
     !execve ||
