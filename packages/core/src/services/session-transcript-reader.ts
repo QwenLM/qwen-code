@@ -16,6 +16,12 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import {
+  applySessionNotesRecord,
+  isSubstantiveSessionRecord,
+  parseSessionNotesPayload,
+  type SessionNotesState,
+} from './session-notes-state.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
@@ -277,6 +283,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   attributionSnapshot?: AttributionSnapshot;
   historyGaps?: HistoryGap[];
   recording: {
+    sessionNotes?: SessionNotesState;
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
     customTitle?: string;
@@ -466,6 +473,7 @@ interface AggregatedRecordReadContext {
 }
 
 interface UuidIndexEntry {
+  substantive: boolean;
   parentUuid: string | null;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
@@ -2084,6 +2092,7 @@ function newIndexEntry(
 ): UuidIndexEntry {
   const navigationKind = navigationKindForRecord(record);
   return {
+    substantive: isSubstantiveSessionRecord(record),
     parentUuid: record.parentUuid,
     sessionIdMatchesFile: record.sessionId === sessionId,
     type: record.type,
@@ -2202,6 +2211,7 @@ async function buildIndex(params: {
                 : undefined,
             } as ChatRecord;
             existing.segments.push(segment);
+            existing.substantive ||= isSubstantiveSessionRecord(fragmentRecord);
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
@@ -2663,6 +2673,60 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
   );
 }
 
+async function readSessionNotesState(
+  index: TranscriptIndex,
+  readContext?: AggregatedRecordReadContext,
+): Promise<SessionNotesState> {
+  const firstSubstantive = index.runtimeUuids.find(
+    (uuid) => index.byUuid.get(uuid)?.substantive,
+  );
+  const sourceLeafUuid = lastUuidMatching(index, (entry) => entry.substantive);
+  const compressionUuid = lastUuidMatching(
+    index,
+    (entry) => entry.apiHistoryCompressionCandidate,
+  );
+  const notesUuid = lastUuidMatching(
+    index,
+    (entry) => entry.type === 'system' && entry.subtype === 'session_notes',
+  );
+  const userUuid = lastUuidMatching(
+    index,
+    (entry) =>
+      entry.type === 'user' &&
+      (entry.subtype === undefined ||
+        entry.subtype === 'mid_turn_user_message'),
+  );
+  const state: SessionNotesState = {
+    windowId: compressionUuid ?? firstSubstantive,
+    sourceLeafUuid,
+  };
+  const selected = [notesUuid, userUuid].filter(
+    (uuid): uuid is string => uuid !== undefined,
+  );
+  await forEachAggregatedRecord(
+    index,
+    selected,
+    (record) => {
+      if (record.uuid === notesUuid) {
+        const payload = parseSessionNotesPayload(record.systemPayload);
+        if (
+          payload &&
+          index.runtimeUuids.includes(payload.sourceLeafUuid) &&
+          index.runtimeUuids.includes(payload.windowId)
+        ) {
+          state.notes = { ...payload, revision: record.uuid };
+        }
+      } else {
+        const userState: SessionNotesState = {};
+        applySessionNotesRecord(userState, record);
+        state.latestUser = userState.latestUser;
+      }
+    },
+    readContext,
+  );
+  return state;
+}
+
 function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
@@ -2865,6 +2929,125 @@ export class SessionTranscriptReader {
       this.cursorCodec?.encodeSnapshot(state) ??
       encodeSessionTranscriptSnapshot(state, this.workspaceCwd)
     );
+  }
+
+  async readNotesState(
+    sessionId: string,
+    leafUuid?: string,
+  ): Promise<SessionNotesState> {
+    const filePath = this.getSessionFilePath(sessionId);
+    const stats = await fsp.stat(filePath);
+    const index = await getCachedIndex({
+      filePath,
+      fileIdentity: fileIdentityFromStats(stats),
+      snapshotSize: stats.size,
+      lastUpdated: new Date(stats.mtimeMs).toISOString(),
+    });
+    const end = leafUuid
+      ? index.runtimeUuids.indexOf(leafUuid)
+      : index.runtimeUuids.length - 1;
+    if (end < 0 && leafUuid)
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    const state = await readSessionNotesState({
+      ...index,
+      runtimeUuids: index.runtimeUuids.slice(0, end + 1),
+    });
+    await assertIndexSnapshotUnchanged(index, sessionId);
+    return state;
+  }
+
+  async readContextHistory(
+    sessionId: string,
+    options: {
+      snapshot?: string;
+      offset?: number;
+      recordId?: string;
+      limit?: number;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<{
+    records: ChatRecord[];
+    snapshot: string;
+    nextOffset?: number;
+    gaps: HistoryGap[];
+  }> {
+    signal?.throwIfAborted();
+    const filePath = this.getSessionFilePath(sessionId);
+    const stats = await fsp.stat(filePath);
+    const fileIdentity = fileIdentityFromStats(stats);
+    const current = await getCachedIndex({
+      filePath,
+      fileIdentity,
+      snapshotSize: stats.size,
+      lastUpdated: new Date(stats.mtimeMs).toISOString(),
+    });
+    const frozen = options.snapshot
+      ? this.decodeSnapshot(options.snapshot)
+      : undefined;
+    if (
+      frozen &&
+      (frozen.sessionId !== sessionId ||
+        !sameFileIdentity(frozen.fileIdentity, fileIdentity) ||
+        frozen.snapshotSize > stats.size ||
+        !current.runtimeUuids.includes(frozen.leafUuid))
+    ) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    const index = frozen
+      ? await getCachedIndex({ filePath, ...frozen })
+      : current;
+    const snapshot =
+      options.snapshot ??
+      this.encodeSnapshot({
+        v: SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
+        kind: 'turn_index',
+        sessionId,
+        fileIdentity,
+        snapshotSize: stats.size,
+        leafUuid: index.leafUuid,
+        startTime: index.startTime,
+        lastUpdated: index.lastUpdated,
+      });
+    const offset = options.recordId
+      ? index.runtimeUuids.indexOf(options.recordId)
+      : (options.offset ?? 0);
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > index.runtimeUuids.length
+    ) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    const limit = options.recordId
+      ? 1
+      : Math.min(normalizeLimit(options.limit), 100);
+    const uuids: string[] = [];
+    let bytes = 0;
+    for (const uuid of index.runtimeUuids.slice(offset, offset + limit)) {
+      const size = recordSegmentBytes(index, uuid);
+      if (size > SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES) {
+        throw new SessionTranscriptPageTooLargeError(
+          sessionId,
+          size,
+          SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
+        );
+      }
+      if (uuids.length > 0 && bytes + size > SESSION_TRANSCRIPT_MAX_PAGE_BYTES)
+        break;
+      uuids.push(uuid);
+      bytes += size;
+    }
+    signal?.throwIfAborted();
+    const records = await readAggregatedRecords(index, uuids);
+    signal?.throwIfAborted();
+    await assertIndexSnapshotUnchanged(current, sessionId);
+    const nextOffset = offset + uuids.length;
+    return {
+      records,
+      snapshot,
+      ...(nextOffset < index.runtimeUuids.length ? { nextOffset } : {}),
+      gaps: index.gaps,
+    };
   }
 
   async readTurnIndexPage(
@@ -3277,7 +3460,10 @@ export class SessionTranscriptReader {
     );
     const selectedReadsStartedAt = performance.now();
     const selectedReadSet = new Set(preReadUuids);
-    let goalRecovery: { selectedGoalRecovery: GoalRecoverySelection };
+    let goalRecovery: {
+      selectedGoalRecovery: GoalRecoverySelection;
+      sessionNotes: SessionNotesState;
+    };
     try {
       goalRecovery = await withAggregatedRecordReadContext(
         index,
@@ -3369,7 +3555,10 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          return { selectedGoalRecovery };
+          return {
+            selectedGoalRecovery,
+            sessionNotes: await readSessionNotesState(index, readContext),
+          };
         },
       );
     } finally {
@@ -3453,6 +3642,7 @@ export class SessionTranscriptReader {
       ...(attributionSnapshot ? { attributionSnapshot } : {}),
       ...(index.gaps.length > 0 ? { historyGaps: index.gaps } : {}),
       recording: {
+        sessionNotes: goalRecovery.sessionNotes,
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
         ...(customTitle !== undefined ? { customTitle } : {}),

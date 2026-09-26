@@ -1863,6 +1863,46 @@ describe('AgentCore.prepareTools', () => {
     };
   }
 
+  const parentSessionToolCases = [
+    ToolNames.SESSION_NOTES,
+    ToolNames.SESSION_HISTORY,
+    ToolNames.GET_CONTEXT_REMAINING,
+    ToolNames.NEW_CONTEXT,
+  ].flatMap((toolName) =>
+    (['subagent', 'teammate'] as const).map((context) => ({
+      toolName,
+      context,
+    })),
+  );
+
+  it.each(parentSessionToolCases)(
+    'hides $toolName from $context declarations',
+    async ({ toolName, context }) => {
+      for (const tools of [['*'], [toolName, ToolNames.READ_FILE]]) {
+        const { core } = buildAgentForTools({ tools }, [
+          { name: toolName },
+          { name: ToolNames.READ_FILE },
+        ]);
+        const prepare = () => core.prepareTools();
+        const declarations =
+          context === 'subagent'
+            ? await runWithAgentContext('session-policy-worker', prepare)
+            : await runWithTeammateIdentity(
+                {
+                  agentId: 'worker@session-policy',
+                  agentName: 'worker',
+                  teamName: 'session-policy',
+                  isTeamLead: false,
+                },
+                prepare,
+              );
+        expect(declarations.map((tool) => tool.name)).toEqual([
+          ToolNames.READ_FILE,
+        ]);
+      }
+    },
+  );
+
   it.each([true, false])(
     'exposes worker task_stop only to contained agents (container=%s)',
     async (contained) => {

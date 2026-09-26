@@ -459,6 +459,64 @@ describe('ToolCallTool', () => {
     },
   );
 
+  const parentSessionTools = [
+    ToolNames.SESSION_NOTES,
+    ToolNames.SESSION_HISTORY,
+    ToolNames.GET_CONTEXT_REMAINING,
+    ToolNames.NEW_CONTEXT,
+  ];
+
+  it.each(
+    parentSessionTools.flatMap((toolName) =>
+      (['subagent', 'teammate'] as const).map((context) => ({
+        toolName,
+        context,
+      })),
+    ),
+  )(
+    'refuses bridged $toolName from $context',
+    async ({ toolName, context }) => {
+      for (const hidden of [true, false]) {
+        const target = new MockTool({ name: toolName, shouldDefer: hidden });
+        const resolve = () =>
+          resolveDeferredToolCall(
+            makeRegistry([target], new Set(hidden ? [toolName] : [])),
+            { name: toolName, arguments: {} },
+          );
+        const result =
+          context === 'subagent'
+            ? await runWithAgentContext('session-policy-worker', resolve)
+            : await runWithTeammateIdentity(
+                {
+                  agentId: 'worker@session-policy',
+                  agentName: 'worker',
+                  teamName: 'session-policy',
+                  isTeamLead: false,
+                },
+                resolve,
+              );
+        expect(result).toMatchObject({
+          errorType: ToolErrorType.EXECUTION_DENIED,
+          error: expect.objectContaining({
+            message: expect.stringContaining('not available to this agent'),
+          }),
+        });
+      }
+    },
+  );
+
+  it.each(parentSessionTools)(
+    'keeps deferred %s callable from the leader session',
+    async (toolName) => {
+      const target = new MockTool({ name: toolName, shouldDefer: true });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([toolName])),
+        { name: toolName, arguments: {} },
+      );
+      expect(result).toMatchObject({ tool: target, arguments: {} });
+    },
+  );
+
   it('discriminates the context-aware exclusion selector for teammates', async () => {
     // R5-3: with only shared-set members tested, replacing the selector with
     // either raw set survives the suite. A teammate's send_message must

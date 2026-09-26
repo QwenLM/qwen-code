@@ -495,6 +495,7 @@ export type CompactionTriggerReason =
   | 'manual';
 
 export interface ChatCompressionInfo {
+  strategy?: 'summary' | 'notes';
   originalTokenCount: number;
   newTokenCount: number;
   /**

@@ -178,6 +178,17 @@ export default {
   // self-mapping and returns the bare display name. Localized values live in
   // zh.js / zh-TW.js; other locales fall back to the English display name.
   // ============================================================================
+  'Chat Compression Strategy': 'Chat Compression Strategy',
+  Summary: 'Summary',
+  'Notes and History': 'Notes and History',
+  'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.':
+    'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.',
+  'toolDisplayName.SessionNotes': 'toolDisplayName.SessionNotes',
+  'toolDisplayName.SessionHistory': 'toolDisplayName.SessionHistory',
+  'toolDisplayName.GetContextRemaining': 'toolDisplayName.GetContextRemaining',
+  'toolDisplayName.NewContext': 'toolDisplayName.NewContext',
   'toolDisplayName.Exec': 'toolDisplayName.Exec',
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',

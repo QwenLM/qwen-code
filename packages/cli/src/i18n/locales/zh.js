@@ -170,6 +170,17 @@ export default {
   // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
   // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
+  'Chat Compression Strategy': '上下文压缩方式',
+  Summary: '摘要',
+  'Notes and History': '笔记与历史',
+  'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.':
+    '选择摘要式压缩，或使用本地笔记并按需读取历史。重启 Qwen Code 后生效。',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    '已从本地笔记恢复新上下文：{{originalTokens}} → {{newTokens}} tokens。',
+  'toolDisplayName.SessionNotes': '会话笔记',
+  'toolDisplayName.SessionHistory': '会话历史',
+  'toolDisplayName.GetContextRemaining': '上下文余量',
+  'toolDisplayName.NewContext': '新建上下文',
   'toolDisplayName.Exec': '执行代码',
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',

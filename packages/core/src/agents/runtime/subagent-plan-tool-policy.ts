@@ -63,6 +63,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
   ToolNames.TODO_WRITE,
+  ToolNames.SESSION_NOTES,
+  ToolNames.SESSION_HISTORY,
+  ToolNames.GET_CONTEXT_REMAINING,
+  ToolNames.NEW_CONTEXT,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
@@ -96,6 +100,10 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.REQUEST_SHUTDOWN,
   ToolNames.TODO_WRITE,
+  ToolNames.SESSION_NOTES,
+  ToolNames.SESSION_HISTORY,
+  ToolNames.GET_CONTEXT_REMAINING,
+  ToolNames.NEW_CONTEXT,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,

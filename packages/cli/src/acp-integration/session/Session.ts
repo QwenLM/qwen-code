@@ -5888,6 +5888,8 @@ export class Session implements SessionContext {
     channelTurn = false,
   ): Promise<PromptResponse> {
     let managedMemoryRecallStarted = false;
+    let notesPromptRecorder: ChatRecordingService | undefined;
+    let notesPromptUuid: string | undefined;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -6105,9 +6107,16 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
+            } else if (
+              !isSlashInput ||
+              (slashCommandName !== 'advisor' &&
+                !(
+                  slashCommandName === 'compress' &&
+                  this.config.getChatCompression?.()?.strategy === 'notes'
+                ))
+            ) {
+              // `/advisor` and notes-mode `/compress` defer recording until
+              // command resolution below — a
               // user-defined command shadowing the name must keep its record
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
@@ -6119,7 +6128,9 @@ export class Session implements SessionContext {
                 .filter((block) => block.type === 'resource_link')
                 .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
-              recorder?.recordUserMessage(
+              if (this.config.getChatCompression?.()?.strategy === 'notes')
+                notesPromptRecorder = recorder;
+              notesPromptUuid = recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
@@ -6200,22 +6211,32 @@ export class Session implements SessionContext {
 
               // Classify by the RESOLVED command, not the raw token: a
               // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
+              // must keep its transcript records (R18-6). Notes-mode `/compress`
+              // also defers recording so the built-in command does not
+              // invalidate the checkpoint it is about to consume.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const notesCompressionCommand =
+                this.config.getChatCompression?.()?.strategy === 'notes' &&
+                slashCommandName === 'compress';
+              const builtInNotesCompression =
+                notesCompressionCommand &&
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'compress';
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
                 resolvedCommandInfo.name === 'advisor'
               );
               if (
-                slashCommandName === 'advisor' &&
+                (slashCommandName === 'advisor' ||
+                  (notesCompressionCommand && !builtInNotesCompression)) &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
                 const recorder = this.config.getChatRecordingService();
-                recorder?.recordUserMessage(
+                if (this.config.getChatCompression?.()?.strategy === 'notes')
+                  notesPromptRecorder = recorder;
+                notesPromptUuid = recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
                   promptDisplayText !== undefined || inputAnnotations
@@ -6227,6 +6248,14 @@ export class Session implements SessionContext {
                     : undefined,
                   daemonPromptId,
                 );
+              }
+
+              if (builtInNotesCompression) {
+                this.config.getChatRecordingService()?.recordSlashCommand({
+                  phase: 'invocation',
+                  rawCommand: inputText,
+                  sentToModel: false,
+                });
               }
 
               try {
@@ -6506,6 +6535,8 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
+            if (notesPromptUuid)
+              notesPromptRecorder?.bindNotesInput(notesPromptUuid, nextMessage);
             let turnCount = 0;
             let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
@@ -7059,6 +7090,8 @@ export class Session implements SessionContext {
         );
       },
     ).finally(() => {
+      if (notesPromptUuid)
+        notesPromptRecorder?.releaseNotesInput(notesPromptUuid);
       if (managedMemoryRecallStarted) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
@@ -8588,6 +8621,7 @@ export class Session implements SessionContext {
     let compressionFailed = false;
     if (
       !options.skipCompression &&
+      this.config.getChatCompression?.()?.strategy !== 'notes' &&
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {

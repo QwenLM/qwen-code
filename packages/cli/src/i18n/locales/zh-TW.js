@@ -169,6 +169,17 @@ export default {
   // via `localizeToolDisplayName`. A product name (e.g. `Notebook`) is kept
   // verbatim inside an otherwise-translated label.
   // ============================================================================
+  'Chat Compression Strategy': '上下文壓縮方式',
+  Summary: '摘要',
+  'Notes and History': '筆記與歷史',
+  'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.':
+    '選擇摘要式壓縮，或使用本機筆記並按需讀取歷史。重新啟動 Qwen Code 後生效。',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    '已從本機筆記恢復新上下文：{{originalTokens}} → {{newTokens}} tokens。',
+  'toolDisplayName.SessionNotes': '工作階段筆記',
+  'toolDisplayName.SessionHistory': '工作階段歷史',
+  'toolDisplayName.GetContextRemaining': '上下文餘量',
+  'toolDisplayName.NewContext': '新建上下文',
   'toolDisplayName.Exec': '執行程式碼',
   'toolDisplayName.Edit': '編輯',
   'toolDisplayName.WriteFile': '寫入檔案',

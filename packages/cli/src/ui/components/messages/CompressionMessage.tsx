@@ -33,6 +33,7 @@ export function CompressionMessage({
   } = compression;
 
   const text = getCompressionStatusText({
+    strategy: compression.strategy,
     isPending,
     originalTokenCount,
     newTokenCount,

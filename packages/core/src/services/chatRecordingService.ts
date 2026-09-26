@@ -14,6 +14,13 @@ import {
   type BackgroundNotificationTurn,
 } from '../utils/background-turn-context.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import {
+  applySessionNotesRecord,
+  isSubstantiveSessionRecord,
+  type SessionNotesPayload,
+  type SessionNotesRevision,
+  type SessionNotesState,
+} from './session-notes-state.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
@@ -22,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
+  Part,
   Content,
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
@@ -304,6 +312,7 @@ export interface ChatRecord {
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   /** Optional subtype for distinguishing non-standard records */
   subtype?:
+    | 'session_notes'
     | 'chat_compression'
     | 'slash_command'
     | 'ui_telemetry'
@@ -380,6 +389,7 @@ export interface ChatRecord {
    * mutating the original UI list.
    */
   systemPayload?:
+    | SessionNotesPayload
     | ChatCompressionRecordPayload
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
@@ -526,6 +536,12 @@ export interface AgentRetryRecordPayload {
  * drop of #9320 on any session that ran /compress-fast before being resumed.
  */
 export interface ChatCompressionRecordPayload {
+  notes?: {
+    revision: string;
+    sourceLeafUuid: string;
+    previousWindowId: string;
+    windowId: string;
+  };
   /** Compression metrics/status returned by the compression service */
   info: ChatCompressionInfo;
   /**
@@ -907,6 +923,7 @@ export interface BranchCheckpointCursor {
 }
 
 export interface ChatRecordingRestoreState {
+  sessionNotes?: SessionNotesState;
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
   customTitle?: string;
@@ -942,6 +959,10 @@ export interface ChatRecordingRestoreState {
  * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
+  private sessionNotesState: SessionNotesState = {};
+  private baseSessionNotesState: SessionNotesState = {};
+  private notesStateDirty = false;
+  private unobservedNotesInputs: Array<{ uuid: string; parts: Part[] }> = [];
   /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
   /** UUID of the last active-tail record confirmed written to disk. */
@@ -1135,7 +1156,7 @@ export class ChatRecordingService {
    * Returns the session ID.
    * @returns The session ID.
    */
-  private getSessionId(): string {
+  getSessionId(): string {
     return (
       this.binding?.sessionId ??
       this.pinnedSessionId ??
@@ -1197,6 +1218,9 @@ export class ChatRecordingService {
     this.currentSourceId = undefined;
     this.currentSessionModel = undefined;
     this.activeBranchRecords = [];
+    this.sessionNotesState = {};
+    this.baseSessionNotesState = {};
+    this.unobservedNotesInputs = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
@@ -1254,6 +1278,10 @@ export class ChatRecordingService {
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.notesStateDirty = false;
+    this.sessionNotesState = structuredClone(state.sessionNotes ?? {});
+    this.baseSessionNotesState = structuredClone(this.sessionNotesState);
+    this.unobservedNotesInputs = [];
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.activeBranchBaseUuid = state.lastCompletedUuid;
@@ -1386,7 +1414,8 @@ export class ChatRecordingService {
   }
 
   private updateActiveBranch(record: ChatRecord): void {
-    const currentTail = this.activeBranchRecords.at(-1)?.uuid ?? null;
+    const currentTail =
+      this.activeBranchRecords.at(-1)?.uuid ?? this.activeBranchBaseUuid;
     if (record.parentUuid !== currentTail) {
       const parentIndex =
         record.parentUuid === null
@@ -1399,14 +1428,34 @@ export class ChatRecordingService {
           ? []
           : this.activeBranchRecords.slice(0, parentIndex + 1);
       if (parentIndex < 0) {
+        if (record.parentUuid !== this.activeBranchBaseUuid) {
+          this.baseSessionNotesState = {};
+          this.notesStateDirty = record.parentUuid !== null;
+        }
         this.activeBranchBaseUuid = record.parentUuid ?? null;
       }
       this.pendingBranchToolCalls = collectPendingBranchToolCalls(
         this.activeBranchRecords,
       );
+      this.sessionNotesState = structuredClone(this.baseSessionNotesState);
+      this.unobservedNotesInputs = [];
+      for (const active of this.activeBranchRecords) {
+        applySessionNotesRecord(this.sessionNotesState, active);
+      }
     }
     this.activeBranchRecords.push(record);
     updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
+    applySessionNotesRecord(this.sessionNotesState, record);
+    if (
+      this.config.getChatCompression?.()?.strategy === 'notes' &&
+      record.type !== 'assistant' &&
+      isSubstantiveSessionRecord(record)
+    ) {
+      this.unobservedNotesInputs.push({
+        uuid: record.uuid,
+        parts: record.message?.parts ?? [],
+      });
+    }
   }
 
   private enqueueRecordWrite(
@@ -1667,6 +1716,183 @@ export class ChatRecordingService {
   async flush(): Promise<void> {
     await this.operationTail;
     if (this.writeFailure) throw this.writeFailure;
+  }
+
+  assertNotesWriterReady(): void {
+    if (this.writeFailure) throw this.writeFailure;
+    if (!this.acceptingWrites || this.state !== 'active') {
+      throw new SessionWriterUnavailableError();
+    }
+    if (this.topologyFence) {
+      throw new Error('Session topology is changing; retry after it settles.');
+    }
+  }
+
+  getSessionNotesState(): SessionNotesState {
+    return structuredClone(this.sessionNotesState);
+  }
+
+  async refreshSessionNotesState(): Promise<void> {
+    if (!this.notesStateDirty) return;
+    await this.flush();
+    const baseUuid = this.activeBranchBaseUuid;
+    const leaf = this.lastRecordUuid;
+    const { SessionTranscriptReader } = await import(
+      './session-transcript-reader.js'
+    );
+    const reader = new SessionTranscriptReader(
+      this.config.getProjectRoot(),
+      undefined,
+      this.config.storage.getRuntimeBaseDir(),
+    );
+    const state = baseUuid
+      ? await reader.readNotesState(this.getSessionId(), baseUuid)
+      : {};
+    if (leaf !== this.lastRecordUuid)
+      throw new Error(
+        'Session changed while restoring notes after rewind. Retry the operation.',
+      );
+    this.baseSessionNotesState = structuredClone(state);
+    for (const record of this.activeBranchRecords)
+      applySessionNotesRecord(state, record);
+    this.sessionNotesState = state;
+    this.notesStateDirty = false;
+  }
+
+  observeNotesInput(content: Content): SessionNotesState | undefined {
+    this.unobservedNotesInputs = this.remainingNotesInputs(content);
+    return this.unobservedNotesInputs.length === 0
+      ? this.getSessionNotesState()
+      : undefined;
+  }
+
+  private remainingNotesInputs(content?: Content) {
+    let available = [...(content?.parts ?? [])];
+    return this.unobservedNotesInputs.filter((input) => {
+      const remaining = [...available];
+      for (const part of input.parts) {
+        const index = remaining.findIndex((candidate) =>
+          part.functionResponse?.id
+            ? candidate.functionResponse?.id === part.functionResponse.id
+            : isDeepStrictEqual(candidate, part),
+        );
+        if (index < 0) return true;
+        remaining.splice(index, 1);
+      }
+      available = remaining;
+      return false;
+    });
+  }
+
+  getNotesHandoffState(pendingInput?: Content): SessionNotesState {
+    this.assertNotesWriterReady();
+    if (
+      this.notesStateDirty ||
+      !this.sessionNotesState.windowId ||
+      this.remainingNotesInputs(pendingInput).length > 0
+    ) {
+      throw new Error(
+        'Process pending session input before switching context.',
+      );
+    }
+    const state = this.getSessionNotesState();
+    if (
+      this.unobservedNotesInputs.some(
+        (input) => input.uuid === state.latestUser?.uuid,
+      )
+    ) {
+      state.latestUser = undefined;
+    }
+    return state;
+  }
+
+  bindNotesInput(recordUuid: string, content: Content): void {
+    const pending = this.unobservedNotesInputs.find(
+      (input) => input.uuid === recordUuid,
+    );
+    if (pending) pending.parts = content.parts ?? [];
+  }
+
+  releaseNotesInput(recordUuid: string): void {
+    this.unobservedNotesInputs = this.unobservedNotesInputs.filter(
+      (input) => input.uuid !== recordUuid,
+    );
+  }
+
+  assertNotesObservationCurrent(observed: SessionNotesState): void {
+    this.assertNotesWriterReady();
+    if (
+      !observed.windowId ||
+      !observed.sourceLeafUuid ||
+      this.notesStateDirty ||
+      observed.windowId !== this.sessionNotesState.windowId ||
+      observed.sourceLeafUuid !== this.sessionNotesState.sourceLeafUuid ||
+      this.unobservedNotesInputs.length > 0
+    ) {
+      throw new Error(
+        'The model observation is stale. Read the latest input before writing notes or switching context.',
+      );
+    }
+  }
+
+  async recordSessionNotes(
+    payload: SessionNotesPayload,
+    signal?: AbortSignal,
+  ): Promise<SessionNotesRevision> {
+    this.assertNotesObservationCurrent(payload);
+    signal?.throwIfAborted();
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      subtype: 'session_notes',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
+    return { ...payload, revision: record.uuid };
+  }
+
+  async recordChatCompressionStrict(
+    payload: ChatCompressionRecordPayload,
+    notes?: SessionNotesRevision,
+    signal?: AbortSignal,
+    expected?: SessionNotesState,
+  ): Promise<string> {
+    this.assertNotesWriterReady();
+    if (
+      expected &&
+      (expected.windowId !== this.sessionNotesState.windowId ||
+        expected.sourceLeafUuid !== this.sessionNotesState.sourceLeafUuid)
+    ) {
+      throw new Error(
+        'New session input arrived before compression committed. Retry with the updated history.',
+      );
+    }
+    if (notes) {
+      const pending = payload.compressedHistory.at(-1);
+      const state = this.getNotesHandoffState(
+        pending?.role === 'user' ? pending : undefined,
+      );
+      if (state.notes?.revision !== notes.revision) {
+        throw new Error(
+          'The notes revision changed. Read the current notes and retry.',
+        );
+      }
+    }
+    signal?.throwIfAborted();
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      subtype: 'chat_compression',
+      systemPayload: payload,
+    };
+    if (notes) {
+      payload.notes = {
+        revision: notes.revision,
+        sourceLeafUuid: notes.sourceLeafUuid,
+        previousWindowId: this.sessionNotesState.windowId!,
+        windowId: record.uuid,
+      };
+    }
+    await this.appendRecordStrict(record);
+    return record.uuid;
   }
 
   async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
@@ -1941,7 +2167,7 @@ export class ChatRecordingService {
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
     daemonPromptId?: string,
-  ): void {
+  ): string | undefined {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
@@ -1953,8 +2179,10 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
       this.appendRecord(record);
+      return record.uuid;
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
+      return undefined;
     }
   }
 
@@ -2638,6 +2866,13 @@ export class ChatRecordingService {
    * `lastRecordUuid` to the last record in the chain.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.notesStateDirty = false;
+    this.sessionNotesState = {};
+    this.baseSessionNotesState = {};
+    this.unobservedNotesInputs = [];
+    for (const record of messages) {
+      applySessionNotesRecord(this.sessionNotesState, record);
+    }
     this.turnParentUuids = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;

@@ -215,6 +215,7 @@ export const compressCommand: SlashCommand = {
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
               compressionKind: 'summarize',
+              ...(compressed.strategy ? { strategy: compressed.strategy } : {}),
               originalTokenCountIsEstimated:
                 compressed.originalTokenCountIsEstimated,
               newTokenCountIsEstimated: compressed.newTokenCountIsEstimated,

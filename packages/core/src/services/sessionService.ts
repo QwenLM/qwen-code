@@ -65,6 +65,11 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { writeNotesProjection } from './session-notes-service.js';
+import {
+  applySessionNotesRecord,
+  type SessionNotesState,
+} from './session-notes-state.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
 import {
   deleteArtifactSnapshot,
@@ -1870,6 +1875,25 @@ export class SessionService {
   ): Promise<void> {
     const sourceState = action === 'archive' ? 'active' : 'archived';
     const destinationState = action === 'archive' ? 'archived' : 'active';
+    const sourceNotes = this.getSessionFilePath(sessionId, sourceState).replace(
+      /\.jsonl$/,
+      '.notes.md',
+    );
+    const destinationNotes = this.getSessionFilePath(
+      sessionId,
+      destinationState,
+    ).replace(/\.jsonl$/, '.notes.md');
+    if (fs.existsSync(sourceNotes)) {
+      assertCleanupOwned?.();
+      try {
+        fs.mkdirSync(path.dirname(destinationNotes), { recursive: true });
+        fs.renameSync(sourceNotes, destinationNotes);
+      } catch (error) {
+        this.warn(
+          `${action}Sessions: failed to move notes projection for ${sessionId}: ${error}`,
+        );
+      }
+    }
     const sourceWorktree = this.getWorktreeSessionPathForState(
       sessionId,
       sourceState,
@@ -3503,6 +3527,16 @@ export class SessionService {
     this.removePrSidecars(sessionId);
     assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
+    for (const state of ['active', 'archived'] as const) {
+      const notesPath = this.getSessionFilePath(sessionId, state).replace(
+        /\.jsonl$/,
+        '.notes.md',
+      );
+      if (fs.existsSync(notesPath)) {
+        assertCleanupOwned?.();
+        this.removeFileIfExists(notesPath);
+      }
+    }
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
     assertCleanupOwned?.();
@@ -3562,6 +3596,11 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(active.filePath);
+          const notesPath = active.filePath.replace(/\.jsonl$/, '.notes.md');
+          if (fs.existsSync(notesPath)) {
+            options.assertCleanupOwned?.();
+            this.removeFileIfExists(notesPath);
+          }
           try {
             options.assertCleanupOwned?.();
             await moveSessionPrSidecar(
@@ -3700,6 +3739,11 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(archived.filePath);
+          const notesPath = archived.filePath.replace(/\.jsonl$/, '.notes.md');
+          if (fs.existsSync(notesPath)) {
+            options.assertCleanupOwned?.();
+            this.removeFileIfExists(notesPath);
+          }
           try {
             options.assertCleanupOwned?.();
             await moveSessionPrSidecar(
@@ -4345,6 +4389,15 @@ export class SessionService {
       }
     }
 
+    const notesState: SessionNotesState = {};
+    for (const record of forked) applySessionNotesRecord(notesState, record);
+    try {
+      await writeNotesProjection(targetPath, notesState.notes);
+    } catch (error) {
+      this.warn(
+        `branch ${newSessionId} committed, but its notes projection could not be written: ${error}`,
+      );
+    }
     return { filePath: targetPath, copiedCount: forked.length };
   }
 

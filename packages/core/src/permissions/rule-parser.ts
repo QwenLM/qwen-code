@@ -47,6 +47,16 @@ import type {
  * Covers all built-in tools plus common aliases (including Claude Code's "Bash").
  */
 export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  // Session notes and context tools
+  session_notes: 'session_notes',
+  SessionNotes: 'session_notes',
+  session_history: 'session_history',
+  SessionHistory: 'session_history',
+  get_context_remaining: 'get_context_remaining',
+  GetContextRemaining: 'get_context_remaining',
+  new_context: 'new_context',
+  NewContext: 'new_context',
+
   // Exec tool
   exec: 'exec',
   Exec: 'exec',

@@ -30,6 +30,7 @@ const SETTING_KEYS = {
   'setting:advisor-session-call-limit': 'advisorMaxUses',
   'setting:vision-model': 'visionModel',
   'setting:model-fallbacks': 'modelFallbacks',
+  'setting:chat-compression-strategy': 'model.chatCompression.strategy',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
   'setting:fuzzy-file-search': 'context.fileFiltering.enableFuzzySearch',
