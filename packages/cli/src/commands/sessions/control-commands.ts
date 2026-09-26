@@ -16,7 +16,11 @@
 
 import type { Argv, CommandModule } from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStdoutLine,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import {
   answerManagedSession,
   peekManagedSession,
@@ -53,8 +57,15 @@ const connectSupervisor: ConnectSupervisor = async () => {
  * Failure lines go to stderr, the way `list`, `ps` and `--bg` report
  * errors; success lines stay on stdout, so redirecting the command's
  * output never captures an error message alongside the result.
+ *
+ * The output guard goes up before the first write, the way `ps.ts` does
+ * it: by the time a result reaches here the supervisor has already
+ * accepted the operation, so a reader that leaves mid-output
+ * (`sessions stop <id> | tee log`) must not turn a completed `answer` or
+ * `stop` into an EPIPE crash and a non-zero exit.
  */
 function report(result: ManagedControlResult): void {
+  ignoreBrokenPipe();
   const write = result.exitCode !== 0 ? writeStderrLine : writeStdoutLine;
   for (const line of result.lines) write(line);
   if (result.exitCode !== 0) process.exitCode = result.exitCode;

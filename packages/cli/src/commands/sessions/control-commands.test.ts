@@ -16,10 +16,19 @@ vi.mock('../../agent-view/supervisor-runner.js', () => ({
 
 const stdout: string[] = [];
 const stderr: string[] = [];
+/** Interleaved record of guard installation and writes, in call order. */
+const outputOrder: string[] = [];
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
-  writeStdoutLine: (line: string) => stdout.push(line),
-  writeStderrLine: (line: string) => stderr.push(line),
+  ignoreBrokenPipe: () => outputOrder.push('guard'),
+  writeStdoutLine: (line: string) => {
+    stdout.push(line);
+    outputOrder.push('write');
+  },
+  writeStderrLine: (line: string) => {
+    stderr.push(line);
+    outputOrder.push('write');
+  },
 }));
 
 const { answerCommand, peekCommand, insertAnswerTextSeparator } = await import(
@@ -33,6 +42,7 @@ let savedExitCode: typeof process.exitCode;
 beforeEach(() => {
   stdout.length = 0;
   stderr.length = 0;
+  outputOrder.length = 0;
   savedExitCode = process.exitCode;
   process.exitCode = undefined;
   connectExistingAgentViewSupervisor.mockReset();
@@ -148,6 +158,27 @@ describe('session control command reporting', () => {
     expect(stdout).toEqual(['Answer delivered.']);
     expect(stderr).toEqual([]);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('installs the output error guard before the first line it writes', async () => {
+    // `answer` and `stop` have already mutated supervisor state by the
+    // time they print, so a reader that goes away (`| tee log`,
+    // `| head -2`) must not turn a completed action into an EPIPE crash
+    // plus a non-zero exit. The guard has to be up *before* the first
+    // write and on both channels: raised afterwards, or on stdout only,
+    // it leaves the write that broke the pipe unguarded.
+    connectExistingAgentViewSupervisor.mockResolvedValue({
+      answer: vi.fn().mockResolvedValue({ sessionId: SESSION, answered: true }),
+    });
+    await run(answerCommand, { session: SESSION, text: ['yes'] });
+    expect(outputOrder[0]).toBe('guard');
+    expect(outputOrder).toContain('write');
+
+    outputOrder.length = 0;
+    connectExistingAgentViewSupervisor.mockResolvedValue(undefined);
+    await run(peekCommand, { session: SESSION });
+    expect(outputOrder[0]).toBe('guard');
+    expect(outputOrder).toContain('write');
   });
 });
 
