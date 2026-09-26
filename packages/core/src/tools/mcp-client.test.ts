@@ -103,11 +103,11 @@ function cfgWithResources(): Config {
   } as unknown as Config;
 }
 
-function mockAppOnlyMcpServer(): void {
+function mockAppOnlyMcpServer(): Record<string, unknown> {
   const methodNotFound = Object.assign(new Error('Method not found'), {
     code: -32601,
   });
-  vi.mocked(ClientLib.Client).mockReturnValue({
+  const mockedClient: Record<string, unknown> = {
     connect: vi.fn(),
     registerCapabilities: vi.fn(),
     setRequestHandler: vi.fn(),
@@ -123,7 +123,10 @@ function mockAppOnlyMcpServer(): void {
     }),
     getInstructions: vi.fn(),
     close: vi.fn(),
-  } as unknown as ClientLib.Client);
+  };
+  vi.mocked(ClientLib.Client).mockReturnValue(
+    mockedClient as unknown as ClientLib.Client,
+  );
   vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
     {} as SdkClientStdioLib.StdioClientTransport,
   );
@@ -133,6 +136,7 @@ function mockAppOnlyMcpServer(): void {
         functionDeclarations: [{ name: 'internal_refresh' }],
       }),
   } as unknown as GenAiLib.CallableTool);
+  return mockedClient;
 }
 
 describe('mcp-client', () => {
@@ -1568,6 +1572,176 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await expect(client.discover(cfgWithResources())).rejects.toThrow();
 
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
+    // Issue #12496: the session-liveness layer (client.onerror) must
+    // tolerate a numeric JSON-RPC -32601 — a legacy-era tools-only server
+    // (e.g. GitLab built-in) answers method-not-found for prompts/list /
+    // resources/list it never advertised, and the wrapped body poisons the
+    // status registry via onerror before the discovery layer swallows it.
+    // Other transport errors (ECONNREFUSED, proxy 502, phrase-only prose)
+    // still flip DISCONNECTED.
+    let onerrorTestSeq = 0;
+    async function setupConnectedClient(label: string) {
+      const mockedClient: Record<string, unknown> = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ tools: {} }),
+        request: vi.fn().mockResolvedValue({ tools: [] }),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `${label}-${(onerrorTestSeq += 1)}`;
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      return { client, onerror, serverName };
+    }
+
+    it.each([
+      [
+        'legacy-era wrapped -32601 body with the phrase',
+        Object.assign(
+          new Error(
+            'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          ),
+          { code: 'CLIENT_HTTP_NOT_IMPLEMENTED' },
+        ),
+      ],
+      [
+        'spec-legal -32601 worded without the phrase (R2-3)',
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Unknown method"},"id":1}',
+        ),
+      ],
+      [
+        'structured numeric -32601 with no body phrase (R2-5 fast path)',
+        Object.assign(new Error('server refused'), { code: -32601 }),
+      ],
+      [
+        'body in data.text with nested members before code (R2-7)',
+        Object.assign(new Error('wrapped'), {
+          data: {
+            text: '{"jsonrpc":"2.0","params":{"nested":{"x":1}},"error":{"code":-32601,"message":"nope"}}',
+          },
+        }),
+      ],
+      [
+        'real SdkHttpError {data:{status,statusText,text}} bag (R4-1)',
+        Object.assign(new Error('Error POSTing to endpoint'), {
+          data: {
+            status: 400,
+            statusText: 'Bad Request',
+            text: '{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          },
+        }),
+      ],
+    ])('keeps CONNECTED on onerror %s (#12496)', async (label, error) => {
+      const { client, onerror, serverName } = await setupConnectedClient(
+        `mnf-${label.slice(0, 6).replace(/\W/g, '')}`,
+      );
+      onerror(error);
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      // R1-4: the tolerance path must not record the benign payload as a
+      // transport error, and must log at debug, not error.
+      expect(client.getLastTransportError()).toBeUndefined();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('method-not-found'),
+      );
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'a real transport error',
+        new Error('TypeError: fetch failed: ECONNREFUSED'),
+      ],
+      [
+        'phrase-only prose with no -32601 code',
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request: Method not found in registry"},"id":1}',
+        ),
+      ],
+      [
+        'a proxy 502 with no JSON body',
+        new Error(
+          'upstream connect error or disconnect/reset before headers (R4-6)',
+        ),
+      ],
+    ])('flips DISCONNECTED on onerror %s (#12496)', async (label, error) => {
+      const { client, onerror, serverName } = await setupConnectedClient(
+        `disc-${label.slice(0, 6).replace(/\W/g, '')}`,
+      );
+      onerror(error);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      // R1-4: transport errors keep the original contract — the upstream
+      // cause is captured for PoolEntry and logged at error level.
+      expect(client.getLastTransportError()).toBe(error);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(`MCP ERROR (${serverName})`),
+      );
+    });
+
+    // R4-2 (#12496): connectAndDiscover installs its own second onerror
+    // handler — a -32601 there must keep the registry CONNECTED just like
+    // the connect() handler, while a real transport error still flips it.
+    it('tolerates -32601 on connectAndDiscover onerror, flips on transport error (#12496 R4-2)', async () => {
+      const mockedClient = mockAppOnlyMcpServer();
+      const serverName = `cad-mnf-${(onerrorTestSeq += 1)}`;
+
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+
+      const onerror = mockedClient['onerror'] as (error: unknown) => void;
+      expect(typeof onerror).toBe('function');
+      onerror(
+        Object.assign(new Error('Error POSTing to endpoint'), {
+          data: {
+            status: 400,
+            statusText: 'Bad Request',
+            text: '{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          },
+        }),
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+
+      const transport = new Error('TypeError: fetch failed: ECONNREFUSED');
+      onerror(transport);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
 

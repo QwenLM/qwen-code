@@ -75,6 +75,7 @@ import {
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
+import { getJsonRpcErrorCode } from './jsonrpc-error-code.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
@@ -566,6 +567,29 @@ export class McpClient {
 
       this.client.onerror = (error) => {
         if (this.isDisconnecting) {
+          return;
+        }
+        // A JSON-RPC -32601 (Method not found) is the server explicitly
+        // saying "I do not implement this method family". For legacy-era
+        // tools-only servers this surfaces as an HTTP 400 carrying a
+        // JSON-RPC error body; the transport's outer `catch` wraps it in
+        // an SdkHttpError before onerror fires. The discovery layer
+        // already swallows -32601 via `isMethodNotFound` (`listMcpPrompts`
+        // / `listMcpResources` return []), but by that time the status
+        // registry is already poisoned and `/mcp` shows the server red.
+        // Mirror the discovery-layer tolerance here so a missing
+        // prompts/resources capability does not flip status to
+        // DISCONNECTED. Use the stricter `isJsonRpcMethodNotFound` (parse
+        // the JSON-RPC error body for the numeric -32601 code) rather
+        // than the loose `isMethodNotFound` substring match — onerror
+        // has no request context, so the substring fallback could
+        // mis-trigger on unrelated "Method not found" text. Transport-
+        // level errors (ECONNREFUSED, proxy 502, etc.) still fall
+        // through to DISCONNECTED.
+        if (isJsonRpcMethodNotFound(error)) {
+          debugLogger.debug(
+            `MCP method-not-found (${this.serverName}): ${getErrorMessage(error)}`,
+          );
           return;
         }
         // capture the upstream error
@@ -1473,6 +1497,16 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
+      // Same -32601 tolerance as the connect() handler (R2-1): a legacy-
+      // era tools-only server answering method-not-found must not poison
+      // the registry here either — the discovery calls below swallow it
+      // and a successful discovery rewrites CONNECTED anyway.
+      if (isJsonRpcMethodNotFound(error)) {
+        debugLogger.debug(
+          `MCP method-not-found (${mcpServerName}): ${getErrorMessage(error)}`,
+        );
+        return;
+      }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
@@ -1727,15 +1761,31 @@ async function discoverToolsWithMetadata(
 /**
  * True when an MCP request failed because the method is not implemented.
  * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
- * precise check. The message fallback (for transports that drop the code)
- * keeps the original case-sensitive exact substring `'Method not found'` —
- * deliberately NOT a broad `/method not found/i`, which would also swallow
- * unrelated errors like "Error in method not found handler: ...".
+ * precise check (via the shared `getJsonRpcErrorCode` extraction). The
+ * message fallback (for transports that drop the code) keeps the original
+ * case-sensitive exact substring `'Method not found'` — deliberately NOT a
+ * broad `/method not found/i`, which would also swallow unrelated errors
+ * like "Error in method not found handler: ...".
  */
 function isMethodNotFound(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === -32601) return true;
+  if (getJsonRpcErrorCode(error) === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
+}
+
+/**
+ * -32601 detector for `client.onerror`, which has no request context and
+ * therefore cannot accept the loose `'Method not found'` substring
+ * fallback that `isMethodNotFound` uses — the phrase alone must never
+ * gate a session-liveness decision. Accepts only the numeric
+ * `-32601` code, wherever the transport surfaces it: structured
+ * `error.code`, or the JSON-RPC body embedded in `data.text` /
+ * `message` (legacy-era HTTP wraps the body before `onerror` fires),
+ * read via `JSON.parse` rather than a text scan.
+ * Worded however the server phrases the message — a spec-legal
+ * `-32601` with "Unknown method" still counts.
+ */
+function isJsonRpcMethodNotFound(error: unknown): boolean {
+  return getJsonRpcErrorCode(error) === -32601;
 }
 
 /**
