@@ -40,7 +40,7 @@ public final class ToolExecutionRecord {
     private final long version;
     private final Instant settledAt;
 
-    public ToolExecutionRecord(String executionCallId, String idempotencyKey,
+    ToolExecutionRecord(String executionCallId, String idempotencyKey,
             String bindingId, long runtimeGeneration,
             String harnessSessionId, String runtimeSessionId, String turnId,
             String toolCallId, String requestDigest,

@@ -9,7 +9,8 @@ public interface RuntimeBindingRepository {
 
     RuntimeBindingRecord findActive(RuntimeProvisionRequest request);
 
-    List<RuntimeBindingRecord> findActiveByIsolationKey(String isolationKey);
+    List<RuntimeBindingRecord> findActiveByIsolationKey(RuntimeScope scope,
+            String isolationKey);
 
     RuntimeBindingRecord findById(String bindingId);
 

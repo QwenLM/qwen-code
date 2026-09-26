@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-/** A bounded, client-safe Runtime Broker failure. */
+/** Stable service error that an embedding adapter can map to its protocol. */
 public final class RuntimeBrokerException extends RuntimeException {
     private final int statusCode;
     private final String code;
@@ -8,27 +8,19 @@ public final class RuntimeBrokerException extends RuntimeException {
 
     public RuntimeBrokerException(int statusCode, String code,
             String message, boolean retryable) {
-        super(message);
-        validateStatus(statusCode);
-        this.statusCode = statusCode;
-        this.code = BrokerValues.requireId(code, "code");
-        this.retryable = retryable;
+        this(statusCode, code, message, retryable, null);
     }
 
     public RuntimeBrokerException(int statusCode, String code,
             String message, boolean retryable, Throwable cause) {
         super(message, cause);
-        validateStatus(statusCode);
-        this.statusCode = statusCode;
-        this.code = BrokerValues.requireId(code, "code");
-        this.retryable = retryable;
-    }
-
-    private static void validateStatus(int statusCode) {
         if (statusCode < 400 || statusCode > 599) {
             throw new IllegalArgumentException(
                     "statusCode must be an error status");
         }
+        this.code = BrokerValues.requireId(code, "code");
+        this.statusCode = statusCode;
+        this.retryable = retryable;
     }
 
     public int getStatusCode() {

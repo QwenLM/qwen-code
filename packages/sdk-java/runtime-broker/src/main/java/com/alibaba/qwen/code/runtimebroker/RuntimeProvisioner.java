@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-/** Starts or reuses one Runtime while honoring the scope isolation class. */
-@FunctionalInterface
+/** Ensures one physical Runtime resource for a claimed placement. */
 public interface RuntimeProvisioner extends AutoCloseable {
+    /** Retries for the same request must converge on one live resource. */
     CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request);
 
     /**
@@ -17,16 +17,10 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return "legacy";
     }
 
-    default String placementDomain() {
-        return "process-local";
-    }
-
-    default String runtimeTemplateDigest() {
-        return "legacy";
-    }
-
-    default boolean supportsDurableRecovery() {
-        return false;
+    /** Creates placement identity from trusted embedding configuration. */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return new RuntimeProvisionRequest(scope, isolationKey, kind());
     }
 
     /**
@@ -66,31 +60,32 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
-    default CompletionStage<Void> drain(RuntimeResourceContext resource) {
-        return drain(resource.getRequest(), resource.getLease());
-    }
-
-    default CompletionStage<Void> release(RuntimeResourceContext resource) {
-        return release(resource.getRequest(), resource.getLease());
-    }
-
-    default CompletionStage<Void> drain(RuntimeProvisionRequest request,
+    /**
+     * Proves a lease this process already treats as ready still answers
+     * attestation. The default accepts the in-memory lease.
+     */
+    default CompletionStage<Void> confirm(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         return CompletableFuture.completedFuture(null);
     }
 
+    /**
+     * Tears down the resource behind a lease the caller has decided to
+     * discard, keyed by the complete lease identity so a fenced loser can
+     * never kill the winning resource for the same request. The default
+     * has nothing to release.
+     */
     default CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         return CompletableFuture.completedFuture(null);
     }
 
-    default CompletionStage<Boolean> health(RuntimeLease lease) {
-        return CompletableFuture.completedFuture(true);
-    }
-
-    default CompletionStage<Boolean> health(RuntimeProvisionRequest request,
-            RuntimeLease lease) {
-        return health(lease);
+    /**
+     * Cheap local check whether the resource behind a lease is still
+     * usable. The default has no resource that can die.
+     */
+    default boolean isUsable(RuntimeLease lease) {
+        return true;
     }
 
     @Override

@@ -99,14 +99,6 @@ final class BrokerProcess implements AutoCloseable {
                 "runtimeSession", runtimeSession));
     }
 
-    /** Opens a tool turn and prepares a foreground Shell call in it. */
-    Reply prepare(String harness, String runtimeSession, String promptId,
-            String callId, String command) {
-        return call("prepare", Map.of("harness", harness,
-                "runtimeSession", runtimeSession, "promptId", promptId,
-                "callId", callId, "command", command));
-    }
-
     Reply create(String harness, String runtimeSession, String key,
             Map<String, Object> reference) {
         return call("create", Map.of("harness", harness,
@@ -126,14 +118,6 @@ final class BrokerProcess implements AutoCloseable {
             String execution) {
         return executionCall("reconcile", harness, runtimeSession,
                 execution);
-    }
-
-    /** An operator's explicit decision for an UNKNOWN execution. */
-    Reply resolve(String harness, String runtimeSession, String execution,
-            UnknownExecutionResolution resolution) {
-        return call("resolve", Map.of("harness", harness,
-                "runtimeSession", runtimeSession, "execution", execution,
-                "resolution", resolution.name()));
     }
 
     Reply release(String harness, String runtimeSession) {

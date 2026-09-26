@@ -17,7 +17,6 @@ import java.util.TimeZone;
 import javax.sql.DataSource;
 
 final class JdbcRepositorySupport {
-    private static final char[] HEX = "0123456789abcdef".toCharArray();
     private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
 
     private JdbcRepositorySupport() {
@@ -32,12 +31,17 @@ final class JdbcRepositorySupport {
 
     static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
+        if (request.isManagedContext()) {
+            return digest("managed-context/1", scope.getTenantId(),
+                    scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
+                    scope.getCanonicalCwd(), scope.getCapabilityDigest(),
+                    scope.getIsolationClass(), request.getIsolationKey(),
+                    request.getProvisionerKind(), request.getStorageId());
+        }
         return digest(scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),
-                request.getIsolationKey(), request.getProvisionerKind(),
-                request.getPlacementDomain(),
-                request.getRuntimeTemplateDigest());
+                request.getIsolationKey(), request.getProvisionerKind());
     }
 
     static String scopeKey(RuntimeScope scope) {
@@ -171,14 +175,7 @@ final class JdbcRepositorySupport {
                     digest.update(bytes);
                 }
             }
-            byte[] hashed = digest.digest();
-            char[] encoded = new char[hashed.length * 2];
-            for (int index = 0; index < hashed.length; index++) {
-                int value = hashed[index] & 0xff;
-                encoded[index * 2] = HEX[value >>> 4];
-                encoded[index * 2 + 1] = HEX[value & 0x0f];
-            }
-            return new String(encoded);
+            return java.util.HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is unavailable",
                     exception);

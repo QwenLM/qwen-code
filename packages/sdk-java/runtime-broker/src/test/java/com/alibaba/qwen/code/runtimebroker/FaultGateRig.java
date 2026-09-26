@@ -7,7 +7,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -16,7 +15,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -31,10 +29,8 @@ import org.h2.tools.Server;
 
 /**
  * The multi-process rig behind the Stage F fault gates (FG1). A gate starts
- * real Broker JVMs ({@link FaultGateBroker}) whose production local-process
- * provisioner starts the real bundled worker
- * ({@code node dist/managed-runtime-worker.js}) in one shared state
- * directory, so a restarted or second Broker can adopt it. The rig puts a
+ * real Broker JVMs ({@link FaultGateBroker}) that provision the real bundled
+ * worker ({@code node dist/cli.js managed-runtime-worker}), puts a
  * {@link FaultProxy} between each Broker and its workers, and keeps every
  * record in a file-backed H2 database behind a TCP server, so a restarted or
  * second Broker sees the same rows. The gate reads those rows directly.
@@ -43,20 +39,21 @@ import org.h2.tools.Server;
 final class FaultGateRig implements AutoCloseable {
     static final String CLI_PROPERTY = "qwen.cli.entry";
     static final String HARNESS = "harness-1";
-    // Tool v2 Sessions are keyed by a caller-supplied UUID.
-    static final String SESSION = "6f1c3e2a-8b4d-4c1e-9f2a-3b5d7e9c1a2f";
-    static final String PROMPT = "prompt-1";
-    // The worker is a full serve runtime, and recovery gives up after four
-    // operation leases, so a lease covers its cold start with room to spare.
-    static final Duration OPERATION_LEASE = Duration.ofSeconds(10);
+    static final String SESSION = "runtime-session-1";
+    static final Duration OPERATION_LEASE = Duration.ofSeconds(2);
     static final Duration DISPATCH_LEASE = Duration.ofSeconds(2);
-    // Tool requests wait for as long as the tool runs (ten minutes at most),
-    // so only the attestation has a short timeout.
-    static final Duration ATTESTATION_TIMEOUT = Duration.ofSeconds(10);
+    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
     static final Duration WAIT = Duration.ofSeconds(45);
     private static final String SECRET_KEY = Base64.getEncoder()
             .encodeToString("fault-gate-secret-key-0123456789"
                     .getBytes(StandardCharsets.US_ASCII));
+
+    enum Provisioner {
+        /** The production provisioner alone: owns workers in memory. */
+        LOCAL_PROCESS,
+        /** The production provisioner plus a pid record a restart adopts. */
+        RECOVERABLE
+    }
 
     final Path root;
     final Path workspace;
@@ -75,6 +72,7 @@ final class FaultGateRig implements AutoCloseable {
         root = Files.createTempDirectory("runtime-broker-fault-gate")
                 .toRealPath();
         workspace = Files.createDirectories(root.resolve("workspace"));
+        Files.createDirectories(root.resolve("records"));
         Files.createDirectories(root.resolve("home"));
         database = Server.createTcpServer("-tcpPort", "0", "-ifNotExists",
                 "-baseDir", root.resolve("db").toString()).start();
@@ -84,13 +82,9 @@ final class FaultGateRig implements AutoCloseable {
         executions = new JdbcToolExecutionRepository(dataSource);
         bindings = new JdbcRuntimeBindingRepository(dataSource,
                 AesGcmSecretProtector.fromBase64("fault-gate", SECRET_KEY));
-        // The worker accepts only the ID the daemon derives from the
-        // canonical workspace path.
-        scope = new RuntimeScope("tenant-a", HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(workspace
-                        .toString().getBytes(StandardCharsets.UTF_8)))
-                .substring(0, 16), "1", workspace.toString(),
-                "sha256:" + "a".repeat(64), "workspace");
+        scope = new RuntimeScope("tenant-a", "workspace-a", "1",
+                workspace.toString(), "sha256:" + "a".repeat(64),
+                "workspace");
     }
 
     static FaultGateRig open() throws Exception {
@@ -105,13 +99,9 @@ final class FaultGateRig implements AutoCloseable {
                     + " must name the bundled dist/cli.js");
         }
         Path cli = Path.of(configured).toAbsolutePath().normalize();
-        for (Path bundled : List.of(cli,
-                cli.resolveSibling("managed-runtime-worker.js"))) {
-            if (!Files.isRegularFile(bundled)) {
-                throw new AssertionError(bundled + " is missing; run `npm run"
-                        + " build && npm run bundle` at the repository root"
-                        + " first");
-            }
+        if (!Files.isRegularFile(cli)) {
+            throw new AssertionError(cli + " is missing; run `npm run build"
+                    + " && npm run bundle` at the repository root first");
         }
         Process node;
         try {
@@ -139,17 +129,19 @@ final class FaultGateRig implements AutoCloseable {
         return relay;
     }
 
-    BrokerProcess broker(String name, FaultProxy proxy) throws Exception {
-        return broker(name, proxy, null);
+    BrokerProcess broker(String name, FaultProxy proxy,
+            Provisioner provisioner) throws Exception {
+        return broker(name, proxy, provisioner, null);
     }
 
-    BrokerProcess broker(String name, FaultProxy proxy, TcpRelay relay)
+    BrokerProcess broker(String name, FaultProxy proxy,
+            Provisioner provisioner, TcpRelay relay) throws Exception {
+        return broker(name, proxy, provisioner, relay, REQUEST_TIMEOUT);
+    }
+
+    BrokerProcess broker(String name, FaultProxy proxy,
+            Provisioner provisioner, TcpRelay relay, Duration requestTimeout)
             throws Exception {
-        return broker(name, proxy, relay, OPERATION_LEASE);
-    }
-
-    BrokerProcess broker(String name, FaultProxy proxy, TcpRelay relay,
-            Duration operationLease) throws Exception {
         Map<String, Object> scopeConfig = new LinkedHashMap<>();
         scopeConfig.put("tenantId", scope.getTenantId());
         scopeConfig.put("workspaceId", scope.getWorkspaceId());
@@ -165,14 +157,13 @@ final class FaultGateRig implements AutoCloseable {
         config.put("ownerId", name + "-" + UUID.randomUUID());
         config.put("node", "node");
         config.put("cli", cli.toString());
-        // One state directory for every Broker, as one host's would be.
-        config.put("stateDir", root.resolve("state").toString());
-        config.put("workerLog", root.resolve("workers.log").toString());
+        config.put("stateDir", root.toString());
+        config.put("records", provisioner == Provisioner.RECOVERABLE
+                ? root.resolve("records").toString() : null);
         config.put("proxyPort", proxy.port());
-        config.put("operationLeaseMillis", operationLease.toMillis());
+        config.put("operationLeaseMillis", OPERATION_LEASE.toMillis());
         config.put("dispatchLeaseMillis", DISPATCH_LEASE.toMillis());
-        config.put("attestationTimeoutMillis",
-                ATTESTATION_TIMEOUT.toMillis());
+        config.put("requestTimeoutMillis", requestTimeout.toMillis());
         config.put("scope", scopeConfig);
         String file = name + "-" + brokers.size();
         Path configFile = root.resolve(file + ".json");
@@ -198,15 +189,19 @@ final class FaultGateRig implements AutoCloseable {
         ProcessTrees.kill(workers.get(0), WAIT);
     }
 
-    /**
-     * A foreground Shell call whose side effects land in the workspace,
-     * prepared in the Session's tool turn the way the Hosted Harness
-     * prepares one. The answer is the invocation reference to execute.
-     */
-    static Map<String, Object> shell(BrokerProcess broker, String callId,
-            String command) {
-        return new LinkedHashMap<>(broker.prepare(HARNESS, SESSION, PROMPT,
-                callId, command).object());
+    /** A foreground shell call whose side effects land in the workspace. */
+    static Map<String, Object> shell(String callId, String command) {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("command", command);
+        input.put("is_background", false);
+        Map<String, Object> reference = new LinkedHashMap<>();
+        reference.put("sessionId", SESSION);
+        reference.put("promptId", "prompt-1");
+        reference.put("callId", callId);
+        reference.put("argsDigest", "digest-" + callId);
+        reference.put("toolName", "run_shell_command");
+        reference.put("input", input);
+        return reference;
     }
 
     /** The lines a tool appended to a marker file in the workspace. */
@@ -268,22 +263,9 @@ final class FaultGateRig implements AutoCloseable {
         }
     }
 
-    /**
-     * The binding the scope's slot points at. The rig has one scope, so its
-     * one slot names the active binding without rebuilding the placement
-     * identity the provisioner derives.
-     */
     RuntimeBindingRecord activeBinding() {
-        try (Connection connection = dataSource.getConnection();
-                var statement = connection.prepareStatement(
-                        "SELECT active_binding_id FROM"
-                                + " qwen_runtime_binding_slot");
-                var result = statement.executeQuery()) {
-            return result.next() ? bindings.findById(result.getString(1))
-                    : null;
-        } catch (SQLException exception) {
-            throw new IllegalStateException(exception);
-        }
+        return bindings.findActive(new RuntimeProvisionRequest(scope, null,
+                LocalProcessRuntimeProvisioner.KIND));
     }
 
     RuntimeSession session() {
@@ -344,15 +326,6 @@ final class FaultGateRig implements AutoCloseable {
         for (BrokerProcess broker : brokers) {
             text.append("\n--- broker ").append(broker.pid()).append(" ---\n")
                     .append(broker.logTail());
-        }
-        try {
-            List<String> lines = Files.readAllLines(root.resolve(
-                    "workers.log"));
-            text.append("\n--- workers ---\n").append(String.join("\n",
-                    lines.subList(Math.max(0, lines.size() - 40),
-                            lines.size())));
-        } catch (IOException missing) {
-            // No worker wrote to standard error.
         }
         return text.toString();
     }

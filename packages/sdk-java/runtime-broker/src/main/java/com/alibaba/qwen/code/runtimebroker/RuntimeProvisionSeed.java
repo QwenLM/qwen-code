@@ -7,7 +7,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Durable credentials created before one physical Runtime is provisioned. */
+/**
+ * Credentials fixed before one physical Runtime is provisioned.
+ *
+ * <p>Durable encoding stays with the later reconcile slice. Attestation only
+ * needs the identity this seed already binds.
+ */
 public final class RuntimeProvisionSeed {
     private static final SecureRandom RANDOM = new SecureRandom();
 

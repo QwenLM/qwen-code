@@ -42,7 +42,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,10 +50,6 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-@Disabled("This branch's Hosted Harness requires a Runtime Broker; this"
-        + " gate covers main's no-Broker, no-tool profile, which the"
-        + " branch does not wire. Hosted flows run in"
-        + " run-managed-hosted-runtime-e2e.ts.")
 class HostedHarnessMySqlIT {
     private static final String MODEL = "hosted-mysql-fixture";
     private static final String TOKEN = "hosted-mysql-private-token";

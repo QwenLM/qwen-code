@@ -10,11 +10,26 @@ it. That ingress must authenticate the tenant before setting the header.
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Integration status
+
+This split is not yet a complete Hosted Harness / Runtime deployment. The
+embedded HTTP transport returns 501 for acquire/control/release. Prepare/start
+and operator resolution also return 501 because the merged Broker lacks their
+durable service APIs.
+Harness-level drain does not tear down workers. The copied real-process E2E
+script requires TypeScript integrations absent from this PR. See the
+[review corrections](../../../docs/design/2026-09-25-managed-agent-review-corrections.md)
+for the remaining merge gates; earlier preview timing and recovery results
+below are not evidence for this split.
+
 ## Prerequisites
 
 - Java 21
 - MySQL 8
-- a running `qwen serve --profile hosted-harness`
+
+The `qwen serve --profile hosted-harness` option on current main is reserved
+and rejects startup. The configuration below supports control-plane development,
+but a successful Hosted Harness turn is not available in this split.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -85,7 +100,7 @@ curl -sS -X DELETE \
 
 Archive and delete reject an active Turn. Rename waits for the Harness to
 durably commit `session_metadata`; archive closes the Harness attachment and
-drains the Runtime binding; delete closes it only when the Session was active
+requests Runtime drain (currently only an in-process retirement flag); delete closes it only when the Session was active
 and always drains the binding; unarchive clears the Runtime retirement fence
 and loads the Harness lazily on the next Turn. A failed external action leaves
 a `PENDING` command that the same idempotency key can safely resume. The
@@ -95,9 +110,8 @@ blocked until it completes.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
-authority and never initializes one. The Java connector attempts strict
-create for a new binding and loads on conflict or an uncertain creation
-outcome. A known existing binding only loads.
+authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
+conflict or uncertain creation outcome. A known existing binding only loads.
 An in-memory Hosted attachment is bound to one normalized Store endpoint,
 tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
@@ -223,7 +237,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32
 export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/absolute/authorized/workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
-export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/managed-runtime-worker.js'
+export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
@@ -232,17 +246,52 @@ When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
-Point `qwen serve --profile hosted-harness` at
-`http://127.0.0.1:4182` with the same Broker bearer. When enabled, the embedded
+The reserved Hosted Harness profile cannot yet connect to the Broker at
+`http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
 credentials with AES-256-GCM. The local-process adapter can recover the same
 worker after a Java restart on the same host; multi-host scheduling and the
 Kubernetes adapter's real-cluster fault matrix remain production gates. This
-standalone reference resolves every accepted tenant to the one configured
-workspace; a trusted tenant-authorized environment registry is still required
-before using it as a multi-tenant production service.
+standalone reference keeps the one configured directory for legacy unbound
+Sessions. Persisted bound Sessions use the private Workspace execution path
+below.
+
+### Private Workspace tool execution (W0c-3)
+
+The worker entry is the built CLI bundle; the server launches it with
+`managed-runtime-worker`. Configure canonical existing roots using Spring
+configuration (all Brokers sharing the database must use the same mappings):
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      workspace-mounts:
+        - tenant-id: tenant-a
+          storage-id: storage-a
+          root: /absolute/canonical/workspace-a
+```
+
+An empty mapping list rejects bound Session execution. This path requires
+`local-process` provisioning and `session` isolation. The Session must be
+created through W0b with a Registry configuration reference of
+`managed-runtime-tools/1` and policy reference of
+`preapproved-workspace-tools/1`. The original creator must still have read and
+create grants. Other frozen configuration pairs are refused.
+
+The private Broker can acquire, execute Read/Write/Edit/foreground Shell, and
+release these Sessions. One Runtime Session holds each tenant/storage pair
+until the original worker closes its execution gate. Lost or ambiguous
+responses retain the SQL holder; there is no timeout-based takeover. The
+provider and file tools do not confine access to the mount root: Read/Write/Edit
+and Shell can reach other paths allowed by the worker's host permissions.
+Foreground Shell may create detached descendants. Use this only with trusted
+local workloads until physical isolation and W0e cleanup are implemented.
+Public bound Turn/lifecycle gates and the full Hosted tool loop remain closed.
+See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
+for the exact boundary.
 
 Build the container from the repository root:
 
@@ -274,11 +323,10 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes a local full-chain check that starts an isolated
-MySQL instance, this Spring application, the Hosted Harness, and a local Tool
-Runtime. It uses the selected model from an existing Qwen settings file, then
-verifies that the same Turn completes a real `write_file` call, idempotent
-Session replay, tenant isolation, and durable Event storage.
+The repository includes copied full-chain scripts for a future integration.
+They cannot run against this split: the Hosted Harness profile rejects startup
+and `dist/managed-runtime-worker.js` is not built. The commands below describe
+the intended verification, not passing evidence for this PR.
 
 Build the required artifacts first, then run:
 
@@ -315,9 +363,9 @@ requires the replacement Harness to use the original `executionCallId`, execute
 the physical tool exactly once, continue the original Prompt without replay,
 and commit one public terminal event.
 
-The default zero-delay run is the stable real-model integration gate. To also
-observe resident model output while the Tool Runtime is unavailable, add a
-controlled cold-start delay:
+Once the missing integration lands, a zero-delay run can check the real-model
+path. A controlled cold-start delay can then test output before Runtime
+readiness:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \

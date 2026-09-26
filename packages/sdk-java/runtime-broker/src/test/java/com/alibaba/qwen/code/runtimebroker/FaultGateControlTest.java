@@ -34,22 +34,18 @@ class FaultGateControlTest {
     void aToolCallSettlesOnceThroughTheRealWorkerAndProxy()
             throws Exception {
         FaultProxy proxy = rig.proxy();
-        BrokerProcess broker = rig.broker("control", proxy);
+        BrokerProcess broker = rig.broker("control", proxy,
+                FaultGateRig.Provisioner.LOCAL_PROCESS);
         assertEquals("READY", broker.warm(HARNESS).object()
                 .getString("state"), rig.logs());
-        // The provisioner waits for the worker it started to answer its
-        // health probe, then the service attests it once before it records
-        // the binding READY.
-        assertEquals(1, proxy.count("attest"));
+        // The provisioner attests the worker it started, then the service
+        // attests it again before it records the binding READY.
+        assertEquals(2, proxy.count("attest"));
         broker.acquire(HARNESS, SESSION).requireOk();
-        // The worker checks the lease's token, ID and epoch on every later
-        // request, starting with this Session verb, so reuse needs no new
-        // attestation.
-        assertEquals(1, proxy.count("prepare"));
-        assertEquals(1, proxy.count("attest"));
+        // A later use of the in-memory lease re-proves its identity.
+        assertEquals(3, proxy.count("attest"));
         String execution = broker.create(HARNESS, SESSION, "key-1",
-                FaultGateRig.shell(broker, "call-1",
-                        "echo ran >> control"))
+                FaultGateRig.shell("call-1", "echo ran >> control"))
                 .object().getString("executionCallId");
 
         ToolExecutionRecord settled = rig.awaitExecution(execution,

@@ -47,16 +47,19 @@ class ConcurrencyStorageFaultGateTest {
         FaultProxy staleProxy = rig.proxy();
         FaultProxy takeoverProxy = rig.proxy();
         TcpRelay staleDatabase = rig.databaseRelay();
-        // The held answer reaches the stale Broker as an answer, since a
-        // tool request waits for as long as the tool could run.
-        BrokerProcess stale = rig.broker("stale", staleProxy, staleDatabase);
-        BrokerProcess takeover = rig.broker("takeover", takeoverProxy);
+        // The held answer must reach the stale Broker as an answer, not as a
+        // request timeout, however long the takeover takes on a slow host.
+        BrokerProcess stale = rig.broker("stale", staleProxy,
+                FaultGateRig.Provisioner.RECOVERABLE, staleDatabase,
+                FaultGateRig.WAIT.multipliedBy(2));
+        BrokerProcess takeover = rig.broker("takeover", takeoverProxy,
+                FaultGateRig.Provisioner.RECOVERABLE);
         assertEquals("READY", stale.warm(HARNESS).object()
                 .getString("state"), rig.logs());
         stale.acquire(HARNESS, SESSION).requireOk();
         FaultProxy.Fault answer = staleProxy.schedule("execute",
                 FaultProxy.Action.HOLD_RESPONSE);
-        Map<String, Object> reference = FaultGateRig.shell(stale, "call-1",
+        Map<String, Object> reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = stale.create(HARNESS, SESSION, "key-1", reference)
                 .object().getString("executionCallId");
@@ -66,14 +69,11 @@ class ConcurrencyStorageFaultGateTest {
         freezeBetweenDatabaseCalls(stale, staleDatabase);
         rig.awaitDispatchLapse(execution);
         takeover.acquire(HARNESS, SESSION).requireOk();
-        // Before reuse, the takeover Broker finds the worker through the
-        // shared state directory and attests it before it adopts it.
-        assertEquals(1, takeoverProxy.count("attest"));
-        // Its same-key retry fences the lapsed claim.
-        assertEquals("runtime_broker_execution_unknown", takeover.create(
-                HARNESS, SESSION, "key-1", reference).code());
-        assertEquals(ToolExecutionRecord.State.UNKNOWN,
-                rig.execution(execution).getState());
+        // Before reuse, the takeover Broker re-proves the worker's identity:
+        // once as the provisioner observes it, once as the service adopts it.
+        assertEquals(2, takeoverProxy.count("attest"));
+        assertEquals("UNKNOWN", takeover.create(HARNESS, SESSION, "key-1",
+                reference).object().getString("state"));
         long thawed = System.nanoTime();
         stale.resume();
 
@@ -115,13 +115,14 @@ class ConcurrencyStorageFaultGateTest {
             throws Exception {
         TcpRelay database = rig.databaseRelay();
         FaultProxy proxy = rig.proxy();
-        BrokerProcess broker = rig.broker("broker", proxy, database);
+        BrokerProcess broker = rig.broker("broker", proxy,
+                FaultGateRig.Provisioner.LOCAL_PROCESS, database);
         assertEquals("READY", broker.warm(HARNESS).object()
                 .getString("state"), rig.logs());
         broker.acquire(HARNESS, SESSION).requireOk();
         FaultProxy.Fault answer = proxy.schedule("execute",
                 FaultProxy.Action.HOLD_RESPONSE);
-        Map<String, Object> reference = FaultGateRig.shell(broker, "call-1",
+        Map<String, Object> reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = broker.create(HARNESS, SESSION, "key-1", reference)
                 .object().getString("executionCallId");
@@ -141,20 +142,20 @@ class ConcurrencyStorageFaultGateTest {
         assertFalse(broker.get(HARNESS, SESSION, execution).ok());
         database.restore();
 
-        // Nothing retried the commit once the database was back, so the
-        // record waits for the claim to lapse.
+        // Today nothing retries the commit once the database is back, so
+        // the record waits for the claim to lapse.
         ToolExecutionRecord uncommitted = rig.execution(execution);
         assertEquals(ToolExecutionRecord.State.EXECUTING,
                 uncommitted.getState());
         assertNull(uncommitted.getResult());
+        assertEquals("EXECUTING", broker.get(HARNESS, SESSION, execution)
+                .object().getString("state"));
 
         // Once the claim lapses, the same key fences the call and the
         // Runtime's evidence settles it; nothing runs it again.
         rig.awaitDispatchLapse(execution);
-        assertEquals("runtime_broker_execution_unknown", broker.create(
-                HARNESS, SESSION, "key-1", reference).code());
-        assertEquals(ToolExecutionRecord.State.UNKNOWN,
-                rig.execution(execution).getState());
+        assertEquals("UNKNOWN", broker.create(HARNESS, SESSION, "key-1",
+                reference).object().getString("state"));
         assertEquals("RESOLVED", broker.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
         ToolExecutionRecord settled = rig.execution(execution);

@@ -26,7 +26,8 @@ public final class JdbcRuntimeSessionRepository
     public RuntimeSessionRecord findOrCreate(
             RuntimeSessionRecord candidate) {
         requireCandidate(candidate);
-        RuntimeSessionRecord existing = findById(
+        RuntimeScope scope = candidate.getSession().getScope();
+        RuntimeSessionRecord existing = findById(scope,
                 candidate.getRuntimeSessionId());
         if (existing != null) {
             return requireSameIdentity(existing, candidate);
@@ -41,7 +42,7 @@ public final class JdbcRuntimeSessionRepository
             if (!JdbcRepositorySupport.isConstraintViolation(failure)) {
                 throw failure;
             }
-            RuntimeSessionRecord winner = findById(
+            RuntimeSessionRecord winner = findById(scope,
                     candidate.getRuntimeSessionId());
             if (winner == null) {
                 throw failure;
@@ -51,13 +52,19 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
-    public RuntimeSessionRecord findById(String runtimeSessionId) {
+    public RuntimeSessionRecord findById(RuntimeScope scope,
+            String runtimeSessionId) {
+        if (scope == null) {
+            throw new IllegalArgumentException("scope is required");
+        }
         String id = BrokerValues.requireId(runtimeSessionId,
                 "runtimeSessionId");
         return JdbcRepositorySupport.read(dataSource, connection -> {
-            RuntimeSessionRecord record = selectSession(connection, id,
-                    false);
-            if (record != null && !id.equals(record.getRuntimeSessionId())) {
+            RuntimeSessionRecord record = selectSession(connection, scope,
+                    id, false);
+            if (record != null
+                    && (!scope.equals(record.getSession().getScope())
+                            || !id.equals(record.getRuntimeSessionId()))) {
                 throw new IllegalStateException(
                         "Runtime Session identifier collision");
             }
@@ -71,6 +78,7 @@ public final class JdbcRuntimeSessionRepository
         requireReplacement(expected, replacement);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             RuntimeSessionRecord current = selectSession(connection,
+                    expected.getSession().getScope(),
                     expected.getRuntimeSessionId(), true);
             if (current == null || !current.sameIdentity(expected)
                     || current.getVersion() != expected.getVersion()) {
@@ -132,19 +140,23 @@ public final class JdbcRuntimeSessionRepository
     }
 
     private static RuntimeSessionRecord selectSession(Connection connection,
-            String runtimeSessionId, boolean forUpdate)
+            RuntimeScope scope, String runtimeSessionId, boolean forUpdate)
             throws SQLException {
         String sql = "SELECT " + SESSION_COLUMNS
-                + " FROM qwen_runtime_session WHERE runtime_session_id = ?"
+                + " FROM qwen_runtime_session WHERE scope_key = ? "
+                + "AND runtime_session_id = ?"
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, runtimeSessionId);
+            statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
+            statement.setString(2, runtimeSessionId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return null;
                 }
                 RuntimeSessionRecord record = mapSession(result);
-                if (!runtimeSessionId.equals(record.getRuntimeSessionId())) {
+                if (!scope.equals(record.getSession().getScope())
+                        || !runtimeSessionId.equals(
+                                record.getRuntimeSessionId())) {
                     throw new IllegalStateException(
                             "Runtime Session identifier collision");
                 }

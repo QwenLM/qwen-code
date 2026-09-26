@@ -69,15 +69,8 @@ public final class JdbcToolExecutionRepository
     public ToolExecutionRecord findByExecutionCallId(String executionCallId) {
         String id = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            ToolExecutionRecord record = selectByExecutionId(connection, id,
-                    false);
-            if (record != null && !id.equals(record.getExecutionCallId())) {
-                throw new IllegalStateException(
-                        "Tool execution identifier collision");
-            }
-            return record;
-        });
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                selectByExecutionId(connection, id, false));
     }
 
     @Override
@@ -127,9 +120,9 @@ public final class JdbcToolExecutionRepository
                             != dispatchGeneration) {
                 return null;
             }
-            ToolExecutionRecord.State to = replacement.getState();
-            if (to == ToolExecutionRecord.State.PREPARED
-                    || to == ToolExecutionRecord.State.DISPATCHING
+            ToolExecutionRecord.State nextState = replacement.getState();
+            if (nextState == ToolExecutionRecord.State.PREPARED
+                    || nextState == ToolExecutionRecord.State.DISPATCHING
                             && current.getState()
                                     != ToolExecutionRecord.State.DISPATCHING) {
                 throw new IllegalArgumentException(
@@ -341,7 +334,7 @@ public final class JdbcToolExecutionRepository
                 ToolExecutionRecord record = mapExecution(result);
                 if (!executionCallId.equals(record.getExecutionCallId())) {
                     throw new IllegalStateException(
-                            "Tool execution identifier collision");
+                            "Tool execution-call hash collision");
                 }
                 return record;
             }

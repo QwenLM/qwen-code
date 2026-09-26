@@ -18,15 +18,14 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * FG2: the worker answered, and the answer never reached the Broker. Every
  * case checks that the side effect ran at most once, that nothing reported a
- * completion that did not happen, that nothing settled without the Runtime's
- * evidence, and that the original identity returns the original result. The
- * dispatcher looks a call up by its reference before it executes it and
- * again after any lost answer, so a lost answer is recovered from the
- * Runtime's own record of the call instead of being left UNKNOWN.
+ * completion that did not happen, that UNKNOWN stayed blocked until the
+ * Runtime gave evidence, and that the original identity returns the original
+ * result.
  */
 @Tag("fault-gate")
 class LostResponseFaultGateTest {
@@ -38,7 +37,8 @@ class LostResponseFaultGateTest {
     void openRig() throws Exception {
         rig = FaultGateRig.open();
         proxy = rig.proxy();
-        broker = rig.broker("broker", proxy);
+        broker = rig.broker("broker", proxy,
+                FaultGateRig.Provisioner.LOCAL_PROCESS);
     }
 
     @AfterEach
@@ -48,35 +48,30 @@ class LostResponseFaultGateTest {
         }
     }
 
-    // A slow answer is not a lost one: a tool request waits for as long as
-    // the tool runs, up to ten minutes.
     @ParameterizedTest
-    @EnumSource(value = FaultProxy.Action.class, names = {"DROP", "RESET"})
-    void aLostExecuteResponseIsRecoveredFromEvidenceAndNeverReplayed(
+    @EnumSource(value = FaultProxy.Action.class,
+            names = {"DROP", "RESET", "DELAY"})
+    void aLostExecuteResponseIsReconciledAndNeverReplayed(
             FaultProxy.Action loss) throws Exception {
-        proxy.schedule("execute", loss);
+        proxy.schedule("execute", loss == FaultProxy.Action.DELAY
+                ? FaultProxy.Fault.delay(FaultGateRig.REQUEST_TIMEOUT
+                        .plusSeconds(3))
+                : FaultProxy.Fault.of(loss));
         acquire();
-        Map<String, Object> reference = FaultGateRig.shell(broker, "call-1",
+        Map<String, Object> reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = broker.create(HARNESS, SESSION, "key-1",
                 reference).object().getString("executionCallId");
 
-        ToolExecutionRecord settled = rig.awaitExecution(execution,
-                ToolExecutionRecord::isSettled, "settled execution");
-        assertEquals("success", settled.getExecutionStatus());
+        rig.awaitExecution(execution, record -> record.getState()
+                == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         rig.awaitMarker("marker", List.of("ran"));
-        // The result came from a lookup made after the answer was lost.
-        List<String> operations = proxy.exchanges().stream()
-                .map(FaultProxy.Exchange::operation).toList();
-        assertTrue(operations.lastIndexOf("status")
-                > operations.indexOf("execute"), operations.toString());
 
-        // A same-key retry answers from the settled row and dispatches
-        // nothing.
+        // A same-key retry joins the UNKNOWN record and dispatches nothing.
         JSONObject retried = broker.create(HARNESS, SESSION, "key-1",
                 reference).object();
         assertEquals(execution, retried.getString("executionCallId"));
-        assertEquals("SETTLED", retried.getString("state"));
+        assertEquals("UNKNOWN", retried.getString("state"));
         // The Runtime joins a retry of the same identity to the call it
         // already ran instead of running it again.
         RuntimeLease lease = rig.activeBinding().getLease();
@@ -87,8 +82,15 @@ class LostResponseFaultGateTest {
                 reference, 0).toCompletableFuture().get(30,
                         TimeUnit.SECONDS);
         assertEquals("settled", status.get("state"));
-        assertTrue(BrokerValues.sameJsonMap(BrokerValues.immutableMap(joined),
-                BrokerValues.immutableMap(castMap(status.get("result")))));
+        assertEquals(joined, status.get("result"));
+        assertEquals(List.of("ran"), rig.marker("marker"));
+
+        JSONObject reconciled = broker.reconcile(HARNESS, SESSION, execution)
+                .object();
+        assertEquals("RESOLVED", reconciled.getString("outcome"));
+        ToolExecutionRecord settled = rig.execution(execution);
+        assertTrue(settled.isSettled());
+        assertEquals("success", settled.getExecutionStatus());
         assertTrue(BrokerValues.sameJsonMap(settled.getResult(),
                 BrokerValues.immutableMap(joined)));
         assertEquals(List.of("ran"), rig.marker("marker"));
@@ -96,35 +98,34 @@ class LostResponseFaultGateTest {
     }
 
     @Test
-    void aLostStatusResponseNeverSettlesTheCall() throws Exception {
+    void aLostStatusResponseLeavesTheExecutionUnknown() throws Exception {
         proxy.schedule("execute", FaultProxy.Action.DROP);
-        // The first lookup comes before the execute; the next ones recover
-        // the lost execute answer.
-        proxy.schedule("status", FaultProxy.Action.PASS);
-        FaultProxy.Fault held = proxy.schedule("status",
-                FaultProxy.Action.HOLD_RESPONSE);
-        proxy.schedule("status", FaultProxy.Action.RESET);
         acquire();
         String execution = broker.create(HARNESS, SESSION, "key-1",
-                FaultGateRig.shell(broker, "call-1", "echo ran >> marker"))
+                FaultGateRig.shell("call-1", "echo ran >> marker"))
                 .object().getString("executionCallId");
-        held.awaitHeld(FaultGateRig.WAIT);
+        rig.awaitExecution(execution, record -> record.getState()
+                == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         rig.awaitMarker("marker", List.of("ran"));
 
-        // The Runtime's answer is held in flight: nothing has settled.
-        ToolExecutionRecord pending = rig.execution(execution);
-        assertEquals(ToolExecutionRecord.State.EXECUTING,
-                pending.getState());
-        assertNull(pending.getResult());
-        held.release(FaultProxy.Action.DROP);
+        for (FaultProxy.Action loss : List.of(FaultProxy.Action.DROP,
+                FaultProxy.Action.RESET)) {
+            proxy.schedule("status", loss);
+            BrokerProcess.Reply lost = broker.reconcile(HARNESS, SESSION,
+                    execution);
+            assertFalse(lost.ok(), loss + " status settled the execution");
+            assertEquals("managed_runtime_unavailable", lost.code());
+            assertTrue(lost.retryable());
+            ToolExecutionRecord still = rig.execution(execution);
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, still.getState());
+            assertNull(still.getResult());
+        }
 
-        // A dropped and then a reset lookup settle nothing; the next
-        // answered lookup settles the call from the Runtime's record.
-        ToolExecutionRecord settled = rig.awaitExecution(execution,
-                ToolExecutionRecord::isSettled, "settled execution");
-        assertEquals("success", settled.getExecutionStatus());
-        assertTrue(proxy.count("status") >= 4,
-                proxy.exchanges().toString());
+        assertEquals("RESOLVED", broker.reconcile(HARNESS, SESSION,
+                execution).object().getString("outcome"));
+        assertEquals("success", rig.execution(execution)
+                .getExecutionStatus());
+        assertEquals(3, proxy.count("status"));
         assertEquals(1, proxy.count("execute"));
         assertEquals(List.of("ran"), rig.marker("marker"));
     }
@@ -133,7 +134,7 @@ class LostResponseFaultGateTest {
     void aLostCancelResponseNeverReportsTheCancellation() throws Exception {
         acquire();
         String execution = broker.create(HARNESS, SESSION, "key-1",
-                FaultGateRig.shell(broker, "call-1",
+                FaultGateRig.shell("call-1",
                         "echo start >> marker; sleep 5; echo end >> marker"))
                 .object().getString("executionCallId");
         rig.awaitMarker("marker", List.of("start"));
@@ -162,44 +163,30 @@ class LostResponseFaultGateTest {
         assertEquals(1, proxy.count("execute"));
     }
 
-    @Test
-    void aLostAttestationIsProvenAgainBeforeTheBindingIsReady()
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void aLostAttestationNeverYieldsAReadyLease(int lostAttestation)
             throws Exception {
+        // The provisioner attests the worker it started (0), then the
+        // service attests it again (1).
+        for (int index = 0; index < lostAttestation; index++) {
+            proxy.schedule("attest", FaultProxy.Action.PASS);
+        }
         proxy.schedule("attest", FaultProxy.Action.DROP);
 
-        assertEquals("READY", broker.warm(HARNESS).object()
-                .getString("state"), rig.logs());
-        // The lost answer proved nothing; READY waited for a second
-        // attestation of the same worker.
-        assertEquals(2, proxy.count("attest"));
-        assertEquals(1, broker.workers().size());
-    }
-
-    @Test
-    void attestationsLostUntilTheDeadlineNeverYieldAReadyLease()
-            throws Exception {
-        // A short operation lease bounds how long recovery keeps trying.
-        BrokerProcess shortLived = rig.broker("short", proxy, null,
-                Duration.ofSeconds(3));
-        for (int index = 0; index < 1000; index++) {
-            proxy.schedule("attest", FaultProxy.Action.DROP);
-        }
-
-        BrokerProcess.Reply lost = shortLived.warm(HARNESS);
+        BrokerProcess.Reply lost = broker.warm(HARNESS);
         assertFalse(lost.ok(), "a lost attestation produced a binding");
         assertTrue(lost.retryable());
-        assertTrue(proxy.count("attest") > 1, proxy.exchanges().toString());
         RuntimeBindingRecord binding = rig.activeBinding();
-        assertFalse(binding.getState() == RuntimeBindingRecord.State.READY);
+        assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                binding.getState());
         assertNull(binding.getLease());
-        assertEquals(1, shortLived.workers().size());
+        FaultGateRig.await(broker::workers, List::isEmpty,
+                "the unattested worker to be reaped");
 
-        // Once an attestation is answered, the next warm proves the same
-        // worker and binding instead of starting another.
-        proxy.clear("attest");
-        assertEquals("READY", shortLived.warm(HARNESS).object()
-                .getString("state"), rig.logs());
-        assertEquals(1, shortLived.workers().size());
+        assertEquals("READY", broker.warm(HARNESS).object()
+                .getString("state"));
+        assertEquals(1, broker.workers().size());
         assertEquals(binding.getBindingId(), rig.activeBinding()
                 .getBindingId());
     }

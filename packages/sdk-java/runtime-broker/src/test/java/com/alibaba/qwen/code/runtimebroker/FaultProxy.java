@@ -124,11 +124,6 @@ final class FaultProxy implements AutoCloseable {
         return schedule(operation, Fault.of(action));
     }
 
-    /** Drops the faults still queued for {@code operation}. */
-    void clear(String operation) {
-        faults.remove(operation);
-    }
-
     long count(String operation) {
         return exchanges.stream()
                 .filter(exchange -> exchange.operation().equals(operation))

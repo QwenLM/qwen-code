@@ -21,9 +21,8 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * FG3: a worker or a Broker JVM dies with a tool call in flight. A killed
- * Broker leaves its worker running, as a crashed JVM does, and a restarted
- * Broker adopts it through the shared state directory; a host crash takes
- * both.
+ * Broker leaves its worker running, as a crashed JVM does; a host crash
+ * takes both.
  */
 @Tag("fault-gate")
 class ProcessCrashFaultGateTest {
@@ -41,7 +40,6 @@ class ProcessCrashFaultGateTest {
     }
 
     private FaultGateRig rig;
-    private Map<String, Object> reference;
 
     @BeforeEach
     void openRig() throws Exception {
@@ -59,48 +57,32 @@ class ProcessCrashFaultGateTest {
     void aWorkerKilledMidExecutionLeavesItUnknownWithoutEvidence()
             throws Exception {
         FaultProxy proxy = rig.proxy();
-        BrokerProcess broker = rig.broker("broker", proxy);
+        BrokerProcess broker = rig.broker("broker", proxy,
+                FaultGateRig.Provisioner.LOCAL_PROCESS);
         acquire(broker);
         String execution = create(broker);
         rig.awaitMarker("marker", List.of("start"));
         String bindingId = rig.execution(execution).getBindingId();
 
-        long generation = rig.bindings.findById(bindingId).getGeneration();
-
         rig.killWorker(broker);
 
-        // To the dispatcher a dead worker looks like a lost answer. The
-        // binding's liveness check tells them apart: it finds the worker
-        // gone, the generation is LOST, and the call is left UNKNOWN.
         rig.awaitExecution(execution, record -> record.getState()
                 == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
-        assertEquals(RuntimeBindingRecord.State.LOST,
-                rig.bindings.findById(bindingId).getState());
         assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
                 execution));
-        // The unknown call pins the lost placement (#12670) until an
-        // operator decides it.
-        assertEquals("runtime_broker_runtime_lost",
-                broker.warm(HARNESS).code());
+        // The dead generation is retired, and a new one serves new work.
+        assertEquals(RuntimeBindingRecord.State.FAILED,
+                rig.bindings.findById(bindingId).getState());
+        JSONObject replacement = broker.warm(HARNESS).object();
+        assertEquals("READY", replacement.getString("state"));
+        assertFalse(bindingId.equals(replacement.getString("bindingId")));
+        // Nothing the new generation says can settle the old call.
+        assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
+                execution));
         ToolExecutionRecord unknown = rig.execution(execution);
         assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
         assertNull(unknown.getResult());
         rig.holdMarker("marker", List.of("start"), Duration.ofSeconds(4));
-
-        // Once the call is decided and its Session released, a new
-        // generation serves new work.
-        assertEquals("SETTLED", broker.resolve(HARNESS, SESSION, execution,
-                UnknownExecutionResolution.ACCEPTED_UNKNOWN).object()
-                .getString("state"));
-        assertEquals(Boolean.TRUE, broker.release(HARNESS, SESSION)
-                .requireOk().value());
-        assertEquals("READY", broker.warm(HARNESS).object()
-                .getString("state"), rig.logs());
-        RuntimeBindingRecord replacement = rig.activeBinding();
-        assertTrue(!bindingId.equals(replacement.getBindingId())
-                || replacement.getGeneration() > generation,
-                "the lost generation was reused");
-        assertEquals(List.of("start"), rig.marker("marker"));
         assertEquals(1, proxy.count("execute"));
     }
 
@@ -115,7 +97,8 @@ class ProcessCrashFaultGateTest {
                     case AFTER_SEND -> FaultProxy.Action.PASS;
                     case BEFORE_COMMIT -> FaultProxy.Action.HOLD_RESPONSE;
                 });
-        BrokerProcess first = rig.broker("first", firstProxy);
+        BrokerProcess first = rig.broker("first", firstProxy,
+                FaultGateRig.Provisioner.RECOVERABLE);
         acquire(first);
         String execution = create(first);
         switch (window) {
@@ -128,12 +111,13 @@ class ProcessCrashFaultGateTest {
         rig.killBroker(first);
         fault.release(FaultProxy.Action.RESET);
         FaultProxy secondProxy = rig.proxy();
-        BrokerProcess second = rig.broker("second", secondProxy);
+        BrokerProcess second = rig.broker("second", secondProxy,
+                FaultGateRig.Provisioner.RECOVERABLE);
         rig.awaitDispatchLapse(execution);
         second.acquire(HARNESS, SESSION).requireOk();
-        // Before reuse, the restarted Broker finds the worker through the
-        // shared state directory and attests it before it adopts it.
-        assertEquals(1, secondProxy.count("attest"));
+        // Before reuse, the restarted Broker re-proves the worker's identity:
+        // once as the provisioner observes it, once as the service adopts it.
+        assertEquals(2, secondProxy.count("attest"));
 
         // Adopted, not replaced: the same generation and lease, and the
         // second Broker started no worker of its own.
@@ -146,20 +130,17 @@ class ProcessCrashFaultGateTest {
         assertTrue(second.workers().isEmpty());
 
         // A same-key retry fences the lapsed claim instead of replaying it.
-        BrokerProcess.Reply retried = second.create(HARNESS, SESSION,
-                "key-1", reference);
-        assertFalse(retried.ok(), "a lapsed claim was replayed");
-        assertEquals("runtime_broker_execution_unknown", retried.code());
-        assertEquals(ToolExecutionRecord.State.UNKNOWN,
-                rig.execution(execution).getState());
+        JSONObject retried = second.create(HARNESS, SESSION, "key-1",
+                FaultGateRig.shell("call-1", SLOW)).object();
+        assertEquals(execution, retried.getString("executionCallId"));
+        assertEquals("UNKNOWN", retried.getString("state"));
 
         if (window == Window.AFTER_CLAIM) {
-            // The worker never saw the execute: it holds the call only as
-            // prepared, which is no evidence of an outcome.
+            // The worker never saw the call, so it has no evidence to give.
             JSONObject lookup = second.reconcile(HARNESS, SESSION, execution)
                     .object();
             assertEquals("UNRESOLVED", lookup.getString("outcome"));
-            assertEquals("prepared", lookup.getString("runtimeState"));
+            assertEquals("unknown", lookup.getString("runtimeState"));
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     rig.execution(execution).getState());
             rig.holdMarker("marker", List.of(), Duration.ofSeconds(1));
@@ -183,6 +164,51 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
+     * Pins today's production behaviour. {@link LocalProcessRuntimeProvisioner}
+     * keeps worker ownership in memory, so a restarted Broker observes its
+     * worker as UNKNOWN until the reconciliation deadline: the binding is
+     * neither adopted nor retired, and the orphaned worker keeps running.
+     * Recoverable local-process provisioning is follow-up work in the
+     * runtime-binding reconciliation design; this gate flips to adoption
+     * when it lands.
+     */
+    @Test
+    void theProductionProvisionerCannotAdoptAfterARestart()
+            throws Exception {
+        BrokerProcess first = rig.broker("first", rig.proxy(),
+                FaultGateRig.Provisioner.LOCAL_PROCESS);
+        acquire(first);
+        String execution = create(first);
+        rig.awaitMarker("marker", List.of("start"));
+        RuntimeBindingRecord before = rig.activeBinding();
+
+        rig.killBroker(first);
+        FaultProxy secondProxy = rig.proxy();
+        BrokerProcess second = rig.broker("second", secondProxy,
+                FaultGateRig.Provisioner.LOCAL_PROCESS);
+
+        BrokerProcess.Reply warm = second.warm(HARNESS);
+        assertFalse(warm.ok(), "a restarted Broker adopted a worker it"
+                + " cannot observe");
+        assertEquals("runtime_broker_reconcile_timeout", warm.code());
+        assertTrue(warm.retryable());
+        RuntimeBindingRecord after = rig.activeBinding();
+        assertEquals(before.getBindingId(), after.getBindingId());
+        assertEquals(RuntimeBindingRecord.State.READY, after.getState());
+        assertEquals(before.getLease().getEndpoint(),
+                after.getLease().getEndpoint());
+        assertTrue(second.workers().isEmpty());
+        // The orphan finishes the call on its own; nothing runs it again,
+        // and without a Session nothing fences or settles the record.
+        rig.awaitMarker("marker", List.of("start", "end"));
+        assertEquals("IN_FLIGHT", second.reconcile(HARNESS, SESSION,
+                execution).object().getString("outcome"));
+        assertEquals(ToolExecutionRecord.State.EXECUTING,
+                rig.execution(execution).getState());
+        assertEquals(0, secondProxy.count("execute"));
+    }
+
+    /**
      * Pins today's behaviour for #12670: once a restart proves the worker
      * gone, the unsettled execution pins the LOST generation, so the
      * placement can neither be reclaimed nor released. Update this gate when
@@ -191,7 +217,8 @@ class ProcessCrashFaultGateTest {
     @Test
     void aHostCrashPinsTheLostGenerationBehindTheUnsettledCall()
             throws Exception {
-        BrokerProcess first = rig.broker("first", rig.proxy());
+        BrokerProcess first = rig.broker("first", rig.proxy(),
+                FaultGateRig.Provisioner.RECOVERABLE);
         acquire(first);
         String execution = create(first);
         rig.awaitMarker("marker", List.of("start"));
@@ -201,18 +228,17 @@ class ProcessCrashFaultGateTest {
         workers.forEach(worker -> ProcessTrees.kill(worker,
                 FaultGateRig.WAIT));
         FaultProxy secondProxy = rig.proxy();
-        BrokerProcess second = rig.broker("second", secondProxy);
+        BrokerProcess second = rig.broker("second", secondProxy,
+                FaultGateRig.Provisioner.RECOVERABLE);
 
-        // Recovery finds the worker gone and marks the generation LOST; the
-        // unsettled call then pins it.
-        assertEquals("runtime_broker_runtime_lost",
-                second.warm(HARNESS).code());
-        assertEquals(RuntimeBindingRecord.State.LOST,
-                rig.activeBinding().getState());
         BrokerProcess.Reply acquire = second.acquire(HARNESS, SESSION);
         assertFalse(acquire.ok());
         assertEquals("runtime_broker_runtime_lost", acquire.code());
-        assertEquals("runtime_broker_execution_active",
+        assertEquals(RuntimeBindingRecord.State.LOST,
+                rig.activeBinding().getState());
+        assertEquals("runtime_broker_runtime_lost",
+                second.warm(HARNESS).code());
+        assertEquals("runtime_reconciliation_required",
                 second.release(HARNESS, SESSION).code());
         assertEquals("IN_FLIGHT", second.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
@@ -229,17 +255,16 @@ class ProcessCrashFaultGateTest {
         broker.acquire(HARNESS, SESSION).requireOk();
     }
 
-    private String create(BrokerProcess broker) {
-        reference = FaultGateRig.shell(broker, "call-1", SLOW);
-        return broker.create(HARNESS, SESSION, "key-1", reference).object()
+    private static String create(BrokerProcess broker) {
+        return broker.create(HARNESS, SESSION, "key-1",
+                FaultGateRig.shell("call-1", SLOW)).object()
                 .getString("executionCallId");
     }
 
     private static void assertEvidenceUnavailable(BrokerProcess.Reply reply) {
         assertFalse(reply.ok(), "a dead generation settled an execution");
         assertEquals(409, reply.status());
-        assertEquals("runtime_broker_execution_evidence_unavailable",
-                reply.code());
+        assertEquals("runtime_execution_evidence_unavailable", reply.code());
         assertFalse(reply.retryable());
     }
 

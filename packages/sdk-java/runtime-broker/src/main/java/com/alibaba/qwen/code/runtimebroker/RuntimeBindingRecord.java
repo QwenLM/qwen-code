@@ -267,6 +267,18 @@ public final class RuntimeBindingRecord {
                 && generation == other.generation;
     }
 
+    boolean sameOperation(RuntimeBindingRecord other) {
+        return other != null
+                && Objects.equals(operationOwner, other.operationOwner)
+                && Objects.equals(operationLeaseUntil,
+                        other.operationLeaseUntil)
+                && operationGeneration == other.operationGeneration;
+    }
+
+    boolean hasLiveOperationAt(Instant now) {
+        return operationOwner != null && operationLeaseUntil.isAfter(now);
+    }
+
     private RuntimeBindingRecord copy(State nextState, RuntimeLease nextLease,
             RuntimeResourceHandle nextHandle, long nextAttestationGeneration,
             boolean requested, String owner, Instant leaseUntil,

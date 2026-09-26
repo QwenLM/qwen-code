@@ -1,46 +1,35 @@
-# Qwen Managed Runtime Broker
+# Qwen Managed Runtime Broker Core
 
-This module is the Java control-plane half of the Hosted Harness architecture.
-It is embedded in the Java product service rather than deployed as a mandatory
-standalone service. Repository contracts define the persistence boundary;
-in-memory implementations remain useful for tests and single-process
-development, while JDBC implementations coordinate state through a shared
-database.
+This Java 21 module defines the state and embeddable orchestration core for a
+Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
+and Tool execution records; repository contracts; thread-safe in-memory
+and JDBC implementations; and a framework-neutral service that composes
+authoritative scope resolution, Runtime provisioning, and Runtime transport
+adapters.
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the Broker's private
-tables. The JDBC implementations depend only on `javax.sql.DataSource`; the
-embedding service owns its connection pool, schema lifecycle, and repository
-wiring. Tool execution rows preserve idempotency identity, dispatch ownership,
-lease and cancellation state, ambiguous `UNKNOWN` recovery, and settled
-results. Their case-sensitive execution and idempotency identifiers are indexed
-by deterministic hashes and verified against the complete stored values.
-`JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
-(`AesGcmSecretProtector` is included): the provision seed of a durable binding
-and the lease token of a legacy binding are stored encrypted, so the key
-material must come from the embedding service's own durable secret store and
-stay stable across restarts and instances.
+The service acquires operation and dispatch leases, renews them while external
+work is in flight, converges idempotent Tool execution, records cancellation
+intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
+`reconcileExecution` asks the original Runtime about an `UNKNOWN` execution
+and settles it only on that Runtime's terminal answer; it never replays the
+call. A persisted `READY` binding is never reused by a new process without
+proof: a binding whose request carries a durable provisioner kind is adopted
+only after the provisioner observes the physical resource and the Broker
+re-attests the Runtime identity through the transport, while a legacy binding
+still fails closed with `runtime_reconciliation_required`; see
+[Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
 
-The module provides:
+The module ships one local process provider, `LocalProcessRuntimeProvisioner`,
+which starts the merged Managed Runtime worker and adopts it only after
+attestation; see
+[Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
+The embedding service still owns the worker command wiring, recovery-capable
+provisioners, and any container or remote provider. The module
+intentionally does not expose an HTTP API, wire Spring, call the Hosted
+Harness, or define public Agent resources. Those adapters belong to later PRs.
 
-- authenticated Harness Session scope resolution;
-- asynchronous Runtime warmup and compatible Runtime reuse;
-- Runtime Session acquisition and release;
-- in-memory and JDBC execution ledgers with at-most-once dispatch per
-  idempotency key;
-- evidence-only `UNKNOWN` reconciliation through `reconcileExecution`,
-  which settles only on the original Runtime's terminal answer and never
-  replays the call;
-- a two-phase Tool boundary that reserves a durable execution identity before
-  the Harness checkpoint and starts physical execution only after that commit;
-- encrypted durable Runtime seeds, versioned resource handles, and an
-  owner-generation fence for cross-JVM recovery;
-- a static provisioner for externally managed Runtime endpoints;
-- a local-process provisioner with file boot, active health, idle reclaim,
-  epoch fencing, same-host process adoption, and owned process-tree shutdown;
-- a bare-Pod and Secret Kubernetes provisioner with UID-fenced reconciliation;
-- the private `/internal/runtime-broker/v1` HTTP contract used by
-  `qwen serve --profile hosted-harness`;
-- an HTTP transport for the existing Managed Runtime v1/v2 worker protocol.
+Building and running this module requires JDK 21 or later. Its Maven release
+target is 21; services embedding the resulting JAR must also use JDK 21 or later.
 
 Build and test with:
 
@@ -48,6 +37,26 @@ Build and test with:
 mvn test
 mvn checkstyle:check
 ```
+
+## JDBC persistence
+
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
+Broker tables. The JDBC implementations use `javax.sql.DataSource` for
+database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+codec; the embedding service owns the connection pool and schema lifecycle.
+`JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
+(`AesGcmSecretProtector` is included): the provision seed of a durable binding
+and the lease token of a legacy binding are stored encrypted, so the key
+material must come from the embedding service's own durable secret store and
+stay stable across restarts and instances.
+Tool execution rows preserve idempotency identity, dispatch ownership and
+lease, cancellation intent, `UNKNOWN` recovery state, and the final result.
+Tool execution identifiers are globally unique repository keys. The embedding
+service must derive them from authenticated tenant, workspace, and session
+context because this repository interface does not carry separate scope
+arguments.
+This module intentionally does not wire a Spring service or dispatch Tool
+calls.
 
 Run the optional real-MySQL contract with:
 
@@ -59,22 +68,19 @@ mvn -Pmysql-integration \
   verify
 ```
 
-A restored endpoint is never trusted directly. The Broker reconciles the exact
-provider resource and completes private Runtime attestation before opening the
-local readiness gate; see
-[Runtime binding reconciliation](../../../docs/design/2026-09-24-runtime-binding-reconciliation.md).
-The local-process adapter supports same-host adoption; the Kubernetes adapter
-still requires the real-cluster fault matrix described in the P3 design before
-production rollout.
+Durable rows alone do not make a stopped local Runtime process recoverable.
+For a binding without durable identity the embedding service must reconcile a
+persisted lease before reuse and own the process adoption or reprovisioning
+policy; a durable binding is reconciled and adopted by the Broker itself.
 
 ## Fault gates
 
 The Stage F fault gates run the service in real Broker JVMs against the real
 bundled worker, with a fault-injecting HTTP proxy between them and a
-file-backed H2 database behind a relay that can be cut. They drop, reset or
-hold Runtime answers, kill workers and Broker JVMs, freeze a Broker past its
-lease, and take the database away, then check that no tool call runs twice
-or settles without the Runtime's evidence; see
+file-backed H2 database behind a relay that can be cut. They drop, reset,
+delay or hold Runtime answers, kill workers and Broker JVMs, freeze a Broker
+past its lease, and take the database away, then check that no tool call
+runs twice or settles without the Runtime's evidence; see
 [Runtime Broker Fault Gates](../../../docs/design/2026-09-26-runtime-broker-fault-gates.md).
 They need the bundle, Node.js and POSIX signals, and fail when any is
 missing. The default `mvn test` excludes them. From the repository root, run
@@ -84,8 +90,7 @@ missing. The default `mvn test` excludes them. From the repository root, run
 mvn -Pfault-gates test
 ```
 
-`-Dqwen.cli.entry=/path/to/dist/cli.js` points them at another bundle, with
-its `managed-runtime-worker.js` next to it.
+`-Dqwen.cli.entry=/path/to/dist/cli.js` points them at another bundle.
 
 ## Workspace binding
 

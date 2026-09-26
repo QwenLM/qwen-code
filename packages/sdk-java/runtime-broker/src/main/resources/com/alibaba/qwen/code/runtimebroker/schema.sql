@@ -8,12 +8,9 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
-    placement_domain VARCHAR(512) NOT NULL,
-    runtime_template_digest VARCHAR(512) NOT NULL,
     storage_id VARCHAR(256),
     last_generation BIGINT NOT NULL,
-    active_binding_id VARCHAR(512),
-    CONSTRAINT uq_runtime_binding_isolation UNIQUE (isolation_key)
+    active_binding_id VARCHAR(512)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
@@ -28,8 +25,6 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
-    placement_domain VARCHAR(512) NOT NULL,
-    runtime_template_digest VARCHAR(512) NOT NULL,
     storage_id VARCHAR(256),
     runtime_generation BIGINT NOT NULL,
     binding_state VARCHAR(32) NOT NULL,
@@ -60,8 +55,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
 );
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_session (
-    runtime_session_id VARCHAR(512) PRIMARY KEY,
     scope_key CHAR(64) NOT NULL,
+    runtime_session_id VARCHAR(512) NOT NULL,
     tenant_id VARCHAR(512) NOT NULL,
     workspace_id VARCHAR(512) NOT NULL,
     workspace_generation VARCHAR(512) NOT NULL,
@@ -75,7 +70,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_session (
     session_state VARCHAR(32) NOT NULL,
     record_version BIGINT NOT NULL,
     last_active_at DATETIME(6) NOT NULL,
-    INDEX idx_runtime_session_scope (scope_key),
+    PRIMARY KEY (scope_key, runtime_session_id),
     INDEX idx_runtime_session_binding
         (binding_id, runtime_generation, session_state)
 );

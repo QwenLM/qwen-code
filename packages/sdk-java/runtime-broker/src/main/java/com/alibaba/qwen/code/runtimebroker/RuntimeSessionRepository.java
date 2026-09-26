@@ -4,7 +4,7 @@ package com.alibaba.qwen.code.runtimebroker;
 public interface RuntimeSessionRepository {
     RuntimeSessionRecord findOrCreate(RuntimeSessionRecord candidate);
 
-    RuntimeSessionRecord findById(String runtimeSessionId);
+    RuntimeSessionRecord findById(RuntimeScope scope, String runtimeSessionId);
 
     RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement);

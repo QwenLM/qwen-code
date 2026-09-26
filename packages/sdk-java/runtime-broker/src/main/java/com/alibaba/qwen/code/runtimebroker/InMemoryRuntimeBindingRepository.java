@@ -45,14 +45,6 @@ public final class InMemoryRuntimeBindingRepository
         if (existing != null) {
             return existing;
         }
-        if (request.getIsolationKey() != null && records.values().stream()
-                .map(RuntimeBindingRecord::getRequest)
-                .anyMatch(candidate -> !candidate.equals(request)
-                        && request.getIsolationKey().equals(
-                                candidate.getIsolationKey()))) {
-            throw new IllegalArgumentException(
-                    "isolationKey is bound to another Runtime scope");
-        }
         String bindingId = BrokerValues.requireId(idSupplier.get(),
                 "bindingId");
         if (records.containsKey(bindingId)) {
@@ -95,12 +87,16 @@ public final class InMemoryRuntimeBindingRepository
 
     @Override
     public synchronized List<RuntimeBindingRecord> findActiveByIsolationKey(
-            String isolationKey) {
+            RuntimeScope scope, String isolationKey) {
+        if (scope == null) {
+            throw new IllegalArgumentException("scope is required");
+        }
         String key = BrokerValues.requireId(isolationKey, "isolationKey");
         List<RuntimeBindingRecord> matches = new ArrayList<>();
         for (RuntimeBindingRecord record : records.values()) {
-            if (record.isActive() && key.equals(
-                    record.getRequest().getIsolationKey())) {
+            if (record.isActive()
+                    && scope.equals(record.getRequest().getScope())
+                    && key.equals(record.getRequest().getIsolationKey())) {
                 matches.add(record);
             }
         }
@@ -115,7 +111,9 @@ public final class InMemoryRuntimeBindingRepository
         RuntimeBindingRecord current = records.get(expected.getBindingId());
         if (current == null
                 || !current.sameIdentity(expected)
-                || current.getVersion() != expected.getVersion()) {
+                || current.getVersion() != expected.getVersion()
+                || !current.sameOperation(expected)
+                || !current.hasLiveOperationAt(clock.instant())) {
             return null;
         }
         if (!current.isActive() && replacement.isActive()) {
@@ -211,9 +209,11 @@ public final class InMemoryRuntimeBindingRepository
             RuntimeBindingRecord replacement) {
         if (expected == null || replacement == null
                 || !expected.sameIdentity(replacement)
+                || !expected.sameOperation(replacement)
                 || replacement.getVersion() != expected.getVersion()) {
             throw new IllegalArgumentException(
-                    "replacement must preserve binding identity and version");
+                    "replacement must preserve binding identity, "
+                            + "operation claim, and version");
         }
     }
 

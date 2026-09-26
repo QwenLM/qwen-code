@@ -7,16 +7,20 @@ public final class RuntimeProvisionRequest {
     private final RuntimeScope scope;
     private final String isolationKey;
     private final String provisionerKind;
-    private final String placementDomain;
-    private final String runtimeTemplateDigest;
+    private final String storageId;
 
     public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey) {
-        this(scope, isolationKey, "legacy", "process-local", "legacy");
+        this(scope, isolationKey, "legacy");
     }
 
     public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey,
-            String provisionerKind, String placementDomain,
-            String runtimeTemplateDigest) {
+            String provisionerKind) {
+        this(scope, isolationKey, provisionerKind, null);
+    }
+
+    /** A non-null storageId explicitly selects managed-context/1. */
+    public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey,
+            String provisionerKind, String storageId) {
         if (scope == null) {
             throw new IllegalArgumentException("scope is required");
         }
@@ -33,10 +37,23 @@ public final class RuntimeProvisionRequest {
         this.scope = scope;
         this.provisionerKind = BrokerValues.requireId(provisionerKind,
                 "provisionerKind");
-        this.placementDomain = BrokerValues.requireId(placementDomain,
-                "placementDomain");
-        this.runtimeTemplateDigest = BrokerValues.requireId(
-                runtimeTemplateDigest, "runtimeTemplateDigest");
+        this.storageId = storageId == null ? null
+                : ManagedContextProtocol.storageId(storageId);
+        if (isManagedContext()) {
+            if (!requiresDurableIdentity()) {
+                throw new IllegalArgumentException(
+                        "managed context requires durable provisioning");
+            }
+            ManagedContextProtocol.validateScope(this);
+        }
+    }
+
+    public String getStorageId() {
+        return storageId;
+    }
+
+    public boolean isManagedContext() {
+        return storageId != null;
     }
 
     public RuntimeScope getScope() {
@@ -49,14 +66,6 @@ public final class RuntimeProvisionRequest {
 
     public String getProvisionerKind() {
         return provisionerKind;
-    }
-
-    public String getPlacementDomain() {
-        return placementDomain;
-    }
-
-    public String getRuntimeTemplateDigest() {
-        return runtimeTemplateDigest;
     }
 
     /**
@@ -81,14 +90,11 @@ public final class RuntimeProvisionRequest {
         return scope.equals(other.scope)
                 && Objects.equals(isolationKey, other.isolationKey)
                 && provisionerKind.equals(other.provisionerKind)
-                && placementDomain.equals(other.placementDomain)
-                && runtimeTemplateDigest.equals(
-                        other.runtimeTemplateDigest);
+                && Objects.equals(storageId, other.storageId);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(scope, isolationKey, provisionerKind,
-                placementDomain, runtimeTemplateDigest);
+        return Objects.hash(scope, isolationKey, provisionerKind, storageId);
     }
 }

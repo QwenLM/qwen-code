@@ -231,10 +231,9 @@ public final class InMemoryToolExecutionRepository
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");
         }
-        return recordsById.values().stream().anyMatch(record ->
-                id.equals(record.getBindingId())
-                        && runtimeGeneration
-                                == record.getRuntimeGeneration()
+        return recordsById.values().stream()
+                .anyMatch(record -> id.equals(record.getBindingId())
+                        && record.getRuntimeGeneration() == runtimeGeneration
                         && !record.isSettled());
     }
 

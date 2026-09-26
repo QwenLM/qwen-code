@@ -19,7 +19,7 @@
     <properties>
         <java.version>21</java.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
-        <runtime-broker.version>0.1.2-alpha</runtime-broker.version>
+        <runtime-broker.version>0.1.0-alpha</runtime-broker.version>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
     </properties>

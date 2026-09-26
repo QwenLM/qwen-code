@@ -134,6 +134,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
@@ -28708,6 +28709,20 @@ describe('App session callbacks', () => {
     );
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
+
+  it.each([
+    { sessionId: 'session-1', hiddenSlashCommands: [], enabled: true },
+    { sessionId: undefined, hiddenSlashCommands: [], enabled: false },
+    { sessionId: 'session-1', hiddenSlashCommands: ['/BTW'], enabled: false },
+  ])(
+    'gates the BTW menu entry by session and host policy: %j',
+    async ({ sessionId, hiddenSlashCommands, enabled }) => {
+      mockConnection.sessionId = sessionId;
+      renderApp({ hiddenSlashCommands });
+      await flush();
+      expect(testState.latestChatEditorProps?.btwEnabled).toBe(enabled);
+    },
+  );
 
   it('keeps /btw as a lightweight side question when side tasks are available', async () => {
     mockConnection.capabilities.features = ['session_side_task'];

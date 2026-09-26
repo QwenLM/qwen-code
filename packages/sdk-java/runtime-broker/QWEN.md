@@ -1,9 +1,4 @@
-# Qwen Managed Runtime Broker
-
-This Java 11 module is an embeddable control-plane component. It owns Runtime
-placement, Harness-to-Runtime Session bindings, and tool execution identities.
-It must not run the model loop or accept tenant/workspace claims from the
-Harness.
+# Qwen Managed Runtime Broker State
 
 Keep this module independent of Spring, Qwen Code CLI internals, and any
 specific Runtime scheduler. Repository contracts define the persistence
@@ -22,6 +17,8 @@ alive. The Broker reconciles and adopts bindings through recovery-capable
 provisioners. The embedding service owns those provisioners, reprovisioning
 policy, and Session rebind policy.
 
+Use JDK 21 or later to build and run this module.
+
 Build and test with:
 
 ```bash
@@ -29,18 +26,14 @@ mvn test
 mvn checkstyle:check
 ```
 
-Keep the core independent of Spring or a specific scheduler. Product services
-adapt their authenticated Session store through `HarnessSessionResolver` and
-their placement system through `RuntimeProvisioner`.
-
 ## Fault gates
 
 The `fault-gate` tests (profile `fault-gates`) inject faults only through
 the network, the database link and the process table. Never add a fault
-hook to production code for them. Two gates pin the #12670 `LOST` wedge: a
-host crash, and a killed worker whose call stays `UNKNOWN` until an operator
-resolves it. A change to that behaviour updates both pins and the design
-document in the same change.
+hook to production code for them. Two gates pin current behaviour: a
+restart that cannot adopt a `LocalProcessRuntimeProvisioner` worker, and the
+#12670 `LOST` wedge. A change to either behaviour updates its pin and the
+design document in the same change.
 
 ## Workspace binding package
 

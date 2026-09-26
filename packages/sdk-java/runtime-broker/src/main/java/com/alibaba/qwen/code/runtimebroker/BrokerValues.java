@@ -59,12 +59,11 @@ final class BrokerValues {
     static Map<String, Object> immutableMap(Map<String, ?> source) {
         Map<String, Object> copy = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : source.entrySet()) {
-            Object key = entry.getKey();
-            if (!(key instanceof String)) {
+            if (!(entry.getKey() instanceof String key)) {
                 throw new IllegalArgumentException(
                         "map key must be a string");
             }
-            copy.put((String) key, immutableValue(entry.getValue()));
+            copy.put(key, immutableValue(entry.getValue()));
         }
         return Collections.unmodifiableMap(copy);
     }
@@ -83,7 +82,7 @@ final class BrokerValues {
             }
             return Collections.unmodifiableList(copy);
         }
-        if (value instanceof Number && !isJsonFinite((Number) value)) {
+        if (value instanceof Number number && !isJsonFinite(number)) {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
         }
@@ -129,8 +128,8 @@ final class BrokerValues {
         if (first == null || second == null) {
             return false;
         }
-        if (first instanceof Number && second instanceof Number) {
-            return sameJsonNumber((Number) first, (Number) second);
+        if (first instanceof Number left && second instanceof Number right) {
+            return sameJsonNumber(left, right);
         }
         if (first instanceof Map && second instanceof Map) {
             @SuppressWarnings("unchecked")
@@ -139,9 +138,7 @@ final class BrokerValues {
             Map<String, Object> right = (Map<String, Object>) second;
             return sameJsonMap(left, right);
         }
-        if (first instanceof List && second instanceof List) {
-            List<?> left = (List<?>) first;
-            List<?> right = (List<?>) second;
+        if (first instanceof List<?> left && second instanceof List<?> right) {
             if (left.size() != right.size()) {
                 return false;
             }
@@ -167,9 +164,9 @@ final class BrokerValues {
     }
 
     private static boolean isJsonFinite(Number value) {
-        return !(value instanceof Double
-                && !Double.isFinite(((Double) value).doubleValue()))
-                && !(value instanceof Float
-                        && !Float.isFinite(((Float) value).floatValue()));
+        return !(value instanceof Double doubleValue
+                && !Double.isFinite(doubleValue))
+                && !(value instanceof Float floatValue
+                        && !Float.isFinite(floatValue));
     }
 }

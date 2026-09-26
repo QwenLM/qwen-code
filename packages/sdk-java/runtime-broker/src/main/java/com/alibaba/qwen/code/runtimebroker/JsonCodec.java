@@ -46,51 +46,6 @@ final class JsonCodec {
         }
     }
 
-    static int requiredInt(Map<String, Object> object, String field,
-            String context) {
-        Object value = object.get(field);
-        if (!(value instanceof Number)) {
-            throw invalid(context + "." + field + " must be an integer.");
-        }
-        Number number = (Number) value;
-        long result = number.longValue();
-        if (number.doubleValue() != result
-                || result < Integer.MIN_VALUE || result > Integer.MAX_VALUE) {
-            throw invalid(context + "." + field + " must be an integer.");
-        }
-        return (int) result;
-    }
-
-    static Long optionalNonNegativeLong(Map<String, Object> object,
-            String field, String context) {
-        Object value = object.get(field);
-        if (value == null) {
-            return null;
-        }
-        if (!(value instanceof Number)) {
-            throw invalid(context + "." + field
-                    + " must be a non-negative integer.");
-        }
-        Number number = (Number) value;
-        long result = number.longValue();
-        if (number.doubleValue() != result || result < 0) {
-            throw invalid(context + "." + field
-                    + " must be a non-negative integer.");
-        }
-        return result;
-    }
-
-    static Map<String, Object> requiredObject(Map<String, Object> object,
-            String field, String context) {
-        Object value = object.get(field);
-        if (!(value instanceof Map)) {
-            throw invalid(context + "." + field + " must be an object.");
-        }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> result = (Map<String, Object>) value;
-        return BrokerValues.immutableMap(result);
-    }
-
     private static RuntimeBrokerException invalid(String message) {
         return new RuntimeBrokerException(400,
                 "runtime_broker_invalid_request", message, false);

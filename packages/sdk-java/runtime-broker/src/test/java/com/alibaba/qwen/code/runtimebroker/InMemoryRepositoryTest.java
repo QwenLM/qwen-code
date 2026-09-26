@@ -41,8 +41,7 @@ class InMemoryRepositoryTest {
     private static final RuntimeLease LEASE = new RuntimeLease("runtime",
             URI.create("http://127.0.0.1:4096"), "token", "lease", 1);
     private static final RuntimeProvisionRequest DURABLE_REQUEST =
-            new RuntimeProvisionRequest(SCOPE, "harness", "local-process",
-                    "process-local", "template");
+            new RuntimeProvisionRequest(SCOPE, "harness", "local-process");
     private static final RuntimeProvisionSeed SEED =
             new RuntimeProvisionSeed("provision-request", "runtime",
                     "incarnation", "lease", 1, "token");
@@ -78,8 +77,13 @@ class InMemoryRepositoryTest {
                 new InMemoryRuntimeBindingRepository(clock,
                         () -> "binding-" + ids.incrementAndGet());
         RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
-        RuntimeBindingRecord ready = repository.compareAndSet(created,
+        assertNull(repository.compareAndSet(created,
                 created.withState(RuntimeBindingRecord.State.READY, LEASE,
+                        START)));
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner", Duration.ofMinutes(1));
+        RuntimeBindingRecord ready = repository.compareAndSet(claimed,
+                claimed.withState(RuntimeBindingRecord.State.READY, LEASE,
                         START));
 
         assertNull(repository.compareAndSet(created,
@@ -93,11 +97,12 @@ class InMemoryRepositoryTest {
         RuntimeBindingRecord next = repository.findOrCreate(REQUEST);
         assertEquals(2, next.getGeneration());
         assertEquals("binding-2", next.getBindingId());
-        RuntimeBindingRecord forged = released.withState(
+        RuntimeBindingRecord forgedExpected = released.withState(
                 RuntimeBindingRecord.State.READY, LEASE, START);
         assertThrows(IllegalArgumentException.class,
-                () -> repository.compareAndSet(forged,
-                        forged.withDrainRequested(true, START)));
+                () -> repository.compareAndSet(forgedExpected,
+                        forgedExpected.withDrainRequested(true, START)));
+        assertSame(next, repository.findActive(REQUEST));
     }
 
     @Test
@@ -114,6 +119,9 @@ class InMemoryRepositoryTest {
                 "owner-b", Duration.ofSeconds(30)));
 
         clock.advance(Duration.ofSeconds(31));
+        assertNull(repository.compareAndSet(first,
+                first.withState(RuntimeBindingRecord.State.READY, LEASE,
+                        clock.instant())));
         RuntimeBindingRecord takeover = repository.claimOperation(
                 binding.getBindingId(), "owner-b", Duration.ofSeconds(30));
         assertEquals(2, takeover.getOperationGeneration());
@@ -121,6 +129,44 @@ class InMemoryRepositoryTest {
         assertNull(repository.renewOperation(binding.getBindingId(),
                 "owner-a", first.getOperationGeneration(),
                 Duration.ofSeconds(30)));
+    }
+
+    @Test
+    void bindingCasRejectsStaleVersionWithCurrentOperationClaim() {
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(
+                        new MutableClock(START), () -> "binding");
+        RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner", Duration.ofSeconds(30));
+        RuntimeBindingRecord staleVersion = claimed.withVersion(
+                created.getVersion());
+
+        assertNull(repository.compareAndSet(staleVersion,
+                staleVersion.withDrainRequested(true, START)));
+        assertSame(claimed, repository.findById(created.getBindingId()));
+    }
+
+    @Test
+    void currentOperationOwnerCanRenewItsLease() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(clock, () -> "binding");
+        RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner", Duration.ofSeconds(30));
+        clock.advance(Duration.ofSeconds(10));
+
+        RuntimeBindingRecord renewed = repository.renewOperation(
+                created.getBindingId(), "owner",
+                claimed.getOperationGeneration(), Duration.ofSeconds(30));
+
+        assertEquals(claimed.getOperationGeneration(),
+                renewed.getOperationGeneration());
+        assertEquals(claimed.getVersion() + 1, renewed.getVersion());
+        assertEquals(clock.instant().plusSeconds(30),
+                renewed.getOperationLeaseUntil());
+        assertSame(renewed, repository.findById(created.getBindingId()));
     }
 
     @Test
@@ -187,7 +233,7 @@ class InMemoryRepositoryTest {
     }
 
     @Test
-    void runtimePlacementIsScopedAndGeneratedIdsRemainUnique() {
+    void runtimePlacementNeverReusesAcrossTenants() {
         AtomicInteger ids = new AtomicInteger();
         InMemoryRuntimeBindingRepository repository =
                 new InMemoryRuntimeBindingRepository(
@@ -198,25 +244,33 @@ class InMemoryRepositoryTest {
                 "session");
 
         RuntimeBindingRecord first = repository.findOrCreate(REQUEST);
-        assertThrows(IllegalArgumentException.class,
-                () -> repository.findOrCreate(
-                        new RuntimeProvisionRequest(otherScope, "harness")));
         RuntimeBindingRecord other = repository.findOrCreate(
-                new RuntimeProvisionRequest(otherScope, "other-harness"));
+                new RuntimeProvisionRequest(otherScope, "harness"));
 
+        assertEquals("binding-1", first.getBindingId());
+        assertEquals("binding-2", other.getBindingId());
+        assertEquals(1, first.getGeneration());
+        assertEquals(1, other.getGeneration());
         assertEquals(List.of(first), repository.findActiveByIsolationKey(
-                "harness"));
+                SCOPE, "harness"));
         assertEquals(List.of(other), repository.findActiveByIsolationKey(
-                "other-harness"));
+                otherScope, "harness"));
+    }
 
-        InMemoryRuntimeBindingRepository duplicateIds =
+    @Test
+    void duplicateGeneratedBindingIdFailsWithoutOverwriting() {
+        InMemoryRuntimeBindingRepository repository =
                 new InMemoryRuntimeBindingRepository(
                         new MutableClock(START), () -> "binding");
-        duplicateIds.findOrCreate(REQUEST);
+        RuntimeBindingRecord first = repository.findOrCreate(REQUEST);
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+
         assertThrows(IllegalStateException.class,
-                () -> duplicateIds.findOrCreate(
-                        new RuntimeProvisionRequest(otherScope,
-                                "other-harness")));
+                () -> repository.findOrCreate(
+                        new RuntimeProvisionRequest(otherScope, "harness")));
+        assertSame(first, repository.findById("binding"));
     }
 
     @Test
@@ -233,16 +287,26 @@ class InMemoryRepositoryTest {
         assertSame(candidate, repository.findOrCreate(new RuntimeSessionRecord(
                 session, "binding", 1,
                 RuntimeSessionRecord.State.ACQUIRING, 0, START)));
-        RuntimeScope otherScope = new RuntimeScope("other-tenant",
-                "workspace", "generation", "/workspace", "capability",
-                "session");
+        RuntimeSession conflictingSession = new RuntimeSession(
+                "other-harness", "session", "bootstrap", SCOPE);
         RuntimeSessionRecord conflicting = new RuntimeSessionRecord(
-                new RuntimeSession("other-harness", "session",
-                        "bootstrap", otherScope),
-                "other-binding", 1,
+                conflictingSession, "binding", 1,
                 RuntimeSessionRecord.State.ACQUIRING, 0, START);
         assertThrows(IllegalArgumentException.class,
                 () -> repository.findOrCreate(conflicting));
+        assertFalse(candidate.sameIdentity(conflicting));
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+        RuntimeSessionRecord otherCandidate = new RuntimeSessionRecord(
+                new RuntimeSession("harness", "session", "bootstrap",
+                        otherScope),
+                "other-binding", 1,
+                RuntimeSessionRecord.State.ACQUIRING, 0, START);
+        assertSame(otherCandidate, repository.findOrCreate(otherCandidate));
+        assertSame(candidate, repository.findById(SCOPE, "session"));
+        assertSame(otherCandidate,
+                repository.findById(otherScope, "session"));
         assertEquals(1, repository.countActiveByBinding("binding", 1));
 
         RuntimeSessionRecord released = repository.compareAndSet(candidate,
@@ -254,11 +318,11 @@ class InMemoryRepositoryTest {
                         START)));
         assertEquals(RuntimeSessionRecord.State.RELEASED,
                 released.getState());
-        RuntimeSessionRecord forged = released.withState(
+        RuntimeSessionRecord forgedExpected = released.withState(
                 RuntimeSessionRecord.State.READY, START);
         assertThrows(IllegalArgumentException.class,
-                () -> repository.compareAndSet(forged,
-                        forged.withState(
+                () -> repository.compareAndSet(forgedExpected,
+                        forgedExpected.withState(
                                 RuntimeSessionRecord.State.RELEASING,
                                 START)));
     }
@@ -271,6 +335,31 @@ class InMemoryRepositoryTest {
     }
 
     @Test
+    void runtimeSessionReplacementCannotMoveAcrossScopes() {
+        InMemoryRuntimeSessionRepository repository =
+                new InMemoryRuntimeSessionRepository();
+        RuntimeSessionRecord current = new RuntimeSessionRecord(
+                new RuntimeSession("harness", "session", "bootstrap",
+                        SCOPE),
+                "binding", 1, RuntimeSessionRecord.State.ACQUIRING, 0,
+                START);
+        repository.findOrCreate(current);
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+        RuntimeSessionRecord replacement = new RuntimeSessionRecord(
+                new RuntimeSession("harness", "session", "bootstrap",
+                        otherScope),
+                "binding", 1, RuntimeSessionRecord.State.READY,
+                current.getVersion(), START);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(current, replacement));
+        assertSame(current, repository.findById(SCOPE, "session"));
+        assertNull(repository.findById(otherScope, "session"));
+    }
+
+    @Test
     void executionIdempotencyAndDispatchClaimAreDurablePrimitives()
             throws Exception {
         MutableClock clock = new MutableClock(START);
@@ -279,7 +368,7 @@ class InMemoryRepositoryTest {
 
         List<ToolExecutionRecord> records = invokeConcurrently(() ->
                 repository.findOrCreate(execution(
-                        "execution-" + Thread.currentThread().getId())));
+                        "execution-" + Thread.currentThread().threadId())));
         Set<String> executionIds = records.stream()
                 .map(ToolExecutionRecord::getExecutionCallId)
                 .collect(Collectors.toSet());
