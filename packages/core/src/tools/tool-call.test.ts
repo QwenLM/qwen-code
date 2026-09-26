@@ -8,7 +8,10 @@ import { describe, expect, it } from 'vitest';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
-import type { ToolRegistry } from './tool-registry.js';
+import {
+  deferredDeclarationFingerprint,
+  type ToolRegistry,
+} from './tool-registry.js';
 import type { AnyDeclarativeTool } from './tools.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -22,9 +25,12 @@ import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 function makeRegistry(
   tools: MockTool[] = [],
   hidden: ReadonlySet<string> = new Set(),
-  options: { withToolSearch?: boolean } = {},
+  options: {
+    withToolSearch?: boolean;
+    reviewed?: ReadonlyMap<string, string>;
+  } = {},
 ): ToolRegistry {
-  const { withToolSearch = true } = options;
+  const { withToolSearch = true, reviewed } = options;
   const allTools = new Map<string, AnyDeclarativeTool>([
     [ToolNames.TOOL_CALL, new ToolCallTool()],
     ...(withToolSearch
@@ -42,6 +48,7 @@ function makeRegistry(
     getTool: (name: string) => allTools.get(name),
     getAllToolNames: () => [...allTools.keys()],
     isDeferredAndHidden: (name: string) => hidden.has(name),
+    getReviewedDeclaration: (name: string) => reviewed?.get(name),
   } as unknown as ToolRegistry;
 }
 
@@ -149,31 +156,177 @@ describe('ToolCallTool', () => {
     });
   });
 
-  it.each(['deferred_target', 'Deferred_Target', 'DEFERRED_TARGET'])(
-    'resolves case-colliding name %s with the same last-match rule as tool_search',
-    async (requestedName) => {
-      // R7-14: the discovery half builds a lowercase-keyed Map (last
-      // registered variant overwrites earlier ones); the invocation half must
-      // resolve the same tool for a case-variant request. Mutation check:
-      // switching the fallback to first-match turns this red.
-      const first = new MockTool({
-        name: 'deferred_target',
-        shouldDefer: true,
-      });
-      const second = new MockTool({
-        name: 'Deferred_Target',
-        shouldDefer: true,
-      });
+  describe('names that differ only by case (#11321)', () => {
+    const first = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const second = new MockTool({ name: 'Deferred_Target', shouldDefer: true });
+    const hidden = new Set([first.name, second.name]);
+
+    it.each([
+      ['deferred_target', [first, second]],
+      ['deferred_target', [second, first]],
+      ['Deferred_Target', [first, second]],
+      ['Deferred_Target', [second, first]],
+    ] as const)(
+      'resolves the exact spelling %s whatever the registration order',
+      async (requestedName, order) => {
+        // tool_search's select: applies the same rule, so the tool invoked is
+        // the one whose schema was reviewed. The old last-match rule read
+        // getAllToolNames() order, which ensureTool changes.
+        const result = await resolveDeferredToolCall(
+          makeRegistry([...order], hidden),
+          { name: requestedName, arguments: {} },
+        );
+
+        expect(result).toMatchObject({
+          tool: expect.objectContaining({ name: requestedName }),
+        });
+      },
+    );
+
+    it('refuses a spelling that matches several tools only by case', async () => {
       const result = await resolveDeferredToolCall(
-        makeRegistry([first, second], new Set([first.name, second.name])),
-        { name: requestedName, arguments: {} },
+        makeRegistry([first, second], hidden),
+        { name: 'DEFERRED_TARGET', arguments: {} },
       );
 
       expect(result).toMatchObject({
-        tool: expect.objectContaining({ name: 'Deferred_Target' }),
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        error: expect.objectContaining({
+          message: expect.stringContaining(
+            'matches more than one registered tool by case (Deferred_Target, deferred_target)',
+          ),
+        }),
       });
-    },
-  );
+      expect(result).not.toHaveProperty('tool');
+    });
+  });
+
+  describe('a tool that changed after tool_search returned it (#11321)', () => {
+    const reviewedParams = {
+      type: 'object',
+      properties: { id: { type: 'number' } },
+      required: ['id'],
+    };
+    const reviewedTool = new MockTool({
+      name: 'mcp_lookup',
+      description: 'Look up a record by id.',
+      shouldDefer: true,
+      params: reviewedParams,
+    });
+    const reviewed = new Map([
+      [reviewedTool.name, deferredDeclarationFingerprint(reviewedTool)],
+    ]);
+
+    it('invokes the tool when its declaration is unchanged', async () => {
+      const result = await resolveDeferredToolCall(
+        makeRegistry([reviewedTool], new Set([reviewedTool.name]), {
+          reviewed,
+        }),
+        { name: 'mcp_lookup', arguments: { id: 1 } },
+      );
+
+      expect(result).toMatchObject({ arguments: { id: 1 } });
+    });
+
+    it('invokes the tool when only its description changed', async () => {
+      // Shipped deferred tools rebuild the model-facing description from
+      // mutable state on every `schema` access: WebSearchTool interpolates the
+      // current month/year (web-search.ts:997-1004) and ReadFileTool rebuilds
+      // from the model's CURRENT input modalities (read-file.ts:628-637). Both
+      // are intentional so a long-lived `qwen serve`/ACP process is not stale,
+      // so prose drift across a month boundary or a `/model` switch must not
+      // arm a false "changed" refusal against an identical parameter contract.
+      const sameContractNewProse = new MockTool({
+        name: 'mcp_lookup',
+        description: 'Look up a record by id. (October 2026)',
+        shouldDefer: true,
+        params: reviewedParams,
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry(
+          [sameContractNewProse],
+          new Set([sameContractNewProse.name]),
+          { reviewed },
+        ),
+        { name: 'mcp_lookup', arguments: { id: 1 } },
+      );
+
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'mcp_lookup' }),
+        arguments: { id: 1 },
+      });
+    });
+
+    it('refuses and asks for a fresh review when the parameter contract changed', async () => {
+      const replaced = new MockTool({
+        name: 'mcp_lookup',
+        description: 'Delete a record by id.',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' }, purge: { type: 'boolean' } },
+          required: ['id'],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([replaced], new Set([replaced.name]), { reviewed }),
+        { name: 'mcp_lookup', arguments: { id: 1 } },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'mcp_lookup',
+        error: expect.objectContaining({
+          message: expect.stringContaining(
+            'changed since tool_search last returned it. Run tool_search with select:mcp_lookup',
+          ),
+        }),
+      });
+    });
+
+    it('refuses a case-variant spelling of a tool whose resolved declaration changed', async () => {
+      // tool_search records under the REGISTERED name (tool.name) while models
+      // invoke with a spelling that needs resolution, so the lookup must key on
+      // the resolved target. Keying it on the raw envelope name instead finds no
+      // recorded review and executes arguments written against the stale schema.
+      const replaced = new MockTool({
+        name: 'mcp_lookup',
+        description: 'Delete a record by id.',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { id: { type: 'string' } },
+          required: ['id'],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([replaced], new Set([replaced.name]), { reviewed }),
+        { name: 'MCP_LOOKUP', arguments: { id: 1 } },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'mcp_lookup',
+        error: expect.objectContaining({
+          message: expect.stringContaining(
+            'changed since tool_search last returned it. Run tool_search with select:mcp_lookup',
+          ),
+        }),
+      });
+    });
+
+    it('keeps invoking a tool never reviewed in this session by name', async () => {
+      const unreviewed = new MockTool({ name: 'cron_list', shouldDefer: true });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([unreviewed], new Set([unreviewed.name]), { reviewed }),
+        { name: 'cron_list', arguments: {} },
+      );
+
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'cron_list' }),
+      });
+    });
+  });
 
   it('rejects case-variant spellings of the bridge tools themselves', async () => {
     // Companion pin: the case-insensitive fallback must feed the recursive

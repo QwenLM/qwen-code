@@ -13,6 +13,29 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats native Advisor advice and historical structured reviews', () => {
+    expect(
+      toolResultEvent('consult', {
+        type: 'advisor_advice',
+        model: 'reviewer',
+        text: 'Inspect the failing boundary.',
+      }),
+    ).toEqual({
+      type: 'tool-result',
+      id: 'consult',
+      display: 'Inspect the failing boundary.',
+    });
+    expect(
+      renderResultDisplay({
+        type: 'advisor_review',
+        verdict: 'Sound.',
+        risks: 'None.',
+        missingEvidence: 'Tests.',
+        recommendation: 'Verify.',
+      }),
+    ).toContain('## Verdict\n\nSound.');
+  });
+
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(

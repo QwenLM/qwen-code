@@ -27,6 +27,7 @@ const SETTING_KEYS = {
   'setting:usage-statistics': 'privacy.usageStatisticsEnabled',
   'setting:fast-model': 'fastModel',
   'setting:advisor-model': 'advisorModel',
+  'setting:advisor-session-call-limit': 'advisorMaxUses',
   'setting:vision-model': 'visionModel',
   'setting:model-fallbacks': 'modelFallbacks',
   'setting:chat-compression-strategy': 'model.chatCompression.strategy',

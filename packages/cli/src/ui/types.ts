@@ -529,7 +529,13 @@ export interface ContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing: environment context, MCP server instructions, deferred-tools reminder. */
   startupContext?: number;
-  /** Content estimate of the conversation after the startup prelude. */
+  /**
+   * Content estimate of the conversation after the startup prelude. With no
+   * provider total (`totalTokens` 0, e.g. after `/model`, `/restore` or a
+   * resume) it is nonzero, and it is only *part* of the local estimate that
+   * drives the tier: the tier then keys on the request overhead plus this
+   * value, not on this value or on `totalTokens` alone.
+   */
   messages: number;
   /** Provider total not accounted for by any category estimate. Categories plus this sum to `totalTokens`. */
   unattributed?: number;

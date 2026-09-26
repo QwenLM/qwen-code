@@ -23,6 +23,8 @@ import {
 } from './session-notes-state.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import { SessionExecutionEngineError } from './session-execution-engine.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -323,6 +325,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'session_execution_engine'
     | 'omni_recall'
     | 'session_model'
     | 'rewind'
@@ -1188,6 +1191,12 @@ export class ChatRecordingService {
           `Failed to create conversation file at ${conversationFile}: ${message}`,
         );
       }
+    }
+    if (isManagedSessionTranscriptSync(conversationFile)) {
+      throw new SessionExecutionEngineError(
+        this.getSessionId(),
+        'belongs to managed, cannot record with legacy',
+      );
     }
     this.cachedConversationFile = conversationFile;
     return conversationFile;

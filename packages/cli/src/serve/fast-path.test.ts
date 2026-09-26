@@ -731,6 +731,32 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['profile', ['--profile', 'hosted-harness']],
+      ['experimental-managed-agents', ['--experimental-managed-agents']],
+      [
+        'experimental-managed-runtime-worker',
+        ['--experimental-managed-runtime-worker'],
+      ],
+      [
+        'experimental-managed-runtime-auto-local',
+        ['--experimental-managed-runtime-auto-local'],
+      ],
+      [
+        'experimental-managed-runtime-url',
+        ['--experimental-managed-runtime-url', 'http://127.0.0.1:3001'],
+      ],
+      [
+        'experimental-managed-runtime-token',
+        ['--experimental-managed-runtime-token', 'test-token'],
+      ],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:3002'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
@@ -747,6 +773,14 @@ describe('serve fast path argument parsing', () => {
     ]);
     const expectedFallbackOptions = new Set([
       'channel',
+      'profile',
+      'experimental-managed-agents',
+      'experimental-managed-runtime-worker',
+      'experimental-managed-runtime-auto-local',
+      'experimental-managed-runtime-url',
+      'experimental-managed-runtime-token',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',

@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  applySessionStartupConfig,
+  parseSessionStartupConfig,
+  type SessionStartupConfig,
+} from './session-startup-config.js';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import {
@@ -4553,6 +4558,7 @@ export function createSessionControlPlane(
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
+    startupConfig?: SessionStartupConfig,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -4877,7 +4883,6 @@ export function createSessionControlPlane(
       if (entry.sourceType) {
         sourcePersisted = await persistSessionSource(
           entry,
-          entry.sessionId,
           daemonOwnedStandaloneCreation,
         );
       }
@@ -4901,6 +4906,28 @@ export function createSessionControlPlane(
           () => true,
           () => false,
         );
+      }
+
+      let startupConfigApplied;
+      if (startupConfig) {
+        try {
+          startupConfigApplied = await applySessionStartupConfig(
+            bridgeApi,
+            entry.sessionId,
+            startupConfig,
+          );
+          modelApplied = true;
+        } catch (error) {
+          try {
+            await closeSessionImpl(entry.sessionId, undefined, {
+              reason: 'startup_config_failed',
+            });
+            sessionRemovedDuringInitialization = true;
+          } catch {
+            /* preserve the preparation failure */
+          }
+          throw error;
+        }
       }
 
       if (approvalMode) {
@@ -4952,6 +4979,7 @@ export function createSessionControlPlane(
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
         ...(modelApplied !== undefined ? { modelApplied } : {}),
+        ...(startupConfigApplied ? { startupConfigApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
       };
@@ -6404,9 +6432,9 @@ export function createSessionControlPlane(
 
   async function persistSessionSource(
     entry: SessionEntry,
-    logContext: string,
     daemonOwnedStandaloneCreation = false,
   ): Promise<boolean> {
+    let reason = 'unknown';
     try {
       const sourceResult = await Promise.race([
         withTimeout(
@@ -6425,18 +6453,39 @@ export function createSessionControlPlane(
         ),
         getTransportClosedReject(entry),
       ]);
-      return (
-        (sourceResult as { persisted?: boolean } | undefined)?.persisted ===
-        true
-      );
+      const acknowledgement = sourceResult as
+        | { persisted?: unknown; reason?: unknown }
+        | undefined;
+      if (acknowledgement?.persisted === true) return true;
+      reason =
+        acknowledgement?.persisted !== false
+          ? 'invalid_ack'
+          : acknowledgement.reason === undefined
+            ? 'negative_ack'
+            : acknowledgement.reason === 'recording_unavailable' ||
+                acknowledgement.reason === 'write_not_confirmed'
+              ? acknowledgement.reason
+              : 'unknown';
     } catch (err) {
-      writeStderrLine(
-        `qwen serve: source metadata for ${logContext} was not persisted ` +
-          `(${err instanceof Error ? err.message : String(err)}) — the source is live-only ` +
-          `until restart (reported to the caller via sourcePersisted=false)`,
-      );
-      return false;
+      reason =
+        err instanceof BridgeTimeoutError
+          ? 'rpc_timeout'
+          : err instanceof BridgeChannelClosedError
+            ? 'transport_closed'
+            : 'rpc_rejected';
     }
+    const message = `qwen serve: source_persistence_failed sessionId=${entry.sessionId} reason=${reason} sourcePersisted=false`;
+    try {
+      opts.onDiagnosticLine?.(message, 'warn');
+    } catch {
+      /* Best effort. */
+    }
+    try {
+      writeStderrLine(message);
+    } catch {
+      /* Best effort. */
+    }
+    return false;
   }
 
   async function applyRestoreSourceIfMissing(
@@ -6453,10 +6502,7 @@ export function createSessionControlPlane(
       delete entry.sourceId;
     }
     markSessionCatalogChanged();
-    return await persistSessionSource(
-      entry,
-      `${entry.sessionId} during session restore`,
-    );
+    return await persistSessionSource(entry);
   }
 
   const prepareStandaloneArtifactWorkspace = async (
@@ -8200,11 +8246,7 @@ export function createSessionControlPlane(
         );
       }
       const sourcePersisted = entry.sourceType
-        ? await persistSessionSource(
-            entry,
-            `${entry.sessionId} during session restore`,
-            daemonOwnedStandaloneRestore,
-          )
+        ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
       try {
         assertAttachableSessionEntry(req.sessionId, entry);
@@ -9285,8 +9327,9 @@ export function createSessionControlPlane(
       ) {
         throw new InvalidSessionScopeError(req.sessionScope);
       }
+      const startupConfig = parseSessionStartupConfig(req.startupConfig, req);
       const effectiveScope =
-        req.sessionId !== undefined
+        req.sessionId !== undefined || startupConfig !== undefined
           ? 'thread'
           : (req.sessionScope ?? defaultSessionScope);
       const source = parseSessionSource(req.sourceType, req.sourceId);
@@ -9619,6 +9662,7 @@ export function createSessionControlPlane(
             );
           }
         },
+        startupConfig,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel

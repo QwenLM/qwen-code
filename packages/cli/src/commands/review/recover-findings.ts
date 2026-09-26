@@ -305,6 +305,14 @@ export function recoverFindings(
     } catch {
       continue;
     }
+    // The fix auditor's INPUT rides this same digest-named channel, and a
+    // certified fix-audit transcript corroborates its own pointer (its one
+    // input read clears the findings floor), so the file would pass every
+    // fence below and — newest by mtime at resume time — be handed on as the
+    // interrupted run's cumulative state: only the `fixed` subset plus raw
+    // hunks, every other finding dropped. It is an input, not a findings
+    // list; only verify/reverse-audit lists are cumulative state.
+    if (key.startsWith('fix-audit--')) continue;
     const path = join(recordDir, name);
     // lstat, never stat: a symlink is not the file it points at. `statSync`
     // would fence on the TARGET's mtime — attacker-chosen — and the read
@@ -356,6 +364,13 @@ export function recoverFindings(
     '',
   ];
   for (const key of recoveredKeys) {
+    // The fix auditor's DISCLOSURES are not findings either: the findings
+    // channel filters its input above, and the sections channel must not
+    // hand its verdict back under this file's "still owe Step 4
+    // verification" header — Step 6B's audit is re-run from a fresh
+    // snapshot on the resumed run, so nothing is lost. The key stays in
+    // `recoveredKeys` for the accounting: filtered here, at the render.
+    if (key.startsWith('fix-audit--')) continue;
     const rec = recovered.get(key) as AgentRecord;
     // Keys embed PR file paths (the invariant agents), and git allows
     // newlines in filenames — a raw key would let a hostile path forge

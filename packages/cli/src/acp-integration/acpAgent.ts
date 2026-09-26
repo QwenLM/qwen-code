@@ -228,6 +228,7 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -1085,6 +1086,12 @@ function mapSessionRestoreRequestError(
 ): unknown {
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionExecutionEngineError) {
+    return new RequestError(-32024, error.message, {
+      errorKind: error.errorKind,
+      sessionId,
+    });
+  }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
       errorKind: 'transcript_snapshot_unavailable',
@@ -11430,6 +11437,13 @@ class QwenAgent implements Agent {
             ? { sourceId: source.sourceId }
             : {}),
           persisted: ok,
+          ...(!ok
+            ? {
+                reason: recording
+                  ? 'write_not_confirmed'
+                  : 'recording_unavailable',
+              }
+            : {}),
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {

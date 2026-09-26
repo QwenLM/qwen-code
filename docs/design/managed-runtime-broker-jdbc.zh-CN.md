@@ -41,7 +41,7 @@ Scope 身份使用确定性哈希表示，并始终与完整的租户级身份�
 
 ## 事务与并发语义
 
-创建 Binding 时会锁定 Scope slot，在事务内重新读取 Binding，并确保每个 Scope 只插入一个活动记录。Binding 更新同时使用已保存的 version 和 generation 作为 fencing 条件。操作租约使用数据库时钟，使竞争 JVM 不依赖彼此同步的本地时钟。
+创建 Binding 时会锁定 Scope slot，在事务内重新读取 Binding，并确保每个 Scope 只插入一个活动记录。Binding 更新同时使用已保存的 version 和 generation 作为 fencing 条件。操作租约使用数据库时钟，使竞争 JVM 不依赖彼此同步的本地时钟。JDBC adapter 会在查询中把数据库时钟转换为 Unix epoch，避免连接的会话时区偏移租约 instant，并将其归一化为整秒，使租约值经过会丢弃小数秒的 MySQL 兼容驱动后仍能一致地往返读取。
 
 创建 Session 时依赖数据库唯一约束，并在并发插入后重新读取胜出的记录。Session 的 CAS 更新会锁定当前行，校验预期 version 和 Binding generation，并拒绝把终态 Session 重新激活。SQL 失败会回滚事务并向调用方传播；不会静默回退到进程内状态。
 
@@ -53,7 +53,7 @@ Schema 初始化会对四张 Broker 私有表执行幂等的 `CREATE TABLE IF NO
 
 ## 恢复边界
 
-持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账、传输健康检查和权威执行对账仍属于后续 Runtime 集成的职责。
+持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账和传输健康检查仍属于后续 Runtime 集成的职责。按需执行对账会询问原 Runtime，只在其给出终态证据时经 `resolveUnknown` 结算；参见 `managed-runtime-broker-service-core.zh-CN.md` 的 UNKNOWN 对账一节。
 
 ## 安全与租户隔离
 
@@ -75,7 +75,7 @@ Repository 契约覆盖：
 - 通过新 Repository 实例恢复最终结果；
 - Schema 可重复初始化。
 
-默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。可选的 `mysql-integration` Maven profile 会对调用方提供的 MySQL 数据库运行同一套契约。
+默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。CI 还会通过 MySQL Connector/J 在 MariaDB 上运行 `mysql-integration` Maven profile，以便在真实 MySQL 兼容协议上覆盖 session time zone 处理和持久化租约往返读取。同一 profile 也可以在本地对调用方提供的 MySQL 数据库运行。
 
 ## 验收标准
 
@@ -90,8 +90,8 @@ Repository 契约覆盖：
 - 有效 dispatch 租约会拒绝其他 owner，过期的执行中 claim 会进入 `UNKNOWN` 而不会被重放。
 - 取消意图和 Tool 最终结果在 Repository 重建后仍然存在。
 - Schema 初始化可安全重复执行。
-- H2 契约和可选的真实 MySQL 契约均无需进程内回退即可通过。
+- H2 契约和 CI 中真实 MySQL 兼容数据库契约均无需进程内回退即可通过。
 
 ## 后续工作
 
-服务端装配、进程对账、权威 `UNKNOWN` 解决、Schema migration 部署和多进程端到端验证仍属于后续工作。
+服务端装配、进程对账、`UNKNOWN` 执行的接管扫描、Schema migration 部署和多进程端到端验证仍属于后续工作。
