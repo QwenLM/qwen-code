@@ -375,6 +375,44 @@ describe('local managed tool-result segments', () => {
       }),
     ).toEqual({ status: 'refused', code: 'managed_tool_result_conflict' });
 
+    const changedDigestPage = {
+      ...pages[0],
+      segments: [
+        { ...pages[0].segments[0], digest: digest(Buffer.from('wrong')) },
+        ...pages[0].segments.slice(1),
+      ],
+    };
+    const changedDigestRef = await resources.publish(
+      'managed-tool-result-page',
+      Buffer.from(JSON.stringify(changedDigestPage)),
+    );
+    const changedDigestManifest: ToolResultManifest = {
+      ...initial,
+      contents: [
+        {
+          ...initial.contents[0],
+          body: { pages: [{ ...pageRefs[0], ref: changedDigestRef }] },
+        },
+        ...initial.contents.slice(1),
+      ],
+    };
+    const changedDigestManifestRef = await resources.publish(
+      'managed-tool-result-manifest',
+      Buffer.from(JSON.stringify(changedDigestManifest)),
+    );
+    expect(
+      await store.readRange({
+        manifestRef: changedDigestManifestRef,
+        expectedIdentity: identityOf(initial),
+        streamId: 'stdout',
+        offset: 0,
+        length: 1,
+      }),
+    ).toEqual({
+      status: 'refused',
+      code: 'managed_tool_result_digest_mismatch',
+    });
+
     const segment = path.join(
       store.root,
       'capture-capture-01',
@@ -528,6 +566,29 @@ describe('local managed tool-result segments', () => {
     await expect(
       LocalToolResultSegmentStore.openWritable({ lease: newLease, sessionKey }),
     ).rejects.toThrow(/writer already open/);
+  });
+
+  it('rejects a lease for a different Session and checks it on every operation', async () => {
+    const { store, transcriptPath } = await harness();
+    const { lease: otherLease } = await harness({
+      ...sessionKey,
+      sessionId: 'session-b',
+    });
+    await expect(
+      LocalToolResultSegmentStore.openWritable({
+        lease: otherLease,
+        sessionKey,
+      }),
+    ).rejects.toThrow(/lease belongs to another Session/);
+    await fs.writeFile(transcriptPath, 'changed outside the writer');
+    await expect(
+      store.publish({
+        captureId: 'capture',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('blocked'),
+      }),
+    ).rejects.toThrow(/session transcript changed/i);
   });
 
   it('recovers staged, unacknowledged published, and unacknowledged sealed states across processes', async () => {
@@ -715,6 +776,15 @@ describe('local managed tool-result segments', () => {
       code: 'managed_tool_result_digest_mismatch',
     });
     await expect(fs.stat(stream)).rejects.toMatchObject({ code: 'ENOENT' });
+    const capture = path.dirname(stream);
+    await fs.rm(capture, { recursive: true });
+    expect(
+      await store.publish({ ...request, bytes: Buffer.from('replacement') }),
+    ).toEqual({
+      status: 'refused',
+      code: 'managed_tool_result_digest_mismatch',
+    });
+    await expect(fs.stat(capture)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('does not forget an acknowledged seal when its directory is removed', async () => {
@@ -763,6 +833,44 @@ describe('local managed tool-result segments', () => {
       status: 'refused',
       code: 'managed_tool_result_digest_mismatch',
     });
+  });
+
+  it('does not seal past an acknowledged tail segment whose directory vanished', async () => {
+    const { store } = await harness();
+    const request = { captureId: 'capture', streamId: 'stdout' };
+    for (let ordinal = 0; ordinal < 3; ordinal++) {
+      expect(
+        (
+          await store.publish({
+            ...request,
+            ordinal,
+            bytes: Buffer.from(String(ordinal)),
+          })
+        ).status,
+      ).toBe('ok');
+    }
+    await fs.rm(
+      path.join(
+        store.root,
+        'capture-capture',
+        'stream-stdout',
+        'segment-00002',
+      ),
+      { recursive: true },
+    );
+    expect(
+      await store.seal({
+        ...request,
+        segmentCount: 2,
+        byteLength: 2,
+        digest: digest(Buffer.from('01')),
+      }),
+    ).toEqual({ status: 'refused', code: 'managed_tool_result_conflict' });
+    await expect(
+      fs.stat(
+        path.join(store.root, 'capture-capture', 'stream-stdout', 'seal'),
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('copies queued bytes and drains accepted work before close', async () => {
@@ -884,7 +992,8 @@ describe('local managed tool-result segments', () => {
     const size = 4 * 1024 * 1024;
     const expected = createHash('sha256');
     let peakRss = process.memoryUsage().rss;
-    let peakBuffers = process.memoryUsage().arrayBuffers;
+    const initialBuffers = process.memoryUsage().arrayBuffers;
+    let peakBuffers = initialBuffers;
     for (let ordinal = 0; ordinal < count; ordinal++) {
       const chunk = Buffer.alloc(size, ordinal % 251);
       expected.update(chunk);
@@ -918,6 +1027,7 @@ describe('local managed tool-result segments', () => {
       status: 'ok',
       result: { segmentCount: count, byteLength: count * size, sealed: true },
     });
+    expect(peakBuffers - initialBuffers).toBeLessThan(80 * 1024 * 1024);
     if (process.env['O1B_METRICS_PATH']) {
       await fs.writeFile(
         process.env['O1B_METRICS_PATH'],

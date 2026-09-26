@@ -687,13 +687,13 @@ export class LocalToolResultSegmentStore implements ToolResultSegmentStore {
     }
     const directory = path.join(stream, `segment-${id}`);
     if (!(await maybeStat(directory))) {
-      if (await this.publishedMarker(stream, ordinal)) {
+      if (!(await this.publishedMarker(stream, ordinal))) return undefined;
+      if (!(await maybeStat(directory))) {
         if (mark && this.lease) await this.markCorrupt(stream, ordinal);
         throw new CorruptToolResultError(
           'missing published tool-result segment.',
         );
       }
-      return undefined;
     }
     try {
       await assertDirectory(directory);
@@ -930,12 +930,16 @@ export class LocalToolResultSegmentStore implements ToolResultSegmentStore {
             return refused('managed_tool_result_conflict');
           }
         }
-        const names = (await readdir(stream)).filter((name) =>
-          /^segment-[0-9]{5}$/.test(name),
-        );
+        const entries = await readdir(stream);
+        const names = entries.filter((name) => /^segment-[0-9]{5}$/.test(name));
         if (
           names.length !== fields.segmentCount ||
-          names.some((name) => Number(name.slice(8)) >= fields.segmentCount)
+          entries.some((name) => {
+            const match = /^(?:segment|published|corrupt)-([0-9]{5})$/.exec(
+              name,
+            );
+            return match && Number(match[1]) >= fields.segmentCount;
+          })
         ) {
           return refused(
             storedSeal

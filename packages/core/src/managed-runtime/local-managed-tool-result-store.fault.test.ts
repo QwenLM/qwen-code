@@ -107,10 +107,11 @@ afterEach(async () => {
 });
 
 describe('local tool-result disk faults', () => {
-  it('rechecks a sealed prefix after a concurrent reader saw a stale gap', async () => {
+  it('rechecks a sealed prefix across consecutive stale gaps', async () => {
     const { store, runtimeBaseDir } = await harness();
     const bytes = Buffer.from('first');
     const later = Buffer.from('later');
+    const last = Buffer.from('last');
     const request = { captureId: 'capture', streamId: 'stdout' };
     expect(
       (await store.publish({ ...request, ordinal: 0, bytes })).status,
@@ -129,23 +130,35 @@ describe('local tool-result disk faults', () => {
       expect(
         (await store.publish({ ...request, ordinal: 1, bytes: later })).status,
       ).toBe('ok');
-      expect(
-        (
-          await store.seal({
-            ...request,
-            segmentCount: 2,
-            byteLength: bytes.byteLength + later.byteLength,
-            digest: createHash('sha256')
-              .update(bytes)
-              .update(later)
-              .digest('hex'),
-          })
-        ).status,
-      ).toBe('ok');
+      fault.target = path.join(
+        store.root,
+        'capture-capture',
+        'stream-stdout',
+        'segment-00002',
+      );
+      fault.missingOnce = async () => {
+        expect(
+          (await store.publish({ ...request, ordinal: 2, bytes: last })).status,
+        ).toBe('ok');
+        expect(
+          (
+            await store.seal({
+              ...request,
+              segmentCount: 3,
+              byteLength: bytes.byteLength + later.byteLength + last.byteLength,
+              digest: createHash('sha256')
+                .update(bytes)
+                .update(later)
+                .update(last)
+                .digest('hex'),
+            })
+          ).status,
+        ).toBe('ok');
+      };
     };
     expect(await reader.prefix(request)).toMatchObject({
       status: 'ok',
-      result: { segmentCount: 2, sealed: true },
+      result: { segmentCount: 3, sealed: true },
     });
     await fs.writeFile(
       path.join(
