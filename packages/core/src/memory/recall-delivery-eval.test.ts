@@ -90,7 +90,9 @@ function loadFixture(): EvalFixture {
   return JSON.parse(readFileSync(fixtureUrl, 'utf8')) as EvalFixture;
 }
 
-function toScannedDocs(docs: EvalDoc[]): ScannedAutoMemoryDocument[] {
+type Docs = ScannedAutoMemoryDocument[];
+
+function toScannedDocs(docs: EvalDoc[]): Docs {
   return docs.map((doc) => ({
     type: doc.type,
     filePath: `/memory/${doc.id}.md`,
@@ -106,23 +108,26 @@ function toScannedDocs(docs: EvalDoc[]): ScannedAutoMemoryDocument[] {
 const docIdOf = (doc: ScannedAutoMemoryDocument) =>
   doc.filename.replace(/\.md$/, '');
 
+/** A DeliveryOutcome whose unnamed buckets are empty. */
+const outcome = (buckets: Partial<DeliveryOutcome>): DeliveryOutcome => ({
+  initialDocIds: [],
+  toolResultDocIds: [],
+  discardedDocIds: [],
+  duplicateDocIds: [],
+  ...buckets,
+});
+
 /**
  * Stand-in for the model selector's choice. The model is unavailable here, so
  * the deterministic top-5 is used. For the duplicate-rate question this is the
  * worst case on purpose: the fast set is drawn from the same ranking, so
  * overlap is maximal and the dedupe rule gets the hardest input it can get.
  */
-function refinedSelection(
-  query: string,
-  docs: ScannedAutoMemoryDocument[],
-): ScannedAutoMemoryDocument[] {
+function refinedSelection(query: string, docs: Docs): Docs {
   return selectRelevantAutoMemoryDocuments(query, docs, RECALL_AT);
 }
 
-function fastSelection(
-  query: string,
-  docs: ScannedAutoMemoryDocument[],
-): ScannedAutoMemoryDocument[] {
+function fastSelection(query: string, docs: Docs): Docs {
   return selectRelevantAutoMemoryDocuments(query, docs, RECALL_AT).slice(
     0,
     MAX_FAST_RECALL_DOCS,
@@ -136,43 +141,19 @@ function fastSelection(
  */
 function simulateSinglePath(
   query: string,
-  docs: ScannedAutoMemoryDocument[],
+  docs: Docs,
   selectorLatencyMs: number,
   turnShape: TurnShape,
 ): DeliveryOutcome {
   const refined = refinedSelection(query, docs).map(docIdOf);
-  if (refined.length === 0) {
-    return {
-      initialDocIds: [],
-      toolResultDocIds: [],
-      discardedDocIds: [],
-      duplicateDocIds: [],
-    };
-  }
+  if (refined.length === 0) return outcome({});
   if (selectorLatencyMs <= INITIAL_BUDGET_MS) {
-    return {
-      initialDocIds: refined,
-      toolResultDocIds: [],
-      discardedDocIds: [],
-      duplicateDocIds: [],
-    };
+    return outcome({ initialDocIds: refined });
   }
-  if (turnShape === 'tool-using') {
-    // The simulation models the safe ToolResult point after selector completion.
-    // Selector latency is varied by scenario; ToolResult timing is not.
-    return {
-      initialDocIds: [],
-      toolResultDocIds: refined,
-      discardedDocIds: [],
-      duplicateDocIds: [],
-    };
-  }
-  return {
-    initialDocIds: [],
-    toolResultDocIds: [],
-    discardedDocIds: refined,
-    duplicateDocIds: [],
-  };
+  // Both designs model the safe ToolResult point after selector completion.
+  // Selector latency is varied by scenario; ToolResult timing is not.
+  if (turnShape === 'tool-using') return outcome({ toolResultDocIds: refined });
+  return outcome({ discardedDocIds: refined });
 }
 
 /**
@@ -181,19 +162,14 @@ function simulateSinglePath(
  */
 function simulateFastPath(
   query: string,
-  docs: ScannedAutoMemoryDocument[],
+  docs: Docs,
   selectorLatencyMs: number,
   turnShape: TurnShape,
 ): DeliveryOutcome {
   const refined = refinedSelection(query, docs).map(docIdOf);
   if (selectorLatencyMs <= INITIAL_BUDGET_MS) {
     // Selector won the race; the fast result is never consumed.
-    return {
-      initialDocIds: refined,
-      toolResultDocIds: [],
-      discardedDocIds: [],
-      duplicateDocIds: [],
-    };
+    return outcome({ initialDocIds: refined });
   }
 
   const fast = fastSelection(query, docs).map(docIdOf);
@@ -201,21 +177,13 @@ function simulateFastPath(
   const remaining = refined.filter((id) => !delivered.has(id));
 
   if (turnShape === 'tool-using') {
-    // The simulation models the safe ToolResult point after selector completion.
-    // Selector latency is varied by scenario; ToolResult timing is not.
-    return {
+    return outcome({
       initialDocIds: fast,
       toolResultDocIds: remaining,
-      discardedDocIds: [],
       duplicateDocIds: fast.filter((id) => remaining.includes(id)),
-    };
+    });
   }
-  return {
-    initialDocIds: fast,
-    toolResultDocIds: [],
-    discardedDocIds: remaining,
-    duplicateDocIds: [],
-  };
+  return outcome({ initialDocIds: fast, discardedDocIds: remaining });
 }
 
 interface DeliverySummary {
@@ -260,31 +228,19 @@ function summarize(
   let duplicateCases = 0;
   let overlapCases = 0;
 
+  const deliveredAny = (o: DeliveryOutcome) =>
+    o.initialDocIds.length + o.toolResultDocIds.length > 0;
+
   for (const testCase of answerable) {
-    const toolFree = simulate(
-      testCase.query,
-      docs,
-      selectorLatencyMs,
-      'tool-free',
-    );
-    const toolUsing = simulate(
-      testCase.query,
-      docs,
-      selectorLatencyMs,
-      'tool-using',
-    );
+    const run = (shape: TurnShape) =>
+      simulate(testCase.query, docs, selectorLatencyMs, shape);
+    const toolFree = run('tool-free');
+    const toolUsing = run('tool-using');
 
     if (toolUsing.initialDocIds.length > 0) firstTurnHits += 1;
     if (toolFree.initialDocIds.length > 0) toolFreeHits += 1;
-    if (toolFree.initialDocIds.length + toolFree.toolResultDocIds.length > 0) {
-      anyDeliveryHits += 1;
-    }
-    if (
-      toolUsing.initialDocIds.length + toolUsing.toolResultDocIds.length >
-      0
-    ) {
-      anyDeliveryToolUsingHits += 1;
-    }
+    if (deliveredAny(toolFree)) anyDeliveryHits += 1;
+    if (deliveredAny(toolUsing)) anyDeliveryToolUsingHits += 1;
     if (toolUsing.duplicateDocIds.length > 0) duplicateCases += 1;
 
     // What dedupe had to suppress, independent of which design ran.
@@ -451,41 +407,17 @@ describe('auto-memory recall delivery evaluation', () => {
     for (const latency of SELECTOR_LATENCY_SCENARIOS_MS) {
       const before = summarize(fixture, simulateSinglePath, latency);
       const after = summarize(fixture, simulateFastPath, latency);
-      const rows: Array<[string, number, number]> = [
-        [
-          'first-turn delivery (tool-using)',
-          before.firstTurnDeliveryRate,
-          after.firstTurnDeliveryRate,
-        ],
-        [
-          'first-turn delivery (tool-free)',
-          before.toolFreeFirstTurnDeliveryRate,
-          after.toolFreeFirstTurnDeliveryRate,
-        ],
-        [
-          'delivered at all (tool-free)',
-          before.anyDeliveryRate,
-          after.anyDeliveryRate,
-        ],
-        [
-          'delivered at all (tool-using)',
-          before.anyDeliveryRateToolUsing,
-          after.anyDeliveryRateToolUsing,
-        ],
-        [
-          'fast/refined overlap needing dedupe',
-          before.overlapBeforeDedupeRate,
-          after.overlapBeforeDedupeRate,
-        ],
-        [
-          'duplicate delivery',
-          before.duplicateDeliveryRate,
-          after.duplicateDeliveryRate,
-        ],
+      const rows: Array<[string, keyof DeliverySummary]> = [
+        ['first-turn delivery (tool-using)', 'firstTurnDeliveryRate'],
+        ['first-turn delivery (tool-free)', 'toolFreeFirstTurnDeliveryRate'],
+        ['delivered at all (tool-free)', 'anyDeliveryRate'],
+        ['delivered at all (tool-using)', 'anyDeliveryRateToolUsing'],
+        ['fast/refined overlap needing dedupe', 'overlapBeforeDedupeRate'],
+        ['duplicate delivery', 'duplicateDeliveryRate'],
       ];
-      for (const [metric, beforeValue, afterValue] of rows) {
+      for (const [metric, key] of rows) {
         lines.push(
-          `| ${latency} ms | ${metric} | ${formatPercent(beforeValue)} | ${formatPercent(afterValue)} |`,
+          `| ${latency} ms | ${metric} | ${formatPercent(before[key])} | ${formatPercent(after[key])} |`,
         );
       }
     }

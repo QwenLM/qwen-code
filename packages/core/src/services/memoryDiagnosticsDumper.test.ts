@@ -58,6 +58,22 @@ function createMockConfig(overrides: Partial<Record<string, unknown>> = {}) {
   } as unknown as Config;
 }
 
+const newDumper = (overrides?: Partial<Record<string, unknown>>) =>
+  new MemoryDiagnosticsDumper(createMockConfig(overrides));
+
+/** The JSON payload of the `index`-th write (0: Phase 1, 1: Phase 2). */
+const written = (index: number) =>
+  JSON.parse(vi.mocked(fs.writeFileSync).mock.calls[index][1] as string);
+
+/** Advances Date.now by 60s per call, bypassing the cooldown. */
+function advanceClockPerCall() {
+  let mockNow = 1000000;
+  vi.spyOn(Date, 'now').mockImplementation(() => {
+    mockNow += 60_000;
+    return mockNow;
+  });
+}
+
 describe('MemoryDiagnosticsDumper', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -68,8 +84,7 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('writes diagnostics JSON on first dump', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     const result = await dumper.dump('hard');
 
@@ -86,18 +101,14 @@ describe('MemoryDiagnosticsDumper', () => {
     // Two-phase write: Phase 1 (minimal) + Phase 2 (full)
     expect(fs.writeFileSync).toHaveBeenCalledTimes(2);
 
-    const phase1Content = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
-    );
+    const phase1Content = written(0);
     expect(phase1Content.trigger).toBe('hard');
     expect(phase1Content.dumpNumber).toBe(1);
     expect(phase1Content.collectionComplete).toBe(false);
     expect(phase1Content.memoryUsage).toBeDefined();
     expect(phase1Content.v8HeapStats).toBeDefined();
 
-    const phase2Content = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
-    );
+    const phase2Content = written(1);
     expect(phase2Content.trigger).toBe('hard');
     expect(phase2Content.dumpNumber).toBe(1);
     expect(phase2Content.collectionComplete).toBe(true);
@@ -107,15 +118,9 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('respects per-session cap of 3 dumps', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
-    // Bypass cooldown by mocking Date.now
-    let mockNow = 1000000;
-    vi.spyOn(Date, 'now').mockImplementation(() => {
-      mockNow += 60_000;
-      return mockNow;
-    });
+    advanceClockPerCall();
 
     const r1 = await dumper.dump('hard');
     const r2 = await dumper.dump('critical');
@@ -131,8 +136,7 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('respects cooldown between dumps', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     const mockNow = 1000000;
     vi.spyOn(Date, 'now').mockReturnValue(mockNow);
@@ -147,18 +151,11 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('resets state on new session', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
-    let mockNow = 1000000;
-    vi.spyOn(Date, 'now').mockImplementation(() => {
-      mockNow += 60_000;
-      return mockNow;
-    });
+    advanceClockPerCall();
 
-    await dumper.dump('hard');
-    await dumper.dump('hard');
-    await dumper.dump('hard');
+    for (let i = 0; i < 3; i++) await dumper.dump('hard');
 
     // Cap reached
     const r4 = await dumper.dump('hard');
@@ -173,22 +170,18 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('includes critical suggestion for critical pressure', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     await dumper.dump('critical');
 
     // Phase 2 (full payload) is the second write
-    const writtenContent = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
-    );
+    const writtenContent = written(1);
     expect(writtenContent.suggestion).toContain('critically high');
     expect(writtenContent.collectionComplete).toBe(true);
   });
 
   it('writes Phase 1 synchronously before any await (survives crash during Phase 2)', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     // Fire dump() but do not await — Phase 1 must have already written to disk
     // because async functions execute synchronously up to the first await.
@@ -197,9 +190,7 @@ describe('MemoryDiagnosticsDumper', () => {
     // At this point Phase 2 has not run yet (its await is pending), but Phase 1
     // must have completed its writeFileSync call.
     expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
-    const phase1Content = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
-    );
+    const phase1Content = written(0);
     expect(phase1Content.collectionComplete).toBe(false);
 
     await promise;
@@ -208,24 +199,16 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('reserves slot synchronously to prevent concurrent dumps from bypassing cap', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
-    let mockNow = 1000000;
-    vi.spyOn(Date, 'now').mockImplementation(() => {
-      mockNow += 60_000;
-      return mockNow;
-    });
+    advanceClockPerCall();
 
     // Fire 4 concurrent dumps without awaiting between them. The synchronous
     // slot reservation must enforce the cap of 3 even though all 4 calls happen
     // before any of them complete their async Phase 2.
-    const results = await Promise.all([
-      dumper.dump('hard'),
-      dumper.dump('hard'),
-      dumper.dump('hard'),
-      dumper.dump('hard'),
-    ]);
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () => dumper.dump('hard')),
+    );
 
     const successful = results.filter((r) => r !== undefined);
     expect(successful).toHaveLength(3);
@@ -233,24 +216,18 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('handles missing llmClient gracefully', async () => {
-    const config = createMockConfig({
-      getLlmClient: vi.fn().mockReturnValue(null),
-    });
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper({ getLlmClient: vi.fn().mockReturnValue(null) });
 
     const result = await dumper.dump('hard');
 
     expect(result).toBeDefined();
     // Phase 2 (full payload) is the second write
-    const writtenContent = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
-    );
+    const writtenContent = written(1);
     expect(writtenContent.session.available).toBe(false);
   });
 
   it('Phase 1 uses last ring sample for memoryUsage instead of calling process.memoryUsage()', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     const fakeSamples = [
       {
@@ -265,9 +242,7 @@ describe('MemoryDiagnosticsDumper', () => {
 
     await dumper.dump('hard', fakeSamples);
 
-    const phase1Content = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
-    );
+    const phase1Content = written(0);
     // Phase 1 should use the last sample's fields, not process.memoryUsage()
     expect(phase1Content.memoryUsage.rss).toBe(111_111_111);
     expect(phase1Content.memoryUsage.heapUsed).toBe(222_222_222);
@@ -278,14 +253,11 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('Phase 1 falls back to process.memoryUsage() when no samples provided', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     await dumper.dump('hard', []);
 
-    const phase1Content = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
-    );
+    const phase1Content = written(0);
     // With empty samples array, should fall back to process.memoryUsage()
     // which returns real values (not the fake ring sample values)
     expect(phase1Content.memoryUsage).toBeDefined();
@@ -293,8 +265,7 @@ describe('MemoryDiagnosticsDumper', () => {
   });
 
   it('includes recentSamples in both Phase 1 and Phase 2 payloads', async () => {
-    const config = createMockConfig();
-    const dumper = new MemoryDiagnosticsDumper(config);
+    const dumper = newDumper();
 
     const fakeSamples = [
       {
@@ -309,15 +280,11 @@ describe('MemoryDiagnosticsDumper', () => {
 
     await dumper.dump('hard', fakeSamples);
 
-    const phase1 = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
-    );
+    const phase1 = written(0);
     expect(phase1.recentSamples).toEqual(fakeSamples);
     expect(phase1.collectionComplete).toBe(false);
 
-    const phase2 = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
-    );
+    const phase2 = written(1);
     expect(phase2.recentSamples).toEqual(fakeSamples);
     expect(phase2.collectionComplete).toBe(true);
   });

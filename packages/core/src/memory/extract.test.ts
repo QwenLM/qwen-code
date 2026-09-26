@@ -20,6 +20,7 @@ import {
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import { userText } from '../test-utils/model-fixtures.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -683,10 +684,7 @@ describe('auto-memory extraction', () => {
       // Simulate compression: history shrinks from 20 to 5, but cursor
       // still says processedOffset = 20. Then a new user message is added.
       const compressedHistory = fullHistory.slice(0, 5);
-      compressedHistory.push({
-        role: 'user',
-        parts: [{ text: 'new question after compression' }],
-      });
+      compressedHistory.push(userText('new question after compression'));
 
       const agentCallsBefore = vi.mocked(runAutoMemoryExtractionByAgent).mock
         .calls.length;

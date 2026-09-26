@@ -4,12 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * E2E Integration Tests for AutoSkill mechanism (per skill-nudge.md L258-320)
- *
- * Tests the complete workflow from toolCallCount tracking to skill file writing.
- * These tests validate the behavior described in the design document's E2E checklist.
- */
+// E2E integration tests for the AutoSkill mechanism, from toolCallCount
+// tracking to skill file writing (skill-nudge.md L258-320 E2E checklist).
 
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -18,7 +14,12 @@ import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { MemoryManager, AUTO_SKILL_THRESHOLD } from './manager.js';
+import type {
+  ScheduleSkillReviewParams,
+  SkillReviewScheduleResult,
+} from './manager.js';
 import { getProjectSkillsRoot } from '../skills/skill-paths.js';
+import { modelText } from '../test-utils/model-fixtures.js';
 
 vi.mock('./skillReviewAgentPlanner.js', () => ({
   runSkillReviewByAgent: vi.fn().mockResolvedValue({ touchedSkillFiles: [] }),
@@ -32,10 +33,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
 
   const sampleHistory: Content[] = [
     { role: 'user', parts: [{ text: 'Help me refactor this code' }] },
-    {
-      role: 'model',
-      parts: [{ text: 'I can help. Let me analyze the code first.' }],
-    },
+    modelText('I can help. Let me analyze the code first.'),
   ];
 
   beforeEach(async () => {
@@ -55,57 +53,41 @@ describe('Skill Nudge E2E Integration Tests', () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  // ─── Test 1: Low Tool Call Density Not Trigger ───────────────────────────
+  // An enabled review at the threshold; `threshold` is only sent when given.
+  const schedule = (overrides: Partial<ScheduleSkillReviewParams> = {}) =>
+    mgr.scheduleSkillReview({
+      projectRoot,
+      sessionId: 'test-session-1',
+      history: sampleHistory,
+      toolCallCount: AUTO_SKILL_THRESHOLD,
+      skillsModified: false,
+      enabled: true,
+      config: mockConfig,
+      ...overrides,
+    });
+  const atThreshold = (toolCallCount: number) =>
+    schedule({ toolCallCount, threshold: AUTO_SKILL_THRESHOLD });
+  const expectSkipped = (result: SkillReviewScheduleResult, reason: string) => {
+    expect(result.status).toBe('skipped');
+    expect(result.skippedReason).toBe(reason);
+  };
 
   describe('Test 1: Low tool call density should not trigger skill review', () => {
     it('should skip when toolCallCount < threshold', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: 5,
-        skillsModified: false, // Below default threshold of 20
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result = atThreshold(5); // Below default threshold of 20
 
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('below_threshold');
+      expectSkipped(result, 'below_threshold');
       expect(result.taskId).toBeUndefined();
     });
 
     it('should skip when exactly at threshold minus 1', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD - 1,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('below_threshold');
+      expectSkipped(atThreshold(AUTO_SKILL_THRESHOLD - 1), 'below_threshold');
     });
   });
 
-  // ─── Test 2: At Threshold Should Trigger ──────────────────────────────────
-
   describe('Test 2: At or above threshold should trigger skill review', () => {
     it('should schedule when toolCallCount exactly equals threshold', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result = atThreshold(AUTO_SKILL_THRESHOLD);
 
       expect(result.status).toBe('scheduled');
       expect(result.taskId).toBeDefined();
@@ -113,90 +95,38 @@ describe('Skill Nudge E2E Integration Tests', () => {
     });
 
     it('should schedule when toolCallCount exceeds threshold', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD + 10,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result = atThreshold(AUTO_SKILL_THRESHOLD + 10);
 
       expect(result.status).toBe('scheduled');
       expect(result.taskId).toBeDefined();
     });
 
     it('should respect custom threshold when provided', () => {
-      const customThreshold = 50;
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: 30,
-        skillsModified: false,
-        threshold: customThreshold,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('below_threshold');
+      const result = schedule({ toolCallCount: 30, threshold: 50 });
+      expectSkipped(result, 'below_threshold');
     });
   });
-
-  // ─── Test 3: Skills Modified In Session ──────────────────────────────────
 
   describe('Test 3: skills modified in session should prevent nudge', () => {
     it('should skip when skillsModified is true', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: 30, // Well above threshold
+      // toolCallCount 30 is well above threshold.
+      const result = schedule({
+        toolCallCount: 30,
         threshold: AUTO_SKILL_THRESHOLD,
         skillsModified: true,
-        enabled: true,
-        config: mockConfig,
       });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('skills_modified_in_session');
+      expectSkipped(result, 'skills_modified_in_session');
     });
 
     it('should not trigger nudge even with high toolCallCount if skills were modified', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: 100,
-        skillsModified: true,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('skills_modified_in_session');
+      const result = schedule({ toolCallCount: 100, skillsModified: true });
+      expectSkipped(result, 'skills_modified_in_session');
     });
   });
 
-  // ─── Test 4: Config Enable/Disable Gate ────────────────────────────────────
-
   describe('Test 4: Configuration enable/disable gate', () => {
     it('should skip when memory.enableAutoSkill is false', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: false,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('disabled');
+      expectSkipped(schedule({ enabled: false }), 'disabled');
     });
 
     it('should skip when config is not provided', () => {
@@ -208,97 +138,43 @@ describe('Skill Nudge E2E Integration Tests', () => {
         skillsModified: false,
         config: undefined,
       });
-
-      expect(result.status).toBe('skipped');
-      expect(result.skippedReason).toBe('disabled');
+      expectSkipped(result, 'disabled');
     });
 
     it('should schedule when enabled is true', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('scheduled');
+      expect(schedule().status).toBe('scheduled');
     });
   });
 
-  // ─── Test 5: Merge Detection ──────────────────────────────────────────────
-
   describe('Test 5: Extract + Skill Review merge detection', () => {
     it('should return valid result when skill review is scheduled', () => {
-      // Schedule skill review at threshold
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result = schedule();
 
-      // Should successfully schedule or skip with valid status
+      // Should schedule or skip with a valid status, never fail.
       expect(result.status).toBeDefined();
       expect(['scheduled', 'skipped']).toContain(result.status);
-
-      // If scheduled, should have taskId
       if (result.status === 'scheduled') {
         expect(result.taskId).toBeDefined();
       }
-
-      // Should not have unexpected errors
       expect(result.skippedReason).not.toBe('failed');
     });
 
     it('should handle multiple skill reviews for same project (sequential)', async () => {
-      const result1 = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      // While first is in-flight, the second call for the same project is
-      // deduped — it returns skipped with the existing taskId.
-      const result2WhileRunning = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'session-2',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result1 = schedule({ sessionId: 'session-1' });
+      // While the first is in flight, a second call for the same project is
+      // deduped: skipped, returning the existing taskId so callers can
+      // observe the in-flight task.
+      const result2WhileRunning = schedule({ sessionId: 'session-2' });
 
       expect(result1.status).toBe('scheduled');
       expect(result1.taskId).toBeDefined();
-      expect(result2WhileRunning.status).toBe('skipped');
-      expect(result2WhileRunning.skippedReason).toBe('already_running');
-      // Returns the existing taskId so callers can observe the in-flight task.
+      expectSkipped(result2WhileRunning, 'already_running');
       expect(result2WhileRunning.taskId).toBe(result1.taskId);
 
-      // Wait for the first review to complete.
       await result1.promise;
 
-      // Now a new review for the same project should be accepted.
-      const result3AfterCompletion = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'session-3',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
+      // After completion a new review for the same project is accepted.
+      const result3AfterCompletion = schedule({ sessionId: 'session-3' });
 
       expect(result3AfterCompletion.status).toBe('scheduled');
       expect(result3AfterCompletion.taskId).toBeDefined();
@@ -310,50 +186,25 @@ describe('Skill Nudge E2E Integration Tests', () => {
     });
   });
 
-  // ─── Test 6: Task Record Tracking ────────────────────────────────────────
-
   describe('Test 6: Task record tracking and metadata', () => {
     it('should create task record with correct metadata', () => {
-      const toolCallCount = 25;
-      const threshold = 20;
-
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount,
-        threshold,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
+      const result = schedule({ toolCallCount: 25, threshold: 20 });
 
       expect(result.status).toBe('scheduled');
       expect(result.taskId).toBeDefined();
 
-      // Verify task record
       const records = mgr.listTasksByType('skill-review', projectRoot);
       expect(records.length).toBeGreaterThan(0);
 
       const record = records[0];
       expect(record.status).toBe('running');
-      expect(record.metadata?.['toolCallCount']).toBe(toolCallCount);
-      expect(record.metadata?.['threshold']).toBe(threshold);
+      expect(record.metadata?.['toolCallCount']).toBe(25);
+      expect(record.metadata?.['threshold']).toBe(20);
       expect(record.metadata?.['historyLength']).toBe(sampleHistory.length);
     });
 
     it('should track task status transitions', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      const recordId = result.taskId;
+      const recordId = schedule().taskId;
       const records = mgr.listTasksByType('skill-review', projectRoot);
       const record = records.find((r) => r.id === recordId);
 
@@ -363,75 +214,23 @@ describe('Skill Nudge E2E Integration Tests', () => {
     });
   });
 
-  // ─── Test 7: Threshold Boundary Cases ──────────────────────────────────────
-
   describe('Test 7: Threshold boundary cases', () => {
-    it('should not trigger at threshold - 1', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD - 1,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('skipped');
-    });
-
-    it('should trigger at threshold', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('scheduled');
-    });
-
-    it('should trigger at threshold + 1', () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD + 1,
-        skillsModified: false,
-        threshold: AUTO_SKILL_THRESHOLD,
-        enabled: true,
-        config: mockConfig,
-      });
-
-      expect(result.status).toBe('scheduled');
+    it.each([
+      ['should not trigger at threshold - 1', -1, 'skipped'],
+      ['should trigger at threshold', 0, 'scheduled'],
+      ['should trigger at threshold + 1', 1, 'scheduled'],
+    ])('%s', (_title, offset, status) => {
+      expect(atThreshold(AUTO_SKILL_THRESHOLD + offset).status).toBe(status);
     });
   });
 
-  // ─── Test 8: Project Skills Directory Structure ────────────────────────────
-
   describe('Test 8: Project skills directory validation', () => {
     it('should verify project skills root exists when scheduled', async () => {
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'test-session-1',
-        history: sampleHistory,
-        toolCallCount: AUTO_SKILL_THRESHOLD,
-        skillsModified: false,
-        enabled: true,
-        config: mockConfig,
-      });
+      expect(schedule().status).toBe('scheduled');
 
-      expect(result.status).toBe('scheduled');
-
-      // Project skills directory should be ready for writes
+      // The directory may not exist yet, but the path should be valid for
+      // writes; normalize separators for Windows.
       const skillsRootPath = getProjectSkillsRoot(projectRoot);
-      // Directory may not exist yet, but the path should be valid
-      // Use path.normalize-friendly comparison for cross-platform (Windows uses backslash)
       const normalizedPath = skillsRootPath.split(path.sep).join('/');
       expect(normalizedPath.includes('.qwen/skills')).toBe(true);
     });

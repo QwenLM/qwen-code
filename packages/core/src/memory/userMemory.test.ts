@@ -39,10 +39,8 @@ describe('user-level auto-memory', () => {
     await fs.mkdir(projectRoot, { recursive: true });
     previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
-    // Defensive: paths.ts memoizes getAutoMemoryRoot by projectRoot.
-    // Each test uses a fresh mkdtemp dir so collisions are impossible
-    // today, but clearing keeps the suite robust if a future test reuses
-    // a projectRoot string.
+    // Defensive: paths.ts memoizes getAutoMemoryRoot by projectRoot; fresh
+    // mkdtemp dirs can't collide today, but a future test might reuse one.
     clearAutoMemoryRootCache();
   });
 
@@ -60,20 +58,18 @@ describe('user-level auto-memory', () => {
     });
   });
 
+  const readUserIndex = () =>
+    fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8');
+
   describe('paths', () => {
     it('places user memory at {QWEN_CODE_MEMORY_BASE_DIR}/memories', () => {
-      expect(getUserAutoMemoryRoot()).toBe(
-        path.join(tempDir, USER_AUTO_MEMORY_DIRNAME),
-      );
+      const userRoot = path.join(tempDir, USER_AUTO_MEMORY_DIRNAME);
+      expect(getUserAutoMemoryRoot()).toBe(userRoot);
       expect(getUserAutoMemoryIndexPath()).toBe(
-        path.join(
-          tempDir,
-          USER_AUTO_MEMORY_DIRNAME,
-          AUTO_MEMORY_INDEX_FILENAME,
-        ),
+        path.join(userRoot, AUTO_MEMORY_INDEX_FILENAME),
       );
       expect(getUserAutoMemoryTopicPath('user')).toBe(
-        path.join(tempDir, USER_AUTO_MEMORY_DIRNAME, 'user.md'),
+        path.join(userRoot, 'user.md'),
       );
     });
 
@@ -92,25 +88,17 @@ describe('user-level auto-memory', () => {
 
     it('isAnyAutoMemPath accepts paths in either the project or the user root', () => {
       const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
-      const userRoot = getUserAutoMemoryRoot();
+      const userDoc = path.join(getUserAutoMemoryRoot(), 'user', 'y.md');
+      const inEither = (p: string) => isAnyAutoMemPath(p, projectRoot);
 
-      expect(
-        isAnyAutoMemPath(
-          path.join(projectMemoryRoot, 'feedback', 'x.md'),
-          projectRoot,
-        ),
-      ).toBe(true);
-      expect(
-        isAnyAutoMemPath(path.join(userRoot, 'user', 'y.md'), projectRoot),
-      ).toBe(true);
-      expect(
-        isAnyAutoMemPath(path.join(tempDir, 'outside.md'), projectRoot),
-      ).toBe(false);
+      expect(inEither(path.join(projectMemoryRoot, 'feedback', 'x.md'))).toBe(
+        true,
+      );
+      expect(inEither(userDoc)).toBe(true);
+      expect(inEither(path.join(tempDir, 'outside.md'))).toBe(false);
 
       // Symmetric check: project-only helper should reject the user path
-      expect(
-        isAutoMemPath(path.join(userRoot, 'user', 'y.md'), projectRoot),
-      ).toBe(false);
+      expect(isAutoMemPath(userDoc, projectRoot)).toBe(false);
     });
   });
 
@@ -119,17 +107,13 @@ describe('user-level auto-memory', () => {
       await ensureUserAutoMemoryScaffold();
 
       await expect(fs.stat(getUserAutoMemoryRoot())).resolves.toBeDefined();
-      await expect(
-        fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8'),
-      ).resolves.toBe('');
+      await expect(readUserIndex()).resolves.toBe('');
 
       // Preserves custom content on second call
       const customIndex = '# Custom user index\n\n- preserve me\n';
       await fs.writeFile(getUserAutoMemoryIndexPath(), customIndex, 'utf-8');
       await ensureUserAutoMemoryScaffold();
-      await expect(
-        fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8'),
-      ).resolves.toBe(customIndex);
+      await expect(readUserIndex()).resolves.toBe(customIndex);
 
       // Unlike per-project scaffold, no meta.json / extract-cursor.json
       await expect(
@@ -146,14 +130,9 @@ describe('user-level auto-memory', () => {
 
     it('readUserAutoMemoryIndex reads existing content', async () => {
       await ensureUserAutoMemoryScaffold();
-      await fs.writeFile(
-        getUserAutoMemoryIndexPath(),
-        '- [Role](user/role.md) — User is a Go engineer.\n',
-        'utf-8',
-      );
-      await expect(readUserAutoMemoryIndex()).resolves.toBe(
-        '- [Role](user/role.md) — User is a Go engineer.\n',
-      );
+      const content = '- [Role](user/role.md) — User is a Go engineer.\n';
+      await fs.writeFile(getUserAutoMemoryIndexPath(), content, 'utf-8');
+      await expect(readUserAutoMemoryIndex()).resolves.toBe(content);
     });
   });
 
@@ -182,15 +161,17 @@ describe('user-level auto-memory', () => {
       );
       return docPath;
     }
-
-    it('scanUserAutoMemoryTopicDocuments returns documents written under the user root', async () => {
-      await ensureUserAutoMemoryScaffold();
-      await writeUserMemoryDoc(
+    const writeRoleDoc = () =>
+      writeUserMemoryDoc(
         'user',
         'role',
         'User is a Go engineer.',
         'User has been writing Go for 10 years.',
       );
+
+    it('scanUserAutoMemoryTopicDocuments returns documents written under the user root', async () => {
+      await ensureUserAutoMemoryScaffold();
+      await writeRoleDoc();
 
       const docs = await scanUserAutoMemoryTopicDocuments();
 
@@ -206,12 +187,7 @@ describe('user-level auto-memory', () => {
 
     it('rebuildUserAutoMemoryIndex writes MEMORY.md from the user docs', async () => {
       await ensureUserAutoMemoryScaffold();
-      await writeUserMemoryDoc(
-        'user',
-        'role',
-        'User is a Go engineer.',
-        'User has been writing Go for 10 years.',
-      );
+      await writeRoleDoc();
       await writeUserMemoryDoc(
         'feedback',
         'terse',
@@ -227,53 +203,43 @@ describe('user-level auto-memory', () => {
       expect(index).toContain('User prefers terse responses.');
 
       // Persists to disk at the expected path
-      await expect(
-        fs.readFile(getUserAutoMemoryIndexPath(), 'utf-8'),
-      ).resolves.toBe(index);
+      await expect(readUserIndex()).resolves.toBe(index);
     });
   });
 
   describe('system prompt rendering', () => {
-    it('renders both index sections when a user section is provided', () => {
-      const prompt = buildManagedAutoMemoryPrompt(
-        '/tmp/project/.qwen/memory',
-        '- [Release](project/release.md) — Release Friday.',
-        {
-          memoryDir: '/tmp/global/memories',
-          indexContent: '- [Role](user/role.md) — User is a Go engineer.',
-        },
-      );
+    const PROJECT_DIR = '/tmp/project/.qwen/memory';
+    const PROJECT_INDEX = '- [Release](project/release.md) — Release Friday.';
+    const renderWithUserSection = () =>
+      buildManagedAutoMemoryPrompt(PROJECT_DIR, PROJECT_INDEX, {
+        memoryDir: '/tmp/global/memories',
+        indexContent: '- [Role](user/role.md) — User is a Go engineer.',
+      });
 
-      expect(prompt).toContain('USER memory');
-      expect(prompt).toContain('PROJECT memory');
-      expect(prompt).toContain('/tmp/global/memories');
-      expect(prompt).toContain('/tmp/project/.qwen/memory');
-      expect(prompt).toContain('## /tmp/global/memories/MEMORY.md');
-      expect(prompt).toContain('## /tmp/project/.qwen/memory/MEMORY.md');
-      expect(prompt).toContain(
+    it('renders both index sections when a user section is provided', () => {
+      const prompt = renderWithUserSection();
+
+      for (const text of [
+        'USER memory',
+        'PROJECT memory',
+        '/tmp/global/memories',
+        '/tmp/project/.qwen/memory',
+        '## /tmp/global/memories/MEMORY.md',
+        '## /tmp/project/.qwen/memory/MEMORY.md',
         '- [Role](user/role.md) — User is a Go engineer.',
-      );
-      expect(prompt).toContain(
         '- [Release](project/release.md) — Release Friday.',
-      );
-      // Scope guidance is surfaced for every type
-      expect(prompt).toContain('<scope>always user (cross-project)</scope>');
-      expect(prompt).toContain(
+        // Scope guidance is surfaced for every type
+        '<scope>always user (cross-project)</scope>',
         '<scope>always project (this-project-only)</scope>',
-      );
-      expect(prompt).toContain('default user');
-      expect(prompt).toContain('default project');
+        'default user',
+        'default project',
+      ]) {
+        expect(prompt).toContain(text);
+      }
     });
 
     it('renders user section FIRST (background) then project section (more specific)', () => {
-      const prompt = buildManagedAutoMemoryPrompt(
-        '/tmp/project/.qwen/memory',
-        '- [Release](project/release.md) — Release Friday.',
-        {
-          memoryDir: '/tmp/global/memories',
-          indexContent: '- [Role](user/role.md) — User is a Go engineer.',
-        },
-      );
+      const prompt = renderWithUserSection();
 
       const userIdx = prompt.indexOf('## /tmp/global/memories/MEMORY.md');
       const projectIdx = prompt.indexOf(
@@ -285,10 +251,7 @@ describe('user-level auto-memory', () => {
     });
 
     it('falls back to single-dir wording when no user section is provided', () => {
-      const prompt = buildManagedAutoMemoryPrompt(
-        '/tmp/project/.qwen/memory',
-        '- [Release](project/release.md) — Release Friday.',
-      );
+      const prompt = buildManagedAutoMemoryPrompt(PROJECT_DIR, PROJECT_INDEX);
 
       expect(prompt).toContain('persistent, file-based memory system');
       expect(prompt).not.toContain('USER memory');
@@ -297,23 +260,14 @@ describe('user-level auto-memory', () => {
     });
 
     it('buildManagedAutoMemoryPrompt passes the user section through', () => {
-      const result = buildManagedAutoMemoryPrompt(
-        '/tmp/project/.qwen/memory',
-        '- [Release](project/release.md) — Release Friday.',
-        {
-          memoryDir: '/tmp/global/memories',
-          indexContent: '- [Role](user/role.md) — User is a Go engineer.',
-        },
-      );
+      const result = renderWithUserSection();
 
       expect(result).toContain('USER memory');
       expect(result).toContain('/tmp/global/memories');
-      // Separation guard: the managed auto-memory section is standalone. It is
-      // no longer concatenated onto the user-memory/context blob (the former
+      // Separation guard: the managed section is standalone (the former
       // `appendManagedAutoMemoryToUserMemory` wrapper was removed), so nothing
-      // is prepended before the `# auto memory` heading — even when a user
-      // section is present. A regression that re-introduced that concatenation
-      // here would push context ahead of the heading and fail this assertion.
+      // precedes `# auto memory`, even with a user section. Re-introducing
+      // that concatenation would push context ahead of the heading.
       expect(result.startsWith('# auto memory')).toBe(true);
     });
   });

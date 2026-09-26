@@ -12,6 +12,7 @@ import {
   resolveCompletedTurnBranchCandidateFromRecords,
   type BranchPoint,
 } from './branch-points.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 function record(
   uuid: string,
@@ -84,13 +85,7 @@ describe('branch points', () => {
       ] as unknown as Part[]),
       record('tool', 'a-tool', 'tool_result', [
         null,
-        {
-          functionResponse: {
-            id: 'call-1',
-            name: 'read_file',
-            response: { output: 'ok' },
-          },
-        },
+        fnResponse('read_file', { output: 'ok' }, 'call-1'),
       ] as unknown as Part[]),
       record('a-final', 'tool', 'assistant', [
         null,
@@ -122,13 +117,7 @@ describe('branch points', () => {
           { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
         ]),
         record('tool', 'a-tool', 'tool_result', [
-          {
-            functionResponse: {
-              id: 'wrong-id',
-              name: 'read_file',
-              response: {},
-            },
-          },
+          fnResponse('read_file', {}, 'wrong-id'),
         ]),
         record('a1', 'tool', 'assistant', [{ text: 'done' }]),
       ],
@@ -141,14 +130,7 @@ describe('branch points', () => {
           { functionCall: { name: 'read_file', args: { path: 'a' } } },
           { functionCall: { name: 'read_file', args: { path: 'b' } } },
         ]),
-        record('tool', 'a-tool', 'tool_result', [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: {},
-            },
-          },
-        ]),
+        record('tool', 'a-tool', 'tool_result', [fnResponse('read_file', {})]),
         record('a1', 'tool', 'assistant', [{ text: 'done' }]),
       ],
     },
@@ -157,13 +139,7 @@ describe('branch points', () => {
       records: () => [
         record('u1', null, 'user', [{ text: 'question' }]),
         record('tool', 'u1', 'tool_result', [
-          {
-            functionResponse: {
-              id: 'ghost',
-              name: 'read_file',
-              response: {},
-            },
-          },
+          fnResponse('read_file', {}, 'ghost'),
         ]),
         record('a1', 'tool', 'assistant', [{ text: 'done' }]),
       ],
@@ -217,9 +193,7 @@ describe('branch points', () => {
         { functionCall: { name: 'read_file', args: {} } },
       ]),
       record('tool', 'a-tool', 'tool_result', [
-        {
-          functionResponse: { name: 'read_file', response: { output: 'ok' } },
-        },
+        fnResponse('read_file', { output: 'ok' }),
       ]),
       record('a1', 'tool', 'assistant', [{ text: 'done' }]),
     ];

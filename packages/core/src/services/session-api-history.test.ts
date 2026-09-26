@@ -13,24 +13,56 @@ import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
 } from './session-api-history.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
 
+const recordBase = (timestamp: string) => ({
+  sessionId: 'session',
+  timestamp,
+  cwd: '/workspace',
+  version: 'test',
+});
+
+/** A chat_compression payload; `completedToolCallIds` only when given. */
+const compressionPayload = (
+  compressedHistory: Content[],
+  completedToolCallIds?: string[],
+) => ({
+  info: {
+    originalTokenCount: 100,
+    newTokenCount: 50,
+    compressionStatus: CompressionStatus.COMPRESSED,
+  },
+  compressedHistory,
+  ...(completedToolCallIds ? { completedToolCallIds } : {}),
+});
+
+const api = (messages: ChatRecord[]) =>
+  buildApiHistoryFromConversation({ messages });
+
+const completedIds = (messages: ChatRecord[]) =>
+  buildSessionHistoryFromConversation({ messages }).completedToolCallIds;
+
+const trailingNotifications = (messages: ChatRecord[]) =>
+  buildSessionHistoryFromConversation({ messages }).trailingSystemNotifications;
+
 describe('completed local slash commands', () => {
   function commandRecords(command = '/docs'): ChatRecord[] {
-    const base = {
-      sessionId: 'session',
-      timestamp: '2026-09-17T00:00:00.000Z',
-      cwd: '/workspace',
-      version: 'test',
-    };
+    const base = recordBase('2026-09-17T00:00:00.000Z');
     return [
       {
         ...base,
         uuid: 'user',
         parentUuid: null,
         type: 'user',
-        message: { role: 'user', parts: [{ text: command }] },
+        message: userText(command),
       },
       {
         ...base,
@@ -52,7 +84,7 @@ describe('completed local slash commands', () => {
     (command) => {
       const messages = commandRecords(command);
       const original = structuredClone(messages);
-      const history = buildApiHistoryFromConversation({ messages });
+      const history = api(messages);
       expect(history).toEqual([]);
       expect(detectTurnInterruption(history).kind).toBe('none');
       expect(messages).toEqual(original);
@@ -64,22 +96,21 @@ describe('completed local slash commands', () => {
     const pending: ChatRecord = {
       ...user,
       uuid: 'pending',
-      message: { role: 'user', parts: [{ text: 'unfinished request' }] },
+      message: userText('unfinished request'),
     };
     for (const messages of [
       [pending, user, output, output],
       [user, output, pending],
     ]) {
-      const history = buildApiHistoryFromConversation({ messages });
+      const history = api(messages);
       expect(history).toEqual([pending.message]);
       expect(detectTurnInterruption(history).kind).toBe('interrupted_prompt');
     }
-    expect(buildApiHistoryFromConversation({ messages: [user] })).toEqual([
+    expect(api([user])).toEqual([user.message]);
+    expect(api([user, pending, output])).toEqual([
       user.message,
+      pending.message,
     ]);
-    expect(
-      buildApiHistoryFromConversation({ messages: [user, pending, output] }),
-    ).toEqual([user.message, pending.message]);
   });
 
   it.each([true, false])(
@@ -95,11 +126,7 @@ describe('completed local slash commands', () => {
           sentToModel,
         },
       };
-      expect(
-        buildApiHistoryFromConversation({
-          messages: [user, invocation, output],
-        }),
-      ).toEqual([user.message]);
+      expect(api([user, invocation, output])).toEqual([user.message]);
     },
   );
 
@@ -112,63 +139,40 @@ describe('completed local slash commands', () => {
         rawCommand: '/docs',
         outputHistoryItems: [{ type, text: 'display only' }],
       };
-      expect(
-        buildApiHistoryFromConversation({ messages: [user, output] }),
-      ).toEqual([user.message]);
+      expect(api([user, output])).toEqual([user.message]);
     },
   );
 
   it('does not discard unrelated results or merged mid-turn input', () => {
     const [user, output] = commandRecords();
     const unrelated = commandRecords('/other')[1];
-    expect(
-      buildApiHistoryFromConversation({ messages: [user, unrelated] }),
-    ).toEqual([user.message]);
+    expect(api([user, unrelated])).toEqual([user.message]);
     const midTurn: ChatRecord = {
       ...user,
       uuid: 'mid',
       subtype: 'mid_turn_user_message',
     };
-    expect(
-      buildApiHistoryFromConversation({ messages: [user, midTurn, output] }),
-    ).toEqual([
-      {
-        role: 'user',
-        parts: [...user.message!.parts!, ...midTurn.message!.parts!],
-      },
+    expect(api([user, midTurn, output])).toEqual([
+      content('user', ...user.message!.parts!, ...midTurn.message!.parts!),
     ]);
   });
 
   it('does not pop a compression snapshot when the old command result arrives', () => {
     const [user, output] = commandRecords();
-    const compressedHistory = [{ role: 'model', parts: [{ text: 'summary' }] }];
+    const compressedHistory = [modelText('summary')];
     const compression: ChatRecord = {
       ...output,
       uuid: 'compression',
       subtype: 'chat_compression',
-      systemPayload: {
-        info: {
-          originalTokenCount: 100,
-          newTokenCount: 50,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        },
-        compressedHistory,
-      },
+      systemPayload: compressionPayload(compressedHistory),
     };
-    expect(
-      buildApiHistoryFromConversation({
-        messages: [user, compression, output],
-      }),
-    ).toEqual(compressedHistory);
+    expect(api([user, compression, output])).toEqual(compressedHistory);
   });
 });
 
 function records(toolCallId = 'finish'): ChatRecord[] {
   const base = {
-    sessionId: 'session',
-    timestamp: '2026-09-15T00:00:00.000Z',
-    cwd: '/workspace',
-    version: 'test',
+    ...recordBase('2026-09-15T00:00:00.000Z'),
     goalContext: permit,
   };
   return [
@@ -177,28 +181,17 @@ function records(toolCallId = 'finish'): ChatRecord[] {
       uuid: 'call',
       parentUuid: null,
       type: 'assistant',
-      message: {
-        role: 'model',
-        parts: [{ functionCall: { id: toolCallId, name: 'update_goal' } }],
-      },
+      message: content('model', fnCall('update_goal', undefined, toolCallId)),
     },
     {
       ...base,
       uuid: 'result',
       parentUuid: 'call',
       type: 'tool_result',
-      message: {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: toolCallId,
-              name: 'update_goal',
-              response: { readyForVerification: true },
-            },
-          },
-        ],
-      },
+      message: content(
+        'user',
+        fnResponse('update_goal', { readyForVerification: true }, toolCallId),
+      ),
     },
     {
       ...base,
@@ -214,9 +207,7 @@ function records(toolCallId = 'finish'): ChatRecord[] {
 describe('Goal turn end history metadata', () => {
   it('keeps the boundary outside model history and across a later user prompt', () => {
     const messages = records();
-    const before = buildApiHistoryFromConversation({
-      messages: messages.slice(0, 2),
-    });
+    const before = api(messages.slice(0, 2));
     expect(buildSessionHistoryFromConversation({ messages })).toEqual({
       apiHistory: before,
       completedToolCallIds: ['finish'],
@@ -228,14 +219,11 @@ describe('Goal turn end history metadata', () => {
       parentUuid: 'end',
       type: 'user',
       subtype: 'mid_turn_user_message',
-      message: { role: 'user', parts: [{ text: 'new request' }] },
+      message: userText('new request'),
     });
     const restored = buildSessionHistoryFromConversation({ messages });
     expect(restored.completedToolCallIds).toEqual(['finish']);
-    expect(restored.apiHistory).toEqual([
-      ...before,
-      { role: 'user', parts: [{ text: 'new request' }] },
-    ]);
+    expect(restored.apiHistory).toEqual([...before, userText('new request')]);
   });
 
   it.each(['goalId', 'revision', 'turnId'] as const)(
@@ -246,9 +234,7 @@ describe('Goal turn end history metadata', () => {
         ...permit,
         [field]: field === 'revision' ? 2 : 'other',
       };
-      expect(
-        buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-      ).toBeUndefined();
+      expect(completedIds(messages)).toBeUndefined();
     },
   );
 
@@ -258,16 +244,12 @@ describe('Goal turn end history metadata', () => {
       ...messages[1]!,
       uuid: 'new-prompt',
       type: 'user',
-      message: { role: 'user', parts: [{ text: 'new request' }] },
+      message: userText('new request'),
     });
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
     messages.splice(2, 1);
     messages[2]!.systemPayload = { toolCallId: 'unrelated' };
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
   });
 
   it('invalidates a boundary when its tool id is reused later', () => {
@@ -277,63 +259,43 @@ describe('Goal turn end history metadata', () => {
       uuid: 'duplicate-call',
       parentUuid: 'end',
     });
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
     messages.pop();
     messages.unshift({ ...messages[1]!, uuid: 'duplicate-result' });
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
   });
 
   it('retains earlier boundaries and removes only a reused tool id', () => {
     const messages = [...records(), ...records('finish-2')];
     messages.push({ ...messages.at(-1)! });
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toEqual(['finish', 'finish-2']);
+    expect(completedIds(messages)).toEqual(['finish', 'finish-2']);
     messages.push({ ...records()[0]!, uuid: 'reused-call' });
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toEqual(['finish-2']);
+    expect(completedIds(messages)).toEqual(['finish-2']);
   });
 
   it.each([0, 2])(
     'rejects a compression boundary with %s matching calls',
     (callCount) => {
       const messages = records();
-      const [call, result] = buildApiHistoryFromConversation({ messages });
+      const [call, result] = api(messages);
       messages.push({
         ...messages[2]!,
         uuid: 'compression',
         parentUuid: 'end',
         subtype: 'chat_compression',
-        systemPayload: {
-          info: {
-            originalTokenCount: 100,
-            newTokenCount: 50,
-            compressionStatus: CompressionStatus.COMPRESSED,
-          },
-          compressedHistory: [
-            ...Array.from({ length: callCount }, () => call!),
-            result!,
-          ],
-          completedToolCallIds: ['finish'],
-        },
+        systemPayload: compressionPayload(
+          [...Array.from({ length: callCount }, () => call!), result!],
+          ['finish'],
+        ),
       });
-      expect(
-        buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-      ).toBeUndefined();
+      expect(completedIds(messages)).toBeUndefined();
     },
   );
 
   it('drops a boundary whose result is removed when stripping thoughts', () => {
     const messages = records();
     messages[1]!.message!.parts![0]!.thought = true;
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toEqual(['finish']);
+    expect(completedIds(messages)).toEqual(['finish']);
     const restored = buildSessionHistoryFromConversation(
       { messages },
       { stripThoughtsFromHistory: true },
@@ -348,15 +310,8 @@ describe('Goal turn end history metadata', () => {
 
   it('restores only an explicitly preserved compression boundary', () => {
     const messages = records();
-    const compressedHistory = buildApiHistoryFromConversation({ messages });
-    const payload = {
-      info: {
-        originalTokenCount: 100,
-        newTokenCount: 50,
-        compressionStatus: CompressionStatus.COMPRESSED,
-      },
-      compressedHistory,
-    };
+    const compressedHistory = api(messages);
+    const payload = compressionPayload(compressedHistory);
     const compression: ChatRecord = {
       ...messages[2]!,
       uuid: 'compression',
@@ -365,24 +320,18 @@ describe('Goal turn end history metadata', () => {
       systemPayload: payload,
     };
     messages.push(compression);
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
     compression.systemPayload = {
       ...payload,
       completedToolCallIds: ['finish', 'missing', 'finish'],
     };
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toEqual(['finish']);
+    expect(completedIds(messages)).toEqual(['finish']);
     compression.systemPayload = {
       ...payload,
       completedToolCallIds: ['finish'],
-      compressedHistory: [{ role: 'model', parts: [{ text: 'summary' }] }],
+      compressedHistory: [modelText('summary')],
     };
-    expect(
-      buildSessionHistoryFromConversation({ messages }).completedToolCallIds,
-    ).toBeUndefined();
+    expect(completedIds(messages)).toBeUndefined();
   });
 });
 
@@ -392,12 +341,7 @@ describe('trailingSystemNotifications provenance signal', () => {
     '<status>completed</status><summary>Agent "explore" completed.</summary>' +
     '</task-notification>';
 
-  const base = {
-    sessionId: 'session',
-    timestamp: '2026-09-18T00:00:00.000Z',
-    cwd: '/workspace',
-    version: 'test',
-  };
+  const base = recordBase('2026-09-18T00:00:00.000Z');
 
   let seq = 0;
   function userRecord(
@@ -411,17 +355,14 @@ describe('trailingSystemNotifications provenance signal', () => {
       parentUuid: null,
       type: 'user',
       provenance: 'real_user',
-      message: { role: 'user', parts: [{ text }] },
+      message: userText(text),
       ...overrides,
     };
   }
 
   /** The stamp `createNotificationRecord` produces, verbatim. */
   function notificationRecord(text = envelope): ChatRecord {
-    return userRecord(text, {
-      subtype: 'notification',
-      provenance: 'system',
-    });
+    return userRecord(text, { subtype: 'notification', provenance: 'system' });
   }
 
   function modelRecord(text: string): ChatRecord {
@@ -432,7 +373,7 @@ describe('trailingSystemNotifications provenance signal', () => {
       parentUuid: null,
       type: 'assistant',
       provenance: 'assistant_output',
-      message: { role: 'model', parts: [{ text }] },
+      message: modelText(text),
     };
   }
 
@@ -440,10 +381,7 @@ describe('trailingSystemNotifications provenance signal', () => {
     // The whole point of the signal: this record is shape-identical to a cold
     // notification, and only its `provenance: 'real_user'` says otherwise.
     const messages = [modelRecord('earlier answer'), userRecord(envelope)];
-    expect(
-      buildSessionHistoryFromConversation({ messages })
-        .trailingSystemNotifications,
-    ).toBe(0);
+    expect(trailingNotifications(messages)).toBe(0);
   });
 
   it('counts a consecutive trailing run of notification records', () => {
@@ -454,10 +392,7 @@ describe('trailingSystemNotifications provenance signal', () => {
         envelope.replace('explore', 'build').replace('agent-1', 'agent-2'),
       ),
     ];
-    expect(
-      buildSessionHistoryFromConversation({ messages })
-        .trailingSystemNotifications,
-    ).toBe(2);
+    expect(trailingNotifications(messages)).toBe(2);
   });
 
   it('stops the count at the first non-notification entry', () => {
@@ -466,10 +401,7 @@ describe('trailingSystemNotifications provenance signal', () => {
       modelRecord('earlier answer'),
       notificationRecord(),
     ];
-    expect(
-      buildSessionHistoryFromConversation({ messages })
-        .trailingSystemNotifications,
-    ).toBe(1);
+    expect(trailingNotifications(messages)).toBe(1);
   });
 
   it('does not count a cron record, which carries a user-authored prompt', () => {
@@ -480,18 +412,12 @@ describe('trailingSystemNotifications provenance signal', () => {
     const messages = [
       userRecord('nightly digest', { subtype: 'cron', provenance: 'system' }),
     ];
-    expect(
-      buildSessionHistoryFromConversation({ messages })
-        .trailingSystemNotifications,
-    ).toBe(0);
+    expect(trailingNotifications(messages)).toBe(0);
   });
 
   it('does not count a notification stamp missing provenance', () => {
     const messages = [userRecord(envelope, { subtype: 'notification' })];
-    expect(
-      buildSessionHistoryFromConversation({ messages })
-        .trailingSystemNotifications,
-    ).toBe(0);
+    expect(trailingNotifications(messages)).toBe(0);
   });
 
   it('keeps the count aligned across a slash-command pop', () => {
@@ -528,16 +454,7 @@ describe('trailingSystemNotifications provenance signal', () => {
         parentUuid: null,
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: {
-          info: {
-            originalTokenCount: 100,
-            newTokenCount: 50,
-            compressionStatus: CompressionStatus.COMPRESSED,
-          },
-          compressedHistory: [
-            { role: 'user', parts: [{ text: envelope }] },
-          ] as Content[],
-        },
+        systemPayload: compressionPayload([userText(envelope)]),
       },
     ];
     const built = buildSessionHistoryFromConversation({ messages });
@@ -549,26 +466,17 @@ describe('trailingSystemNotifications provenance signal', () => {
     // End to end through the classifier: same shape, opposite verdicts,
     // decided only by the record's own stamp.
     const prefix = [modelRecord('earlier answer')];
-    const real = buildSessionHistoryFromConversation({
-      messages: [...prefix, userRecord(envelope)],
-    });
-    expect(
-      detectTurnInterruption(
-        real.apiHistory,
-        real.completedToolCallIds,
-        real.trailingSystemNotifications,
-      ).kind,
-    ).toBe('interrupted_prompt');
-
-    const cold = buildSessionHistoryFromConversation({
-      messages: [...prefix, notificationRecord()],
-    });
-    expect(
-      detectTurnInterruption(
-        cold.apiHistory,
-        cold.completedToolCallIds,
-        cold.trailingSystemNotifications,
-      ).kind,
-    ).toBe('none');
+    const recoveryKind = (last: ChatRecord) => {
+      const built = buildSessionHistoryFromConversation({
+        messages: [...prefix, last],
+      });
+      return detectTurnInterruption(
+        built.apiHistory,
+        built.completedToolCallIds,
+        built.trailingSystemNotifications,
+      ).kind;
+    };
+    expect(recoveryKind(userRecord(envelope))).toBe('interrupted_prompt');
+    expect(recoveryKind(notificationRecord())).toBe('none');
   });
 });

@@ -30,38 +30,6 @@ vi.mock('node:crypto', () => ({
 }));
 vi.mock('../utils/jsonl-utils.js');
 
-function resumedSessionWithTitle(
-  title: string,
-  source?: 'manual' | 'auto',
-): NonNullable<ReturnType<Config['getResumedSessionData']>> {
-  return {
-    conversation: {
-      sessionId: 'test-session-id',
-      projectHash: 'test-project',
-      startTime: '2026-01-01T00:00:00.000Z',
-      lastUpdated: '2026-01-01T00:00:00.000Z',
-      messages: [
-        {
-          uuid: 'title-uuid',
-          parentUuid: null,
-          sessionId: 'test-session-id',
-          timestamp: '2026-01-01T00:00:00.000Z',
-          type: 'system',
-          subtype: 'custom_title',
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          systemPayload: {
-            customTitle: title,
-            ...(source ? { titleSource: source } : {}),
-          },
-        },
-      ],
-    },
-    filePath: '/test/session.jsonl',
-    lastCompletedUuid: null,
-  };
-}
-
 describe('ChatRecordingService - recordCustomTitle', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
@@ -149,13 +117,95 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     vi.restoreAllMocks();
   });
 
+  const written = () =>
+    vi.mocked(jsonl.writeLine).mock.calls.map(([, r]) => r as ChatRecord);
+  const isTitle = (r: ChatRecord) =>
+    r.type === 'system' && r.subtype === 'custom_title';
+  const titleWrites = () => written().filter(isTitle);
+  const writtenTitles = () =>
+    titleWrites().map(
+      (r) =>
+        (r.systemPayload as CustomTitleRecordPayload | undefined)?.customTitle,
+    );
+  // Holds the next writeLine open until the returned resolver is called.
+  function deferWrite(): () => void {
+    let resolve!: () => void;
+    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
+      new Promise<void>((r) => {
+        resolve = r;
+      }),
+    );
+    return resolve;
+  }
+  const firstWriteStarted = () =>
+    vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+  // Durable titles, then later work, flushed; writeLine history cleared.
+  async function titlesThenWork(...titles: string[]) {
+    for (const t of titles) await chatRecordingService.recordCustomTitle(t);
+    chatRecordingService.recordUserMessage([{ text: 'new work' }]);
+    await chatRecordingService.flush();
+    vi.mocked(jsonl.writeLine).mockClear();
+  }
+  async function titleThenClear(title: string) {
+    await chatRecordingService.recordCustomTitle(title);
+    vi.mocked(jsonl.writeLine).mockClear();
+  }
+  async function recordBulk(
+    n: number,
+    text: string,
+    svc = chatRecordingService,
+  ) {
+    for (let i = 0; i < n; i++) svc.recordUserMessage([{ text }]);
+    await svc.flush();
+  }
+  async function finalizeAndFlush(svc = chatRecordingService) {
+    svc.finalize();
+    await svc.flush();
+  }
+  function resumedService(title: string, source?: 'manual' | 'auto') {
+    vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+      conversation: {
+        sessionId: 'test-session-id',
+        projectHash: 'test-project',
+        startTime: '2026-01-01T00:00:00.000Z',
+        lastUpdated: '2026-01-01T00:00:00.000Z',
+        messages: [
+          {
+            uuid: 'title-uuid',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: '2026-01-01T00:00:00.000Z',
+            type: 'system',
+            subtype: 'custom_title',
+            cwd: '/test/project/root',
+            version: '1.0.0',
+            systemPayload: {
+              customTitle: title,
+              ...(source ? { titleSource: source } : {}),
+            },
+          },
+        ],
+      },
+      filePath: '/test/session.jsonl',
+      lastCompletedUuid: null,
+    });
+    const getSessionTitleInfo = vi.fn().mockReturnValue({ title, source });
+    (
+      mockConfig as unknown as {
+        getSessionService: () => {
+          getSessionTitleInfo: typeof getSessionTitleInfo;
+        };
+      }
+    ).getSessionService = () => ({ getSessionTitleInfo });
+    return activateRecording(new ChatRecordingService(mockConfig));
+  }
+
   it('should record a custom title as a system record', async () => {
     await chatRecordingService.recordCustomTitle('my-feature');
 
     expect(jsonl.writeLine).toHaveBeenCalledOnce();
 
-    const writtenRecord = vi.mocked(jsonl.writeLine).mock
-      .calls[0][1] as ChatRecord;
+    const writtenRecord = written()[0];
     expect(writtenRecord.type).toBe('system');
     expect(writtenRecord.subtype).toBe('custom_title');
     expect(writtenRecord.systemPayload).toEqual({
@@ -170,21 +220,14 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     await chatRecordingService.recordCustomTitle('my-feature');
 
     expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
-
-    const userRecord = vi.mocked(jsonl.writeLine).mock
-      .calls[0][1] as ChatRecord;
-    const titleRecord = vi.mocked(jsonl.writeLine).mock
-      .calls[1][1] as ChatRecord;
-
+    const [userRecord, titleRecord] = written();
     expect(titleRecord.parentUuid).toBe(userRecord.uuid);
   });
 
   it('should include correct metadata in the record', async () => {
     await chatRecordingService.recordCustomTitle('test-title');
 
-    const writtenRecord = vi.mocked(jsonl.writeLine).mock
-      .calls[0][1] as ChatRecord;
-
+    const writtenRecord = written()[0];
     expect(writtenRecord.cwd).toBe('/test/project/root');
     expect(writtenRecord.version).toBe('1.0.0');
     expect(writtenRecord.gitBranch).toBe('main');
@@ -193,12 +236,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   it('does not report success or update observers before the title lands', async () => {
-    let resolveWrite!: () => void;
-    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveWrite = resolve;
-      }),
-    );
+    const resolveWrite = deferWrite();
     const callback = vi.fn();
     chatRecordingService.setTitleRecordedCallback(callback);
     let settled = false;
@@ -208,7 +246,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
       .finally(() => {
         settled = true;
       });
-    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+    await firstWriteStarted();
 
     expect(settled).toBe(false);
     expect(chatRecordingService.getCurrentCustomTitle()).toBeUndefined();
@@ -276,18 +314,13 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   it('serializes concurrent explicit titles and commits them in call order', async () => {
-    let resolveFirst!: () => void;
-    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveFirst = resolve;
-      }),
-    );
+    const resolveFirst = deferWrite();
     const callback = vi.fn();
     chatRecordingService.setTitleRecordedCallback(callback);
 
     const first = chatRecordingService.recordCustomTitle('first-title');
     const second = chatRecordingService.recordCustomTitle('second-title');
-    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+    await firstWriteStarted();
     expect(chatRecordingService.getCurrentCustomTitle()).toBeUndefined();
 
     resolveFirst();
@@ -313,49 +346,23 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   it('does not let finalize re-append a stale title behind a pending rename', async () => {
-    await chatRecordingService.recordCustomTitle('old-title');
-    chatRecordingService.recordUserMessage([{ text: 'new work' }]);
-    await chatRecordingService.flush();
-    vi.mocked(jsonl.writeLine).mockClear();
+    await titlesThenWork('old-title');
 
-    let resolveRename!: () => void;
-    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveRename = resolve;
-      }),
-    );
+    const resolveRename = deferWrite();
     const rename = chatRecordingService.recordCustomTitle('new-title');
-    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+    await firstWriteStarted();
 
     chatRecordingService.finalize();
     resolveRename();
     await expect(rename).resolves.toBe(true);
     await chatRecordingService.flush();
-
-    const writtenTitles = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((call) => call[1] as ChatRecord)
-      .filter(
-        (record) =>
-          record.type === 'system' && record.subtype === 'custom_title',
-      )
-      .map(
-        (record) =>
-          (record.systemPayload as CustomTitleRecordPayload | undefined)
-            ?.customTitle,
-      );
-    expect(writtenTitles).toEqual(['new-title']);
+    expect(writtenTitles()).toEqual(['new-title']);
   });
 
   it('tracks records queued behind a pending title for later finalization', async () => {
-    let resolveTitle!: () => void;
-    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveTitle = resolve;
-      }),
-    );
+    const resolveTitle = deferWrite();
     const title = chatRecordingService.recordCustomTitle('durable-title');
-    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+    await firstWriteStarted();
     chatRecordingService.recordUserMessage([{ text: 'queued descendant' }]);
 
     resolveTitle();
@@ -363,11 +370,8 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     await chatRecordingService.flush();
     vi.mocked(jsonl.writeLine).mockClear();
 
-    chatRecordingService.finalize();
-    await chatRecordingService.flush();
-
-    const anchor = vi.mocked(jsonl.writeLine).mock.calls[0]?.[1] as ChatRecord;
-    expect(anchor).toMatchObject({
+    await finalizeAndFlush();
+    expect(written()[0]).toMatchObject({
       type: 'system',
       subtype: 'custom_title',
       systemPayload: { customTitle: 'durable-title' },
@@ -375,50 +379,27 @@ describe('ChatRecordingService - recordCustomTitle', () => {
   });
 
   it('re-anchors the new title when queued descendants cross the threshold', async () => {
-    await chatRecordingService.recordCustomTitle('old-title');
-    vi.mocked(jsonl.writeLine).mockClear();
+    await titleThenClear('old-title');
 
-    let resolveRename!: () => void;
-    vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        resolveRename = resolve;
-      }),
-    );
+    const resolveRename = deferWrite();
     const rename = chatRecordingService.recordCustomTitle('new-title');
-    await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+    await firstWriteStarted();
     chatRecordingService.recordUserMessage([{ text: 'x'.repeat(40_000) }]);
 
     resolveRename();
     await expect(rename).resolves.toBe(true);
     await chatRecordingService.flush();
-
-    const writtenTitles = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((call) => call[1] as ChatRecord)
-      .filter(
-        (record) =>
-          record.type === 'system' && record.subtype === 'custom_title',
-      )
-      .map(
-        (record) =>
-          (record.systemPayload as CustomTitleRecordPayload | undefined)
-            ?.customTitle,
-      );
-    expect(writtenTitles).toEqual(['new-title', 'new-title']);
+    expect(writtenTitles()).toEqual(['new-title', 'new-title']);
   });
 
   describe('finalize', () => {
     it('should re-append cached custom title to EOF after new content', async () => {
-      await chatRecordingService.recordCustomTitle('my-feature');
-      chatRecordingService.recordUserMessage([{ text: 'new work' }]);
-      await chatRecordingService.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      await titlesThenWork('my-feature');
 
-      chatRecordingService.finalize();
-      await chatRecordingService.flush();
+      await finalizeAndFlush();
 
       expect(jsonl.writeLine).toHaveBeenCalledOnce();
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const record = written()[0];
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('custom_title');
       expect(record.systemPayload).toEqual({
@@ -428,58 +409,28 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     });
 
     it('should not write anything when the title is already the latest record', async () => {
-      await chatRecordingService.recordCustomTitle('my-feature');
-      vi.mocked(jsonl.writeLine).mockClear();
-
-      chatRecordingService.finalize();
-      await chatRecordingService.flush();
-
+      await titleThenClear('my-feature');
+      await finalizeAndFlush();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('should not write anything when no custom title was set', async () => {
-      chatRecordingService.finalize();
-      await chatRecordingService.flush();
-
+      await finalizeAndFlush();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('should not re-append a resumed title without new content', async () => {
-      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        ...resumedSessionWithTitle('resumed-title', 'manual'),
-      });
-      const getSessionTitleInfo = vi.fn().mockReturnValue({
-        title: 'resumed-title',
-        source: 'manual',
-      });
-      (
-        mockConfig as unknown as {
-          getSessionService: () => {
-            getSessionTitleInfo: typeof getSessionTitleInfo;
-          };
-        }
-      ).getSessionService = () => ({ getSessionTitleInfo });
-
-      const svc = activateRecording(new ChatRecordingService(mockConfig));
-      svc.finalize();
-      await svc.flush();
-
+      await finalizeAndFlush(resumedService('resumed-title', 'manual'));
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('should re-append the latest title after multiple renames', async () => {
-      await chatRecordingService.recordCustomTitle('first-name');
-      await chatRecordingService.recordCustomTitle('second-name');
-      chatRecordingService.recordUserMessage([{ text: 'new work' }]);
-      await chatRecordingService.flush();
-      vi.mocked(jsonl.writeLine).mockClear();
+      await titlesThenWork('first-name', 'second-name');
 
-      chatRecordingService.finalize();
-      await chatRecordingService.flush();
+      await finalizeAndFlush();
 
       expect(jsonl.writeLine).toHaveBeenCalledOnce();
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
-      expect(record.systemPayload).toEqual({
+      expect(written()[0].systemPayload).toEqual({
         customTitle: 'second-name',
         titleSource: 'manual',
       });
@@ -488,55 +439,32 @@ describe('ChatRecordingService - recordCustomTitle', () => {
 
   describe('title re-anchor invariant', () => {
     it('re-anchors the title once enough non-title bytes accumulate', async () => {
-      // Write a title, then keep appending bulky messages until the
-      // running tally crosses the 32KB threshold. The first non-title
-      // record after the threshold should provoke a fresh
-      // custom_title append at EOF — keeping the title within the
-      // 64KB tail window the picker scans even if no lifecycle event
-      // (finalize) has fired.
-      await chatRecordingService.recordCustomTitle('long-running-task');
-      vi.mocked(jsonl.writeLine).mockClear();
+      // Once non-title bytes cross the 32KB threshold, the next record must
+      // provoke a fresh custom_title append at EOF so the title stays in the
+      // 64KB tail window the picker scans, even without a finalize.
+      await titleThenClear('long-running-task');
+      // 20 × ~2KB (+ ~200B envelope each) is well over 32KB on the wire.
+      await recordBulk(20, 'x'.repeat(2000));
 
-      // Each user message carries ~2KB of text — 20 of them put well
-      // over 32KB on the wire (counting the ~200B per-record envelope).
-      const bulkText = 'x'.repeat(2000);
-      for (let i = 0; i < 20; i++) {
-        chatRecordingService.recordUserMessage([{ text: bulkText }]);
-      }
-      await chatRecordingService.flush();
-
-      const writes = vi.mocked(jsonl.writeLine).mock.calls;
-      const titleAppendsAfterClear = writes.filter(([, record]) => {
-        const r = record as ChatRecord;
-        return r.type === 'system' && r.subtype === 'custom_title';
-      });
-
+      const titleAppendsAfterClear = titleWrites();
       expect(titleAppendsAfterClear.length).toBeGreaterThanOrEqual(1);
-      // The re-anchored record must carry the same title + source as
-      // the original — it's a copy, not a fresh rename.
-      const reanchored = titleAppendsAfterClear[0][1] as ChatRecord;
-      expect(reanchored.systemPayload).toEqual({
+      // A copy of the original title + source, not a fresh rename.
+      expect(titleAppendsAfterClear[0].systemPayload).toEqual({
         customTitle: 'long-running-task',
         titleSource: 'manual',
       });
     });
 
     it('does not let threshold re-anchor records become the active parent tail', async () => {
-      await chatRecordingService.recordCustomTitle('long-running-task');
-      vi.mocked(jsonl.writeLine).mockClear();
+      await titleThenClear('long-running-task');
 
       chatRecordingService.recordUserMessage([{ text: 'before bulk' }]);
       chatRecordingService.recordUserMessage([{ text: 'x'.repeat(40 * 1024) }]);
       chatRecordingService.recordUserMessage([{ text: 'after re-anchor' }]);
       await chatRecordingService.flush();
 
-      const records = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map(([, record]) => record as ChatRecord);
-      const reanchorIndex = records.findIndex(
-        (record) =>
-          record.type === 'system' && record.subtype === 'custom_title',
-      );
+      const records = written();
+      const reanchorIndex = records.findIndex(isTitle);
 
       expect(reanchorIndex).toBeGreaterThan(0);
 
@@ -553,68 +481,28 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     });
 
     it('does not re-anchor when no title has been set', async () => {
-      // The counter only matters when there's a title to keep alive;
-      // sessions that never set one shouldn't pay for spurious writes.
-      const bulkText = 'x'.repeat(2000);
-      for (let i = 0; i < 30; i++) {
-        chatRecordingService.recordUserMessage([{ text: bulkText }]);
-      }
-      await chatRecordingService.flush();
-
-      const titleAppends = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.filter(([, record]) => {
-          const r = record as ChatRecord;
-          return r.type === 'system' && r.subtype === 'custom_title';
-        });
-      expect(titleAppends).toHaveLength(0);
+      // Sessions that never set a title shouldn't pay for spurious writes.
+      await recordBulk(30, 'x'.repeat(2000));
+      expect(titleWrites()).toHaveLength(0);
     });
 
     it('omits titleSource on re-anchor when source is unknown (legacy resumed session)', async () => {
-      // The picker dim-styling depends on the persisted `titleSource`
-      // discriminator. Legacy `custom_title` records (written before
-      // the field existed) have no source — `getSessionTitleInfo`
-      // returns `source: undefined` for those, and the writer's
-      // re-anchor invariant must mirror that exact shape: emit
-      // `customTitle` alone, never a hardcoded `'manual'`. Otherwise
-      // resuming a legacy session on a current build would silently
-      // reclassify it the first time the threshold fires.
-      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        ...resumedSessionWithTitle('legacy-title'),
-      });
-      const getSessionTitleInfo = vi
-        .fn()
-        .mockReturnValue({ title: 'legacy-title', source: undefined });
-      (
-        mockConfig as unknown as {
-          getSessionService: () => {
-            getSessionTitleInfo: typeof getSessionTitleInfo;
-          };
-        }
-      ).getSessionService = () => ({ getSessionTitleInfo });
-
-      const svc = activateRecording(new ChatRecordingService(mockConfig));
+      // Picker dim-styling depends on the persisted `titleSource`. Legacy
+      // custom_title records have none (`getSessionTitleInfo` returns
+      // `source: undefined`), and the re-anchor must mirror that shape:
+      // `customTitle` alone, never a hardcoded 'manual', or resuming a legacy
+      // session would silently reclassify it when the threshold first fires.
+      const svc = resumedService('legacy-title');
       await svc.flush();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
 
-      const bulkText = 'x'.repeat(2000);
-      for (let i = 0; i < 20; i++) {
-        svc.recordUserMessage([{ text: bulkText }]);
-      }
-      await svc.flush();
+      await recordBulk(20, 'x'.repeat(2000), svc);
 
-      const titleAppends = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.filter(([, record]) => {
-          const r = record as ChatRecord;
-          return r.type === 'system' && r.subtype === 'custom_title';
-        });
-
+      const titleAppends = titleWrites();
       expect(titleAppends.length).toBeGreaterThanOrEqual(1);
-      const reanchored = titleAppends[0][1] as ChatRecord;
-      // Key must be ABSENT, not present-and-undefined — JSON.stringify
-      // would still serialize an explicit `undefined` away, but the
-      // record-shape contract is "no key when no source", so pin it.
+      const reanchored = titleAppends[0];
+      // Key must be ABSENT, not present-and-undefined: JSON.stringify would
+      // drop an explicit undefined, but the contract is "no key", so pin it.
       expect(reanchored.systemPayload).toEqual({ customTitle: 'legacy-title' });
       expect(
         Object.prototype.hasOwnProperty.call(
@@ -625,95 +513,52 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     });
 
     it('counts UTF-8 bytes, not UTF-16 code units, when measuring bulk writes', async () => {
-      // CJK characters are 1 UTF-16 code unit but 3 UTF-8 bytes. The wire
-      // format is UTF-8 (jsonl.writeLine emits utf8), so a per-record
-      // `String.length` undercounts a multi-byte payload by ~3×. A naive
-      // length-based counter would let ~96KB of CJK content land on disk
-      // before the 32KB threshold thinks it has — pushing the title past
-      // the 64KB tail window the picker scans.
-      //
-      // Twelve 1500-char CJK messages ≈ 21K UTF-16 units (under threshold)
-      // but ≈ 57K UTF-8 bytes (over). Anchor fires only when the counter
-      // measures bytes, not chars.
-      await chatRecordingService.recordCustomTitle('cjk-session');
-      vi.mocked(jsonl.writeLine).mockClear();
-
-      const cjkText = '汉'.repeat(1500);
-      for (let i = 0; i < 12; i++) {
-        chatRecordingService.recordUserMessage([{ text: cjkText }]);
-      }
-      await chatRecordingService.flush();
-
-      const titleAppends = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.filter(([, record]) => {
-          const r = record as ChatRecord;
-          return r.type === 'system' && r.subtype === 'custom_title';
-        });
-      expect(titleAppends.length).toBeGreaterThanOrEqual(1);
+      // CJK chars are 1 UTF-16 unit but 3 UTF-8 bytes, and the wire format is
+      // UTF-8, so a `String.length` counter undercounts ~3× and would let
+      // ~96KB land before the 32KB threshold fires, pushing the title past
+      // the 64KB tail window. Twelve 1500-char messages ≈ 21K units (under)
+      // but ≈ 57K bytes (over): the anchor fires only if bytes are counted.
+      await titleThenClear('cjk-session');
+      await recordBulk(12, '汉'.repeat(1500));
+      expect(titleWrites().length).toBeGreaterThanOrEqual(1);
     });
 
     it('resets the byte counter when re-anchor fails — no retry storm', async () => {
-      // If reanchorTitle throws (disk full, permission revoked) and we
-      // leave the byte counter pinned at the threshold, every subsequent
-      // appendRecord will re-fire the failing reanchor — an unbounded
-      // retry storm that amplifies I/O pressure on an already-degraded
-      // system. Resetting on failure trades one missed anchor for
-      // bounded recovery; finalize() will re-emit on the next lifecycle
-      // event.
-      await chatRecordingService.recordCustomTitle('long-running-task');
-      vi.mocked(jsonl.writeLine).mockClear();
+      // If reanchorTitle throws (disk full, permission revoked) and the byte
+      // counter stays pinned at the threshold, every later appendRecord
+      // re-fires the failing reanchor: an unbounded retry storm on an already
+      // degraded system. Resetting trades one missed anchor for bounded
+      // recovery; finalize() re-emits on the next lifecycle event.
+      await titleThenClear('long-running-task');
 
-      // Wrap the private appendRecord so any custom_title append (i.e.
-      // a re-anchor — the initial title write already happened) throws.
-      // Bulk records pass through to the real implementation so the
-      // byte counter still accumulates exactly as production would.
+      // Make any custom_title append (a re-anchor; the initial write already
+      // happened) throw, while bulk records reach the real appendRecord so
+      // the byte counter accumulates exactly as in production.
       let reanchorAttempts = 0;
       const svc = chatRecordingService as unknown as {
         appendRecord(record: ChatRecord): void;
       };
       const originalAppendRecord = svc.appendRecord.bind(chatRecordingService);
       svc.appendRecord = (record: ChatRecord) => {
-        if (record.type === 'system' && record.subtype === 'custom_title') {
+        if (isTitle(record)) {
           reanchorAttempts++;
           throw new Error('simulated disk-full');
         }
         return originalAppendRecord(record);
       };
 
-      // 25 × 2KB ≈ 50KB > 32KB → first re-anchor fires (and throws).
-      // With the counter-reset fix, it stays reset; without it, every
-      // subsequent message would re-trigger reanchor.
-      const bulkText = 'x'.repeat(2000);
-      for (let i = 0; i < 25; i++) {
-        chatRecordingService.recordUserMessage([{ text: bulkText }]);
-      }
-      await chatRecordingService.flush();
-
-      // One failed attempt is acceptable; multiple means the counter was
-      // pinned and turned a single fault into a per-record loop.
+      // 25 × 2KB ≈ 50KB > 32KB: the first re-anchor fires (and throws); a
+      // pinned counter would re-trigger it on every later message.
+      await recordBulk(25, 'x'.repeat(2000));
       expect(reanchorAttempts).toBe(1);
     });
 
     it('does not re-anchor on small write bursts under threshold', async () => {
-      // A handful of small messages must not trigger a re-anchor —
-      // the cost would defeat the whole point. Threshold is 32KB;
-      // five 200B user messages stay safely under it.
-      await chatRecordingService.recordCustomTitle('quick-session');
-      vi.mocked(jsonl.writeLine).mockClear();
-
-      for (let i = 0; i < 5; i++) {
-        chatRecordingService.recordUserMessage([{ text: 'short' }]);
-      }
-      await chatRecordingService.flush();
-
-      const titleAppends = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.filter(([, record]) => {
-          const r = record as ChatRecord;
-          return r.type === 'system' && r.subtype === 'custom_title';
-        });
-      expect(titleAppends).toHaveLength(0);
+      // A few small messages must not re-anchor (the cost would defeat the
+      // point): five 200B messages stay well under the 32KB threshold.
+      await titleThenClear('quick-session');
+      await recordBulk(5, 'short');
+      expect(titleWrites()).toHaveLength(0);
     });
   });
 });

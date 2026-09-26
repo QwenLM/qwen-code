@@ -13,7 +13,7 @@ import {
   type FileRecognizedEvent,
   type PolicySucceededInput,
 } from './index.js';
-import { truncateUtf8 } from './service.js';
+import { truncateUtf8, type PolicyTextOutputInput } from './service.js';
 import { MEDIA_MEMORY_FILE_NAME } from './store.js';
 import type { MediaMemorySnapshot } from './types.js';
 
@@ -80,8 +80,10 @@ function recognizedEvent(
   };
 }
 
+type Binding = { fileId: string; fileVersionId: string; rootFileId: string };
+
 function succeededInput(
-  source: { fileId: string; fileVersionId: string; rootFileId: string },
+  source: Binding,
   overrides?: Partial<PolicySucceededInput>,
 ): PolicySucceededInput {
   return {
@@ -114,14 +116,46 @@ function succeededInput(
   };
 }
 
+const recognize = (overrides?: Partial<FileRecognizedEvent>) =>
+  service.recordFileRecognized(recognizedEvent(overrides));
+const succeed = (source: Binding, overrides?: Partial<PolicySucceededInput>) =>
+  service.commitPolicySucceeded(succeededInput(source, overrides));
+const bindingOf = ({ fileId, fileVersionId, rootFileId }: Binding) => ({
+  fileId,
+  fileVersionId,
+  rootFileId,
+});
+
+/** A text/plain output stored as `sha`. */
+const textOutput = (
+  text: string,
+  sizeBytes: number,
+  role: string,
+  sha = SHA_TEXT,
+): PolicyTextOutputInput => ({
+  kind: 'text',
+  objectPath: `/store/objects/${sha}.txt`,
+  sha256: sha,
+  mimeType: 'text/plain',
+  text,
+  sizeBytes,
+  role,
+});
+
+/** The first entry an execution recorded. */
+async function firstEntry(executionId: string) {
+  const snapshot = await readSnapshot();
+  return snapshot.entries[snapshot.executions[executionId].outputRefs[0]];
+}
+
 describe('MediaMemoryService.recordFileRecognized', () => {
   it('creates file + version and is idempotent for identical content', async () => {
-    const first = await service.recordFileRecognized(recognizedEvent());
+    const first = await recognize();
     expect(first).toBeDefined();
     expect(first!.created).toBe(true);
     expect(first!.rootFileId).toBe(first!.fileId);
 
-    const second = await service.recordFileRecognized(recognizedEvent());
+    const second = await recognize();
     expect(second).toMatchObject({
       fileId: first!.fileId,
       fileVersionId: first!.fileVersionId,
@@ -134,10 +168,8 @@ describe('MediaMemoryService.recordFileRecognized', () => {
   });
 
   it('creates a new version on content change and moves CURRENT_VERSION both ways', async () => {
-    const v1 = await service.recordFileRecognized(recognizedEvent());
-    const v2 = await service.recordFileRecognized(
-      recognizedEvent({ sha256: SHA_B }),
-    );
+    const v1 = await recognize();
+    const v2 = await recognize({ sha256: SHA_B });
     expect(v2!.fileId).toBe(v1!.fileId);
     expect(v2!.fileVersionId).not.toBe(v1!.fileVersionId);
     expect(v2!.created).toBe(true);
@@ -146,7 +178,7 @@ describe('MediaMemoryService.recordFileRecognized', () => {
     expect(snapshot.files[v1!.fileId].currentVersionId).toBe(v2!.fileVersionId);
 
     // Revert on disk: the pointer moves back, no third version appears.
-    const reverted = await service.recordFileRecognized(recognizedEvent());
+    const reverted = await recognize();
     expect(reverted).toMatchObject({
       fileVersionId: v1!.fileVersionId,
       created: false,
@@ -157,10 +189,8 @@ describe('MediaMemoryService.recordFileRecognized', () => {
   });
 
   it('keeps two files with identical bytes as two distinct records (M §11)', async () => {
-    const a = await service.recordFileRecognized(recognizedEvent());
-    const b = await service.recordFileRecognized(
-      recognizedEvent({ fileRef: '/movies/copy.mkv' }),
-    );
+    const a = await recognize();
+    const b = await recognize({ fileRef: '/movies/copy.mkv' });
     expect(b!.fileId).not.toBe(a!.fileId);
     expect(b!.fileVersionId).not.toBe(a!.fileVersionId);
     const snapshot = await readSnapshot();
@@ -170,12 +200,9 @@ describe('MediaMemoryService.recordFileRecognized', () => {
   it.runIf(canDropPermissions)(
     'returns undefined instead of throwing when persistence fails',
     async () => {
-      await service.recordFileRecognized(recognizedEvent());
+      await recognize();
       await fs.chmod(path.join(root, MEDIA_MEMORY_FILE_NAME), 0o000);
-      const result = await service.recordFileRecognized(
-        recognizedEvent({ sha256: SHA_B }),
-      );
-      expect(result).toBeUndefined();
+      expect(await recognize({ sha256: SHA_B })).toBeUndefined();
     },
   );
 });
@@ -188,13 +215,11 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     // versions were handed back stamped with B's root (mixed lineage).
     // M §11.2/§11.3: each File writes its own PolicyExecution and
     // provenance; only the underlying computation and bytes are reused.
-    const a = (await service.recordFileRecognized(recognizedEvent()))!;
-    const b = (await service.recordFileRecognized(
-      recognizedEvent({ fileRef: '/movies/copy.mkv' }),
-    ))!;
+    const a = (await recognize())!;
+    const b = (await recognize({ fileRef: '/movies/copy.mkv' }))!;
 
-    const commitA = (await service.commitPolicySucceeded(succeededInput(a)))!;
-    const commitB = (await service.commitPolicySucceeded(succeededInput(b)))!;
+    const commitA = (await succeed(a))!;
+    const commitB = (await succeed(b))!;
 
     // Separate execution nodes, and B's is recorded as a reuse of A's.
     expect(commitB.executionId).not.toBe(commitA.executionId);
@@ -223,9 +248,9 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   });
 
   it('stays idempotent when the SAME file replays the same execution', async () => {
-    const a = (await service.recordFileRecognized(recognizedEvent()))!;
-    const first = (await service.commitPolicySucceeded(succeededInput(a)))!;
-    const replay = (await service.commitPolicySucceeded(succeededInput(a)))!;
+    const a = (await recognize())!;
+    const first = (await succeed(a))!;
+    const replay = (await succeed(a))!;
 
     expect(replay.executionId).toBe(first.executionId);
     expect(replay.created).toBe(false);
@@ -244,13 +269,11 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     // configuration can land on byte-identical output — same derived File,
     // same version. Rewriting the version's producer would make it name an
     // execution whose outputs it is not.
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const first = (await service.commitPolicySucceeded(
-      succeededInput(source),
-    ))!;
-    const second = (await service.commitPolicySucceeded(
-      succeededInput(source, { omniConfigHash: 'fp-' + '1'.repeat(61) }),
-    ))!;
+    const source = (await recognize())!;
+    const first = (await succeed(source))!;
+    const second = (await succeed(source, {
+      omniConfigHash: 'fp-' + '1'.repeat(61),
+    }))!;
 
     expect(second.executionId).not.toBe(first.executionId);
     const derivedVersionId = first.mediaBindings.get(SHA_OUT)!.fileVersionId;
@@ -264,8 +287,8 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   });
 
   it('commits execution + derived version + entry atomically with lineage edges', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const commit = await service.commitPolicySucceeded(succeededInput(source));
+    const source = (await recognize())!;
+    const commit = await succeed(source);
     expect(commit).toBeDefined();
     expect(commit!.created).toBe(true);
 
@@ -310,12 +333,10 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   });
 
   it('converges replays on the same execution node (content-identity key)', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const first = await service.commitPolicySucceeded(succeededInput(source));
+    const source = (await recognize())!;
+    const first = await succeed(source);
     // Different invocation (degradation-cache hit), same content identity.
-    const replay = await service.commitPolicySucceeded(
-      succeededInput(source, { invocationId: 'cache-hit' }),
-    );
+    const replay = await succeed(source, { invocationId: 'cache-hit' });
     expect(replay!.executionId).toBe(first!.executionId);
     expect(replay!.created).toBe(false);
     expect(replay!.mediaBindings.get(SHA_OUT)).toEqual(
@@ -331,11 +352,9 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   });
 
   it('creates distinct executions for distinct tool configurations', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const first = await service.commitPolicySucceeded(succeededInput(source));
-    const other = await service.commitPolicySucceeded(
-      succeededInput(source, { omniConfigHash: 'fp-other' }),
-    );
+    const source = (await recognize())!;
+    const first = await succeed(source);
+    const other = await succeed(source, { omniConfigHash: 'fp-other' });
     expect(other!.executionId).not.toBe(first!.executionId);
     expect(other!.created).toBe(true);
   });
@@ -348,22 +367,13 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     const commit = await bounded.commitPolicySucceeded(
       succeededInput(source, {
         outputs: [
-          {
-            kind: 'text',
-            objectPath: `/store/objects/${SHA_OUT}.txt`,
-            sha256: SHA_OUT,
-            mimeType: 'text/plain',
-            text: '你好世界这段文本很长', // 3 bytes per CJK code point
-            sizeBytes: 30,
-            role: 'transcript',
-          },
+          // 3 bytes per CJK code point
+          textOutput('你好世界这段文本很长', 30, 'transcript', SHA_OUT),
         ],
       }),
     );
     expect(commit!.mediaBindings.size).toBe(0);
-    const snapshot = await readSnapshot();
-    const entry =
-      snapshot.entries[snapshot.executions[commit!.executionId].outputRefs[0]];
+    const entry = await firstEntry(commit!.executionId);
     expect(entry.kind).toBe('policy_result');
     expect(entry.derivedVersionId).toBeUndefined();
     // 10-byte budget over 3-byte code points → 3 characters, never split.
@@ -380,29 +390,11 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   ] as const)(
     'derives %s %s text channels from the source modality',
     async (mediaType, role, expectedChannels) => {
-      const source = (await service.recordFileRecognized(
-        recognizedEvent({ mediaType }),
-      ))!;
-      const commit = await service.commitPolicySucceeded(
-        succeededInput(source, {
-          outputs: [
-            {
-              kind: 'text',
-              objectPath: `/store/objects/${SHA_TEXT}.txt`,
-              sha256: SHA_TEXT,
-              mimeType: 'text/plain',
-              text: `${mediaType} ${role}`,
-              sizeBytes: 20,
-              role,
-            },
-          ],
-        }),
-      );
-      const snapshot = await readSnapshot();
-      const entry =
-        snapshot.entries[
-          snapshot.executions[commit!.executionId].outputRefs[0]
-        ];
+      const source = (await recognize({ mediaType }))!;
+      const commit = await succeed(source, {
+        outputs: [textOutput(`${mediaType} ${role}`, 20, role)],
+      });
+      const entry = await firstEntry(commit!.executionId);
       expect(entry.channels).toEqual(expectedChannels);
     },
   );
@@ -413,7 +405,7 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     // only the first would have memory report the run as done while half
     // its products are invisible to recall and to reuse — the next
     // identical run then re-derives what memory silently dropped.
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const source = (await recognize())!;
     const input = succeededInput(source, {
       toolName: 'omni_extract_audio',
       outputs: [
@@ -427,15 +419,7 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
           mimeType: 'audio/mp4',
           role: 'extracted_audio',
         },
-        {
-          kind: 'text',
-          objectPath: `/store/objects/${SHA_TEXT}.txt`,
-          sha256: SHA_TEXT,
-          mimeType: 'text/plain',
-          text: 'Two divers surface at dawn.',
-          sizeBytes: 27,
-          role: 'transcript',
-        },
+        textOutput('Two divers surface at dawn.', 27, 'transcript'),
       ],
     });
     const commit = (await service.commitPolicySucceeded(input))!;
@@ -484,52 +468,44 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
   });
 
   it('derives sampled coverage for keyframe outputs', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const commit = await service.commitPolicySucceeded(
-      succeededInput(source, {
-        outputs: [
-          {
-            kind: 'media',
-            objectPath: `/store/objects/${SHA_OUT}.jpg`,
-            sha256: SHA_OUT,
-            mediaType: 'image',
-            metadata: { width: 854, height: 480 },
-            sizeBytes: 50_000,
-            mimeType: 'image/jpeg',
-            role: 'keyframe',
-          },
-        ],
-      }),
-    );
-    const snapshot = await readSnapshot();
-    const entry =
-      snapshot.entries[snapshot.executions[commit!.executionId].outputRefs[0]];
+    const source = (await recognize())!;
+    const commit = await succeed(source, {
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: `/store/objects/${SHA_OUT}.jpg`,
+          sha256: SHA_OUT,
+          mediaType: 'image',
+          metadata: { width: 854, height: 480 },
+          sizeBytes: 50_000,
+          mimeType: 'image/jpeg',
+          role: 'keyframe',
+        },
+      ],
+    });
+    const entry = await firstEntry(commit!.executionId);
     expect(entry.coverage).toEqual({ mode: 'sampled', scope: {} });
     expect(entry.channels).toEqual(['visual']);
   });
 
   it('derives partial coverage for clip outputs', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    const commit = await service.commitPolicySucceeded(
-      succeededInput(source, {
-        toolName: 'omni_extract_clip',
-        outputs: [
-          {
-            kind: 'media',
-            objectPath: `/store/objects/${SHA_OUT}.mp4`,
-            sha256: SHA_OUT,
-            mediaType: 'video',
-            metadata: { durationMs: 30_000, width: 1920, height: 1080 },
-            sizeBytes: 2_000_000,
-            mimeType: 'video/mp4',
-            role: 'clip',
-          },
-        ],
-      }),
-    );
-    const snapshot = await readSnapshot();
-    const entry =
-      snapshot.entries[snapshot.executions[commit!.executionId].outputRefs[0]];
+    const source = (await recognize())!;
+    const commit = await succeed(source, {
+      toolName: 'omni_extract_clip',
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: `/store/objects/${SHA_OUT}.mp4`,
+          sha256: SHA_OUT,
+          mediaType: 'video',
+          metadata: { durationMs: 30_000, width: 1920, height: 1080 },
+          sizeBytes: 2_000_000,
+          mimeType: 'video/mp4',
+          role: 'clip',
+        },
+      ],
+    });
+    const entry = await firstEntry(commit!.executionId);
     // A clip is one slice of a 81-minute film. Recording it as `complete`
     // would let the gap derivation count the version's visual and acoustic
     // channels as fully covered, so recall reports nothing missing and the
@@ -542,114 +518,68 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
 
 describe('MediaMemoryService.findBindingBySha256', () => {
   it('returns the binding for known content and undefined for unknown', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    await expect(service.findBindingBySha256(SHA_A)).resolves.toEqual({
-      fileId: source.fileId,
-      fileVersionId: source.fileVersionId,
-      rootFileId: source.rootFileId,
-    });
+    const source = (await recognize())!;
+    await expect(service.findBindingBySha256(SHA_A)).resolves.toEqual(
+      bindingOf(source),
+    );
     await expect(service.findBindingBySha256(SHA_B)).resolves.toBeUndefined();
   });
 
   it('prefers the newest version when several match', async () => {
-    await service.recordFileRecognized(recognizedEvent());
-    const newer = (await service.recordFileRecognized(
-      recognizedEvent({ fileRef: '/movies/copy.mkv' }),
-    ))!;
+    await recognize();
+    const newer = (await recognize({ fileRef: '/movies/copy.mkv' }))!;
     const found = await service.findBindingBySha256(SHA_A);
-    expect(found).toEqual({
-      fileId: newer.fileId,
-      fileVersionId: newer.fileVersionId,
-      rootFileId: newer.rootFileId,
-    });
+    expect(found).toEqual(bindingOf(newer));
   });
 });
 
 describe('MediaMemoryService.collectVersionOutputRoles', () => {
   it('returns an empty set for a version with no recorded outputs', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const source = (await recognize())!;
     await expect(
-      service.collectVersionOutputRoles({
-        fileId: source.fileId,
-        fileVersionId: source.fileVersionId,
-        rootFileId: source.rootFileId,
-      }),
+      service.collectVersionOutputRoles(bindingOf(source)),
     ).resolves.toEqual(new Set());
   });
 
   it('collects roles of outputs committed against the version itself', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
-    await service.commitPolicySucceeded(
-      succeededInput(source, {
-        outputs: [
-          {
-            kind: 'text',
-            objectPath: `/store/objects/${SHA_TEXT}.txt`,
-            sha256: SHA_TEXT,
-            mimeType: 'text/plain',
-            text: 'full transcript',
-            sizeBytes: 15,
-            role: 'transcript',
-          },
-        ],
-      }),
-    );
-    const roles = await service.collectVersionOutputRoles({
-      fileId: source.fileId,
-      fileVersionId: source.fileVersionId,
-      rootFileId: source.rootFileId,
+    const source = (await recognize())!;
+    await succeed(source, {
+      outputs: [textOutput('full transcript', 15, 'transcript')],
     });
+    const roles = await service.collectVersionOutputRoles(bindingOf(source));
     expect(roles).toEqual(new Set(['transcript']));
   });
 
   it('sees roles recorded on DERIVED versions (the §4.1 extract→transcribe chain)', async () => {
-    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const source = (await recognize())!;
     // Step 1: extract_audio on the video → derived audio version.
-    const extract = (await service.commitPolicySucceeded(
-      succeededInput(source, {
-        outputs: [
-          {
-            kind: 'media',
-            objectPath: `/store/objects/${SHA_OUT}.wav`,
-            sha256: SHA_OUT,
-            mediaType: 'audio',
-            metadata: { durationMs: 4_860_000 },
-            sizeBytes: 46_656_000,
-            mimeType: 'audio/wav',
-            role: 'extracted_audio',
-          },
-        ],
-      }),
-    ))!;
+    const extract = (await succeed(source, {
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: `/store/objects/${SHA_OUT}.wav`,
+          sha256: SHA_OUT,
+          mediaType: 'audio',
+          metadata: { durationMs: 4_860_000 },
+          sizeBytes: 46_656_000,
+          mimeType: 'audio/wav',
+          role: 'extracted_audio',
+        },
+      ],
+    }))!;
     const audioBinding = extract.mediaBindings.get(SHA_OUT)!;
     expect(audioBinding).toBeDefined();
 
     // Step 2: transcribe the DERIVED audio — the transcript entry is
     // parented to the audio version, not the video version.
-    await service.commitPolicySucceeded(
-      succeededInput(audioBinding, {
-        toolName: 'omni_transcribe_audio',
-        outputs: [
-          {
-            kind: 'text',
-            objectPath: `/store/objects/${SHA_TEXT}.txt`,
-            sha256: SHA_TEXT,
-            mimeType: 'text/plain',
-            text: 'full transcript',
-            sizeBytes: 15,
-            role: 'transcript',
-          },
-        ],
-      }),
-    );
+    await succeed(audioBinding, {
+      toolName: 'omni_transcribe_audio',
+      outputs: [textOutput('full transcript', 15, 'transcript')],
+    });
 
     // Querying the VIDEO version must still surface the transcript role:
     // the audio version is in its derived subgraph.
-    const roles = await service.collectVersionOutputRoles({
-      fileId: source.fileId,
-      fileVersionId: source.fileVersionId,
-      rootFileId: source.rootFileId,
-    });
+    const roles = await service.collectVersionOutputRoles(bindingOf(source));
     expect(roles).toEqual(new Set(['transcript', 'extracted_audio']));
   });
 

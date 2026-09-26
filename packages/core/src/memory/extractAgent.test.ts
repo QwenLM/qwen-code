@@ -14,6 +14,7 @@ import { runAutoMemoryExtract } from './extract.js';
 import { getAutoMemoryRoot } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { userText } from '../test-utils/model-fixtures.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -78,12 +79,7 @@ describe('auto-memory extraction with agent planner', () => {
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
-      history: [
-        {
-          role: 'user',
-          parts: [{ text: 'I prefer terse responses.' }],
-        },
-      ],
+      history: [userText('I prefer terse responses.')],
     });
 
     expect(result.touchedTopics).toEqual(['user']);

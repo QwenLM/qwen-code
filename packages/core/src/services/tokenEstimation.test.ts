@@ -12,11 +12,9 @@ import {
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from './tokenEstimation.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
-const textContent = (text: string): Content => ({
-  role: 'user',
-  parts: [{ text }],
-});
+const textContent = (text: string): Content => content('user', { text });
 
 describe('estimateContextTextTokens', () => {
   it('uses the shared ASCII and CJK context-reporting heuristic', () => {
@@ -47,20 +45,16 @@ describe('estimateContentTokens', () => {
   });
 
   it('estimates inlineData via imageTokenEstimate', () => {
-    const c: Content = {
-      role: 'user',
-      parts: [{ inlineData: { mimeType: 'image/png', data: 'xxx' } }],
-    };
+    const c: Content = content('user', {
+      inlineData: { mimeType: 'image/png', data: 'xxx' },
+    });
     // estimateContentChars uses imageTokenEstimate * TOKEN_TO_CHAR_RATIO (4)
     // for inlineData, so estimateContentTokens divides back by 4 → 1600
     expect(estimateContentTokens([c], 1600)).toBe(1600);
   });
 
   it('estimates functionCall (json-dense) contributes some positive count', () => {
-    const c: Content = {
-      role: 'model',
-      parts: [{ functionCall: { name: 'foo', args: { a: 1, b: 2 } } }],
-    };
+    const c: Content = content('model', fnCall('foo', { a: 1, b: 2 }));
     const result = estimateContentTokens([c]);
     expect(result).toBeGreaterThan(0);
   });
@@ -70,17 +64,10 @@ describe('estimateContentTokens', () => {
     // (nested parts walk + json-stringify fallback). Tool-heavy
     // conversations are where context grows fastest, so locking coverage
     // here protects the trigger from undercounting. (review #4168 R3.5)
-    const c: Content = {
-      role: 'user',
-      parts: [
-        {
-          functionResponse: {
-            name: 'tool',
-            response: { result: 'data'.repeat(100) },
-          },
-        },
-      ],
-    };
+    const c: Content = content(
+      'user',
+      fnResponse('tool', { result: 'data'.repeat(100) }),
+    );
     const result = estimateContentTokens([c]);
     expect(result).toBeGreaterThan(0);
   });
@@ -106,10 +93,9 @@ describe('estimatePromptTokens', () => {
   });
 
   it('keeps custom image-token estimates as the fifth argument', () => {
-    const imageUser: Content = {
-      role: 'user',
-      parts: [{ inlineData: { mimeType: 'image/png', data: 'xxx' } }],
-    };
+    const imageUser: Content = content('user', {
+      inlineData: { mimeType: 'image/png', data: 'xxx' },
+    });
 
     expect(estimatePromptTokens(history, imageUser, 5000, 1200, 1600)).toBe(
       5000 + 1200 + 1600,
@@ -150,18 +136,13 @@ describe('estimatePromptTokens', () => {
       // `prompt + max_tokens` to exceed the window by ~1 token in
       // production (see Research/Discovery_QwenCode-MainTurnOutputClamp-
       // SeparateBug_20260728.md in the ArgoStack repo).
-      const cjkToolResult: Content = {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              // A realistic stand-in for a CJK-dense design doc chunk.
-              response: { output: '设计文档章节内容。'.repeat(2000) },
-            },
-          },
-        ],
-      };
+      const cjkToolResult: Content = content('user', {
+        functionResponse: {
+          name: 'read_file',
+          // A realistic stand-in for a CJK-dense design doc chunk.
+          response: { output: '设计文档章节内容。'.repeat(2000) },
+        },
+      });
       const lastPromptTokenCount = 25_000;
       const nonConservative = estimatePromptTokens(
         [],
