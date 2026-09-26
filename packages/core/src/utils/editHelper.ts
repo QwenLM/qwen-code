@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { safeLiteralReplace } from './textUtils.js';
+
 /**
  * Helpers for reconciling LLM-proposed edits with on-disk text.
  *
@@ -591,6 +593,13 @@ export function applyReplacementPreservingLineEndings(
     return rawContent;
   }
 
+  if (!rawContent.includes('\r\n')) {
+    // Nothing to map: with no CRLF in the file the normalized copy is byte for
+    // byte the file itself, so the replacement can be applied to it directly.
+    // This is also exactly what the write path used to do for such a file.
+    return safeLiteralReplace(rawContent, oldString, newString);
+  }
+
   const offsets = normalizedToRawOffsets(rawContent, normalizedContent.length);
 
   let result = '';
@@ -602,7 +611,19 @@ export function applyReplacementPreservingLineEndings(
       break;
     }
     const matchEnd = matchAt + oldString.length;
-    const rawStart = offsets[matchAt];
+    let rawStart = offsets[matchAt];
+    // Normalization drops the `\r` of every CRLF, so a normalized `\n` maps to
+    // the raw index of the `\n` and never to the `\r` in front of it. A match
+    // that starts on such a newline owns that `\r`, so pull it into the span
+    // rather than leave it in the untouched prefix -- otherwise the pair is
+    // split and the file ends up with a doubled `\r`.
+    if (
+      rawStart > 0 &&
+      rawContent[rawStart - 1] === '\r' &&
+      rawContent[rawStart] === '\n'
+    ) {
+      rawStart--;
+    }
     let rawEnd = offsets[matchEnd];
     // Normalization drops the `\r` of every CRLF, so a span can end up holding
     // one. That `\r` is not part of the text being replaced — it is the first
@@ -616,12 +637,29 @@ export function applyReplacementPreservingLineEndings(
       rawEnd--;
     }
 
+    // A line break the edit matched is replaced by one of the same kind: when
+    // the span starts on a break, that break belonged to the line in front of
+    // it, so the inserted text's first break keeps the ending of the line it
+    // terminates. The guard above has already pulled a dropped `\r` into the
+    // span, so its first character says which kind it was.
+    const matchedLeadingEnding = rawContent[rawStart] === '\r' ? '\r\n' : '\n';
+    // Any further breaks are new lines sitting where the span was, and take the
+    // ending of that region: the span's own trailing break, else the one after
+    // it, else the one before it.
     const ending =
       spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
       lineEndingAfter(rawContent, rawEnd) ??
       lineEndingBefore(rawContent, rawStart) ??
       '\n';
-    const inserted = newString.replace(/\r\n|\n/g, ending);
+    // When the span starts on a break, the inserted text continues the line that
+    // break terminated, so every break it adds takes the same kind.
+    const spanStartsWithBreak =
+      rawContent[rawStart] === '\n' || rawContent[rawStart] === '\r';
+    const insertedEnding = spanStartsWithBreak ? matchedLeadingEnding : ending;
+    const inserted = newString
+      .split(/\r\n|\n/)
+      .map((text, index) => (index === 0 ? text : `${insertedEnding}${text}`))
+      .join('');
 
     result += rawContent.slice(copiedUpTo, rawStart) + inserted;
     copiedUpTo = rawEnd;

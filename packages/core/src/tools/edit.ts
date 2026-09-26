@@ -28,12 +28,7 @@ import {
 import type { SandboxFileVersion } from '../sandbox/file-version.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
-import {
-  FileEncoding,
-  needsUtf8Bom,
-  detectLineEnding,
-} from '../services/fileSystemService.js';
-import type { LineEnding } from '../services/fileSystemService.js';
+import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
@@ -137,8 +132,6 @@ interface CalculatedEdit {
   encoding: string;
   /** Whether the existing file has a UTF-8 BOM */
   bom: boolean;
-  /** Original line ending style of the existing file */
-  lineEnding: LineEnding;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -175,7 +168,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let useBOM = false;
     let rawContent: string | null = null;
     let detectedEncoding = 'utf-8';
-    let detectedLineEnding: LineEnding = 'lf';
     // Prior-read enforcement runs before any content is read so that
     // the read pipeline below (and the content-derived error codes
     // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
@@ -208,7 +200,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
-          lineEnding: 'lf',
         };
       }
     }
@@ -225,8 +216,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
-        // Detect original line ending style before normalizing
-        detectedLineEnding = detectLineEnding(fileInfo.content);
         // Normalize line endings to LF for consistent processing.
         // `rawContent` keeps the bytes as read: the normalization above is for
         // matching and the diff, and it must not reach disk (see
@@ -282,7 +271,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
-          lineEnding: 'lf',
         };
       }
     }
@@ -419,7 +407,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       isNewFile,
       bom: useBOM,
       encoding: detectedEncoding,
-      lineEnding: detectedLineEnding,
     };
   }
 

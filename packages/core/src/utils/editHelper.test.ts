@@ -6,6 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  detectLineEnding,
+  ensureCrlfLineEndings,
+} from '../services/fileSystemService.js';
+import { safeLiteralReplace } from './textUtils.js';
+import {
   applyReplacementPreservingLineEndings,
   countOccurrences,
   maybeAugmentOldStringForDeletion,
@@ -262,6 +267,115 @@ describe('applyReplacementPreservingLineEndings', () => {
     expect(splice('one\r\ntwo', 'two', 'TWO\nAGAIN')).toBe(
       'one\r\nTWO\r\nAGAIN',
     );
+  });
+
+  it('keeps the CRLF intact when the match starts on a newline', () => {
+    // Normalization drops the `\r` of every CRLF, so a normalized `\n` maps to
+    // the raw index of the `\n` and never of the `\r` in front of it. When the
+    // match *starts* on such a newline, that `\r` belongs to the match: leaving
+    // it in the untouched prefix orphans it, and the inserted text then
+    // contributes a break of its own.
+    expect(
+      splice(
+        'const a = 1;\r\nconst b = 2;\r\n',
+        '\nconst b = 2;',
+        '\nconst B = 2;',
+      ),
+    ).toBe('const a = 1;\r\nconst B = 2;\r\n');
+  });
+
+  it('keeps the CRLF intact when the match starts on a newline in a mixed file', () => {
+    expect(
+      splice(
+        'const a = 1;\nconst b = 2;\r\nconst c = 3;\n',
+        '\nconst b = 2;',
+        '\nconst B = 2;',
+      ),
+    ).toBe('const a = 1;\nconst B = 2;\r\nconst c = 3;\n');
+  });
+
+  it('replaces every newline-only match, each keeping its own kind', () => {
+    // replace_all over a bare newline: the same span shape at every position,
+    // so each one has to resolve its own ending rather than inherit the first
+    // match's. A matched break is replaced by a break of the same kind, so
+    // swapping newlines for newlines leaves the file alone.
+    expect(splice('a\r\nb\nc\r\n', '\n', '\n')).toBe('a\r\nb\nc\r\n');
+    expect(splice('a\r\nb\r\nc\r\n', '\n', '\n')).toBe('a\r\nb\r\nc\r\n');
+    expect(splice('a\nb\rc\n', '\n', '\n')).toBe('a\nb\rc\n');
+
+    // A break the edit adds is new, so it takes the ending of the region it
+    // lands in: the matched one keeps its own kind, the added one follows it.
+    expect(splice('a\r\nb\nc\r\n', '\n', '\n\n')).toBe(
+      'a\r\n\r\nb\n\nc\r\n\r\n',
+    );
+  });
+
+  it('keeps the CRLF intact when the match ends on a newline', () => {
+    // The mirror image: a match that ends on a newline must not leave the
+    // `\r` of that pair behind either.
+    expect(
+      splice(
+        'const a = 1;\r\nconst b = 2;\r\n',
+        'const a = 1;\n',
+        'const A = 1;\n',
+      ),
+    ).toBe('const A = 1;\r\nconst b = 2;\r\n');
+  });
+
+  it('matches the previous write path byte for byte on uniform files', () => {
+    // The promise this change makes is that a file which is already uniformly LF
+    // or uniformly CRLF comes out exactly as it did before: `main` replaced on
+    // the normalized text and then let `prepareTextFileContent` re-expand it to
+    // the file's single style. Reproduce that here and compare, rather than
+    // trusting a couple of hand-picked cases.
+    const uniform = [
+      'const a = 1;\nconst b = 2;\nconst c = 3;\n',
+      'one\n\nthree\nfour\n',
+      'x = 1\n',
+      'a\nb\nc\nd\ne\n',
+    ];
+    const uniformCrlf = [
+      'const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n',
+      'one\r\n\r\nthree\r\nfour\r\n',
+      'x = 1\r\n',
+      'a\r\nb\r\nc\r\nd\r\ne\r\n',
+    ];
+    const edits: Array<[string, string]> = [
+      ['const b = 2;', 'const B = 2;'],
+      ['const a = 1;\n', 'const A = 1;\n'],
+      ['\nconst b = 2;', '\nconst B = 2;'],
+      ['const b = 2;\n', ''],
+      ['const a = 1;\nconst b = 2;', 'const B = 2;\nconst A = 1;'],
+      ['const b = 2;', 'const B = 2;\nconst extra = 3;'],
+      ['one', 'ONE\ninserted'],
+    ];
+
+    const previous = (raw: string, oldString: string, newString: string) => {
+      const replaced = safeLiteralReplace(
+        raw.replace(/\r\n/g, '\n'),
+        oldString,
+        newString,
+      );
+      return detectLineEnding(raw) === 'crlf'
+        ? ensureCrlfLineEndings(replaced)
+        : replaced;
+    };
+
+    for (const file of [...uniform, ...uniformCrlf]) {
+      for (const [oldString, newString] of edits) {
+        if (!normalized(file).includes(oldString)) {
+          continue;
+        }
+        expect(
+          applyReplacementPreservingLineEndings(
+            file,
+            normalized(file),
+            oldString,
+            newString,
+          ),
+        ).toBe(previous(file, oldString, newString));
+      }
+    }
   });
 
   it('returns the file unchanged when the old string is absent', () => {
