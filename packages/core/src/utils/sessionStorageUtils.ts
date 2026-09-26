@@ -11,9 +11,11 @@
  * file reading for fast session metadata access on large JSONL files.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import * as path from 'node:path';
+import { getProjectHash } from './paths.js';
 import { _recoverObjectsFromLine } from './jsonl-utils.js';
-
 import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
@@ -772,4 +774,323 @@ export function readSessionTitleInfoFromFileSync(
   const source =
     rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
   return { title, source };
+}
+
+/**
+ * The Managed session key for a locally stored session.
+ *
+ * The key addresses both the log's records and the resource bodies they
+ * reference, so the writer and every reader must derive it identically -- a
+ * second derivation that disagreed would leave published bodies unreadable.
+ * Structurally a `ManagedSessionKey`, defined here so `utils/` stays a leaf.
+ */
+export function localManagedSessionKey(
+  projectRoot: string,
+  sessionId: string,
+): { tenantId: string; workspaceId: string; sessionId: string } {
+  return {
+    tenantId: 'local',
+    workspaceId: getProjectHash(projectRoot),
+    sessionId,
+  };
+}
+
+/**
+ * Session-owned Managed resources live beside the session under the controlled
+ * runtime base directory. Defined here so `utils/` stays a leaf layer and the
+ * resource store and this reader cannot drift apart.
+ */
+export function managedSessionResourceRoot(
+  runtimeBaseDir: string,
+  sessionId: string,
+): string {
+  if (!isSinglePathSegment(sessionId)) {
+    throw new Error('sessionId must be a single path segment.');
+  }
+  return path.join(runtimeBaseDir, 'resources', sessionId);
+}
+
+/**
+ * Checked directly rather than through `path.basename` so the guard holds even
+ * where `node:path` is stubbed, and so it cannot be weakened by a platform's
+ * separator handling.
+ */
+export function isSinglePathSegment(value: string): boolean {
+  return (
+    value.length > 0 && !/[/\\]/.test(value) && value !== '.' && value !== '..'
+  );
+}
+
+const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
+const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
+
+function lastLineContaining(text: string, marker: string): string | undefined {
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index].includes(marker)) return lines[index];
+  }
+  return undefined;
+}
+
+function lastCommittedDomainLine(
+  text: string,
+  marker: string,
+): string | undefined {
+  const lines = text.split('\n');
+  lines.pop();
+  let committed: { firstSequence: number; lastSequence: number } | undefined;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    const record = JSON.parse(line) as {
+      subtype?: string;
+      managedSession?: {
+        firstSequence?: number;
+        lastSequence?: number;
+        eventCount?: number;
+        sequence?: number;
+        kind?: string;
+      };
+    };
+    const body = record.managedSession;
+    if (record.subtype === 'managed_session_commit_v1') {
+      const first = body?.firstSequence;
+      const last = body?.lastSequence;
+      committed =
+        Number.isSafeInteger(first) &&
+        Number.isSafeInteger(last) &&
+        first! > 0 &&
+        last! >= first! &&
+        body?.eventCount === last! - first! + 1
+          ? { firstSequence: first!, lastSequence: last! }
+          : undefined;
+    } else if (
+      committed !== undefined &&
+      record.subtype === 'managed_session_event_v1' &&
+      body?.kind === 'domain.committed' &&
+      Number.isSafeInteger(body.sequence) &&
+      body.sequence! >= committed.firstSequence &&
+      body.sequence! <= committed.lastSequence &&
+      line.includes(marker)
+    ) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when the transcript carries a Managed Session header.
+ *
+ * A positive identification, unlike the execution-engine reader, which reports
+ * `unavailable` for any transcript with a completeness diagnostic and so cannot
+ * gate legacy-only operations without regressing legacy sessions.
+ */
+export function isManagedSessionTranscriptSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): boolean {
+  let fd: number | undefined;
+  try {
+    const fileSize = fs.statSync(filePath).size;
+    if (fileSize === 0) return false;
+    fd = openSyncNoFollow(filePath);
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+    const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const read = fs.readSync(fd, buffer, 0, length, 0);
+    return buffer.toString('utf-8', 0, read).includes(MANAGED_HEADER_MARKER);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/**
+ * Managed sessions keep their title in a committed `session_metadata` domain
+ * record whose body lives in the resource store, so the legacy scan for a
+ * `custom_title` record finds nothing and would report a blank title.
+ *
+ * Returns `undefined` when the transcript is not Managed, so the caller falls
+ * back to the legacy reader. Returns `{}` for a Managed session that was never
+ * renamed, which genuinely has no custom title. Display stays tolerant: an
+ * unreadable body yields `{}` rather than throwing into the session list.
+ *
+ * Like the legacy reader this only scans the tail and head windows, so a rename
+ * buried in the middle of a very long log is not found.
+ */
+export function readManagedSessionTitleInfoSync(
+  filePath: string,
+  runtimeBaseDir: string,
+  scratchBuffer?: Buffer,
+): { title?: string; source?: 'auto' | 'manual' } | undefined {
+  const found = readManagedDomainBodySync(
+    filePath,
+    runtimeBaseDir,
+    MANAGED_METADATA_MARKER,
+    scratchBuffer,
+  );
+  if (found === undefined) return undefined;
+  const body = found.body as
+    | { title?: unknown; titleSource?: unknown }
+    | undefined;
+  if (typeof body?.title !== 'string' || body.title.length === 0) return {};
+  const source =
+    body.titleSource === 'auto' || body.titleSource === 'manual'
+      ? body.titleSource
+      : undefined;
+  return { title: body.title, source };
+}
+
+/**
+ * The source a Managed session was created from, read the same way as its
+ * title: the record lives in a committed `session_source` domain body, so the
+ * legacy scan for a `session_source` line finds nothing.
+ *
+ * Returns `undefined` when the transcript is not Managed, so the caller falls
+ * back to the legacy reader, and `{}` for a Managed session with no source.
+ */
+export function readManagedSessionSourceSync(
+  filePath: string,
+  runtimeBaseDir: string,
+  scratchBuffer?: Buffer,
+): { sourceType?: string; sourceId?: string } | undefined {
+  const found = readManagedDomainBodySync(
+    filePath,
+    runtimeBaseDir,
+    MANAGED_SOURCE_MARKER,
+    scratchBuffer,
+  );
+  if (found === undefined) return undefined;
+  const payload = (
+    found.body as
+      | {
+          record?: {
+            systemPayload?: { sourceType?: unknown; sourceId?: unknown };
+          };
+        }
+      | undefined
+  )?.record?.systemPayload;
+  if (
+    typeof payload?.sourceType !== 'string' ||
+    payload.sourceType.length === 0
+  )
+    return {};
+  return {
+    sourceType: payload.sourceType,
+    ...(typeof payload.sourceId === 'string'
+      ? { sourceId: payload.sourceId }
+      : {}),
+  };
+}
+
+/**
+ * Locates the newest committed record for a domain marker and reads its body.
+ *
+ * `undefined` means the transcript carries no Managed header, which is how the
+ * callers tell "not Managed, use the legacy reader" apart from "Managed with
+ * nothing to report" (`{}`). Display stays tolerant: an unreadable body is the
+ * latter rather than a throw into the session list.
+ *
+ * Like the legacy readers this only scans the tail and head windows, so a
+ * record buried in the middle of a very long log is not found.
+ */
+function readManagedDomainBodySync(
+  filePath: string,
+  runtimeBaseDir: string,
+  marker: string,
+  scratchBuffer?: Buffer,
+): { body?: unknown } | undefined {
+  let fd: number | undefined;
+  try {
+    const fileSize = fs.statSync(filePath).size;
+    if (fileSize === 0) return undefined;
+    fd = openSyncNoFollow(filePath);
+
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+
+    const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
+    const headText = buffer.toString('utf-8', 0, headBytes);
+    const headerLine = lastLineContaining(headText, MANAGED_HEADER_MARKER);
+    if (headerLine === undefined) return undefined;
+
+    /* The recorded identity, not the file name, decides where the resources
+       live. */
+    const header = JSON.parse(headerLine) as {
+      managedSession?: { sessionKey?: { sessionId?: unknown } };
+    };
+    const recordedId = header.managedSession?.sessionKey?.sessionId;
+    if (typeof recordedId !== 'string' || recordedId.length === 0) return {};
+    const resourceRoot = managedSessionResourceRoot(runtimeBaseDir, recordedId);
+
+    let line = undefined as string | undefined;
+    const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const tailOffset = fileSize - tailLength;
+    if (tailOffset > 0) {
+      const tailBytes = fs.readSync(fd, buffer, 0, tailLength, tailOffset);
+      const tailText = buffer.toString('utf-8', 0, tailBytes);
+      line = lastCommittedDomainLine(
+        tailText.slice(tailText.indexOf('\n') + 1),
+        marker,
+      );
+    }
+    line ??= lastCommittedDomainLine(headText, marker);
+    if (line === undefined) return {};
+
+    const record = JSON.parse(line) as {
+      managedSession?: {
+        payload?: {
+          recordRef?: {
+            kind?: unknown;
+            resourceId?: unknown;
+            byteLength?: unknown;
+            digest?: unknown;
+          };
+        };
+      };
+    };
+    const ref = record.managedSession?.payload?.recordRef;
+    if (typeof ref?.kind !== 'string' || typeof ref.resourceId !== 'string') {
+      return {};
+    }
+    if (
+      !isSinglePathSegment(ref.kind) ||
+      !isSinglePathSegment(ref.resourceId)
+    ) {
+      return {};
+    }
+    const bytes = fs.readFileSync(
+      path.join(resourceRoot, ref.kind, ref.resourceId),
+    );
+    if (
+      bytes.byteLength !== ref.byteLength ||
+      createHash('sha256').update(bytes).digest('hex') !== ref.digest
+    ) {
+      return {};
+    }
+    return { body: JSON.parse(bytes.toString('utf8')) as unknown };
+  } catch {
+    return {};
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 }
