@@ -19,6 +19,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
+import { runGit } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -43,6 +44,65 @@ export function worktreeBranchForSlug(slug: string): string {
 export const WORKTREE_SESSION_FILE = '.qwen-session';
 
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
+
+/**
+ * Ignored top-level directories whose contents are regenerable build or
+ * dependency output. They are exempt from the ignored-content check in
+ * {@link worktreeHasWork} so a checkout where an agent ran `npm install`
+ * or a build stays cleanable; every other ignored entry (agent artifacts
+ * like `.qwen/pr-drafts/`) still counts as work.
+ */
+export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
+  'node_modules',
+  'dist',
+  'coverage',
+]);
+
+/**
+ * The one "is there work here?" predicate for every path that destroys a
+ * worktree checkout: the CLI startup sweep (`cleanupStaleAgentWorktrees`)
+ * and the daemon's orphan reaper both gate `removeUserWorktree` on this,
+ * so the two reapers cannot drift into disagreeing policies again
+ * (#12758).
+ *
+ * Runs `git status --porcelain --untracked-files=normal
+ * --ignored=matching`: tracked, untracked and ignored entries all count
+ * as work, except ignored entries whose first path segment is disposable
+ * build output ({@link DISPOSABLE_IGNORED_ROOTS}) and the session marker
+ * ({@link WORKTREE_SESSION_FILE}) — git-excluded in production but
+ * possibly untracked in hand-built fixtures. The argv tokens added for
+ * this probe are literals placed after the `status` subcommand and are
+ * never caller-derived (see `load-simple-git.ts`), and `runGit` scrubs
+ * the environment (`gitEnv`) so an inherited `GIT_DIR` or
+ * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
+ *
+ * Fail-closed: any read error counts as work, preserving the checkout.
+ */
+export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
+  try {
+    const stdout = await runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=normal',
+      '--ignored=matching',
+    ]);
+    return stdout
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .some((line) => {
+        const entry = line.slice(3);
+        if (entry === WORKTREE_SESSION_FILE) return false;
+        if (line.startsWith('!!')) {
+          return !DISPOSABLE_IGNORED_ROOTS.has(entry.split('/')[0] ?? '');
+        }
+        return true;
+      });
+  } catch {
+    return true;
+  }
+}
 
 /**
  * Diff flags that stop the tree being diffed from choosing the program that
