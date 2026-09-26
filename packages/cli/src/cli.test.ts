@@ -1639,6 +1639,67 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe(`${expectedVersion}\n`);
   });
 
+  it('leaves a leading --bg prompt to cli.js instead of answering -v', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-entry-bg-'));
+    const entryPath = path.join(tempDir, 'cli-entry.mjs');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      // A stub cli.js rather than the built one: both wrapper version
+      // shortcuts fire before cli.js is imported, so "the stub was reached
+      // with argv intact" is the entire assertion and needs no build. The
+      // distinctive version tells shortcut #2 (package.json) apart from a
+      // real forward.
+      writeFileSync(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({ name: 'stub', version: '9.9.9-stub' }),
+      );
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        'process.stdout.write(JSON.stringify({ args: process.argv.slice(2) }));\n',
+      );
+      const childEnv = { ...process.env };
+      delete childEnv['CLI_VERSION'];
+      const runRaw = (args: string[], env: NodeJS.ProcessEnv) =>
+        execFileSync(process.execPath, [entryPath, ...args], {
+          encoding: 'utf8',
+          env,
+        });
+      const runForwarded = (args: string[]) =>
+        JSON.parse(runRaw(args, childEnv)) as { args: string[] };
+
+      // `--bg` owns every token after it, and cli.ts reads the prompt ahead
+      // of its own version route. A bare `-v` in an unquoted prompt is
+      // therefore prompt data: the wrapper must forward it so cli.js can
+      // decline the launch, not print a version and exit 0 with nothing
+      // dispatched. This is the docs' own `qwen --bg explain the -v flag`.
+      expect(runForwarded(['--bg', 'explain', 'the', '-v', 'flag'])).toEqual({
+        args: ['--bg', 'explain', 'the', '-v', 'flag'],
+      });
+      expect(
+        runForwarded(['--bg', 'explain', 'the', '--version', 'flag']),
+      ).toEqual({ args: ['--bg', 'explain', 'the', '--version', 'flag'] });
+      // Forwarded in both CLI_VERSION shapes: shortcut #1 is the one the
+      // official image ships with (Dockerfile sets CLI_VERSION).
+      expect(
+        JSON.parse(
+          runRaw(['--bg', 'explain', 'the', '-v', 'flag'], {
+            ...childEnv,
+            CLI_VERSION: '7.7.7-test',
+          }),
+        ),
+      ).toEqual({ args: ['--bg', 'explain', 'the', '-v', 'flag'] });
+
+      // The two shortcuts themselves are untouched.
+      expect(
+        runRaw(['--version'], { ...childEnv, CLI_VERSION: '7.7.7-test' }),
+      ).toBe('7.7.7-test\n');
+      expect(runRaw(['-v'], childEnv)).toBe('9.9.9-stub\n');
+      expect(runRaw(['--version'], childEnv)).toBe('9.9.9-stub\n');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('resolves and pins managed updates from the configured home', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-managed-npm-'));
     const entryDir = path.join(tempDir, 'bootstrap');
