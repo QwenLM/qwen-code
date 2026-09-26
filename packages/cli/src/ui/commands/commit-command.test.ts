@@ -59,6 +59,8 @@ describe('commitCommand', () => {
     expect(text.toLowerCase()).toContain('subject');
     expect(text.toLowerCase()).toContain('body');
     expect(text.toLowerCase()).toContain('multi-line');
+    // Names a concrete multi-line form the co-author injector can rewrite.
+    expect(text).toContain('-m "subject" -m "body"');
   });
 
   it('includes the safety guards from the design review', async () => {
@@ -86,12 +88,44 @@ describe('commitCommand', () => {
     const text = promptText(result);
     expect(text).toContain('Co-authored-by');
     expect(text).toMatch(/general\.gitCoAuthor\.commit/);
-    expect(text).toMatch(/already appends the configured/i);
+    // The auto-append is gated on the active shell being bash — the prompt
+    // must name that gate so non-bash users are not promised a trailer.
+    expect(text).toMatch(/active shell is bash/i);
     expect(text).toMatch(/do not add your own ai-assistance trailer/i);
-    // Not automatic without an inline -m/-am, and must not claim to be.
-    expect(text).toMatch(/no-op when the commit carries no inline/i);
+    // The platform trailer lands as a new final paragraph, so model-written
+    // trailer lines would leave git's trailer block; user-named co-authors
+    // must go through a non-inline message the injector ignores.
+    expect(text).toMatch(/final trailer block/i);
+    expect(text).toContain('git commit -F -');
+    // The model must verify what landed instead of claiming attribution.
+    expect(text).toContain('git log -1 --format=%B');
+    // The overclaims this wording replaced must never come back.
+    expect(text).not.toMatch(/already appends the configured/i);
     // The #3935 misconception this replaces must never come back.
     expect(text).not.toMatch(/nothing injects it automatically/i);
+  });
+
+  it('requires reading untracked file contents before staging them', async () => {
+    const ctx = createMockCommandContext();
+    const result = await commitCommand.action!(ctx, '');
+    const text = promptText(result);
+    // Untracked files are invisible to git diff HEAD, so the prompt must
+    // make the model open them directly — anchored on the requirement so
+    // dropping it (not just rewording it) turns this red.
+    expect(text).toMatch(/untracked files never appear in this diff/i);
+    expect(text).toMatch(/read each untracked file directly/i);
+    expect(text).toMatch(
+      /never stage a file whose contents you have not seen/i,
+    );
+  });
+
+  it('stops instead of committing in abnormal repository states', async () => {
+    const ctx = createMockCommandContext();
+    const result = await commitCommand.action!(ctx, '');
+    const text = promptText(result);
+    expect(text).toMatch(/detached HEAD/i);
+    expect(text).toMatch(/merge, rebase, or cherry-pick/i);
+    expect(text).toMatch(/stop and report the state instead of committing/i);
   });
 
   it('gives the model a fallback for a repository with no commits yet', async () => {
