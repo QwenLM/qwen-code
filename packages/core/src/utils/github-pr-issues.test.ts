@@ -289,7 +289,9 @@ describe('fetchGitHubPullRequestIssues', () => {
     );
 
     expect(result.kind).toBe('ok');
-    expect(seenEnv?.['GH_CONFIG_DIR']).toBe('/tmp/gh-user-config/gh');
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe(
+      path.join('/tmp/gh-user-config', 'gh'),
+    );
     expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
     expect(seenEnv).not.toHaveProperty('GIT_DIR');
   });

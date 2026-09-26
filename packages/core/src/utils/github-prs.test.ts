@@ -442,7 +442,9 @@ describe('createGitHubPullRequest', () => {
       },
     );
 
-    expect(seenEnv?.['GH_CONFIG_DIR']).toBe('/tmp/gh-user-config/gh');
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe(
+      path.join('/tmp/gh-user-config', 'gh'),
+    );
     expect(seenEnv?.['GIT_SSL_CAINFO']).toBe('/tmp/ca.pem');
     expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
     expect(seenEnv).not.toHaveProperty('GIT_DIR');

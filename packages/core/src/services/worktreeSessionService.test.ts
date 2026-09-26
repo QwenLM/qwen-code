@@ -19,8 +19,10 @@ import {
   getSessionRuntimeLiveness,
   isSessionRuntimeActive,
   WorktreeSessionReadInconclusiveError,
+  WorktreeRestoreRefusedError,
   type WorktreeSession,
 } from './worktreeSessionService.js';
+import { readWorktreeSessionMarker } from './gitWorktreeService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
@@ -767,6 +769,41 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
+  it('restores when the marker sits at nlink 2 in the publish window', async () => {
+    // createWorktreeSessionMarkerExclusive publishes by linking the staged
+    // sibling onto the marker path and only then unlinking the sibling, so
+    // a crash leaves the marker at nlink 2 with complete, fsync'd content
+    // naming the owner. The strict reader reports that residue as invalid;
+    // the resume path must read it leniently or the legitimate owner loses
+    // its worktree binding on every --resume.
+    const liveCwd = path.join(tmpDir, 'repo-residue');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'residue');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'residue',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+    const markerPath = path.join(liveWorktree, '.qwen-session');
+    const stagedPath = `${markerPath}.deadbeef.tmp`;
+    await fs.writeFile(stagedPath, 'session-owner', 'utf8');
+    await fs.link(stagedPath, markerPath);
+
+    const onWarn = vi.fn();
+    const result = await restoreWorktreeContext(
+      filePath,
+      onWarn,
+      'session-owner',
+    );
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain(live.worktreePath);
+    expect(onWarn).not.toHaveBeenCalled();
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
   it('rejects and preserves a sidecar when the marker has another owner', async () => {
     const liveCwd = path.join(tmpDir, 'repo');
     const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'reowned');
@@ -784,17 +821,27 @@ describe('restoreWorktreeContext', () => {
       'utf8',
     );
 
-    const result = await restoreWorktreeContext(
-      filePath,
-      undefined,
-      'old-owner',
-    );
+    const onWarn = vi.fn();
+    const result = await restoreWorktreeContext(filePath, onWarn, 'old-owner');
 
     expect(result).toEqual({ contextMessage: null, session: null });
     expect(await readWorktreeSession(filePath)).toEqual(live);
+    // A present marker naming another session must refuse — and through
+    // the typed error, so entry points surface the lost binding as a
+    // user-visible warning instead of a debug log line.
+    expect(onWarn).toHaveBeenCalledWith(
+      expect.any(WorktreeRestoreRefusedError),
+    );
   });
 
-  it('preserves a live sidecar whose marker is missing', async () => {
+  it('heals a missing marker and restores the binding', async () => {
+    // A missing marker is a tolerated state (pre-guard worktree,
+    // `git clean -xdf`, a failed publish), and exit_worktree's removal
+    // guard treats it as "owner unknown — allow". Refusing the restore
+    // would lock the legitimate owner out of its own worktree while the
+    // sidecar keeps advertising the binding; instead the sidecar has
+    // already passed the containment check, so the marker is re-created
+    // for the resuming session and the restore proceeds.
     const liveCwd = path.join(tmpDir, 'repo-missing');
     const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'missing');
     await fs.mkdir(liveWorktree, { recursive: true });
@@ -813,13 +860,13 @@ describe('restoreWorktreeContext', () => {
       'session-owner',
     );
 
-    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain(`"${live.slug}"`);
+    expect(result.contextMessage).toContain(live.worktreePath);
+    expect(onWarn).not.toHaveBeenCalled();
+    // The healed marker re-binds the worktree to the resuming session.
+    expect(await readWorktreeSessionMarker(liveWorktree)).toBe('session-owner');
     expect(await readWorktreeSession(filePath)).toEqual(live);
-    expect(onWarn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining('preserving sidecar'),
-      }),
-    );
   });
 
   it('rejects and preserves a sidecar when the marker is invalid', async () => {

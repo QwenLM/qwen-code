@@ -496,9 +496,20 @@ async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
 async function readBoundedRegularFile(
   filePath: string,
   maxBytes: number,
+  options?: { allowHardLinks?: boolean },
 ): Promise<string | null> {
+  // `allowHardLinks` is for the session sidecar only: createWorktreeSession
+  // publishes by linking the staged sibling onto the sidecar path and only
+  // then unlinking the sibling, so a crash leaves a complete, fsync'd
+  // sidecar at nlink 2 (matching core's readWorktreeSession, which
+  // deliberately omits the nlink check). The marker and gitdir readers keep
+  // the nlink === 1 gate.
   const pathStat = await fsPromises.lstat(filePath);
-  if (!pathStat.isFile() || pathStat.nlink !== 1 || pathStat.size > maxBytes) {
+  if (
+    !pathStat.isFile() ||
+    (!options?.allowHardLinks && pathStat.nlink !== 1) ||
+    pathStat.size > maxBytes
+  ) {
     return null;
   }
   const handle = await fsPromises.open(
@@ -509,20 +520,32 @@ async function readBoundedRegularFile(
     const openedStat = await handle.stat();
     if (
       !openedStat.isFile() ||
-      openedStat.nlink !== 1 ||
+      (!options?.allowHardLinks && openedStat.nlink !== 1) ||
       openedStat.dev !== pathStat.dev ||
       openedStat.ino !== pathStat.ino ||
       openedStat.size > maxBytes
     ) {
       return null;
     }
+    // Looped bounded read: POSIX permits short reads on regular files
+    // (FUSE/NFS), and a truncated document must not be misread as complete.
     const buffer = Buffer.alloc(maxBytes + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
     if (bytesRead > maxBytes) return null;
     const finalStat = await fsPromises.lstat(filePath);
     if (
       !finalStat.isFile() ||
-      finalStat.nlink !== 1 ||
+      (!options?.allowHardLinks && finalStat.nlink !== 1) ||
       finalStat.dev !== openedStat.dev ||
       finalStat.ino !== openedStat.ino
     ) {
@@ -676,7 +699,9 @@ export async function resolveSessionManagedGitCwd(
       createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
         sessionId,
       );
-    const sidecarRaw = await readBoundedRegularFile(sidecarPath, 64 * 1024);
+    const sidecarRaw = await readBoundedRegularFile(sidecarPath, 64 * 1024, {
+      allowHardLinks: true,
+    });
     if (sidecarRaw === null) return null;
     let sidecar: unknown;
     try {

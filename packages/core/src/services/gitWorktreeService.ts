@@ -642,14 +642,26 @@ export async function transferWorktreeSessionMarkerOwner(
 }
 
 /**
- * Reads the owning session id stored at worktree provisioning time.
- * Returns `null` when the marker is missing or unreadable — callers
- * decide whether to treat that as "owner unknown, refuse" or "owner
- * unknown, allow with explicit override".
+ * Three-way outcome of the lenient marker read. Guards that DELETE on
+ * absence (exit_worktree) must distinguish "no marker" from "present but
+ * not read conclusively" (the inode changed mid-read, or the read failed):
+ * collapsing the latter into absence would turn a detected ownership swap
+ * into "no marker — allow removal". Callers that only badge or compare
+ * owners keep using {@link readWorktreeSessionMarker}, which maps both
+ * non-owned states to `null`.
  */
-export async function readWorktreeSessionMarker(
+export type WorktreeSessionMarkerOutcome =
+  | { state: 'missing' }
+  | { state: 'owned'; sessionId: string }
+  | { state: 'inconclusive' };
+
+/**
+ * Lenient marker read reporting the full three-way outcome. See
+ * {@link readWorktreeSessionMarker} for the collapsing variant.
+ */
+export async function readWorktreeSessionMarkerOutcome(
   worktreePath: string,
-): Promise<string | null> {
+): Promise<WorktreeSessionMarkerOutcome> {
   const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
   let handle: fs.FileHandle | undefined;
   try {
@@ -658,12 +670,12 @@ export async function readWorktreeSessionMarker(
     // sibling onto the marker path and only then unlinking the sibling, so
     // the marker sits at nlink 2 inside every publish window and permanently
     // after a crash — with complete, fsync'd content. exit_worktree treats a
-    // null owner as "no marker; allow removal", so that residue must still
-    // read as owned. Reading through a hard link is harmless; writing
+    // missing marker as "no owner; allow removal", so that residue must
+    // still read as owned. Reading through a hard link is harmless; writing
     // through one is not, and the strict readers gating writes keep the
     // nlink rejection.
     const pathStat = await fs.lstat(markerPath);
-    if (!pathStat.isFile()) return null;
+    if (!pathStat.isFile()) return { state: 'inconclusive' };
     handle = await fs.open(
       markerPath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -674,7 +686,7 @@ export async function readWorktreeSessionMarker(
       openedStat.dev !== pathStat.dev ||
       openedStat.ino !== pathStat.ino
     ) {
-      return null;
+      return { state: 'inconclusive' };
     }
     const raw = await readBoundedMarker(handle);
     const finalStat = await fs.lstat(markerPath);
@@ -683,24 +695,42 @@ export async function readWorktreeSessionMarker(
       finalStat.dev !== openedStat.dev ||
       finalStat.ino !== openedStat.ino
     ) {
-      return null;
+      return { state: 'inconclusive' };
     }
-    return raw;
+    return raw === null
+      ? { state: 'missing' }
+      : { state: 'owned', sessionId: raw };
   } catch (error) {
     // Distinguish "marker missing" (legitimate — worktree predates the
     // session-ownership guard) from "marker unreadable" (disk error,
-    // permission, corrupt NFS). Both still return `null`, but the
-    // unreadable case logs so an operator chasing a "wrong session
-    // bypassed the ownership guard" report has a breadcrumb.
+    // permission, corrupt NFS). The unreadable case logs so an operator
+    // chasing a "wrong session bypassed the ownership guard" report has a
+    // breadcrumb, and reports inconclusive so deleting guards fail closed.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn(
         `readWorktreeSessionMarker: cannot read ${markerPath}: ${error}`,
       );
+      return { state: 'inconclusive' };
     }
-    return null;
+    return { state: 'missing' };
   } finally {
     await handle?.close();
   }
+}
+
+/**
+ * Reads the owning session id stored at worktree provisioning time.
+ * Returns `null` when the marker is missing, empty, or cannot be read
+ * conclusively — callers decide whether to treat that as "owner unknown,
+ * refuse" or "owner unknown, allow with explicit override". Guards that
+ * delete on `null` must use {@link readWorktreeSessionMarkerOutcome}
+ * instead so a mid-read identity change fails closed.
+ */
+export async function readWorktreeSessionMarker(
+  worktreePath: string,
+): Promise<string | null> {
+  const outcome = await readWorktreeSessionMarkerOutcome(worktreePath);
+  return outcome.state === 'owned' ? outcome.sessionId : null;
 }
 
 /**
@@ -2866,6 +2896,14 @@ export class GitWorktreeService {
         return { success: false, error: 'Worktree path identity changed' };
       }
       const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+      // Complete the interrupted publish's last step before the
+      // cleanliness gates: a crash between the marker's link and its
+      // post-commit unlink leaves `.qwen-session` (and the staged sibling)
+      // untracked with no info/exclude rule, which both `git status` and
+      // `git worktree remove` treat as blocking content. The path-identity
+      // check above proves this is the daemon-managed worktree, and the
+      // anchored rule names only the daemon's own bookkeeping files.
+      await ensureWorktreeSessionMarkerExcluded(worktreePath);
       const markerMatches = async () => {
         if (expectedOwner === null) {
           return await fs
@@ -2876,8 +2914,14 @@ export class GitWorktreeService {
               throw error;
             });
         }
+        // Read-only owner comparison, so no nlink gate (unlike the
+        // write paths): the publisher's link-then-unlink leaves the marker
+        // at nlink 2 permanently after a crash, with complete fsync'd
+        // content. Removal unlinks names and never writes through the
+        // inode, so that residue must still match its owner — refusing it
+        // would make the crash residue impossible to clean up.
         const markerStat = await fs.lstat(markerPath);
-        if (!markerStat.isFile() || markerStat.nlink !== 1) return false;
+        if (!markerStat.isFile()) return false;
         const owner = await readWorktreeSessionMarker(worktreePath);
         return owner === expectedOwner;
       };

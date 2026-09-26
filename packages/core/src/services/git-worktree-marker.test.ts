@@ -13,6 +13,7 @@ import {
   createWorktreeSessionMarker,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  readWorktreeSessionMarkerOutcome,
   replaceWorktreeSessionMarker,
   writeWorktreeSessionMarker,
   worktreeBranchForSlug,
@@ -147,6 +148,51 @@ describe('strict worktree session markers', () => {
     await expect(readWorktreeSessionMarker(repo)).resolves.toBe('session-a');
   });
 
+  it('reports inconclusive — never absence — when the marker identity changes mid-read', async () => {
+    // A concurrent ownership transfer publishes through atomicWriteFile
+    // (sibling temp + rename), so the marker path gets a new inode while
+    // the reader holds it open. Collapsing that into null would read as
+    // "no marker — allow removal" to exit_worktree's ownership guard.
+    await createWorktreeSessionMarker(repo, 'session-a');
+    const markerPath = path.join(repo, '.qwen-session');
+
+    const probe = await fs.open(markerPath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    await probe.close();
+    const originalStat = prototype.stat;
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof probe) {
+        const stats = await originalStat.call(this);
+        return Object.assign(stats, { ino: stats.ino === 1 ? 2 : 1 });
+      });
+    try {
+      await expect(readWorktreeSessionMarkerOutcome(repo)).resolves.toEqual({
+        state: 'inconclusive',
+      });
+      // The collapsing variant keeps its contract for badge-style callers.
+      await expect(readWorktreeSessionMarker(repo)).resolves.toBeNull();
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    await expect(readWorktreeSessionMarkerOutcome(repo)).resolves.toEqual({
+      state: 'owned',
+      sessionId: 'session-a',
+    });
+  });
+
+  it('distinguishes a missing marker from an owned one', async () => {
+    await expect(readWorktreeSessionMarkerOutcome(repo)).resolves.toEqual({
+      state: 'missing',
+    });
+    await createWorktreeSessionMarker(repo, 'session-a');
+    await expect(readWorktreeSessionMarkerOutcome(repo)).resolves.toEqual({
+      state: 'owned',
+      sessionId: 'session-a',
+    });
+  });
+
   it('reads an oversized marker as present, never as absent', async () => {
     // Writers cap owner ids at 512 bytes, so bounded content beyond that cap
     // can never equal a real owner — returning it keeps exit_worktree's
@@ -253,6 +299,39 @@ describe('prepared worktree cleanup', () => {
         baseCommit,
       ),
     ).resolves.toEqual({ success: true });
+  });
+
+  it('removes a prepared worktree whose marker sits at nlink 2 in the publish window', async () => {
+    // Publish residue: createWorktreeSessionMarkerExclusive links the
+    // staged sibling onto the marker path and only then unlinks the
+    // sibling, so a crash in between leaves `.qwen-session` at nlink 2
+    // with complete, fsync'd content naming the owner. The owner gate is a
+    // read-only comparison — removal unlinks names and never writes
+    // through the inode — so the residue must still match its owner;
+    // refusing it leaks the worktree, its branch, and the recovery journal
+    // forever.
+    const { baseCommit, service, worktreePath } = await createPreparedWorktree(
+      'publish-residue',
+      false,
+    );
+    const markerPath = path.join(worktreePath, '.qwen-session');
+    const stagedPath = `${markerPath}.deadbeef.tmp`;
+    await fs.writeFile(stagedPath, 'session-a', 'utf8');
+    await fs.link(stagedPath, markerPath);
+
+    await expect(
+      service.removePreparedUserWorktree(
+        'publish-residue',
+        'session-a',
+        baseCommit,
+      ),
+    ).resolves.toEqual({ success: true });
+    await expect(fs.stat(worktreePath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      service.getPreparedUserWorktreeBranchTip('publish-residue'),
+    ).resolves.toBeNull();
   });
 
   it('removes the owning worktree despite an inherited GIT_DIR', async () => {

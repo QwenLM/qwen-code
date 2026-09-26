@@ -271,6 +271,47 @@ describe('ExitWorktreeTool', () => {
       expect(branches).toContain(worktreeBranchForSlug('publish-residue'));
     });
 
+    it('refuses remove when the marker changes identity mid-read', async () => {
+      // A concurrent ownership transfer publishes through atomicWriteFile
+      // (sibling temp + rename), so the marker path gets a new inode while
+      // the guard holds it open. Reading that as "no marker" would disable
+      // the session-ownership guard exactly when it matters — fail closed.
+      const wtPath = await provisionWorktree('inconclusive-marker');
+      const markerPath = path.join(wtPath, WORKTREE_SESSION_FILE);
+
+      const probe = await fs.open(markerPath, 'r');
+      const prototype = Object.getPrototypeOf(probe) as typeof probe;
+      await probe.close();
+      const originalStat = prototype.stat;
+      const statSpy = vi
+        .spyOn(prototype, 'stat')
+        .mockImplementation(async function (this: typeof probe) {
+          const stats = await originalStat.call(this);
+          return Object.assign(stats, { ino: stats.ino === 1 ? 2 : 1 });
+        });
+      try {
+        const otherCfg = {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-stranger',
+        } as unknown as Config;
+        const result = await new ExitWorktreeTool(otherCfg)
+          .build({ name: 'inconclusive-marker', action: 'remove' })
+          .execute(new AbortController().signal);
+        expect(result.error?.message).toMatch(
+          /could not be read conclusively/i,
+        );
+      } finally {
+        statSpy.mockRestore();
+      }
+      // The worktree and its branch must survive the refused removal.
+      await expect(fs.access(wtPath)).resolves.toBeUndefined();
+      const branches = execFileSync('git', ['branch', '--list'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      });
+      expect(branches).toContain(worktreeBranchForSlug('inconclusive-marker'));
+    });
+
     it('keep returns success and leaves the worktree + branch intact', async () => {
       const wtPath = await provisionWorktree('keepme');
       const cfg = {

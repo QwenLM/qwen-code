@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -400,6 +401,104 @@ describe('resolveSessionManagedGitCwd', () => {
     expect(await resolveSessionManagedGitCwd(request, runtime)).toBe(
       fs.realpathSync(worktree),
     );
+  });
+
+  it('accepts a publish-window sidecar and reads it to EOF under short reads', async () => {
+    const worktree = path.join(repo, '.qwen', 'worktrees', 'branch-residue');
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    execFileSync(
+      'git',
+      [
+        'worktree',
+        'add',
+        '-q',
+        '-b',
+        'worktree-branch-residue',
+        worktree,
+        'HEAD',
+      ],
+      { cwd: repo },
+    );
+    fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
+    const runtime = {
+      workspaceId: 'primary',
+      workspaceCwd: repo,
+      sessionRuntimeBaseDir: runtimeBase,
+      primary: true,
+      trusted: true,
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: {
+        getSessionExecutionSnapshot: () => ({
+          workspaceCwd: repo,
+          effectiveCwd: worktree,
+          worktree: {
+            slug: 'branch-residue',
+            path: worktree,
+            branch: 'worktree-branch-residue',
+          },
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+    const sidecarPath =
+      createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
+        sessionId,
+      );
+    fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+    // Publish-window residue: createWorktreeSession links the staged
+    // sibling onto the sidecar path and only then unlinks the sibling, so
+    // a crash leaves a complete, fsync'd sidecar at nlink 2.
+    const stagedPath = `${sidecarPath}.deadbeef.tmp`;
+    fs.writeFileSync(
+      stagedPath,
+      JSON.stringify({
+        slug: 'branch-residue',
+        worktreePath: worktree,
+        worktreeBranch: 'worktree-branch-residue',
+        originalCwd: repo,
+        originalBranch: 'main',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+          encoding: 'utf8',
+        }).trim(),
+      }),
+    );
+    fs.linkSync(stagedPath, sidecarPath);
+
+    // POSIX permits short reads on regular files (FUSE/NFS); the resolver
+    // must read to EOF rather than mistake a truncated document for the
+    // whole sidecar.
+    const probe = await fsPromises.open(sidecarPath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    const shortRead = function (
+      this: typeof probe,
+      buffer: Buffer,
+      offset: number,
+      length: number,
+      position: number,
+    ) {
+      return originalRead.call(this, {
+        buffer,
+        offset,
+        length: Math.min(length, 16),
+        position,
+      });
+    };
+    const readSpy = vi
+      .spyOn(prototype, 'read')
+      .mockImplementation(shortRead as typeof prototype.read);
+    try {
+      const request = {
+        query: { cwd: worktree, sessionId },
+      } as unknown as Request;
+      expect(await resolveSessionManagedGitCwd(request, runtime)).toBe(
+        fs.realpathSync(worktree),
+      );
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('rejects a standalone repository under the managed worktree root', async () => {

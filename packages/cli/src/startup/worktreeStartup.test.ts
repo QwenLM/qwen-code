@@ -756,6 +756,52 @@ describe('persistStartupWorktreeSidecar', () => {
     );
   });
 
+  it('sanitizes terminal escapes from the conflicting owner in the error message', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('hostile-owner');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    // The owner id is raw `.qwen-session` marker content — the lenient
+    // reader only trims — so a tracked or attacker-written marker can
+    // carry terminal escapes, and this error reaches stderr unsanitized
+    // via handleCriticalError's fall-through.
+    const hostileOwner = '\x1b]0;pwned\x07';
+    await writeWorktreeSessionMarker(setup.context.worktreePath, hostileOwner);
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        hostileOwner,
+      ),
+      {
+        sessionId: hostileOwner,
+        workDir: setup.context.worktreePath,
+        pid: process.pid,
+      },
+    );
+
+    const error = await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'new-session'),
+      { ...setup.context, wasReattached: true },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WorktreeOwnershipConflictError);
+    // The raw value stays on the field for the ownership compare-and-swap…
+    expect((error as WorktreeOwnershipConflictError).ownerSessionId).toBe(
+      hostileOwner,
+    );
+    // …but the message that reaches the terminal is sanitized.
+    const message = (error as Error).message;
+    expect(message).not.toContain('\x1b');
+    expect(message).not.toContain('\x07');
+    // The OSC sequence is stripped wholesale, payload included — what
+    // remains is the plain sentence frame.
+    expect(message).toMatch(/^Worktree is owned by active session\s*$/);
+    // Sanitization is message-only: the marker keeps the raw owner.
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      hostileOwner,
+    );
+  });
+
   it('rejects an active owner under a repo-subdir relative runtime dir', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);

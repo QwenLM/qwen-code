@@ -39,6 +39,7 @@ import {
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 
@@ -49,10 +50,18 @@ export class WorktreeOwnershipConflictError extends Error {
     readonly ownerSessionId: string,
     reason: 'active' | 'unverifiable' = 'active',
   ) {
+    // ownerSessionId is raw `.qwen-session` marker content — the lenient
+    // reader only trims — so it can carry terminal escapes/control chars
+    // into a message that reaches stderr via handleCriticalError. Sanitize
+    // the interpolation only; the field keeps the raw value for the
+    // ownership comparisons and marker compare-and-swap.
+    const safeOwner = stripAnsiAndControl(
+      ownerSessionId.replace(/[\p{Cf}\s]+/gu, ' '),
+    );
     super(
       reason === 'active'
-        ? `Worktree is owned by active session ${ownerSessionId}`
-        : `Worktree ownership cannot be verified for session ${ownerSessionId}`,
+        ? `Worktree is owned by active session ${safeOwner}`
+        : `Worktree ownership cannot be verified for session ${safeOwner}`,
     );
     this.name = 'WorktreeOwnershipConflictError';
   }

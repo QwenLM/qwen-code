@@ -14,7 +14,11 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { readWorktreeSessionMarkerStrict } from './gitWorktreeService.js';
+import {
+  readWorktreeSessionMarker,
+  writeWorktreeSessionMarker,
+} from './gitWorktreeService.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const WORKTREE_SESSION_SIDECAR_MAX_BYTES = 64 * 1024;
@@ -118,6 +122,21 @@ export class WorktreeSessionReadInconclusiveError extends Error {
       `Worktree session sidecar at ${filePath} changed identity while being read`,
     );
     this.name = 'WorktreeSessionReadInconclusiveError';
+  }
+}
+
+/**
+ * Passed to {@link restoreWorktreeContext}'s `onWarn` when the marker
+ * ownership gate refuses the restore: the session still loads, but its
+ * worktree binding is silently lost — the model is never told the worktree
+ * exists, so later edits land in the original checkout. Distinct from
+ * benign restore warnings (stale sidecar cleanup) so entry points can
+ * surface it as a user-visible warning instead of a debug log line.
+ */
+export class WorktreeRestoreRefusedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'WorktreeRestoreRefusedError';
   }
 }
 
@@ -677,7 +696,7 @@ export interface WorktreeRestoreResult {
  * - returns a context message + the live session, or
  * - deletes the stale sidecar and returns nulls.
  *
- * Four "stale" cases produce sidecar cleanup so future `--resume` calls
+ * "Stale" cases produce sidecar cleanup so future `--resume` calls
  * don't keep tripping on the same broken state:
  * 1. ENOENT-followed-by-malformed-JSON (handled inside readWorktreeSession,
  *    which returns null without throwing for parse errors).
@@ -685,7 +704,11 @@ export interface WorktreeRestoreResult {
  * 3. The sidecar exists but `readWorktreeSession` threw a non-ENOENT I/O
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
- * 4. The worktree marker is missing.
+ *
+ * A missing worktree marker is NOT stale: the sidecar passed the
+ * containment check, so the binding is healed (the marker is re-created
+ * for the resuming session) and the restore proceeds. Restore is refused
+ * only when a present marker names a different session.
  *
  * A sidecar carrying `supersededBy` is refused the same way but deliberately
  * NOT cleared: a worktree reset moved ownership of that checkout to the
@@ -797,25 +820,42 @@ export async function restoreWorktreeContext(
   }
 
   if (expectedSessionId !== undefined) {
-    const marker = await readWorktreeSessionMarkerStrict(session.worktreePath);
-    if (marker.state === 'missing') {
+    // Read-side ownership check deliberately uses the LENIENT marker
+    // reader: the publisher's link-then-unlink leaves complete, fsync'd
+    // content at nlink 2 inside every publish window and permanently after
+    // a crash, and the strict reader reports that residue as invalid —
+    // which would make a legitimate owner's --resume silently lose its
+    // worktree binding on every attempt. The strict readers stay on the
+    // write paths (the heal below re-verifies through them).
+    const markerOwner = await readWorktreeSessionMarker(session.worktreePath);
+    if (markerOwner === null) {
+      // No readable marker (pre-guard worktree, `git clean -xdf`, a failed
+      // publish): the sidecar already passed the containment check above,
+      // so heal the binding by re-creating the marker for this session and
+      // continue the restore. writeWorktreeSessionMarker refuses a marker
+      // that names a different session, so a stale read cannot clobber a
+      // foreign owner here.
+      try {
+        await writeWorktreeSessionMarker(
+          session.worktreePath,
+          expectedSessionId,
+        );
+      } catch (error) {
+        onWarn?.(
+          new WorktreeRestoreRefusedError(
+            `Worktree marker could not be restored for session ` +
+              `${expectedSessionId}; refusing restore and preserving sidecar.`,
+            { cause: error },
+          ),
+        );
+        return { contextMessage: null, session: null };
+      }
+    } else if (markerOwner !== expectedSessionId) {
       onWarn?.(
-        new Error(
-          `Worktree marker is missing for session ${expectedSessionId}; ` +
-            'refusing restore and preserving sidecar.',
-        ),
-      );
-      return { contextMessage: null, session: null };
-    }
-    if (marker.state !== 'valid' || marker.sessionId !== expectedSessionId) {
-      const markerOwner =
-        marker.state === 'valid'
-          ? marker.sessionId
-          : `(invalid: ${marker.reason})`;
-      onWarn?.(
-        new Error(
-          `Worktree marker owner ${markerOwner} does not match session ` +
-            `${expectedSessionId}; refusing restore and preserving sidecar.`,
+        new WorktreeRestoreRefusedError(
+          `Worktree marker owner ${stripAnsiAndControl(markerOwner)} does ` +
+            `not match session ${expectedSessionId}; refusing restore and ` +
+            `preserving sidecar.`,
         ),
       );
       return { contextMessage: null, session: null };
