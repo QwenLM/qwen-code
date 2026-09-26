@@ -198,6 +198,135 @@ describe('createServeApp default bridge wiring', () => {
     expect(writeSameHostToolText).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['without the opt-in', {}],
+    ['with child arguments and without the opt-in', { experimentalLsp: true }],
+  ])(
+    'keeps the default Bridge on a single factory %s',
+    async (_name, extra) => {
+      let bridgeOptions: BridgeOptions | undefined;
+      vi.doMock('./acp-session-bridge.js', async () => {
+        const actual = await vi.importActual<
+          typeof import('./acp-session-bridge.js')
+        >('./acp-session-bridge.js');
+        return {
+          ...actual,
+          createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+            bridgeOptions = opts;
+            return makeBridge();
+          }),
+        };
+      });
+
+      const { createServeApp } = await import('./server.js');
+      createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: WS_BOUND,
+          ...extra,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+
+      expect(bridgeOptions?.executionEngines).toBeUndefined();
+      expect(bridgeOptions?.channelFactory === undefined).toBe(
+        !('experimentalLsp' in extra),
+      );
+    },
+  );
+
+  it.each([
+    ['the default spawn factory', {}],
+    ['the factory carrying child arguments', { experimentalLsp: true }],
+  ])('pairs the default Bridge with %s when opted in', async (_name, extra) => {
+    let bridgeOptions: BridgeOptions | undefined;
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions = opts;
+          return makeBridge();
+        }),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { defaultSpawnChannelFactory } = await import(
+      './acp-session-bridge.js'
+    );
+    createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+        experimentalPairedEngines: true,
+        ...extra,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+
+    expect(bridgeOptions?.channelFactory).toBeUndefined();
+    const engines = bridgeOptions!.executionEngines!;
+    expect(engines.legacy === defaultSpawnChannelFactory).toBe(
+      !('experimentalLsp' in extra),
+    );
+    await expect(engines.managed(WS_BOUND)).rejects.toThrow(
+      'No Managed execution engine is available in this host.',
+    );
+    await expect(
+      engines.select({
+        operation: 'spawn',
+        request: { workspaceCwd: WS_BOUND },
+        daemonOwnedStandalone: false,
+      }),
+    ).resolves.toBe('legacy');
+  });
+
+  it('pairs the default Bridge with an injected Managed engine', async () => {
+    let bridgeOptions: BridgeOptions | undefined;
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions = opts;
+          return makeBridge();
+        }),
+      };
+    });
+    const managedFactory = vi.fn();
+    const evaluate = vi.fn(() => ({ status: 'compatible' as const }));
+
+    const { createServeApp } = await import('./server.js');
+    createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+        experimentalPairedEngines: true,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { managedExecutionEngine: { factory: managedFactory, evaluate } },
+    );
+
+    const engines = bridgeOptions!.executionEngines!;
+    expect(engines.managed).toBe(managedFactory);
+    await expect(
+      engines.select({
+        operation: 'spawn',
+        request: { workspaceCwd: WS_BOUND },
+        daemonOwnedStandalone: false,
+      }),
+    ).resolves.toBe('managed');
+    expect(evaluate).toHaveBeenCalledTimes(1);
+  });
+
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;
     vi.doMock('./acp-session-bridge.js', async () => {
