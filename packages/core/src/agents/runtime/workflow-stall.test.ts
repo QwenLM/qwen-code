@@ -22,6 +22,9 @@ import { DEFAULT_RETRY_OPTIONS } from '../../utils/retry.js';
 import { getRetryDelayMs } from '../../utils/retryPolicy.js';
 
 describe('resolveStallMs', () => {
+  const fromEnv = (seconds: string) =>
+    resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: seconds });
+
   it('uses the per-call override when positive', () => {
     expect(resolveStallMs(5000, {})).toBe(5000);
   });
@@ -29,21 +32,15 @@ describe('resolveStallMs', () => {
     expect(resolveStallMs(0, {})).toBe(0);
   });
   it('falls back to env seconds when no per-call override', () => {
-    expect(
-      resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: '30' }),
-    ).toBe(30_000);
+    expect(fromEnv('30')).toBe(30_000);
   });
   it('env 0 disables', () => {
-    expect(
-      resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: '0' }),
-    ).toBe(0);
+    expect(fromEnv('0')).toBe(0);
   });
   it.each(['0x10', '1e3', '1.0', '2.5', '0x0'])(
     'ignores malformed env seconds %j',
     (value) => {
-      expect(
-        resolveStallMs(undefined, { [MAX_WORKFLOW_STALL_MS_ENV]: value }),
-      ).toBe(DEFAULT_STALL_MS);
+      expect(fromEnv(value)).toBe(DEFAULT_STALL_MS);
     },
   );
   it('falls back to default when nothing set', () => {
@@ -53,23 +50,20 @@ describe('resolveStallMs', () => {
     expect(resolveStallMs(-5, {})).toBe(DEFAULT_STALL_MS);
   });
 
-  // The default is not an arbitrary round number: it has to outlast the
-  // transport's own silent retry ladder, or a request that is retrying exactly
-  // as designed reads as a stall. `DEFAULT_RETRY_OPTIONS` in utils/retry.ts
-  // sleeps 1.5s, 3s, 6s, 12s, 24s, 30s between attempts, and agent-core
-  // consumes each `retry` stream event without emitting anything the watchdog
-  // counts as progress — so the whole ladder is one silent stretch.
-  //
-  // Asserting the relationship rather than the literal keeps this meaningful if
-  // either number is retuned later.
+  // The default has to outlast the transport's own silent retry ladder, or a
+  // request retrying exactly as designed reads as a stall:
+  // `DEFAULT_RETRY_OPTIONS` (utils/retry.ts) sleeps 1.5s, 3s, 6s, 12s, 24s, 30s
+  // between attempts, and agent-core consumes each `retry` stream event
+  // without emitting anything the watchdog counts as progress, so the whole
+  // ladder is one silent stretch. Asserting the relationship, not the literal,
+  // survives a retune of either.
   //
   // The ladder is DERIVED from `DEFAULT_RETRY_OPTIONS`, not hand-copied: a
-  // local literal would keep this test green while a retune of the real
-  // options pushed the real ladder past the window — the exact false-stall
-  // regression this test exists to prevent. Mirrors retryWithBackoff's error
-  // path: `maxAttempts - 1` sleeps, `currentDelay` doubling from
-  // `initialDelayMs` under the `maxDelayMs` cap, each sleep run through
-  // `getRetryDelayMs` with the ±30% jitter that path applies.
+  // local literal would stay green while a retune pushed the real ladder past
+  // the window (the false-stall regression this guards). Mirrors
+  // retryWithBackoff's error path: `maxAttempts - 1` sleeps, `currentDelay`
+  // doubling from `initialDelayMs` under the `maxDelayMs` cap, each through
+  // `getRetryDelayMs` with that path's ±30% jitter.
   const transportLadderMs = (random: () => number) => {
     const { maxAttempts, initialDelayMs, maxDelayMs } = DEFAULT_RETRY_OPTIONS;
     let currentDelay = initialDelayMs;
@@ -107,20 +101,25 @@ describe('attachStallWatchdog', () => {
     vi.useRealTimers();
   });
 
-  it('fires after stallMs of silence once armed (ROUND_START)', () => {
+  function watch(stallMs = 1000) {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
-    // Not armed until the first progress event — so advancing past stallMs
-    // here does nothing. In a real dispatch that event is ROUND_START, which
-    // fires before the request reaches the wire (see the doc comment on
-    // `attachStallWatchdog`), so this pre-arm silence is only round 1's
-    // pre-generator work, NOT the time-to-first-token window — that window is
-    // watched, and is pinned by the test below.
+    const wd = attachStallWatchdog(emitter, controller, stallMs);
+    const emit = (type: AgentEventType) => emitter.emit(type, {} as never);
+    return { controller, wd, emit };
+  }
+
+  it('fires after stallMs of silence once armed (ROUND_START)', () => {
+    const { controller, wd, emit } = watch();
+    // Not armed until the first progress event, so advancing past stallMs does
+    // nothing. In a real dispatch that event is ROUND_START, fired before the
+    // request reaches the wire (see `attachStallWatchdog`'s doc), so this is
+    // only round 1's pre-generator work, NOT the time-to-first-token window,
+    // which is watched (pinned below).
     vi.advanceTimersByTime(2000);
     expect(wd.stalled()).toBe(false);
     // ROUND_START arrives → watchdog arms; then silence trips it.
-    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    emit(AgentEventType.ROUND_START);
     vi.advanceTimersByTime(999);
     expect(wd.stalled()).toBe(false);
     vi.advanceTimersByTime(2);
@@ -130,18 +129,14 @@ describe('attachStallWatchdog', () => {
     wd.dispose();
   });
 
-  // Replaces a test that asserted the watchdog does not fire during the
-  // time-to-first-response window. That test never emitted ROUND_START, so it
-  // only proved that a silent emitter does not trip a watchdog that was never
-  // armed — and it encoded a model of the transport that is not true. In a real
-  // dispatch ROUND_START has already fired by this point: `sendMessageStream`
-  // returns a lazily iterated generator, so the `await` on it resolves before
-  // the request reaches the wire, and agent-core emits ROUND_START on the very
-  // next line. These two tests pin what actually happens.
+  // Replaces a test that the watchdog does not fire during time-to-first-
+  // response. It never emitted ROUND_START, so it only proved an unarmed
+  // watchdog stays quiet, and it encoded a false model of the transport: in a
+  // real dispatch `sendMessageStream` returns a lazily iterated generator, so
+  // its `await` resolves before the request reaches the wire and agent-core
+  // emits ROUND_START on the very next line. These two tests pin that.
   it('does not arm before the first progress event', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
+    const { controller, wd } = watch();
     // Nothing emitted: the timer was never armed, so nothing can elapse.
     vi.advanceTimersByTime(10_000);
     expect(wd.stalled()).toBe(false);
@@ -150,12 +145,10 @@ describe('attachStallWatchdog', () => {
   });
 
   it('DOES count the time-to-first-token window, because ROUND_START precedes the request', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
+    const { controller, wd, emit } = watch();
     // Exactly what agent-core does: emit ROUND_START immediately after
     // `await sendMessageStream(...)` resolves — i.e. before any bytes are sent.
-    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    emit(AgentEventType.ROUND_START);
     // The provider is still connecting/queueing/thinking; no deltas yet.
     vi.advanceTimersByTime(1001);
     expect(wd.stalled()).toBe(true);
@@ -164,11 +157,9 @@ describe('attachStallWatchdog', () => {
   });
 
   it('resets the timer on a progress event', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
+    const { wd, emit } = watch();
     vi.advanceTimersByTime(800);
-    emitter.emit(AgentEventType.STREAM_TEXT, {} as never); // activity → reset
+    emit(AgentEventType.STREAM_TEXT); // activity → reset
     vi.advanceTimersByTime(800);
     expect(wd.stalled()).toBe(false); // would have fired at 1000 without reset
     vi.advanceTimersByTime(300);
@@ -177,22 +168,18 @@ describe('attachStallWatchdog', () => {
   });
 
   it('suspends the timer while a tool is in flight', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
-    emitter.emit(AgentEventType.TOOL_CALL, {} as never); // tool starts
+    const { wd, emit } = watch();
+    emit(AgentEventType.TOOL_CALL); // tool starts
     vi.advanceTimersByTime(5000); // long tool — must NOT count as stall
     expect(wd.stalled()).toBe(false);
-    emitter.emit(AgentEventType.TOOL_RESULT, {} as never); // tool done → re-arm
+    emit(AgentEventType.TOOL_RESULT); // tool done → re-arm
     vi.advanceTimersByTime(1001);
     expect(wd.stalled()).toBe(true);
     wd.dispose();
   });
 
   it('does not fire after dispose', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 1000);
+    const { controller, wd } = watch();
     wd.dispose();
     vi.advanceTimersByTime(5000);
     expect(wd.stalled()).toBe(false);
@@ -200,9 +187,7 @@ describe('attachStallWatchdog', () => {
   });
 
   it('stallMs <= 0 returns an inert handle', () => {
-    const emitter = new AgentEventEmitter();
-    const controller = new AbortController();
-    const wd = attachStallWatchdog(emitter, controller, 0);
+    const { controller, wd } = watch(0);
     vi.advanceTimersByTime(100_000);
     expect(wd.stalled()).toBe(false);
     expect(controller.signal.aborted).toBe(false);
@@ -211,6 +196,33 @@ describe('attachStallWatchdog', () => {
 });
 
 describe('runStallResilient', () => {
+  const CANCELLED = 'did not complete (terminate mode: CANCELLED).';
+  /**
+   * Resolves once `signal` aborts. With `orNow`, also at once if it already
+   * has; without it an already-aborted signal hangs, as the originals did.
+   */
+  const untilAborted = (signal: AbortSignal, orNow = true) =>
+    new Promise<void>((resolve) => {
+      if (orNow && signal.aborted) return resolve();
+      signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+
+  /**
+   * A stalled attempt: emit ROUND_START so the watchdog arms (in a real
+   * dispatch it fires before the request reaches the wire, so the
+   * time-to-first-token window IS watched), go silent until the watchdog
+   * aborts the signal, then throw the "did not complete" terminal.
+   */
+  async function stall(
+    signal: AbortSignal,
+    emitter: AgentEventEmitter,
+    message = CANCELLED,
+  ): Promise<never> {
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    await untilAborted(signal);
+    throw new Error(message);
+  }
+
   it('returns the result on success (no stall, no retry)', async () => {
     let calls = 0;
     const result = await runStallResilient(
@@ -226,32 +238,15 @@ describe('runStallResilient', () => {
 
   it('retries on stall up to MAX_STALL_ATTEMPTS then abandons', async () => {
     let calls = 0;
-    // Each attempt stalls immediately: the attemptFn waits for the watchdog
-    // to abort its signal, then throws the "did not complete" terminal.
-    const attemptFn = async (
-      signal: AbortSignal,
-      emitter: AgentEventEmitter,
-    ): Promise<string> => {
+    const attemptFn = (signal: AbortSignal, emitter: AgentEventEmitter) => {
       calls += 1;
-      // Emit ROUND_START so the watchdog arms — in a real dispatch that fires
-      // before the request reaches the wire, so the time-to-first-token window
-      // IS watched — then go silent → it trips.
-      emitter.emit(AgentEventType.ROUND_START, {} as never);
-      await new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
-      throw new Error(
-        'Workflow subagent did not complete (terminate mode: CANCELLED).',
-      );
+      return stall(signal, emitter, `Workflow subagent ${CANCELLED}`);
     };
-    // Use a tiny stallMs with real timers so the watchdog fires fast.
-    let caught: unknown;
-    try {
-      await runStallResilient(attemptFn, { stallMs: 5, label: 'slow' });
-    } catch (e) {
-      caught = e;
-    }
+    // A tiny stallMs with real timers so the watchdog fires fast.
+    const caught = await runStallResilient(attemptFn, {
+      stallMs: 5,
+      label: 'slow',
+    }).catch((e: unknown) => e);
     expect(calls).toBe(MAX_STALL_ATTEMPTS);
     expect(isWorkflowAgentFailedError(caught)).toBe(true);
     expect((caught as WorkflowAgentFailedError).kind).toBe('stalled');
@@ -265,17 +260,7 @@ describe('runStallResilient', () => {
       emitter: AgentEventEmitter,
     ): Promise<string> => {
       calls += 1;
-      if (calls < 2) {
-        // First attempt stalls: emit ROUND_START to arm the watchdog — in a
-        // real dispatch that fires before the request reaches the wire — then
-        // go silent until it aborts.
-        emitter.emit(AgentEventType.ROUND_START, {} as never);
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) return resolve();
-          signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-        throw new Error('did not complete (terminate mode: CANCELLED).');
-      }
+      if (calls < 2) return stall(signal, emitter); // first attempt stalls
       return 'recovered';
     };
     const result = await runStallResilient(attemptFn, { stallMs: 5 });
@@ -291,12 +276,9 @@ describe('runStallResilient', () => {
         'Workflow subagent did not complete (terminate mode: MAX_TURNS).',
       );
     };
-    let caught: unknown;
-    try {
-      await runStallResilient(attemptFn, { stallMs: 1000 });
-    } catch (e) {
-      caught = e;
-    }
+    const caught = await runStallResilient(attemptFn, { stallMs: 1000 }).catch(
+      (e: unknown) => e,
+    );
     expect(calls).toBe(1);
     expect(String(caught)).toMatch(/MAX_TURNS/);
   });
@@ -306,22 +288,15 @@ describe('runStallResilient', () => {
     let calls = 0;
     const attemptFn = async (signal: AbortSignal): Promise<string> => {
       calls += 1;
-      await new Promise<void>((resolve) => {
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
-      throw new Error('did not complete (terminate mode: CANCELLED).');
+      await untilAborted(signal, false);
+      throw new Error(CANCELLED);
     };
     const p = runStallResilient(attemptFn, {
       stallMs: 100_000, // watchdog won't fire
       signal: parent.signal,
     });
     parent.abort('user-cancel');
-    let caught: unknown;
-    try {
-      await p;
-    } catch (e) {
-      caught = e;
-    }
+    const caught = await p.catch((e: unknown) => e);
     expect(calls).toBe(1); // no retry on parent abort
     expect(String(caught)).toMatch(/CANCELLED/);
   });
@@ -331,9 +306,7 @@ describe('runStallResilient', () => {
     let capturedSignal: AbortSignal | undefined;
     const attemptFn = async (signal: AbortSignal): Promise<string> => {
       capturedSignal = signal;
-      await new Promise<void>((resolve) => {
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
+      await untilAborted(signal, false);
       return 'aborted-and-returned';
     };
     const p = runStallResilient(attemptFn, {
