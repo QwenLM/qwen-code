@@ -102,6 +102,35 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void rejectsARequestNumberThatCannotBePersisted() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            assertEquals(200, fixture.post("/tool-sessions:acquire", Map.of(
+                    "protocolVersion", 1, "requestId", "acquire",
+                    "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime",
+                    "turnKind", "bootstrap")).statusCode());
+            String number = "1" + "7".repeat(7953) + "E+2047";
+            String body = "{\"protocolVersion\":1,\"requestId\":\"request\","
+                    + "\"idempotencyKey\":\"key\","
+                    + "\"harnessSessionId\":\"harness\","
+                    + "\"runtimeSessionId\":\"runtime\","
+                    + "\"turnId\":\"turn\",\"toolCallId\":\"call\","
+                    + "\"requestDigest\":\"digest\",\"reference\":{"
+                    + "\"sessionId\":\"runtime\",\"promptId\":\"turn\","
+                    + "\"callId\":\"call\",\"argsDigest\":\"digest\","
+                    + "\"input\":{\"value\":" + number + "}}}";
+
+            HttpResponse<String> response = fixture.postRaw("/executions",
+                    body);
+
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains(
+                    "runtime_broker_invalid_request"), response.body());
+            assertNull(fixture.executions.findByIdempotencyKey("key"));
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");

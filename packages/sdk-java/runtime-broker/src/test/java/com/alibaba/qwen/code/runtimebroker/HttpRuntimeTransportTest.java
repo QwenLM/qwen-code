@@ -960,6 +960,22 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void rejectsAToolResultNumberThatCannotBePersisted() {
+        String number = "1" + "7".repeat(7953) + "E+2047";
+        reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"settled\","
+                + "\"result\":{\"executionStatus\":\"success\","
+                + "\"responseParts\":[" + number + "]}}")
+                .getBytes(StandardCharsets.UTF_8)));
+
+        RuntimeBrokerException failure = awaitToolFailure("status");
+
+        assertEquals(400, failure.getStatusCode());
+        assertEquals("managed_runtime_attestation_invalid",
+                failure.getCode());
+        assertFalse(failure.isRetryable());
+    }
+
+    @Test
     void acceptsAToolResponseAboveTheAttestationBound() throws Exception {
         String text = "x".repeat(64 * 1024);
         reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"settled\","

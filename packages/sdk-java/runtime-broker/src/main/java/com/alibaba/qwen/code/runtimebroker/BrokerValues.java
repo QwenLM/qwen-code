@@ -12,6 +12,7 @@ import java.util.Map;
 
 final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
+    private static final int MAXIMUM_PLAIN_INTEGER_DIGITS = 10_000;
 
     private BrokerValues() {
     }
@@ -85,6 +86,17 @@ final class BrokerValues {
         if (value instanceof Number number && !isJsonFinite(number)) {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
+        }
+        if ((value instanceof BigDecimal decimal
+                && plainIntegerDigits(decimal)
+                        > MAXIMUM_PLAIN_INTEGER_DIGITS)
+                || (value instanceof BigInteger integer
+                        && integer.abs().toString().length()
+                                > MAXIMUM_PLAIN_INTEGER_DIGITS)) {
+            throw new IllegalArgumentException(
+                    "JSON number must have at most "
+                            + MAXIMUM_PLAIN_INTEGER_DIGITS
+                            + " plain integer digits");
         }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.
@@ -168,5 +180,10 @@ final class BrokerValues {
                 && !Double.isFinite(doubleValue))
                 && !(value instanceof Float floatValue
                         && !Float.isFinite(floatValue));
+    }
+
+    private static long plainIntegerDigits(BigDecimal value) {
+        return (long) value.precision()
+                + Math.max(0L, -(long) value.scale());
     }
 }
