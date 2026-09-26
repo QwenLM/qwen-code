@@ -92,5 +92,7 @@ The fixtures of the `managed-context/1` envelope,
 context digests computed with the same encoding, and
 `ManagedContextEnvelopeConformanceTest` recomputes them; see
 [Managed Context Envelope](../../../docs/design/2026-09-25-managed-context-envelope.md).
+Both fixture files carry unpaired surrogates as `\uXXXX` escapes on purpose,
+so read them with a parser that keeps such escapes, as Jackson does.
 The package uses only the JDK and no other Broker class, and nothing wires
 it into the Broker service yet.
