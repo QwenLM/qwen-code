@@ -155,8 +155,9 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 
 B2d 不注册任何引擎。此时双引擎的 `managed` factory 以“不可用”错误拒绝。没有注册引擎
 时选择器永远不会返回 `managed`，因此不会走到这个 factory；它存在只是因为双引擎 Bridge
-要求两个 factory 都存在。测试通过宿主构造方的一个依赖项注册进程内替身，并配一个桩
-评估。
+要求两个 factory 都存在。测试通过 serve app 默认 Bridge 的依赖项注册进程内替身，并
+配一个桩评估。daemon 中 `runQwenServe` 的三处构造点不注册任何引擎，直到引擎切片为每个
+runtime 构造引擎。
 
 ### 配置兼容契约
 
@@ -227,8 +228,8 @@ runtime 的作用域，其错误分类沿用 B2a。
    transcript 的第一条记录。属于 Managed 的 transcript 在 load 和 resume 时于任何
    通道启动之前以 409 `session_execution_engine_unavailable` 失败，字节保持不变。
    Legacy 历史与没有 owner 的历史在 Legacy 上恢复。
-4. 注册替身后，双引擎宿主能以两个引擎启动、恢复和关闭。即使评估返回 `compatible`，
-   延期用途仍保持 Legacy。`deferred`、`unknown` 与失败的评估使新会话选择 Legacy，并
+4. 在 serve app 上注册替身后，双引擎嵌入式宿主能以两个引擎启动、恢复和关闭。
+   即使评估返回 `compatible`，延期用途仍保持 Legacy。`deferred`、`unknown` 与失败的评估使新会话选择 Legacy，并
    使 Managed 恢复准确失败，且不向另一个引擎派发任何内容。
 5. 会话存在之后修改替身的评估，既不改变已 attach 的会话，也不改变已持久化 owner 的
    会话。
@@ -242,7 +243,8 @@ runtime 的作用域，其错误分类沿用 B2a。
 
 - 在 Managed 引擎落地之前，开关只让 Legacy 会话从创建起就是持久的，并带来 B2a 所述的
   未使用会话只含 owner 的 transcript。它不会在 Managed 上运行任何内容。
-- 在引擎切片落地之前，宿主构造方的 Managed 引擎依赖项只由测试设置。
+- 在引擎切片落地之前，serve app 的 Managed 引擎依赖项没有生产调用方；测试用它注册
+  替身。
 - 用途规则依赖创建方标注的来源，而这些来源只能让会话失去资格。如果某个延期用途的
   内部创建方不再标记其会话，那么引擎出现后这些会话就会变得有资格，因此引擎切片要
   重新审计内部创建方。

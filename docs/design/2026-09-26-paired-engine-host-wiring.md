@@ -192,7 +192,9 @@ B2d registers no engine. The paired `managed` factory then rejects with an
 unavailable error. The selector never returns `managed` without a registered
 engine, so this factory is not reached; it exists because a paired Bridge
 requires both factories. Tests register an in-process double, with a stub
-evaluation, through a dependency of the host constructors.
+evaluation, through the serve app's dependency for its default Bridge. The
+daemon's three `runQwenServe` sites register none until the engine slice
+constructs an engine for each runtime.
 
 ### Configuration compatibility contract
 
@@ -276,11 +278,11 @@ classification is B2a's.
    transcript fails load and resume with 409
    `session_execution_engine_unavailable` before any channel starts, and its
    bytes are unchanged. Legacy and owner-less histories restore on Legacy.
-4. With a registered double, paired hosts start, restore and shut down with both
-   engines. Deferred purposes stay on Legacy even when the evaluation returns
-   `compatible`. `deferred`, `unknown` and failed evaluations select Legacy for
-   new sessions and fail Managed restores precisely, with no dispatch to the
-   other engine.
+4. With a double registered on the serve app, the paired embedded host starts,
+   restores and shuts down with both engines. Deferred purposes stay on Legacy
+   even when the evaluation returns `compatible`. `deferred`, `unknown` and
+   failed evaluations select Legacy for new sessions and fail Managed restores
+   precisely, with no dispatch to the other engine.
 5. Changing the double's evaluation after sessions exist changes neither an
    attached session nor a durably owned one.
 6. `--profile hosted-harness` with `--experimental-paired-engines` rejects
@@ -296,8 +298,8 @@ classification is B2a's.
 - Until a Managed engine lands, the opt-in only makes Legacy sessions durable
   from creation, with the owner-only transcripts for unused sessions described
   in B2a. It runs nothing on Managed.
-- The host constructors' Managed-engine dependency is set only by tests until
-  the engine slice lands.
+- The serve app's Managed-engine dependency has no production caller until the
+  engine slice lands; tests use it for the double.
 - The purpose rules rely on creator-attributed sources, which can only make a
   session ineligible. An internal creator of a deferred purpose that stopped
   marking its sessions would become eligible once an engine exists, so the
