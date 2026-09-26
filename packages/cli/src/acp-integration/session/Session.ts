@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
   Content,
+  FinishReason,
   FunctionCall,
   GenerateContentResponseUsageMetadata,
   Part,
@@ -1627,6 +1628,49 @@ interface AgentResponseCapture {
     finalText: string;
   };
   agentOutput: AgentOutputMessageCapture;
+  /**
+   * The provider `finishReason` of the most recently observed stream
+   * candidate for the CURRENT model attempt, tracked independently of
+   * `agentOutput` because `AgentOutputMessageCapture.observeFinishReason`
+   * is a telemetry sink that no-ops unless sensitive span attributes are
+   * enabled -- it cannot be relied on to decide the ACP terminal stop
+   * reason. Set at every site that also calls `observeFinishReason`, and
+   * reset to `undefined` by `beginChannelDeliveryResponseBlock` at the
+   * start of each new attempt (tool-call round, or Stop hook / TODO-guard
+   * continuation) -- so it reflects only the last attempt's terminal
+   * reason, never a stale one from an earlier attempt in the same turn.
+   * An attempt whose final chunk carries no finishReason at all therefore
+   * reads back as `undefined` (safe `end_turn`), not a leaked prior
+   * `MAX_TOKENS`.
+   */
+  lastFinishReason?: FinishReason;
+}
+
+/**
+ * `'MAX_TOKENS'` as a `FinishReason` without importing the Google GenAI SDK as
+ * a runtime value. The ACP agent entry point's static import closure is
+ * checked by the repo's bundle policy and must not reach `@google/genai`, so
+ * this mirrors the same cast the shared compat module already uses
+ * (`packages/core/src/core/genai-compat.ts`: `MAX_TOKENS: 'MAX_TOKENS' as
+ * GenAiFinishReason`) rather than importing that module across the package
+ * boundary.
+ */
+const FINISH_REASON_MAX_TOKENS = 'MAX_TOKENS' as FinishReason;
+
+/**
+ * True when the turn's final observed provider finish reason is still an
+ * unresolved output-length truncation. Bounded output recovery
+ * (`MAX_OUTPUT_RECOVERY_ATTEMPTS` in `llm-chat.ts`) already tried and
+ * exhausted its attempts by the time `#handleStopHookLoop`'s natural-stop
+ * branch is reached -- if the provider's last segment still ended on
+ * `MAX_TOKENS`, the visible response is a truncated partial, not a
+ * completed turn, and the ACP client is entitled to be told so via the
+ * protocol's own `max_tokens` stop reason rather than `end_turn`.
+ */
+function isUnresolvedOutputTruncation(
+  responseCapture: AgentResponseCapture | undefined,
+): boolean {
+  return responseCapture?.lastFinishReason === FINISH_REASON_MAX_TOKENS;
 }
 
 interface ChannelDeliveryResponseBlock {
@@ -1646,6 +1690,15 @@ function beginChannelDeliveryResponseBlock(
   capture: AgentResponseCapture | undefined,
 ): ChannelDeliveryResponseBlock | undefined {
   capture?.agentOutput.beginResponse();
+  // Mirrors `agentOutput.beginResponse()`'s own per-attempt reset: this is
+  // the single point all three send sites call exactly once before
+  // consuming a new attempt's stream. Without this, a MAX_TOKENS segment
+  // from an earlier attempt in the same turn (a tool-call round, or a Stop
+  // hook / TODO-guard continuation) would survive into a later attempt
+  // that legitimately ends without ever yielding a finishReason on its
+  // final chunk, so the fallback branch would wrongly read the stale value
+  // and report `max_tokens` for what is actually a normal `end_turn`.
+  if (capture) capture.lastFinishReason = undefined;
   if (capture?.channelDelivery) capture.channelDelivery.finalText = '';
   if (capture?.turnResult) capture.turnResult.finalText = '';
   if (
@@ -6766,6 +6819,10 @@ export class Session implements SessionContext {
                         responseCapture.agentOutput.observeFinishReason(
                           candidate.finishReason,
                         );
+                        if (candidate.finishReason) {
+                          responseCapture.lastFinishReason =
+                            candidate.finishReason;
+                        }
                       }
 
                       if (
@@ -7391,7 +7448,11 @@ export class Session implements SessionContext {
       }
 
       if (!externalReason && !guardContinuation) {
-        return { stopReason: 'end_turn' };
+        return {
+          stopReason: isUnresolvedOutputTruncation(responseCapture)
+            ? 'max_tokens'
+            : 'end_turn',
+        };
       }
 
       const continueParts: Part[] = [];
@@ -7920,6 +7981,9 @@ export class Session implements SessionContext {
             options.responseCapture?.agentOutput.observeFinishReason(
               candidate.finishReason,
             );
+            if (candidate.finishReason && options.responseCapture) {
+              options.responseCapture.lastFinishReason = candidate.finishReason;
+            }
           }
 
           if (
@@ -10214,6 +10278,10 @@ export class Session implements SessionContext {
                       responseCapture.agentOutput.observeFinishReason(
                         candidate.finishReason,
                       );
+                      if (candidate.finishReason) {
+                        responseCapture.lastFinishReason =
+                          candidate.finishReason;
+                      }
                     }
 
                     if (
