@@ -7,7 +7,7 @@
 /** @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { readLanguage } from './strings.js';
+import { createChromeStrings, readLanguage } from './strings.js';
 
 describe('readLanguage', () => {
   afterEach(() => {
@@ -22,5 +22,12 @@ describe('readLanguage', () => {
   it('falls back to the navigator language when lang is unset', () => {
     document.documentElement.lang = '';
     expect(readLanguage()).toBe('en');
+  });
+});
+
+describe('createChromeStrings', () => {
+  it('keeps the Chinese untitled-session label localized', () => {
+    const strings = createChromeStrings('zh-CN');
+    expect(strings('session.untitled')).toBe('未命名');
   });
 });
