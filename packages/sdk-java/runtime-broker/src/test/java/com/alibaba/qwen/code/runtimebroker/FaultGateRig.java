@@ -136,6 +136,12 @@ final class FaultGateRig implements AutoCloseable {
 
     BrokerProcess broker(String name, FaultProxy proxy,
             Provisioner provisioner, TcpRelay relay) throws Exception {
+        return broker(name, proxy, provisioner, relay, REQUEST_TIMEOUT);
+    }
+
+    BrokerProcess broker(String name, FaultProxy proxy,
+            Provisioner provisioner, TcpRelay relay, Duration requestTimeout)
+            throws Exception {
         Map<String, Object> scopeConfig = new LinkedHashMap<>();
         scopeConfig.put("tenantId", scope.getTenantId());
         scopeConfig.put("workspaceId", scope.getWorkspaceId());
@@ -157,7 +163,7 @@ final class FaultGateRig implements AutoCloseable {
         config.put("proxyPort", proxy.port());
         config.put("operationLeaseMillis", OPERATION_LEASE.toMillis());
         config.put("dispatchLeaseMillis", DISPATCH_LEASE.toMillis());
-        config.put("requestTimeoutMillis", REQUEST_TIMEOUT.toMillis());
+        config.put("requestTimeoutMillis", requestTimeout.toMillis());
         config.put("scope", scopeConfig);
         String file = name + "-" + brokers.size();
         Path configFile = root.resolve(file + ".json");

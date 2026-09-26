@@ -115,6 +115,9 @@ class ProcessCrashFaultGateTest {
                 FaultGateRig.Provisioner.RECOVERABLE);
         rig.awaitDispatchLapse(execution);
         second.acquire(HARNESS, SESSION).requireOk();
+        // Before reuse, the restarted Broker re-proves the worker's identity:
+        // once as the provisioner observes it, once as the service adopts it.
+        assertEquals(2, secondProxy.count("attest"));
 
         // Adopted, not replaced: the same generation and lease, and the
         // second Broker started no worker of its own.

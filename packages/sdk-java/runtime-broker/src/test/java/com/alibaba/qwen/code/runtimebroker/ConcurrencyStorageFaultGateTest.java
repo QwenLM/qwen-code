@@ -47,8 +47,11 @@ class ConcurrencyStorageFaultGateTest {
         FaultProxy staleProxy = rig.proxy();
         FaultProxy takeoverProxy = rig.proxy();
         TcpRelay staleDatabase = rig.databaseRelay();
+        // The held answer must reach the stale Broker as an answer, not as a
+        // request timeout, however long the takeover takes on a slow host.
         BrokerProcess stale = rig.broker("stale", staleProxy,
-                FaultGateRig.Provisioner.RECOVERABLE, staleDatabase);
+                FaultGateRig.Provisioner.RECOVERABLE, staleDatabase,
+                FaultGateRig.WAIT.multipliedBy(2));
         BrokerProcess takeover = rig.broker("takeover", takeoverProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
         assertEquals("READY", stale.warm(HARNESS).object()
@@ -66,6 +69,9 @@ class ConcurrencyStorageFaultGateTest {
         freezeBetweenDatabaseCalls(stale, staleDatabase);
         rig.awaitDispatchLapse(execution);
         takeover.acquire(HARNESS, SESSION).requireOk();
+        // Before reuse, the takeover Broker re-proves the worker's identity:
+        // once as the provisioner observes it, once as the service adopts it.
+        assertEquals(2, takeoverProxy.count("attest"));
         assertEquals("UNKNOWN", takeover.create(HARNESS, SESSION, "key-1",
                 reference).object().getString("state"));
         long thawed = System.nanoTime();
