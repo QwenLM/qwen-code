@@ -15,11 +15,117 @@ import {
   StopHookOutput,
   PermissionRequestHookOutput,
   isToolArtifactLike,
+  isBlockingHookOutput,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
+
+const BLOCKING_REASON_FALLBACK = 'Hook exited with a blocking error';
+
+const STOP_REQUEST_BLOCKS: ReadonlySet<HookEventName> = new Set([
+  HookEventName.Stop,
+  HookEventName.SubagentStop,
+  HookEventName.PostToolBatch,
+  HookEventName.PreToolUse,
+]);
+
+function isAskingForApproval(
+  output: HookOutput,
+  eventName: HookEventName,
+): boolean {
+  if (eventName !== HookEventName.PreToolUse) return false;
+  return (
+    output.hookSpecificOutput?.['permissionDecision'] === 'ask' ||
+    output.decision === 'ask'
+  );
+}
+
+function isStopRequestThatBlocks(
+  output: HookOutput,
+  eventName: HookEventName,
+): boolean {
+  if (output.continue !== false) return false;
+  if (!STOP_REQUEST_BLOCKS.has(eventName)) return false;
+  return !isAskingForApproval(output, eventName);
+}
+
+type DenyShapeFn = (output: HookOutput, reason: string) => HookOutput;
+
+// The prompt lanes read a top-level deny decision only.
+const denyDecision: DenyShapeFn = (output, reason) => ({
+  ...output,
+  decision: 'deny',
+  reason,
+});
+
+// A blocking exit 2 has to land in the field the event's consumer reads, so
+// every lane is either shaped or audited as decision-free (null). The record
+// is total over HookEventName on purpose: a lane missing here fails to compile
+// instead of silently failing open.
+const DENY_SHAPE: Record<HookEventName, DenyShapeFn | null> = {
+  PermissionRequest: (output, reason) => {
+    const specific = { ...(output.hookSpecificOutput ?? {}) };
+    const previous = specific['decision'];
+    const decision =
+      previous && typeof previous === 'object' && !Array.isArray(previous)
+        ? { ...(previous as Record<string, unknown>) }
+        : {};
+    decision['behavior'] = 'deny';
+    decision['message'] = reason;
+    specific['decision'] = decision;
+    return {
+      ...output,
+      decision: 'deny',
+      reason,
+      hookSpecificOutput: specific,
+    };
+  },
+  PreToolUse: (output, reason) => {
+    const specific = { ...(output.hookSpecificOutput ?? {}) };
+    specific['permissionDecision'] = 'deny';
+    specific['permissionDecisionReason'] = reason;
+    return {
+      ...output,
+      decision: 'deny',
+      reason,
+      hookSpecificOutput: specific,
+    };
+  },
+  TodoCreated: (output, reason) => ({ ...output, decision: 'block', reason }),
+  TodoCompleted: (output, reason) => ({ ...output, decision: 'block', reason }),
+  Stop: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+  SubagentStop: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+  PostToolBatch: (output, reason) => ({
+    ...output,
+    continue: false,
+    stopReason: reason,
+  }),
+  UserPromptSubmit: denyDecision,
+  UserPromptExpansion: denyDecision,
+  PostToolUse: null,
+  PostToolUseFailure: null,
+  Notification: null,
+  SessionStart: null,
+  SessionEnd: null,
+  SessionDelete: null,
+  MessageDisplay: null,
+  SubagentStart: null,
+  PreCompact: null,
+  PostCompact: null,
+  PermissionDenied: null,
+  StopFailure: null,
+  InstructionsLoaded: null,
+};
 
 /**
  * Ranking for PreToolUse `hookSpecificOutput.permissionDecision` values.
@@ -89,7 +195,29 @@ export class HookAggregator {
     }
 
     const success = errors.length === 0;
-    const finalOutput = this.mergeOutputs(allOutputs, eventName);
+    let finalOutput = this.mergeOutputs(allOutputs, eventName);
+    // A blocking outcome has to end in a decision the consumer acts on: a
+    // payload with no decision, or with `allow`, runs the action, and `ask`
+    // sends it to confirmation rather than the block the hook asked for.
+    // The denial text comes from the blocking results themselves: the merge
+    // can put a sibling's reason in the blocking hook's place.
+    const blockingResults = results.filter(
+      (result) => result.outcome === 'blocking',
+    );
+    if (blockingResults.length > 0) {
+      const authorText = blockingResults
+        .flatMap((result) =>
+          result.output ? [result.output.stopReason, result.output.reason] : [],
+        )
+        .find(
+          (text): text is string => typeof text === 'string' && text !== '',
+        );
+      finalOutput = this.enforceBlockingDeny(
+        finalOutput,
+        eventName,
+        authorText,
+      );
+    }
 
     return {
       success,
@@ -98,6 +226,31 @@ export class HookAggregator {
       totalDuration,
       finalOutput,
     };
+  }
+
+  /**
+   * Rewrite a blocking aggregation that carries no deny into one, in the
+   * shape the event's consumers actually read.
+   */
+  private enforceBlockingDeny(
+    output: HookOutput | undefined,
+    eventName: HookEventName,
+    authorText: string | undefined,
+  ): HookOutput | undefined {
+    const reason = authorText ?? BLOCKING_REASON_FALLBACK;
+    if (!output) {
+      const shape = DENY_SHAPE[eventName];
+      return shape ? shape({}, reason) : undefined;
+    }
+    if (isBlockingHookOutput(eventName, output)) {
+      return output;
+    }
+    if (isStopRequestThatBlocks(output, eventName)) {
+      return output;
+    }
+    const shape = DENY_SHAPE[eventName];
+    if (!shape) return output;
+    return shape(output, reason);
   }
 
   /**

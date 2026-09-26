@@ -2365,14 +2365,22 @@ export function execCommand(
 /**
  * Resolves the path of a command in the system's PATH.
  * @param {string} command The command name (e.g., 'git', 'grep').
+ * @param {{ cwd?: string }} [opts] Directory the lookup runs from; a lookup
+ * that inherits the process cwd also searches that directory first on Windows.
  * @returns {path: string | null; error?: Error} The path of the command, or null if it is not found and any error that occurred.
  */
-export function resolveCommandPath(command: string): {
+export function resolveCommandPath(
+  command: string,
+  opts?: { cwd?: string },
+): {
   path: string | null;
   error?: Error;
 } {
   try {
     const isWin = process.platform === 'win32';
+    // No process.cwd() fallback: that read throws when the cwd is deleted;
+    // without opts the child simply inherits the process cwd.
+    const probeCwd = opts?.cwd;
 
     if (isWin) {
       const checkCommand = 'where.exe';
@@ -2383,12 +2391,33 @@ export function resolveCommandPath(command: string): {
         result = execFileSync(checkCommand, checkArgs, {
           encoding: 'utf8',
           shell: false,
-        }).trim();
-      } catch {
-        return { path: null, error: undefined };
+          // Capture the finder's stderr so a miss does not leak into the user's session.
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...(probeCwd ? { cwd: probeCwd } : {}),
+        });
+      } catch (error) {
+        // A numeric status means the finder ran: a nonzero exit is a plain
+        // miss. Without one the lookup never completed (e.g. ENOENT spawning
+        // into a missing cwd) and the cause must reach the caller.
+        if (typeof (error as { status?: unknown }).status === 'number') {
+          return { path: null, error: undefined };
+        }
+        return {
+          path: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
       }
-
-      return result ? { path: result } : { path: null };
+      if (!result) return { path: null, error: undefined };
+      const first = result.split(/\r?\n/)[0]?.trim();
+      if (!first) return { path: null, error: undefined };
+      // `path` follows the host platform; this arm must resolve Windows paths
+      // on any host so the win32 resolution stays testable off Windows.
+      const resolved =
+        !probeCwd || path.win32.isAbsolute(first)
+          ? first
+          : path.win32.resolve(probeCwd, first);
+      accessSync(resolved, fsConstants.X_OK);
+      return { path: resolved, error: undefined };
     } else {
       const shell = '/bin/sh';
       const checkArgs = ['-c', `command -v ${escapeShellArg(command, 'bash')}`];
@@ -2398,14 +2427,29 @@ export function resolveCommandPath(command: string): {
         result = execFileSync(shell, checkArgs, {
           encoding: 'utf8',
           shell: false,
-        }).trim();
-      } catch {
-        return { path: null, error: undefined };
+          // Capture the finder's stderr so a miss does not leak into the user's session.
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...(probeCwd ? { cwd: probeCwd } : {}),
+        });
+      } catch (error) {
+        // Same rule as the win32 arm: exit status present means the lookup ran.
+        if (typeof (error as { status?: unknown }).status === 'number') {
+          return { path: null, error: undefined };
+        }
+        return {
+          path: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+        };
       }
-
       if (!result) return { path: null, error: undefined };
-      accessSync(result, fsConstants.X_OK);
-      return { path: result, error: undefined };
+      const first = result.split(/\r?\n/)[0]?.trim();
+      if (!first) return { path: null, error: undefined };
+      const resolved =
+        !probeCwd || path.isAbsolute(first)
+          ? first
+          : path.resolve(probeCwd, first);
+      accessSync(resolved, fsConstants.X_OK);
+      return { path: resolved, error: undefined };
     }
   } catch (error) {
     return {
