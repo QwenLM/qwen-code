@@ -1281,12 +1281,17 @@ jobs:
       # spawns real subprocess loops on the shared ECS pool, and a main push
       # has no flaky-rerun patrol — a single host hiccup failed the lane on a
       # CSS-only commit (#12772). A real break still fails both attempts.
+      # Attempt 1 tees to a log so the warning can name the failed suites;
+      # pipefail (defaults.run.shell: bash) is what keeps node's status
+      # through that pipe. The warning is gated on the retry's success, so
+      # only an absorbed flake is annotated — a double failure reddens the
+      # lane directly (the #11364 doctrine from e2e.yml).
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} || {
-            echo '::warning::helper tests failed once; retrying against a contention flake'
-            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
+            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
+              echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
           }
 
       # State-at-failure dump for the 19 substantive steps after install: the
