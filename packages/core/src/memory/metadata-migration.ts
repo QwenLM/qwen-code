@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isMap, parseDocument } from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
@@ -34,6 +35,7 @@ import {
   scanAllUserAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   validateStructuredAutoMemoryDocument,
+  type ScannedAutoMemoryDocument,
   type StructuredAutoMemoryValidation,
 } from './structured-scan.js';
 import {
@@ -43,6 +45,8 @@ import {
 } from './types.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import { MEMORY_METADATA_ITEM_BOUNDS } from './prompt.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_MIGRATION');
 
 const MAX_FILES_PER_RUN = 10;
 const MAX_BODY_CHARS_PER_RUN = 40_000;
@@ -524,25 +528,30 @@ export async function runMemoryMetadataMigration(params: {
   result.legacyFiles = initialCandidates.length;
   result.remainingLegacyFiles = result.legacyFiles;
   const candidates = initialCandidates;
-  const docs =
-    params.scope === 'project'
-      ? (
-          await scanAutoMemorySnapshot(params.projectRoot, {
-            scopes: ['project'],
-            trustedProject: params.config.isTrustedFolder?.() ?? false,
-            uncapped: true,
-          })
-        ).docs
-      : params.scope === 'user'
-        ? await scanAllUserAutoMemoryTopicDocuments()
-        : (
+  // The vocabulary corpus is only rendered inside the candidate loop; a
+  // no-op run (the steady state once a corpus is migrated) must not pay
+  // for a full-corpus scan.
+  const docs: ScannedAutoMemoryDocument[] =
+    candidates.length === 0
+      ? []
+      : params.scope === 'project'
+        ? (
             await scanAutoMemorySnapshot(params.projectRoot, {
-              scopes: ['team'],
-              teamMemoryEnabled: true,
-              trustedProject: true,
+              scopes: ['project'],
+              trustedProject: params.config.isTrustedFolder?.() ?? false,
               uncapped: true,
             })
-          ).docs;
+          ).docs
+        : params.scope === 'user'
+          ? await scanAllUserAutoMemoryTopicDocuments()
+          : (
+              await scanAutoMemorySnapshot(params.projectRoot, {
+                scopes: ['team'],
+                teamMemoryEnabled: true,
+                trustedProject: true,
+                uncapped: true,
+              })
+            ).docs;
   const committedRoots = new Set<string>();
   const trustMustRemain =
     params.scope !== 'user' && (params.config.isTrustedFolder?.() ?? true);
@@ -627,27 +636,34 @@ export async function runMemoryMetadataMigration(params: {
       if (status === 'committed') {
         result.committed += 1;
         committedRoots.add(candidate.root);
-        const content = await fs.readFile(candidate.filePath, 'utf-8');
-        // The committed doc re-enters the vocabulary corpus: give it its real
-        // mtime so the recency-sorted budget keeps the term it just
-        // established instead of ranking the newest file as the oldest.
-        const stats = await fs.stat(candidate.filePath);
-        const migratedDoc = parseAutoMemoryTopicDocument(
-          candidate.filePath,
-          content,
-          stats.mtimeMs,
-          candidate.relativePath,
-          params.scope,
-        );
-        if (migratedDoc) {
-          const existingIndex = docs.findIndex(
-            (doc) => doc.filePath === candidate.filePath,
+        try {
+          const content = await fs.readFile(candidate.filePath, 'utf-8');
+          // The committed doc re-enters the vocabulary corpus: give it its
+          // real mtime so the recency-sorted budget keeps the term it just
+          // established instead of ranking the newest file as the oldest.
+          const stats = await fs.stat(candidate.filePath);
+          const migratedDoc = parseAutoMemoryTopicDocument(
+            candidate.filePath,
+            content,
+            stats.mtimeMs,
+            candidate.relativePath,
+            params.scope,
           );
-          if (existingIndex >= 0) {
-            docs[existingIndex] = migratedDoc;
-          } else {
-            docs.push(migratedDoc);
+          if (migratedDoc) {
+            const existingIndex = docs.findIndex(
+              (doc) => doc.filePath === candidate.filePath,
+            );
+            if (existingIndex >= 0) {
+              docs[existingIndex] = migratedDoc;
+            } else {
+              docs.push(migratedDoc);
+            }
           }
+        } catch (error) {
+          // The commit already succeeded; a file deleted or replaced in the
+          // instant before this re-read skips the vocabulary re-entry and
+          // must not be double-counted as a failure.
+          debugLogger.error('Post-commit vocabulary re-entry failed:', error);
         }
       } else if (status === 'conflict') {
         result.conflicts += 1;

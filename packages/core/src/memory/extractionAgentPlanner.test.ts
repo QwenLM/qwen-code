@@ -535,4 +535,37 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(result.touchedProjectScope).toBe(true);
     expect(result.touchedUserScope).toBe(true);
   });
+
+  it('includes the existing keyword vocabulary in the agent task prompt', async () => {
+    // The reuse-canonical-terms instruction is meaningless unless the
+    // vocabulary snapshot actually reaches the task prompt.
+    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        scope: 'project',
+        type: 'project',
+        filePath: '/tmp/auto-memory/project/conventions.md',
+        relativePath: 'project/conventions.md',
+        filename: 'conventions.md',
+        title: 'Project conventions',
+        description: 'Project conventions memory',
+        category: 'project_introduction',
+        keywords: ['terse responses', 'memory migration'],
+        usageScenarios: [],
+        body: 'Prefer terse responses.',
+        mtimeMs: 1,
+      },
+    ]);
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const taskPrompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].taskPrompt;
+    expect(taskPrompt).toContain('## Existing keyword vocabulary');
+    expect(taskPrompt).toContain('terse responses');
+  });
 });

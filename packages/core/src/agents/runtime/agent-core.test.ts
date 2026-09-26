@@ -1929,6 +1929,66 @@ describe('AgentCore.prepareTools', () => {
     expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
+  it('explicit empty tools array denies all tools (does not inherit)', async () => {
+    // An explicit `tools: []` is the documented deny-all contract (e.g.
+    // single-turn text-output agents); it must not fall into the wildcard
+    // inherit branch, or a no-tools agent silently runs with the full
+    // registry under forced auto-approval.
+    const { core, getFunctionDeclarationsSpy } = buildAgentForTools(
+      { tools: [] },
+      [
+        { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+        {
+          name: 'mcp__github__create_issue',
+          description: 'mcp deferred',
+        } as FunctionDeclaration,
+      ],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([]);
+    expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
+  });
+
+  it('explicit empty tools array denies all tools in CodeModeOnly', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        warmAll: vi.fn().mockResolvedValue(undefined),
+        getAllToolNames: vi
+          .fn()
+          .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
+        getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
+          [ToolNames.EXEC, ToolNames.READ_FILE]
+            .filter((name) => names.includes(name))
+            .map((name) => ({ name }) as FunctionDeclaration),
+        ),
+        isPermissionDeferred: vi.fn().mockReturnValue(false),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('code-mode-empty-tools'),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+      getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'code-mode-empty-tools-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      { tools: [] },
+    );
+
+    await expect(core.prepareTools()).resolves.toEqual([]);
+  });
+
   it.each(['subagent', 'teammate'])(
     'excludes parent-owned record_source from a reused registry in a %s',
     async (context) => {
