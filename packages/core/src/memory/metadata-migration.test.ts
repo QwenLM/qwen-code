@@ -1052,6 +1052,63 @@ describe('memory metadata migration', () => {
     ).resolves.toContain('Migrated memory');
   });
 
+  it.each(['project', 'user'] as const)(
+    'does not follow a %s index symlink outside the memory root',
+    async (scope) => {
+      const root = scope === 'project' ? memoryRoot : getUserAutoMemoryRoot();
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(path.join(root, 'legacy.md'), legacyContent());
+      const outside = path.join(tempDir, 'outside.md');
+      await fs.writeFile(outside, 'outside sentinel');
+      const index = path.join(root, 'MEMORY.md');
+      await fs.rm(index, { force: true });
+      await fs.symlink(outside, index, 'file');
+
+      const result = await runMemoryMetadataMigration({
+        config: {} as Config,
+        projectRoot,
+        root,
+        scope,
+        generateMetadata: async (_config, candidate) => metadata(candidate),
+      });
+
+      expect(result.committed).toBe(1);
+      await expect(fs.readFile(outside, 'utf-8')).resolves.toBe(
+        'outside sentinel',
+      );
+      expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+      await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
+    },
+  );
+
+  it('repairs a failed index write on retry without regenerating metadata', async () => {
+    await write('project/legacy.md', legacyContent());
+    const index = path.join(memoryRoot, 'MEMORY.md');
+    await fs.rm(index, { force: true });
+    await fs.mkdir(index);
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project' as const,
+      generateMetadata,
+    };
+
+    await expect(runMemoryMetadataMigration(params)).rejects.toThrow();
+    await fs.rmdir(index);
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 0,
+      committed: 0,
+      remainingLegacyFiles: 0,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
+  });
+
   it('aggregates migration agent latency and token usage', async () => {
     await write('project/one.md', legacyContent('First body'));
     await write('project/two.md', legacyContent('Second body'));
