@@ -27,6 +27,8 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
@@ -2416,7 +2418,9 @@ function currentServeFeaturesForRunQwenServe(
     scratchWorkspaceRegistrationAvailable: true,
     standaloneSessionsAvailable: true,
     workspaceTrustHotReloadAvailable: true,
-    acpHttpEnabled: resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
+    acpHttpEnabled:
+      opts.profile !== 'hosted-harness' &&
+      resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2657,6 +2661,12 @@ function createBootstrapServeApp(input: {
   } else {
     app.use(denyBrowserOriginCors);
   }
+  if (opts.profile === 'hosted-harness') {
+    app.use((req, res, next) => {
+      if (req.path === '/health' || req.path === '/capabilities') next();
+      else res.sendStatus(404);
+    });
+  }
 
   const healthHandler = (req: Request, res: Response): void => {
     const runtimeError = getRuntimeError();
@@ -2691,6 +2701,11 @@ function createBootstrapServeApp(input: {
   }
 
   app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
+    if (opts.profile === 'hosted-harness') {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({ error: 'Hosted Harness is starting.' });
+      return;
+    }
     if (multiWorkspaceCapabilitiesRequireRuntime) {
       const runtimeError = getRuntimeError();
       if (runtimeError === undefined) {
@@ -3327,7 +3342,10 @@ async function runQwenServeImpl(
   // copy before freezing runtime environments or starting auxiliary workers.
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
-  let shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
+  let shouldPreheat =
+    optsIn.profile !== 'hosted-harness' &&
+    !deps.bridge &&
+    shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
       Date.now() - Math.round(process.uptime() * 1000),
@@ -3362,6 +3380,23 @@ async function runQwenServeImpl(
     deps.bootSettings ?? {},
     'serve / ACP / web terminals',
   );
+
+  const { token, generated: generatedToken } = resolveRemoteServeToken(
+    optsIn.token,
+    isLoopbackBind(optsIn.hostname),
+  );
+  const hostedHarnessCapabilityDigest =
+    optsIn.hostedHarnessCapabilityDigest ??
+    (optsIn.profile === 'hosted-harness'
+      ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
+      : undefined);
+  validateHostedHarnessProfile({
+    ...optsIn,
+    token,
+    requireAuth:
+      optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
+    hostedHarnessCapabilityDigest,
+  });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
@@ -3429,14 +3464,15 @@ async function runQwenServeImpl(
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
+  if (optsIn.profile === 'hosted-harness' && !isLoopbackAddress(bindHostname)) {
+    throw new Error(
+      '--profile hosted-harness resolved outside the loopback interface.',
+    );
+  }
   // Generation keys on the operator's spelling (with the literal `localhost`
   // resolved once). The fail-closed backstop for a spelling that resolves
   // off-loopback is the resolved-address refusal further below — it must not
   // be folded into this operand, which by construction never sees it.
-  const { token, generated: generatedToken } = resolveRemoteServeToken(
-    optsIn.token,
-    isLoopbackBind(optsIn.hostname),
-  );
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
@@ -3488,22 +3524,30 @@ async function runQwenServeImpl(
   const opts: ServeOptions = {
     ...optsIn,
     hostname: bindHostname,
+    requireAuth:
+      optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     maxRegisteredWorkspaces: resolveMaxRegisteredWorkspaces(
       optsIn.maxRegisteredWorkspaces,
       daemonRuntimeBaseEnv,
     ),
     token,
+    hostedHarnessCapabilityDigest,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
     clientMcpOverWs:
-      optsIn.clientMcpOverWs ??
-      (!envFlagDisabled(clientMcpOverWsEnv) &&
-        clientMcpOverWsEnv !== undefined),
+      optsIn.profile === 'hosted-harness'
+        ? false
+        : (optsIn.clientMcpOverWs ??
+          (!envFlagDisabled(clientMcpOverWsEnv) &&
+            clientMcpOverWsEnv !== undefined)),
     cdpTunnelOverWs:
-      optsIn.cdpTunnelOverWs ??
-      (!envFlagDisabled(cdpTunnelOverWsEnv) &&
-        (cdpTunnelOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
+      optsIn.profile === 'hosted-harness'
+        ? false
+        : (optsIn.cdpTunnelOverWs ??
+          (!envFlagDisabled(cdpTunnelOverWsEnv) &&
+            (cdpTunnelOverWsEnv !== undefined ||
+              chromeExtensionOriginAllowed))),
   };
   let channelRuntime = opts.channelSelection
     ? await loadChannelWorkerRuntime()
@@ -4228,6 +4272,7 @@ async function runQwenServeImpl(
    * that "was not restored".
    */
   const startupChannelsForWorkspace = (workspaceCwd: string): string[] => {
+    if (opts.profile === 'hosted-harness') return [];
     const restored = resolveStartupChannelSelection({
       // Never the primary workspace, and read from disk rather than from the
       // boot snapshot: this runs long after boot, and the file may have been
@@ -4242,6 +4287,7 @@ async function runQwenServeImpl(
     return restored.selection?.mode === 'names' ? restored.selection.names : [];
   };
   if (
+    opts.profile !== 'hosted-harness' &&
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
       startupChannelWorkspaces.length > 1)
@@ -8170,7 +8216,7 @@ async function runQwenServeImpl(
       // The real long-running daemon keeps scheduled-task sessions resident
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
-      manageScheduledTaskSessions: true,
+      manageScheduledTaskSessions: opts.profile !== 'hosted-harness',
       currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,

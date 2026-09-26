@@ -1851,12 +1851,16 @@ export default {
     'Contexto excede o limite! Use /compress ou /clear para reduzir.',
   'No API response yet. Send a message to see actual usage.':
     'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
+  'Estimated usage, including the conversation':
+    'Uso estimado, incluindo a conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Ainda não há uso do provedor. Estas são estimativas locais, incluindo a conversa.',
   'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
   'Context window': 'Janela de Contexto',
   tokens: 'tokens',
   Used: 'Usado',
   Free: 'Livre',
-  'Autocompact buffer': 'Buffer de autocompactação',
+  'Autocompact buffer': 'Buffer de compactação',
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',

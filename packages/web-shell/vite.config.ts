@@ -45,8 +45,14 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
+const managedAgentJavaProxy: ProxyOptions = {
+  target: process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+  changeOrigin: true,
+};
+
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
+export const MANAGED_AGENT_JAVA_ROUTE_PROXY = '/api/agent/web-shell/v1';
 
 // Exact-path on purpose. A bare `/brand` prefix would also match
 // `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
@@ -174,6 +180,7 @@ export default defineConfig(({ command }) => ({
     },
     port: 5173,
     proxy: {
+      [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with

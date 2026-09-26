@@ -65,7 +65,7 @@ public interface RuntimeProvisioner extends AutoCloseable {
 
     /**
      * Tears down the resource behind a lease the caller has decided to
-     * discard, keyed by the lease's runtime instance so a fenced loser can
+     * discard, keyed by the complete lease identity so a fenced loser can
      * never kill the winning resource for the same request. The default
      * has nothing to release.
      */
