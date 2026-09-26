@@ -162,12 +162,12 @@ function isClosedAttestationRequest(
   );
 }
 
-const noStore: RequestHandler = (_req, res, next) => {
+export const managedRuntimeNoStore: RequestHandler = (_req, res, next) => {
   res.setHeader('Cache-Control', ATTEST_ROUTE.cacheControl);
   next();
 };
 
-function authorize(
+export function authorizeManagedRuntime(
   identity: ManagedRuntimeAttestationIdentity,
 ): RequestHandler {
   return (req, res, next): void => {
@@ -246,7 +246,12 @@ function handleAttestation(
   };
 }
 
-const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
+export const handleManagedRuntimeJsonError: ErrorRequestHandler = (
+  error,
+  _req,
+  res,
+  next,
+) => {
   if (res.headersSent) {
     next(error);
     return;
@@ -259,7 +264,7 @@ const handleJsonError: ErrorRequestHandler = (error, _req, res, next) => {
   ) {
     res.status(413).json({
       code: 'managed_runtime_attestation_too_large',
-      error: 'Managed Runtime attestation request exceeds 16 KiB.',
+      error: 'Managed Runtime request exceeds its body size limit.',
     });
     return;
   }
@@ -291,8 +296,8 @@ export function registerManagedRuntimeAttestationRoute(
   >;
   app[method](
     ATTEST_ROUTE.path,
-    noStore,
-    authorize(identitySnapshot),
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identitySnapshot),
     express.json({
       // Compressed private requests add no value at 16 KiB. Refusing them
       // keeps the limit on wire bytes and makes corrupt streams use the JSON
@@ -303,7 +308,7 @@ export function registerManagedRuntimeAttestationRoute(
       type: 'application/json',
     }),
     handleAttestation(identitySnapshot, responseJson),
-    handleJsonError,
+    handleManagedRuntimeJsonError,
   );
 }
 
@@ -311,7 +316,9 @@ export function isOwnedManagedRuntimeRoute(
   method: string | undefined,
   url: string | undefined,
 ): boolean {
-  return method === ATTEST_ROUTE.method && url === ATTEST_ROUTE.path;
+  return OWNED_MANAGED_RUNTIME_ROUTES.some(
+    (route) => method === route.method && url === route.path,
+  );
 }
 
 export function ownedManagedRuntimeRouteGate(

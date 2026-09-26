@@ -27,6 +27,7 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
@@ -3362,6 +3363,8 @@ async function runQwenServeImpl(
     deps.bootSettings ?? {},
     'serve / ACP / web terminals',
   );
+
+  validateHostedHarnessProfile(optsIn);
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
