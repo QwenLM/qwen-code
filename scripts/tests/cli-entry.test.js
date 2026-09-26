@@ -450,5 +450,67 @@ describe('scripts/cli-entry.js production entry', () => {
         delete process.env.QWEN_CODE_LAUNCHER_PATH;
       }
     });
+
+    it('defers a --bg launch to cli.js instead of exiting on its version token', async () => {
+      // `qwen --bg -v "$TASK"`: the version token is one of that launch's
+      // prompt words. Intercepting it here printed a version and exited 0
+      // before cli.js ever ran, so a wrapper's `qwen --bg -v "$TASK" &&
+      // notify` reported success with no session started.
+      process.argv = [
+        'node',
+        'scripts/cli-entry.js',
+        '--bg',
+        '-v',
+        'audit the release',
+      ];
+      process.env.CLI_VERSION = '9.9.9';
+      const writes = [];
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(String(chunk));
+          return true;
+        });
+      try {
+        await import('../cli-entry.js?bg-version-token');
+
+        expect(writes).not.toContain('9.9.9\n');
+        expect(exitSpy).not.toHaveBeenCalledWith(0);
+        // The launch reached cli.js, which owns the --bg gate, with every
+        // token intact.
+        expect(process.argv.slice(1)).toEqual([
+          cliPath,
+          '--bg',
+          '-v',
+          'audit the release',
+        ]);
+      } finally {
+        writeSpy.mockRestore();
+        delete process.env.CLI_VERSION;
+      }
+    });
+
+    it('still fast-paths a plain version request', async () => {
+      // The --bg deferral is narrow: an argv with no --bg token keeps the
+      // in-process fast path, so the fix cannot cost every `qwen --version`.
+      process.argv = ['node', 'scripts/cli-entry.js', '--version'];
+      process.env.CLI_VERSION = '9.9.9';
+      const writes = [];
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(String(chunk));
+          return true;
+        });
+      try {
+        await import('../cli-entry.js?plain-version');
+
+        expect(writes).toContain('9.9.9\n');
+        expect(exitSpy).toHaveBeenCalledWith(0);
+      } finally {
+        writeSpy.mockRestore();
+        delete process.env.CLI_VERSION;
+      }
+    });
   });
 });

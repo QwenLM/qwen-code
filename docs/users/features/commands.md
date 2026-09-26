@@ -715,11 +715,11 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command                     | Description                                 | Usage Examples                                                                   |
-| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
-| `qwen sessions list`        | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
-| `qwen sessions ps`          | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                                    |
-| `qwen sessions controllers` | Manage trusted controller tokens            | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
+| Command                     | Description                         | Usage Examples                                                                   |
+| --------------------------- | ----------------------------------- | -------------------------------------------------------------------------------- |
+| `qwen sessions list`        | List recent conversation sessions   | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
+| `qwen sessions ps`          | List the sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                                    |
+| `qwen sessions controllers` | Manage trusted controller tokens    | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
 
 #### `qwen sessions list`
 
@@ -758,6 +758,20 @@ qwen sessions list --limit 50
 # Output as JSON for scripting
 qwen sessions list --json | jq .
 ```
+
+#### `qwen --bg "<prompt>"`
+
+Experimental. Runs a prompt as a background session and returns once the worker has started, printing the session id.
+
+The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it as a `managed` row. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents` and can be addressed with `send_message` (see [Messaging Another Running Session](#6-messaging-another-running-session)).
+
+```bash
+qwen --bg "find out why the release job is flaky"
+# Started background session 0f8e...c31
+# See it with: qwen sessions ps
+```
+
+What it does not do yet: `sessions ps` reports the row's directory, not what the session is doing, and there is no way to attach to a background session, read its transcript, answer its question from the CLI, or stop it. Those land with the Agent View roster.
 
 #### `qwen sessions ps`
 

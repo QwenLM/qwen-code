@@ -808,6 +808,11 @@ function normalizeLaunch(
     ...raw,
     schemaVersion: 1,
     sessionId,
+    // Validated like every other text field: this value is read back as
+    // `launch.resumeSessionId ?? launch.sessionId` when a launch's PTY host
+    // identity is checked, so a non-string or empty spelling must not
+    // survive normalization.
+    resumeSessionId: stringValue(raw['resumeSessionId']),
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,
@@ -890,6 +895,13 @@ function normalizeWorker(
     schemaVersion: 1,
     hostPid: numberValue(raw['hostPid']),
     workerPid: numberValue(raw['workerPid']),
+    // `null` rather than `undefined` for an absent token: it is the value
+    // `isSameProcess` reads as "no identity recorded, fall back to a bare
+    // liveness check", so a pre-identity worker file keeps its old
+    // behaviour instead of being treated as a mismatch.
+    hostProcStart: stringValue(raw['hostProcStart']) ?? null,
+    workerProcStart: stringValue(raw['workerProcStart']) ?? null,
+    pidNs: numberValue(raw['pidNs']) ?? null,
     endpoint: stringValue(raw['endpoint']),
     hostEndpoint: stringValue(raw['hostEndpoint']),
     hostAuthToken: stringValue(raw['hostAuthToken']),

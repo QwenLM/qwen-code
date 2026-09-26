@@ -115,6 +115,28 @@ export interface AgentViewWorkerFile {
   schemaVersion: 1;
   hostPid?: number;
   workerPid?: number;
+  /**
+   * Process start tokens for the pids above, and the PID namespace they
+   * were recorded in.
+   *
+   * A pid number does not identify a process. Nothing reaps this store
+   * while no supervisor runs, so a crash or a reboot leaves recorded pids
+   * behind that the OS later recycles to unrelated processes; and a
+   * shared `~/.qwen` — an NFS home, a devcontainer with the home mounted
+   * — puts another machine's pids in front of a reader who would resolve
+   * them in its own namespace. A reader pairs these with `isSameProcess`
+   * to answer the question the live-session registry already answers for
+   * its own records.
+   *
+   * All three are optional on purpose: this is a durable
+   * `schemaVersion: 1` record, and a file written before these fields
+   * existed must stay readable. A reader that finds them absent degrades
+   * to a bare liveness check — the same rule `isSameProcess` applies on a
+   * platform that has no start token.
+   */
+  hostProcStart?: string | null;
+  workerProcStart?: string | null;
+  pidNs?: number | null;
   endpoint?: string;
   hostEndpoint?: string;
   hostAuthToken?: string;

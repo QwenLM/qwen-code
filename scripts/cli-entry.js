@@ -46,13 +46,43 @@ function isInProcessFastPath() {
     return true;
   }
   if (first === undefined || first.startsWith('-')) {
+    if (hasBackgroundFlagToken()) {
+      return false;
+    }
     return hasFlag('--help', '-h') || hasFlag('--version', '-v');
+  }
+  return false;
+}
+
+// True when argv carries a `--bg`-shaped token before any `--`.
+//
+// A background launch is decided by cli.js, which owns the real gate: it
+// knows the boolean off spellings, every other flag's value slot, and where
+// the prompt starts. This wrapper only has to avoid swallowing the launch
+// into a fast path that exits before cli.js runs — intercepting the version
+// token of `qwen --bg -v "$TASK"` printed a version and exited 0, so a
+// wrapper's `&& notify` reported success with nothing running.
+//
+// The test is therefore deliberately coarser than the gate's: any
+// `--bg`-shaped token defers to cli.js, including the off spellings that
+// are not a launch. Over-approximating only costs the fast path — cli.js
+// still prints the version for `qwen --bg=false --version` — whereas
+// re-deriving the off-value grammar here would be a ninth copy of it.
+function hasBackgroundFlagToken() {
+  for (const arg of cliArgs) {
+    if (arg === '--') {
+      return false;
+    }
+    if (arg === '--bg' || arg.startsWith('--bg=')) {
+      return true;
+    }
   }
   return false;
 }
 
 const isTopLevelVersion =
   (cliArgs[0] === undefined || cliArgs[0].startsWith('-')) &&
+  !hasBackgroundFlagToken() &&
   hasFlag('--version', '-v');
 
 if (isTopLevelVersion && process.env['CLI_VERSION']) {
