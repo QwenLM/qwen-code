@@ -77,11 +77,17 @@ import {
 import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type {
-  WorkflowDispatchTraceStatus,
-  WorkflowTask,
+import {
+  isActiveWorkflowStatus,
+  type WorkflowDispatchTraceStatus,
+  type WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
+import {
+  sanitizeWorkflowText,
+  stringifyWorkflowResult,
+  workflowResultReplacer,
+} from '../../agents/workflow-result-format.js';
 import {
   buildWorkflowSizeGuidelineParagraph,
   resolveWorkflowSizeGuidelineSetting,
@@ -258,6 +264,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   WorkflowToolResult
 > {
   private callId?: string;
+  private notifyOnCompletion = false;
+
+  setCompletionNotificationEnabled(enabled: boolean): void {
+    this.notifyOnCompletion =
+      enabled &&
+      this.config.isInteractive?.() === true &&
+      this.config.getExperimentalZedIntegration?.() !== true;
+  }
 
   /**
    * The failure hint, when the failing script is one this call authored.
@@ -544,6 +558,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
+        notifyOnCompletion: this.notifyOnCompletion,
         ...(!this.sessionOwned && this.config.isWorkflowNameOnly?.() === true
           ? { restrictNestedScriptPaths: true }
           : {}),
@@ -705,7 +720,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const failureText = cancelled
         ? 'Workflow cancelled.'
         : `Workflow failed: ${clampForDisplay(
-            sanitizeBlock(message),
+            sanitizeWorkflowText(message),
             TRAILER_ERROR_CHARS,
           )}`;
       const trailer = buildRunTrailer(
@@ -983,7 +998,13 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
     };
   }
   try {
-    return '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
+    const guidance =
+      entry.notifyOnCompletion &&
+      !entry.isBackgrounded &&
+      isActiveWorkflowStatus(entry.status)
+        ? `Workflow ${entry.runId}: watch progress in this tool card.\n`
+        : '';
+    return guidance + '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
   } catch {
     return `Workflow ${entry.runId} — ${entry.status} — ${entry.phases.length} phase(s)`;
   }
@@ -1044,23 +1065,6 @@ const CONFIRM_STRUCTURE_HEADING =
  */
 function sanitizeLine(text: string): string {
   return stripAnsiAndControl(text);
-}
-
-/**
- * Sanitize text whose line structure is meaningful (the script excerpt).
- *
- * `stripAnsiAndControl` removes C0 controls, and `\n` is one of them — running
- * it over a script would collapse it to a single unreadable line. Sanitize each
- * line separately so the structure survives while escape sequences do not.
- * Tabs become spaces first, since they would otherwise be stripped and silently
- * destroy indentation.
- */
-function sanitizeBlock(text: string): string {
-  return text
-    .replace(/\t/g, '  ')
-    .split('\n')
-    .map((line) => stripAnsiAndControl(line))
-    .join('\n');
 }
 
 /** Clamp already-sanitized text, naming what was dropped rather than eliding it. */
@@ -1249,7 +1253,10 @@ function buildConfirmationPrompt(
       loaded
         ? `Script (${WORKFLOW_RULE_DIGEST_KEY} ${loaded.digest}):`
         : 'Script:',
-      clampForDisplay(sanitizeBlock(scriptText), CONFIRM_SCRIPT_EXCERPT_CHARS),
+      clampForDisplay(
+        sanitizeWorkflowText(scriptText),
+        CONFIRM_SCRIPT_EXCERPT_CHARS,
+      ),
     );
   }
 
@@ -1416,13 +1423,7 @@ function safeEmitUpdate(
  * successful workflow is not reported as a failure.
  */
 function safeStringifyResult(result: unknown): string {
-  if (result === undefined) return '(workflow returned no value)';
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result, null, 2);
-  } catch {
-    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
-  }
+  return stringifyWorkflowResult(result, true);
 }
 
 /**
@@ -1436,13 +1437,13 @@ function safeStringifyResult(result: unknown): string {
  */
 function safeStringifyDisplayPayload(payload: unknown): string {
   try {
-    return JSON.stringify(payload, null, 2);
+    return JSON.stringify(payload, workflowResultReplacer, 2);
   } catch {
     if (payload && typeof payload === 'object') {
       const sanitized: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(payload)) {
         try {
-          JSON.stringify(value);
+          JSON.stringify(value, workflowResultReplacer);
           sanitized[key] = value;
         } catch {
           sanitized[key] =
@@ -1450,7 +1451,7 @@ function safeStringifyDisplayPayload(payload: unknown): string {
         }
       }
       try {
-        return JSON.stringify(sanitized, null, 2);
+        return JSON.stringify(sanitized, workflowResultReplacer, 2);
       } catch {
         // Fall through to the generic fallback string below.
       }

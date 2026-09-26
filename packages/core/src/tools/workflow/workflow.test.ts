@@ -1303,6 +1303,128 @@ await agent('scan package.json')
     expect(updateOutput).not.toHaveBeenCalled();
   });
 
+  it('keeps a client-started workflow in the foreground and reports its completion', async () => {
+    const registry = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const invocation = tool.build({
+      script: `phase('audit'); return { result: await agent('check fr') };`,
+    });
+    (
+      invocation as unknown as {
+        setCompletionNotificationEnabled: (enabled: boolean) => void;
+      }
+    ).setCompletionNotificationEnabled(true);
+    const updateOutput = vi.fn();
+    let settled = false;
+    const execution = invocation
+      .execute(new AbortController().signal, updateOutput)
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    expect(settled).toBe(false);
+    expect(registry.list()[0].isBackgrounded).toBe(false);
+    expect(
+      updateOutput.mock.calls.some(([text]) =>
+        text.includes('watch progress in this tool card.'),
+      ),
+    ).toBe(true);
+    expect(completion).not.toHaveBeenCalled();
+    resolveDispatch?.('French checked');
+    const result = await execution;
+    expect(JSON.stringify(result.llmContent)).toContain('French checked');
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][0]).toContain('French checked');
+    expect(completion.mock.calls[0][1]).toContain('French checked');
+  });
+
+  it.each(['caller', 'dialog'])(
+    'replaces running progress with cancelled state after %s cancellation',
+    async (source) => {
+      const { config, registry } = configWithRegistry();
+      config.isInteractive = () => true;
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      let rejectDispatch: ((error: Error) => void) | undefined;
+      const invocation = new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((_resolve, reject) => {
+            rejectDispatch = reject;
+          }),
+      }).build({ script: "phase('audit'); return await agent('held agent');" });
+      (
+        invocation as unknown as {
+          setCompletionNotificationEnabled: (enabled: boolean) => void;
+        }
+      ).setCompletionNotificationEnabled(true);
+      const caller = new AbortController();
+      const updateOutput = vi.fn();
+      const execution = invocation.execute(caller.signal, updateOutput);
+      await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+      const runId = registry.list()[0].runId;
+      expect(updateOutput.mock.lastCall?.[0]).toContain('"status": "running"');
+      expect(updateOutput.mock.lastCall?.[0]).toContain(
+        `Workflow ${runId}: watch progress in this tool card.`,
+      );
+
+      if (source === 'caller') caller.abort();
+      else registry.cancel(runId, Date.now());
+      rejectDispatch?.(new Error('Request was aborted'));
+      await execution;
+
+      const lastDisplay = updateOutput.mock.lastCall?.[0];
+      expect(lastDisplay).toContain(runId);
+      expect(lastDisplay).toContain('"status": "cancelled"');
+      expect(lastDisplay).not.toContain('"status": "running"');
+      expect(lastDisplay).not.toContain('watch progress');
+      expect(registry.get(runId)?.dispatches[0].status).toBe('cancelled');
+      expect(completion).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { interactive: false, acp: false },
+    { interactive: true, acp: true },
+  ])(
+    'keeps completion routing unchanged outside the TUI: %j',
+    async ({ interactive, acp }) => {
+      const registry = new WorkflowRunRegistry();
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      const config = {
+        isInteractive: () => interactive,
+        getExperimentalZedIntegration: () => acp,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const invocation = new WorkflowTool(config).build({
+        script: 'return 42;',
+      });
+      (
+        invocation as unknown as {
+          setCompletionNotificationEnabled: (enabled: boolean) => void;
+        }
+      ).setCompletionNotificationEnabled(true);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(JSON.stringify(result.llmContent)).toContain('42');
+      expect(completion).not.toHaveBeenCalled();
+    },
+  );
+
   it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
     const run = async (runInBackground: false | undefined) => {
       const registry = new WorkflowRunRegistry();
@@ -1436,6 +1558,30 @@ await agent('scan package.json')
     expect(JSON.parse(llmText)).toEqual(['T:a', 'T:b']);
   });
 
+  it('execute() preserves returned VM Errors and collections in the card and model result', async () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const invocation = tool.build({
+      script: `return {
+        error: new Error('disk full'),
+        failed: new Map([['agent-1', new Error('rate limited')]]),
+        errors: new Set(['agent-2: timeout'])
+      };`,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const expected = {
+      error: 'Error: disk full',
+      failed: [['agent-1', 'Error: rate limited']],
+      errors: ['agent-2: timeout'],
+    };
+    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
+    expect(JSON.parse(llmText)).toEqual(expected);
+    const displayJson = String(result.returnDisplay).match(
+      /```json\n([\s\S]*?)\n```/,
+    )![1];
+    expect(JSON.parse(displayJson).result).toEqual(expected);
+  });
+
   // P3 (PR #5xxx): schema mode end-to-end through WorkflowTool. The
   // dispatch returns the validated structured payload as an object; the
   // sandbox revives it per-call into the vm realm; the script reads it
@@ -1564,24 +1710,32 @@ await agent('scan package.json')
   // the runId, the phases, AND the logs. safeStringifyDisplayPayload now
   // degrades per-field on the failure path so always-serializable
   // metadata survives regardless of which field went bad.
-  it('execute() preserves runId/phases/logs in returnDisplay when result is non-JSON-serializable', async () => {
-    const tool = new WorkflowTool(fakeConfig(), {
-      dispatch: async () => 'unused',
-    });
-    const invocation = tool.build({
-      script: 'phase("compute"); const a = {}; a.self = a; return a;',
-    });
-    const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeUndefined();
-    const display = String(result.returnDisplay);
-    // runId, the phase, and a result placeholder must all survive.
-    expect(display).toMatch(/wf_[0-9a-f]{16}/);
-    expect(display).toContain('compute');
-    expect(display).toContain('non-JSON-serializable');
-    // The atomic-failure fallback must NOT appear — that would mean the
-    // whole display payload had thrown.
-    expect(display).not.toContain('display payload not JSON-serializable');
-  });
+  it.each([
+    'const a = {}; a.self = a; return a;',
+    'return { error: new Error("disk full"), count: 1n };',
+    'return new Map([["agent-1", 1n]]);',
+  ])(
+    'execute() preserves runId/phases/logs when result cannot be serialized: %s',
+    async (script) => {
+      const tool = new WorkflowTool(fakeConfig(), {
+        dispatch: async () => 'unused',
+      });
+      const invocation = tool.build({
+        script: `phase("compute"); log("before result"); ${script}`,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      const display = String(result.returnDisplay);
+      // runId, the phase, and a result placeholder must all survive.
+      expect(display).toMatch(/wf_[0-9a-f]{16}/);
+      expect(display).toContain('compute');
+      expect(display).toContain('before result');
+      expect(display).toContain('non-JSON-serializable');
+      // The atomic-failure fallback must NOT appear — that would mean the
+      // whole display payload had thrown.
+      expect(display).not.toContain('display payload not JSON-serializable');
+    },
+  );
 
   // P4: execute() surfaces the extracted `export const meta = {...}` in
   // the returnDisplay payload so the user (and a future /workflows

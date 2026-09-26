@@ -6397,11 +6397,17 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
       admitNotification({
         displayText,
         modelText,
@@ -6409,12 +6415,13 @@ export const useLlmStream = (
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [admitNotification, config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
