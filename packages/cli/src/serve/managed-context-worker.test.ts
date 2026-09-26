@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,7 @@ import {
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 interface Expected {
   readonly status: number;
@@ -213,6 +215,22 @@ function shell(sessionId: string, callId: string, command: string) {
   };
 }
 
+/**
+ * A shell command that writes the session and project directory its shell
+ * sees to `file`, in any shell the Shell tool picks.
+ */
+function writeShellEnvironment(file: string): string {
+  const script =
+    "process.stdout.write([process.env.QWEN_CODE_SESSION_ID, process.env.QWEN_CODE_PROJECT_DIR].join('|'))";
+  return `"${process.execPath}" -e "${script}" > ${file}`;
+}
+
+/** The session a Runtime Session's calls run as. */
+function sessionKey(sessionId: string): string {
+  const digest = createHash('sha256').update(sessionId).digest('hex');
+  return `${BOOT.runtimeInstanceId}.${digest.slice(0, 32)}`;
+}
+
 function tools(directory: string) {
   return createManagedToolSet(directory, 'runtime-01');
 }
@@ -237,6 +255,25 @@ describe('Managed context worker boot', () => {
       }
     },
   );
+
+  it.each([
+    ['an encoded surrogate', Buffer.from([0xed, 0xa0, 0x80])],
+    ['a byte that is never UTF-8', Buffer.from([0xff])],
+  ])('refuses a boot v2 document with %s', async (_label, bytes) => {
+    const [before, after] = JSON.stringify({
+      ...BOOT,
+      mountRoot: '/mnt/X',
+    }).split('X');
+    const document = Buffer.concat([
+      Buffer.from(before!),
+      bytes,
+      Buffer.from(after!),
+    ]);
+
+    await expect(
+      readManagedRuntimeWorkerBoot(Readable.from([document])),
+    ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
+  });
 
   it('answers ready v2 and serves exactly the boot v2 routes', async () => {
     const worker = await startManagedRuntimeAttestationWorker(BOOT);
@@ -476,7 +513,7 @@ describe('Managed context installation', () => {
     },
   );
 
-  it('refuses a directory that does not exist and records nothing', async () => {
+  it('refuses a directory that does not exist, and the same request succeeds after a repair', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });
     const request = installation('session-1', 'services/missing');
@@ -553,19 +590,18 @@ describe('Managed context installation', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    "refuses a mount root in the other platform's form",
+    "refuses a mount root in the other platform's form without resolving it",
     async () => {
-      // Resolved as a relative path, the root would name this directory.
-      const relative = `C:\\qwen-host-root-${process.pid}`;
-      fs.mkdirSync(path.join(relative, 'services', 'api'), { recursive: true });
-      onTestFinished(() =>
-        fs.rmSync(relative, { recursive: true, force: true }),
-      );
-      const origin = await startWorker({ ...BOOT, mountRoot: relative });
+      // As a relative path, the root would resolve against the working
+      // directory.
+      const realpath = vi.spyOn(fs.promises, 'realpath');
+      onTestFinished(() => realpath.mockRestore());
+      const origin = await startWorker({ ...BOOT, mountRoot: 'C:\\ws' });
 
       expect(await refusals(origin, ['services/api'])).toStrictEqual([
         UNAVAILABLE,
       ]);
+      expect(realpath).not.toHaveBeenCalled();
     },
   );
 
@@ -647,6 +683,49 @@ describe('Managed context installation', () => {
     );
   });
 
+  it('records neither the operation nor the Session of a refused installation', async () => {
+    const root = workspace();
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+
+    const refused = await post(
+      origin,
+      CONTEXT,
+      installation('session-1', 'services/missing', 'op-1'),
+    );
+    // Had either been recorded, another context under the same operation and
+    // Session would conflict.
+    const other = await post(
+      origin,
+      CONTEXT,
+      installation('session-1', 'services/api', 'op-1'),
+    );
+
+    expect(await refused.json()).toStrictEqual(UNAVAILABLE);
+    expect(other.status).toBe(200);
+  });
+
+  it('refuses a directory whose access check fails', async () => {
+    const root = workspace();
+    const access = vi
+      .spyOn(fs.promises, 'access')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    onTestFinished(() => access.mockRestore());
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const request = installation('session-1', 'services/api');
+
+    const refused = await post(origin, CONTEXT, request);
+    const repaired = await post(origin, CONTEXT, request);
+
+    expect(access).toHaveBeenCalledWith(
+      realDirectory(root, 'services/api'),
+      fs.constants.R_OK | fs.constants.X_OK,
+    );
+    expect(await refused.json()).toStrictEqual(UNAVAILABLE);
+    expect(repaired.status).toBe(200);
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses a directory the worker cannot read',
     async () => {
@@ -724,6 +803,84 @@ describe('Managed context tool gate', () => {
           )
           .trim(),
       ).toBe(sessionId);
+    }
+  });
+
+  it("gives each Session's shells its own session and project directory", async () => {
+    const root = workspace(['services/api', 'services/web']);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const sessions = [
+      ['session-api', 'services/api'],
+      ['tenant/../session-web', 'services/web'],
+    ] as const;
+    for (const [index, [sessionId, cwdRelative]] of sessions.entries()) {
+      await post(
+        origin,
+        CONTEXT,
+        installation(sessionId, cwdRelative, `op-${index}`),
+      );
+    }
+    const environment = async (index: number, callId: string) => {
+      const [sessionId, cwdRelative] = sessions[index]!;
+      await post(
+        origin,
+        EXECUTE,
+        shell(sessionId, callId, writeShellEnvironment('env.txt')),
+      );
+      const directory = realDirectory(root, cwdRelative);
+      const [session, projectDirectory] = fs
+        .readFileSync(path.join(directory, 'env.txt'), 'utf8')
+        .split('|');
+      expect(projectDirectory).toBe(new Storage(directory).getProjectDir());
+      return session;
+    };
+
+    const api = await environment(0, 'call-1');
+    const web = await environment(1, 'call-2');
+    const apiAgain = await environment(0, 'call-3');
+
+    expect([api, web, apiAgain]).toEqual([
+      sessionKey('session-api'),
+      sessionKey('tenant/../session-web'),
+      sessionKey('session-api'),
+    ]);
+  });
+
+  it("keeps each Session's shell environment under concurrent calls", async () => {
+    const directories = ['services/a', 'services/b', 'services/c'];
+    const sessions = ['séance', 'сессия', '会话'];
+    const root = workspace(directories);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    for (const [index, cwdRelative] of directories.entries()) {
+      await post(
+        origin,
+        CONTEXT,
+        installation(sessions[index]!, cwdRelative, `op-${index}`),
+      );
+    }
+    const calls = [0, 1, 2, 0, 1, 2].map((index, call) => ({ index, call }));
+
+    await Promise.all(
+      calls.map(({ index, call }) =>
+        post(
+          origin,
+          EXECUTE,
+          shell(
+            sessions[index]!,
+            `call-${call}`,
+            writeShellEnvironment(`env-${call}.txt`),
+          ),
+        ),
+      ),
+    );
+
+    for (const { index, call } of calls) {
+      const directory = realDirectory(root, directories[index]!);
+      expect(
+        fs.readFileSync(path.join(directory, `env-${call}.txt`), 'utf8'),
+      ).toBe(
+        `${sessionKey(sessions[index]!)}|${new Storage(directory).getProjectDir()}`,
+      );
     }
   });
 
