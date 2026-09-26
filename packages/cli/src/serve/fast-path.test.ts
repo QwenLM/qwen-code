@@ -732,6 +732,10 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
       ['profile', ['--profile', 'hosted-harness']],
+      [
+        'hosted-harness-capability-digest',
+        ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
+      ],
       ['experimental-managed-agents', ['--experimental-managed-agents']],
       [
         'experimental-managed-runtime-worker',
@@ -811,6 +815,7 @@ describe('serve fast path argument parsing', () => {
 
       'channel',
       'profile',
+      'hosted-harness-capability-digest',
       'experimental-managed-agents',
       'experimental-managed-runtime-worker',
       'experimental-managed-runtime-auto-local',

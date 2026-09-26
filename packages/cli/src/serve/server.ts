@@ -849,6 +849,18 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  validateHostedHarnessProfile(opts, {
+    serverToken: 'QWEN_SERVER_TOKEN',
+    brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
+    brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
+    capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
+  });
+  if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
+    throw new Error(
+      '--profile hosted-harness cannot manage scheduled task sessions.',
+    );
+  }
+  if (opts.profile === 'hosted-harness') opts = { ...opts, requireAuth: true };
   if (
     (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
     deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
@@ -892,12 +904,6 @@ export function createServeApp(
       'createServeApp: requireAuth requires a non-empty bearer token.',
     );
   }
-  validateHostedHarnessProfile(opts, {
-    serverToken: 'QWEN_SERVER_TOKEN',
-    brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
-    brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
-    capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
-  });
   if (opts.profile !== 'hosted-harness' && deps.hostedHarnessContract) {
     throw new Error(
       'createServeApp: Hosted Harness contract requires profile hosted-harness.',
@@ -1115,6 +1121,7 @@ export function createServeApp(
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot =
+    opts.profile !== 'hosted-harness' &&
     !deps.ownedManagedRuntime &&
     (deps.acpHttpEnabled ?? resolveAcpHttpEnabled(daemonEnvAtBoot));
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
@@ -2233,6 +2240,18 @@ export function createServeApp(
     opts.token ? credentials : undefined,
   );
   app.use(allowOriginCors(originAllowlist));
+  if (opts.profile === 'hosted-harness') {
+    app.use((req, res, next) => {
+      if (
+        req.path === '/health' ||
+        req.path === '/capabilities' ||
+        req.path === '/session' ||
+        req.path.startsWith('/session/')
+      )
+        next();
+      else res.sendStatus(404);
+    });
+  }
 
   // Pre-auth health sits below the origin wall so matched cross-origin health
   // probes carry CORS headers. It stays unlogged (path-exempt above), so the

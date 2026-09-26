@@ -88,7 +88,11 @@ export function registerCapabilitiesRoutes(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
-    const features = deps.currentServeFeatures();
+    const features = deps.hostedHarnessContract
+      ? (['hosted_harness_private_v1'] as ReturnType<
+          typeof getAdvertisedServeFeatures
+        >)
+      : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,

@@ -10,7 +10,7 @@ import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
 export function validateHostedHarnessProfile(
-  opts: ServeOptions,
+  opts: Omit<ServeOptions, 'workspace'>,
   environment: {
     readonly serverToken: string;
     readonly brokerUrl: string;
@@ -21,6 +21,9 @@ export function validateHostedHarnessProfile(
   if (opts.profile !== 'hosted-harness') return;
   if (!isLoopbackBind(opts.hostname)) {
     throw new Error('--profile hosted-harness requires a loopback --hostname.');
+  }
+  if (opts.mode !== 'http-bridge') {
+    throw new Error('--profile hosted-harness requires --http-bridge.');
   }
   if (!opts.token?.trim()) {
     throw new Error(

@@ -197,6 +197,7 @@ interface ServeArgs {
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
+  'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions': number;
   'max-total-sessions'?: number;
@@ -287,6 +288,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: 'default' as const,
         description:
           'Deployment profile. hosted-harness runs the resident model loop and delegates every Managed Tool operation through a Java Runtime Broker.',
+      })
+      .option('hosted-harness-capability-digest', {
+        type: 'string',
+        description:
+          'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
       .option('token', {
         type: 'string',
@@ -1003,6 +1009,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['managed-runtime-broker-token'] !== undefined
           ? {
               managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+            }
+          : {}),
+        ...(argv['hosted-harness-capability-digest'] !== undefined
+          ? {
+              hostedHarnessCapabilityDigest:
+                argv['hosted-harness-capability-digest'],
             }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined

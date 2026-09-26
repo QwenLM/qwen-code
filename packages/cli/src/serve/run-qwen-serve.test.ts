@@ -6788,6 +6788,114 @@ describe('runQwenServe telemetry validation', () => {
   });
 });
 
+describe('runQwenServe deployment profiles', () => {
+  it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
+    );
+    fs.mkdirSync(path.join(workspace, '.qwen'));
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    const createApp = vi
+      .spyOn(serverModule, 'createServeApp')
+      .mockImplementation((...args) => originalCreateServeApp(...args));
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
+        false,
+      );
+    } finally {
+      await handle?.close();
+      createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Hosted Harness surface private', async () => {
+    const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
+      serveOptions: {
+        profile: 'hosted-harness',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+    });
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer secret-token' };
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(capabilities.status).toBe(200);
+      expect(await capabilities.json()).toMatchObject({
+        features: ['hosted_harness_private_v1'],
+        hostedHarness: { bootId: expect.any(String) },
+      });
+      expect(
+        (await fetch(`${handle.url}/daemon/status`, { headers })).status,
+      ).toBe(404);
+      expect((await fetch(`${handle.url}/workspace`, { headers })).status).toBe(
+        404,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: isolatedTestRuntimeDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+            managedRuntimeBrokerToken: 'broker-secret',
+          },
+          {
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/outside the loopback interface/);
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+});
+
 /**
  * Boot validation for the embedded `runQwenServe` API: a non-finite
  * `permissionResponseTimeoutMs` (e.g. config- or NaN-derived) must fail
@@ -22660,9 +22768,6 @@ describe('runQwenServe startup observability', () => {
           capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
         },
       });
-      expect((await readStartup(handle))?.preheat).toMatchObject({
-        status: 'not_scheduled',
-      });
     } finally {
       await handle.close();
     }
@@ -22720,6 +22825,17 @@ describe('runQwenServe startup observability', () => {
       expect(missingHandshake.headers.get('x-qwen-harness-boot-id')).toBe(
         bootId,
       );
+      // A Session route must answer "retry" while the runtime starts: a 404
+      // would tell the connector the Session does not exist.
+      const duringStartup = await fetch(`${handle.url}/session/example/load`, {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'X-Qwen-Harness-Protocol-Version': '1',
+          'X-Qwen-Harness-Boot-Id': bootId,
+        },
+      });
+      expect(duringStartup.status).toBe(503);
 
       resolveTelemetry?.({
         enabled: false,
