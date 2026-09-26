@@ -11146,3 +11146,31 @@ describe('transcript timing frames', () => {
     ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
   });
 });
+
+describe('daemonBlockToPlainText sanitizes tool preview content', () => {
+  it('strips terminal escapes and control chars from a command preview', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'in_progress',
+      // Command text is model- and repository-controlled content; every other
+      // render path strips terminal escapes, so the copy-paste path must too.
+      preview: createDaemonToolPreview(
+        { command: 'echo hi\x1b[31mRED\x1b[0m\r\x1b[2J' },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b[');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('echo hiRED');
+  });
+});
