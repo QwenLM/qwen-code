@@ -17,7 +17,7 @@ capabilities and their correctness dependencies.
    legacy parser, recall, forget and index candidate universe stay intact.
    The engine is callable and independently testable; model registration and
    default activation belong to PR 3. No session-token saving is claimed.
-2. **New PR — migration and writer compatibility.** Body-preserving atomic
+2. **#12757 — migration and writer compatibility.** Body-preserving atomic
    metadata migration, corpus readiness, writer vocabulary, and necessary
    Remember/Extraction/Dream adapters. Depends on PR 1. Preserve legacy
    recall until activation. Background scheduling and protocol switching
@@ -68,6 +68,23 @@ PR 2: migration body preservation, concurrent edit rejection, partial failure,
 and relevant writer tests. PR 3: first-turn recall, irrelevant-memory control,
 fetch/re-fetch, changed files, compaction, tool discovery and CLI/ACP parity.
 Use targeted local checks; leave whole-repository validation to remote CI.
+
+## PR 2 extraction boundary
+
+The migration engine is callable but not scheduled. Remember and Extraction
+reuse the bounded vocabulary; Dream receives the structured format guidance
+without changing its legacy file/index operations. Maintenance agents retain
+their own writer instructions rather than inheriting session routing.
+
+The following original changes remain owned by PR 3: user-mutation scheduling,
+user Dream, runtime-managed Dream deletion manifests, Dream vocabulary/root
+integration, and switching the session prompt to metadata-first delivery.
+In particular, do not introduce a new Dream scan that reads protected pinned
+files merely to collect keywords.
+
+PR 2 adds metadata guidance to existing writer/session prompts. It does not
+reduce their size or deliver a measured token saving. This transitional cost
+must be included when measuring the final runtime against main.
 
 Only PR 3 can substantiate session-token savings. Compare the same corpus,
 task, model and settings. Report main-model input, selector/migration/Dream
