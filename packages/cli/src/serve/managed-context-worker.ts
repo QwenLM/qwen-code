@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
-import express from 'express';
+import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import type express from 'express';
 import type { Application, Response } from 'express';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
+  managedRuntimeJsonBody,
   managedRuntimeNoStore,
   OWNED_MANAGED_RUNTIME_ROUTES,
 } from './managed-runtime-attestation-contract.js';
@@ -125,7 +128,7 @@ export function registerManagedContextRoutes(
     attestRoute.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(boot),
-    jsonBody(attestRoute.requestBodyLimitBytes),
+    managedRuntimeJsonBody(attestRoute.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
       send(res, checkManagedContextAttestation(req.body, boot));
     },
@@ -135,7 +138,7 @@ export function registerManagedContextRoutes(
     contextRoute.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(boot),
-    jsonBody(contextRoute.requestBodyLimitBytes),
+    managedRuntimeJsonBody(contextRoute.requestBodyLimitBytes),
     async (req: express.Request, res: express.Response) => {
       send(
         res,
@@ -152,22 +155,32 @@ export function registerManagedContextRoutes(
   const executor = new ManagedToolExecutor(async (reference) => {
     const binding = installations.installed(reference.sessionId);
     const directory = binding && (await mount.resolve(binding.cwdRelative));
-    // Built for each call, so the tools see the directory just verified.
-    return directory === undefined
-      ? undefined
-      : createManagedToolSet(directory, boot.runtimeInstanceId);
+    if (directory === undefined) {
+      return undefined;
+    }
+    // Built for each call, so the tools see the directory just verified. Built
+    // in the Session's context, so core does not hold the configuration as
+    // the process's debug log session.
+    const sessionId = runtimeSessionKey(
+      boot.runtimeInstanceId,
+      reference.sessionId,
+    );
+    return sessionIdContext.run(sessionId, () =>
+      createManagedToolSet(directory, sessionId),
+    );
   });
   registerManagedRuntimeToolRoutes(app, boot, executor);
   return executor;
 }
 
-function jsonBody(limit: number): express.RequestHandler {
-  return express.json({
-    inflate: false,
-    limit,
-    strict: true,
-    type: 'application/json',
-  });
+/**
+ * The session that a Runtime Session's calls run as, so that each Session's
+ * shells get its own project directory. Core uses a session id in file names,
+ * so the Runtime Session ID, which may hold any character, is hashed.
+ */
+function runtimeSessionKey(runtimeInstanceId: string, sessionId: string) {
+  const digest = createHash('sha256').update(sessionId).digest('hex');
+  return `${runtimeInstanceId}.${digest.slice(0, 32)}`;
 }
 
 function send<Body>(res: Response, outcome: ManagedContextOutcome<Body>): void {
