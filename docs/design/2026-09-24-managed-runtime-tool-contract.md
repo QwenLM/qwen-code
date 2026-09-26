@@ -47,7 +47,9 @@ parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
 request so a tool call's `input` fits; `status` and `cancel` accept up to 16 KiB.
 Every operation answers at most 1 MiB.
 Larger tool outputs travel through the artifact delivery track, never through
-these envelopes.
+these envelopes; its contract is the
+[Managed Tool Result Contract](2026-09-26-managed-tool-result-contract.md),
+which opts in through Tool v3 and leaves these v2 envelopes unchanged.
 
 The fixture header objects are closed to the five protocol headers. This
 constrains fixture declarations, not ordinary HTTP headers added by clients
@@ -97,7 +99,10 @@ A settled `not_started` is the Runtime's explicit terminal answer; a missing
 record must still return `unknown` and never imply `not_started`.
 
 Failures keep the shared classification: 401 credentials, 400/413 protocol,
-409 identity, 404 incompatible. JSON errors retain the shared stable codes;
+409 identity, 404 incompatible. Under boot v2 of `managed-context/1`,
+`execute` can also answer 409 `managed_context_unavailable`, whose class is
+recovery; see [Managed Context Worker](2026-09-26-managed-context-worker.md).
+JSON errors retain the shared stable codes;
 the gate's incompatible 404 has an empty body. The attestation-named codes
 are shared across routes; each parser enforces its own route's body cap.
 
@@ -181,6 +186,9 @@ The merged attestation worker now mounts the three routes beside `attest`.
 Its executor admits exactly the first-slice ordinary tools — `read_file`,
 `write_file`, `edit`, and foreground `run_shell_command` — over a real
 `Config` rooted at the attested workspace cwd, with checkpointing disabled.
+Under boot v2 of `managed-context/1`, each new call instead runs in its
+Session's installed effective directory, behind an activation gate; see
+[Managed Context Worker](2026-09-26-managed-context-worker.md).
 Admission happens on the Harness side; the worker executes with no further
 approval gate. Harness admission must include the workspace-boundary
 decision: the worker does not confine tool paths or shell commands to the

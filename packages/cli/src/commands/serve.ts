@@ -196,6 +196,7 @@ interface ServeArgs {
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
+  'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions': number;
   'max-total-sessions'?: number;
@@ -285,7 +286,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: ['default', 'hosted-harness'] as const,
         default: 'default' as const,
         description:
-          'Deployment profile. hosted-harness is reserved and currently rejects startup; Broker session wiring is not implemented.',
+          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+      })
+      .option('hosted-harness-capability-digest', {
+        type: 'string',
+        description:
+          'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
       .option('token', {
         type: 'string',
@@ -999,6 +1005,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['managed-runtime-broker-token'] !== undefined
           ? {
               managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+            }
+          : {}),
+        ...(argv['hosted-harness-capability-digest'] !== undefined
+          ? {
+              hostedHarnessCapabilityDigest:
+                argv['hosted-harness-capability-digest'],
             }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined
