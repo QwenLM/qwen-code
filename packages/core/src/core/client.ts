@@ -395,6 +395,7 @@ export function getMainSessionBaseSystemPrompt(
         // `getOutputStyle()` directly — a prompt override carries no style
         // section, and a session must not be reminded of one it lacks.
         resolveMainSessionOutputStyle(config),
+        config,
         config.isTodoWriteEnabled(),
         config.getCodeModeOnly(),
         {
@@ -4105,6 +4106,7 @@ export class LlmClient {
             getPlanModeSystemReminder(
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
+              this.config,
             ),
           );
         }

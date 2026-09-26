@@ -139,6 +139,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
     bridgeToolResultImages: bridgeToolResultImagesSpy,
+    getPlanModeSystemReminder: vi.fn(actual.getPlanModeSystemReminder),
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     refreshMemoryInstruction: refreshMemoryInstructionSpy,
     getActiveInteractionSpan: agentTelemetry.getActiveInteractionSpan,
@@ -6049,6 +6050,10 @@ describe('Session', () => {
             part.text.includes('Plan mode is active'),
         ),
       ).toBe(true);
+      expect(core.getPlanModeSystemReminder).toHaveBeenCalledWith(
+        undefined,
+        mockConfig,
+      );
     });
 
     it('does not take the active-todo reminder on the restore turn', async () => {

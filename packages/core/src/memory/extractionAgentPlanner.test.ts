@@ -42,6 +42,10 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
   getCacheSafeParams: vi.fn(),
 }));
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 describe('runAutoMemoryExtractionByAgent', () => {
   const mockConfig = {
@@ -54,6 +58,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsBashSearchAvailable.mockReturnValue(false);
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},
       history: [
@@ -107,6 +112,27 @@ describe('runAutoMemoryExtractionByAgent', () => {
         ],
         maxTurns: 5,
         maxTimeMinutes: 2,
+      }),
+    );
+  });
+
+  it('uses only Shell for search when Bash search is available', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ['read_file', 'run_shell_command', 'write_file', 'edit'],
+        taskPrompt: expect.stringContaining(
+          '`run_shell_command` with `rg` / `rg --files`',
+        ),
       }),
     );
   });

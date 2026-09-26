@@ -10353,7 +10353,7 @@ hello
         }
       });
 
-      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true, mockConfig);
     });
 
     it('uses the subagent plan reminder when SDK mode is active', async () => {
@@ -10380,7 +10380,7 @@ hello
         // consume stream
       }
 
-      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true, mockConfig);
     });
 
     it('uses the main-session plan reminder outside subagent and SDK mode', async () => {
@@ -10407,7 +10407,7 @@ hello
         // consume stream
       }
 
-      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false);
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false, mockConfig);
     });
 
     it('should not inject duplicate date on the same day', async () => {
@@ -15543,6 +15543,7 @@ Other open files:
         undefined,
         'headless',
         undefined,
+        mockConfig,
         false,
         false,
         { declaredTools: undefined },
@@ -15578,6 +15579,7 @@ Other open files:
         undefined,
         'headless',
         concise,
+        mockConfig,
         false,
         false,
         { declaredTools: undefined },
@@ -15604,6 +15606,7 @@ Other open files:
         undefined,
         'headless',
         undefined,
+        mockConfig,
         false,
         true,
         { declaredTools: undefined },
@@ -15639,6 +15642,7 @@ Other open files:
           undefined,
           mode,
           undefined,
+          mockConfig,
           false,
           false,
           { declaredTools: undefined },
