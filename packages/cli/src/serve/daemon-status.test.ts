@@ -133,6 +133,59 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.maxTotalSessions).toBe(50);
   });
 
+  it.each(['admit', 'enforce'] as const)(
+    'managed heap mode %s',
+    async (mode) => {
+      const options = makeOptions();
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+      const policy = createChildHeapPolicy({ budget, mode });
+      options.opts.daemonMemoryBudget = budget;
+      options.getChildHeapPolicySnapshot = () => policy.snapshot();
+      options.childAdmissionEnforced = true;
+      options.getCommittedAcpChildCount = () => 6;
+      const response = await buildDaemonStatusResponse('summary', options);
+      expect(response.limits.memory).toMatchObject({
+        enforced: mode === 'enforce',
+        childHeap: {
+          mode,
+          admissionEnforced: true,
+          maxConcurrentChildren: 6,
+          perChildCeilingMb: 544,
+        },
+      });
+      expect(response.runtime.memory).toMatchObject({
+        committedAcpChildren: 6,
+      });
+    },
+  );
+
+  it('does not claim heap enforcement from an injected policy snapshot alone', async () => {
+    const options = makeOptions();
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8192 });
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
+    options.opts.daemonMemoryBudget = budget;
+    options.opts.childHeapMode = 'enforce';
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: { mode: 'enforce', admissionEnforced: false },
+    });
+  });
+
+  it('does not claim heap enforcement during bootstrap without a policy', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8192,
+    });
+    options.opts.childHeapMode = 'enforce';
+    const response = await buildDaemonStatusResponse('summary', options);
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
+  });
+
   it('reports the modeled partition without claiming it is applied', async () => {
     const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
     const options = makeOptions();
@@ -293,6 +346,7 @@ describe('buildDaemonStatusResponse', () => {
 
     // The single bound workspace has a live channel in BASE_BRIDGE_SNAPSHOT.
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
       childRssCoverage: 'active_children',
@@ -344,6 +398,7 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.runtime.memory).toEqual({
+      committedAcpChildren: null,
       registeredWorkspaces: 0,
       activeAcpChildren: 0,
       childRssCoverage: 'active_children',
@@ -1665,6 +1720,73 @@ describe('buildDaemonStatusResponse', () => {
         },
       },
     });
+  });
+
+  it('warns once per workspace about channels its serve.channels did not restore', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () => [
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'feishu',
+          message: 'gateway did not answer',
+        },
+        {
+          workspaceCwd: '/ws/b',
+          channel: 'ghost',
+          message: 'not configured',
+        },
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'dingtalk',
+          message: 'rolled back',
+        },
+      ],
+    });
+
+    expect(
+      response.issues.filter(
+        (issue) => issue.code === 'channel_restore_failed',
+      ),
+    ).toEqual([
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/a were not restored: ' +
+          'feishu (gateway did not answer); dingtalk (rolled back).',
+      },
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/b were not restored: ghost (not configured).',
+      },
+    ]);
+    expect(response.status).toBe('warning');
+  });
+
+  it('bounds the restore warning by entry count and channel-name length', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () =>
+        Array.from({ length: 70 }, (_, index) => ({
+          workspaceCwd: '/ws/a',
+          channel: `${'c'.repeat(200)}-${index}`,
+          message: 'down',
+        })),
+    });
+
+    const [issue, ...rest] = response.issues.filter(
+      (item) => item.code === 'channel_restore_failed',
+    );
+    expect(rest).toEqual([]);
+    // 64 entries shown, each name capped at 128, and the remainder counted
+    // rather than silently dropped.
+    expect(issue!.message.split('; ')).toHaveLength(65);
+    expect(issue!.message).toContain(`${'c'.repeat(128)} (down)`);
+    expect(issue!.message).not.toContain('c'.repeat(129));
+    expect(issue!.message).toMatch(/; and 6 more\.$/u);
   });
 
   it('rolls up statuses inside tools, hooks, and extensions', async () => {

@@ -27,6 +27,7 @@ import {
 } from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
+import { ToolNames } from '../tools/tool-names.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -67,6 +68,26 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
     expect(prompt).toContain('# Executing actions with care');
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
+  });
+
+  it('keeps the merged verification and faithful-reporting rules', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('NEVER assume standard commands.');
+    expect(prompt).toContain(
+      'Read-only or explanatory turns do not require verification.',
+    );
+    expect(prompt).toContain(
+      'if you did not run a verification step — including when you could not',
+    );
+  });
+
+  it('separates the workflow from the general context rules with a blank line', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'or broken work as done.\n\n- Tool results and user messages',
+    );
   });
 
   it('does not advertise todo_write by default', () => {
@@ -173,6 +194,39 @@ describe('Core System Prompt (prompts.ts)', () => {
       prompt.lastIndexOf('This is a non-interactive, single-turn run'),
     ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
   });
+
+  it.each([
+    ['general', 'gpt-4', false],
+    ['qwen-coder', 'qwen3-coder', false],
+    ['qwen-vl', 'qwen3-vl', false],
+    ['gemma4', 'gemma4', false],
+    ['code mode', 'qwen3-coder', true],
+  ] as const)(
+    'keeps %s headless examples free of follow-up questions',
+    (_name, model, codeModeOnly) => {
+      vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'headless',
+        undefined,
+        false,
+        codeModeOnly,
+      );
+      const responses = [
+        ...prompt.matchAll(
+          /<example>\s*user:[\s\S]*?\nmodel:([\s\S]*?)<\/example>/g,
+        ),
+      ];
+
+      expect(responses.length).toBeGreaterThan(0);
+      expect(prompt).toContain('no reply can be received');
+      for (const response of responses) {
+        expect(response[1]).not.toContain('?');
+      }
+    },
+  );
 
   it('instructs the model to preserve unrelated existing work', () => {
     vi.stubEnv('SANDBOX', undefined);
@@ -326,6 +380,39 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('# macOS Seatbelt');
     expect(prompt).not.toContain('# Sandbox');
     expect(prompt).not.toContain('# Outside of Sandbox');
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('describes the bwrap filesystem boundary and distinguishes ordinary permissions', () => {
+    vi.stubEnv('SANDBOX', 'bwrap');
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('# Kernel Sandbox (bwrap)');
+    expect(prompt).toContain(
+      'repository Git metadata, including config and hooks, remains writable',
+    );
+    expect(prompt).toContain('later unconfined Git commands');
+    expect(prompt).toContain("'Read-only file system' (EROFS)");
+    expect(prompt).toContain(
+      "'Permission denied' (EACCES) can instead come from ordinary file permissions",
+    );
+    expect(prompt).toContain(
+      'Host services reached through Unix sockets remain outside this filesystem boundary',
+    );
+    expect(prompt).toContain('changing the writable roots requires restarting');
+    // /dev is a fresh minimal devtmpfs, so host device nodes are absent
+    // (ENOENT), not read-only — the remedy is an argv change, not a root grant.
+    expect(prompt).toContain('minimal synthetic device tree');
+    expect(prompt).toContain('QWEN_SANDBOX=bwrap qwen sandbox');
+    // The inspection remedy is addressed to the user, from the project
+    // directory, with the settings-derived scope of the report named.
+    expect(prompt).toContain(
+      'tell the user to run it from this project directory on the host',
+    );
+    expect(prompt).toContain('Do NOT work around a refusal');
+    expect(prompt).not.toContain("(EROFS) or 'Permission denied'");
+    expect(prompt).not.toContain('You are running in a sandbox container');
+    expect(prompt).not.toContain('# Outside of Sandbox');
+    expect(prompt).not.toContain('# macOS Seatbelt');
     expect(prompt).toMatchSnapshot();
   });
 
@@ -713,6 +800,11 @@ describe('Core System Prompt (prompts.ts)', () => {
         nonCoding,
       );
       expect(prompt).not.toContain('## Software Engineering Tasks');
+      expect(prompt).not.toContain('**Report outcomes faithfully:**');
+      expect(prompt).toContain(
+        '# Primary Workflows\n\n- Tool results and user messages',
+      );
+      expect(prompt).toContain('- When you see a <persisted-output> tag');
       // Everything else the base prompt carries must survive — dropping the
       // safety rules along with the workflow guidance would be a regression.
       expect(prompt).toContain('# Core Mandates');
@@ -731,6 +823,7 @@ describe('Core System Prompt (prompts.ts)', () => {
         concise,
       );
       expect(prompt).toContain('## Software Engineering Tasks');
+      expect(prompt).toContain('did not run a verification step');
     });
 
     it('omits Learning from headless prompts that cannot receive a reply', () => {
@@ -967,6 +1060,25 @@ describe('main-session style: reminder decision matches prompt section', () => {
     };
 
     expect(getMainSessionBaseSystemPrompt(config)).toContain('todo_write');
+  });
+
+  it('describes the admitted tool execution sandbox instead of the host process', () => {
+    const config = {
+      ...makeConfig({ interactive: false, acp: false }),
+      getShellExecutionSandbox: () => ({
+        filesystem: 'read-only' as const,
+        workspace: '/workspace',
+        installation: '/installation',
+        state: '/state',
+        network: 'closed' as const,
+        requestedBackend: 'bwrap' as const,
+      }),
+    };
+
+    const prompt = getMainSessionBaseSystemPrompt(config);
+    expect(prompt).toContain('# Tool Execution Sandbox (bwrap)');
+    expect(prompt).toContain('workspace is read-only');
+    expect(prompt).not.toContain('# Outside of Sandbox');
   });
 });
 
@@ -1219,6 +1331,363 @@ describe('Model-specific tool call formats', () => {
   });
 });
 
+describe('resident tool gating (#12032)', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(false);
+  });
+
+  const promptFor = (declaredTools?: ReadonlySet<string>) =>
+    getCoreSystemPrompt(
+      undefined,
+      'gpt-4',
+      undefined,
+      'interactive',
+      undefined,
+      false,
+      false,
+      declaredTools ? { declaredTools } : undefined,
+    );
+
+  it('renders identically when every tool is declared', () => {
+    const everyTool = new Set<string>(Object.values(ToolNames));
+
+    expect(promptFor(everyTool)).toBe(promptFor());
+  });
+
+  it('drops the dedicated-tool lines for tools the session did not declare', () => {
+    const prompt = promptFor(new Set([ToolNames.SHELL, ToolNames.READ_FILE]));
+
+    expect(prompt).toContain(`To read files use '${ToolNames.READ_FILE}'`);
+    expect(prompt).not.toContain(`To search for files use '${ToolNames.GLOB}'`);
+    expect(prompt).not.toContain('- **Subagent Delegation:**');
+    expect(prompt).not.toContain('- **Codebase Search:**');
+    // Shell policy survives because the shell itself is declared.
+    expect(prompt).toContain('- **Background Processes:**');
+  });
+
+  it('drops the prefer-dedicated bullet when it would recommend nothing', () => {
+    const prompt = promptFor(new Set([ToolNames.AGENT]));
+
+    expect(prompt).not.toContain('- **Prefer Dedicated Tools:**');
+    expect(prompt).not.toContain('- **Background Processes:**');
+    expect(prompt).toContain('- **Subagent Delegation:**');
+    // Policy that does not depend on the tool surface stays either way.
+    expect(prompt).toContain('- **Tool Fallback:**');
+    expect(prompt).toContain('- **Respect Tool Decisions:**');
+  });
+
+  it('keeps every safety section regardless of the declared set', () => {
+    const prompt = promptFor(new Set([ToolNames.READ_FILE]));
+
+    expect(prompt).toContain('# Executing actions with care');
+    expect(prompt).toContain('**Denied Tool Calls:**');
+    expect(prompt).toContain('## Security and Safety Rules');
+    expect(prompt).toContain('**Report outcomes faithfully:**');
+    expect(prompt).toContain('did not run a verification step');
+  });
+
+  it('keeps only examples whose tools are all declared', () => {
+    const prompt = promptFor(
+      new Set([ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.SHELL]),
+    );
+
+    expect(prompt).toContain('# Examples');
+    expect(prompt).toContain(`[tool_call: ${ToolNames.SHELL}`);
+    expect(prompt).not.toContain(`[tool_call: ${ToolNames.GLOB}`);
+    // `edit` is called from the refactor example's later paragraphs, past a
+    // blank line: the block has to be gated as one unit, not per paragraph.
+    expect(prompt).not.toContain(`[tool_call: ${ToolNames.EDIT}`);
+    expect(prompt).toContain('user: Write tests for someFile.ts');
+  });
+
+  it.each(['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4'])(
+    'omits the examples heading when no %s example tools are declared',
+    (model) => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        { declaredTools: new Set([ToolNames.ASK_USER_QUESTION]) },
+      );
+
+      expect(prompt).not.toContain('# Examples');
+      expect(prompt).not.toContain('<example>');
+      expect(prompt).toContain('# Executing actions with care');
+      expect(prompt).toContain(
+        "Use 'ask_user_question' when you need clarification",
+      );
+    },
+  );
+
+  // A `tools.eager` allowlist sized for file work, plus the tools that stay
+  // declared whatever the allowlist says (they are exempt from eager demotion).
+  const FILE_WORK_TOOLS: ReadonlySet<string> = new Set<string>([
+    ToolNames.READ_FILE,
+    ToolNames.WRITE_FILE,
+    ToolNames.EDIT,
+    ToolNames.GLOB,
+    ToolNames.GREP,
+    ToolNames.SHELL,
+    ToolNames.SKILL,
+    ToolNames.ASK_USER_QUESTION,
+    ToolNames.TOOL_SEARCH,
+  ]);
+
+  const countExamples = (prompt: string) =>
+    prompt.split('<example>').length - 1;
+
+  /** The two sections this change gates: tool policy, and the examples. */
+  function gatedParts(prompt: string): [string, string] {
+    const guidance =
+      prompt.match(/## Using Your Tools\n[\s\S]*?(?=\n#{1,2} )/)?.[0] ?? '';
+    const examples =
+      prompt.match(/# Examples[\s\S]*?(?=\n# Final Reminder)/)?.[0] ?? '';
+    return [guidance, examples];
+  }
+
+  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
+    const full = promptFor();
+    const trimmed = promptFor(FILE_WORK_TOOLS);
+
+    // 无声明快照的基线假定所有工具都可用，因此共移除 1,135 字符：
+    // 委派与搜索规则占 818，未列入白名单的 monitor 规则占 317。
+    // 示例仅调用文件工具和 shell，全部保留。字符区间允许措辞精简，
+    // 同时检测节省量丢失；此口径不同于默认不声明 monitor 的真实会话。
+    const saved = full.length - trimmed.length;
+    expect(saved).toBeGreaterThan(900);
+    expect(saved).toBeLessThan(1_500);
+    expect(countExamples(trimmed)).toBe(countExamples(full));
+  });
+
+  it('keeps the policy text of every tool that is declared', () => {
+    const prompt = promptFor(FILE_WORK_TOOLS);
+
+    // The other half of the invariant: gating must not take guidance for a
+    // tool the session does have.
+    expect(prompt).toContain(`To read files use '${ToolNames.READ_FILE}'`);
+    expect(prompt).toContain(`To edit files use '${ToolNames.EDIT}'`);
+    expect(prompt).toContain(`To create files use '${ToolNames.WRITE_FILE}'`);
+    expect(prompt).toContain(`To search for files use '${ToolNames.GLOB}'`);
+    expect(prompt).toContain(
+      `To search the content of files, use '${ToolNames.GREP}'`,
+    );
+    expect(prompt).toContain('- **Prefer Dedicated Tools:**');
+    expect(prompt).toContain('- **File Paths:**');
+    expect(prompt).toContain('- **Background Processes:**');
+    expect(prompt).toContain('- **Interactive Commands:**');
+    // Only the bullets whose tools are absent go.
+    expect(prompt).not.toContain('- **Subagent Delegation:**');
+    expect(prompt).not.toContain('- **Codebase Search:**');
+  });
+
+  // `monitor` is registered `shouldDefer=true, alwaysLoad=false`, so a default
+  // session leaves it out of `getFunctionDeclarations()` and therefore out of
+  // the prompt snapshot built from it. The bullet has to follow the tool:
+  // discovery of a still-deferred `monitor` is the startup reminder's job, and
+  // a policy line for a tool the session cannot call directly is exactly what
+  // #12032 gates away.
+  it('gates the monitor bullet on the session declaring monitor', () => {
+    const withMonitor = new Set<string>([
+      ...FILE_WORK_TOOLS,
+      ToolNames.MONITOR,
+    ]);
+
+    expect(promptFor(withMonitor)).toContain(
+      `- **Monitor Processes:** Use the '${ToolNames.MONITOR}' tool`,
+    );
+    expect(promptFor(FILE_WORK_TOOLS)).not.toContain(
+      '- **Monitor Processes:**',
+    );
+  });
+
+  it('drops example blocks too once the allowlist is narrower', () => {
+    const narrow = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const full = promptFor();
+    const trimmed = promptFor(narrow);
+
+    expect(trimmed.length).toBeLessThan(full.length);
+    expect(countExamples(trimmed)).toBe(countExamples(full) - 2);
+    expect(gatedParts(trimmed)[1]).toContain('node server.js');
+    expect(gatedParts(trimmed)[1]).not.toContain('Refactor the auth logic');
+    expect(gatedParts(trimmed)[1]).not.toContain('Write tests for someFile.ts');
+  });
+
+  it('gates the model-specific example notations, not just the bracket form', () => {
+    // getToolCallExamples picks a different notation per model, so a filter
+    // that only understood `[tool_call: …]` would quietly stop gating the
+    // examples for every Qwen model that has its own set.
+    const narrow = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const modelPrompt = (model: string, declaredTools?: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        declaredTools ? { declaredTools } : undefined,
+      );
+
+    for (const model of ['qwen3-coder', 'qwen3-vl', 'gemma4']) {
+      const full = modelPrompt(model);
+      const trimmed = modelPrompt(model, narrow);
+      expect(countExamples(trimmed)).toBe(countExamples(full) - 2);
+      // Checked on the examples section alone: `glob` also appears in prose
+      // this change deliberately leaves untouched.
+      expect(gatedParts(trimmed)[1]).not.toContain(ToolNames.GLOB);
+    }
+  });
+
+  it('changes nothing outside the two gated sections', () => {
+    const strip = (prompt: string) => {
+      const [guidance, examples] = gatedParts(prompt);
+      expect(guidance).not.toBe('');
+      expect(examples).not.toBe('');
+      return prompt.replace(guidance, '').replace(examples, '');
+    };
+
+    expect(strip(promptFor(FILE_WORK_TOOLS))).toBe(strip(promptFor()));
+  });
+
+  it('never names an undeclared tool inside the gated sections', () => {
+    const declared = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const [guidance, examples] = gatedParts(promptFor(declared));
+    expect(guidance).not.toBe('');
+    expect(examples).not.toBe('');
+    const gated = `${guidance}\n${examples}`;
+
+    // Mechanical sweep rather than hand-picked assertions: it catches
+    // under-gating (a line that survived and should not have) and, read the
+    // other way with a full set, over-gating.
+    const leaked = Object.values(ToolNames).filter(
+      (name) =>
+        name !== ToolNames.TOOL_CALL &&
+        !declared.has(name) &&
+        new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
+    );
+
+    expect(leaked).toEqual([]);
+  });
+
+  it('gates every tool name the gated sections can mention, on every example set', () => {
+    const everyTool = new Set<string>(Object.values(ToolNames));
+    const modelPrompt = (model: string, declaredTools: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        { declaredTools },
+      );
+    const leaked: string[] = [];
+
+    // Withhold one tool at a time, against each model's example set: the
+    // config-independent version of the invariant above, and the check that
+    // would have caught the example notations going ungated.
+    for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
+      for (const tool of everyTool) {
+        // `ask_user_question` is exempt from `tools.eager`, so it is declared
+        // in practice, and the interaction-mode bullet naming it also carries
+        // the policy for not asking questions — gating that bullet would drop
+        // real guidance. Recorded as residue in the design's §6. `tool_call`
+        // is also the literal protocol marker in every example notation, so a
+        // text scan cannot distinguish that syntax from the bridge tool name.
+        if (
+          tool === ToolNames.ASK_USER_QUESTION ||
+          tool === ToolNames.TOOL_CALL
+        ) {
+          continue;
+        }
+        const declared = new Set(everyTool);
+        declared.delete(tool);
+        const [guidance, examples] = gatedParts(modelPrompt(model, declared));
+        const gated = `${guidance}\n${examples}`;
+        if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
+          leaked.push(`${model}: ${tool}`);
+        }
+      }
+    }
+
+    expect(leaked).toEqual([]);
+  });
+
+  it('leaves CodeModeOnly guidance untouched by the declared set', () => {
+    const codeModePrompt = (declaredTools?: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        'gpt-4',
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        true,
+        declaredTools ? { declaredTools } : undefined,
+      );
+
+    // Reverse check: in code mode the tools are reached as `tools.<name>`
+    // inside `exec` and are not declarations, so a narrow declared set must not
+    // strip that guidance.
+    expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
+  });
+
+  it('takes the declared set from the Config snapshot', () => {
+    const base = {
+      getSystemPrompt: () => undefined,
+      getModel: () => 'gpt-4',
+      getOutputStyle: () => undefined,
+      getCodeModeOnly: () => false,
+      getExperimentalZedIntegration: () => false,
+      getInputFormat: () => InputFormat.TEXT,
+      isInteractive: () => true,
+      isTodoWriteEnabled: () => false,
+    };
+
+    // The snapshot is the single source `/context` and the request share, so
+    // the prompt must actually read it rather than recompute from a registry.
+    const gated = getMainSessionBaseSystemPrompt({
+      ...base,
+      getPromptToolSnapshot: () => FILE_WORK_TOOLS,
+    });
+    const ungated = getMainSessionBaseSystemPrompt(base);
+
+    expect(gated).not.toContain('- **Subagent Delegation:**');
+    expect(ungated).toContain('- **Subagent Delegation:**');
+    expect(gated.length).toBeLessThan(ungated.length);
+  });
+});
+
 describe('CodeModeOnly tool guidance', () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1249,6 +1718,23 @@ describe('CodeModeOnly tool guidance', () => {
     expect(prompt).not.toContain("To read files use 'read_file'");
   });
 
+  it.each([
+    [
+      'shell reservation',
+      '  - Reserve `tools.run_shell_command` for system commands and terminal operations that require shell execution.',
+    ],
+    [
+      'subagent delegation',
+      "- **Subagent Delegation:** Use the 'agent' tool with specialized agents when the task at hand matches the agent's description. Do not duplicate work a subagent is already doing — if you delegate research to a subagent, do not perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.",
+    ],
+    [
+      'directed search',
+      "- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) call `tools.grep_search` or `tools.glob` yourself. For broader codebase exploration and deep research, use the 'agent' tool with subagent_type=Explore — it is slower, so only when a directed search proves insufficient or the task clearly requires more than 3 queries.",
+    ],
+  ])('keeps the condensed %s rule', (_name, rule) => {
+    expect(codeModePrompt().split('\n')).toContain(rule);
+  });
+
   it('does not advertise todo_write when it is disabled', () => {
     expect(codeModePrompt()).not.toContain('todo_write');
   });
@@ -1274,7 +1760,7 @@ describe('CodeModeOnly tool guidance', () => {
     expect(prompt).toContain('**Batch Into One Program:**');
     expect(prompt).toContain('await them together with `Promise.all`');
     expect(prompt).not.toContain(
-      'You can call multiple tools in a single response',
+      'Call independent tools in parallel; run dependent calls sequentially',
     );
   });
 
@@ -1300,12 +1786,12 @@ describe('CodeModeOnly tool guidance', () => {
     );
   });
 
-  it('leaves Direct mode guidance and examples untouched', () => {
+  it('keeps direct calls and parallelism in Direct mode', () => {
     const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
 
     expect(prompt).toContain("To read files use 'read_file'");
     expect(prompt).toContain(
-      'You can call multiple tools in a single response',
+      'Call independent tools in parallel; run dependent calls sequentially',
     );
     expect(prompt).toContain('[tool_call: run_shell_command for');
     expect(prompt).not.toContain('tools.<name>(args)');

@@ -27,7 +27,12 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { LlmClient, SendMessageType, type SteerInput } from './client.js';
+import {
+  LlmClient,
+  SendMessageType,
+  MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  type SteerInput,
+} from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -37,6 +42,7 @@ import {
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
+import { MemoryManager } from '../memory/manager.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -59,6 +65,8 @@ import {
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
+import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
+import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
 
 type MockSessionStartProfiler = {
   time: Mock;
@@ -92,6 +100,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { TurnBudget } from './turn-budget.js';
 import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -102,6 +111,10 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+} from '../tools/tool-call.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -428,6 +441,15 @@ vi.mock(
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
+// Only the selector itself is stubbed — the reminder the client injects is
+// formatted by the real omni module, so the assertions below match the
+// exact block a production passive recall would put on the wire.
+const runOmniMemorySideQueryMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/memory-side-query.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../omni/memory-side-query.js')>()),
+  runOmniMemorySideQuery: runOmniMemorySideQueryMock,
+}));
+
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
  *
@@ -697,6 +719,7 @@ describe('Gemini Client (client.ts)', () => {
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getExecutionEnvironment: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -758,8 +781,126 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('keeps the restored tool boundary through startup reminder refresh', async () => {
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory: [result],
+        completedToolCallIds: ['ended'],
+        uiTelemetryEvents: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      await resumedClient.refreshStartupContextReminder();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
+    it('restores a completed tool boundary from the legacy transcript', async () => {
+      const base = {
+        sessionId: 'session',
+        timestamp: new Date(0).toISOString(),
+        cwd: '/test/project',
+        version: 'test',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+      };
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'session',
+          projectHash: 'project',
+          startTime: base.timestamp,
+          lastUpdated: base.timestamp,
+          messages: [
+            {
+              ...base,
+              uuid: 'call',
+              parentUuid: null,
+              type: 'assistant',
+              message: {
+                role: 'model',
+                parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+              },
+            },
+            {
+              ...base,
+              uuid: 'result',
+              parentUuid: 'call',
+              type: 'tool_result',
+              message: result,
+            },
+            {
+              ...base,
+              uuid: 'end',
+              parentUuid: 'result',
+              type: 'system',
+              subtype: 'goal_turn_end',
+              systemPayload: { toolCallId: 'ended' },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: 'end',
+      });
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getCompletedToolCallIds()).toEqual([
+        'ended',
+      ]);
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
     it('initializes from the selective runtime projection without the full transcript', async () => {
-      const restoreLoadedSkillsFromHistory = vi.fn();
+      // Crossing a macrotask boundary is what makes this an oracle for the
+      // `await`: a mock that returns `undefined` (or resolves in the same
+      // tick) leaves a bare call indistinguishable from an awaited one, and
+      // the restored skills' hooks and allow rules have to be in force
+      // before the resumed session takes its first turn.
+      let skillsRestored = false;
+      const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        skillsRestored = true;
+      });
       vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
         (name: string) =>
           name === ToolNames.SKILL
@@ -804,29 +945,56 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(apiHistory);
+      expect(skillsRestored).toBe(true);
     });
 
-    it('seeds resumed chat with replayed prompt token count', async () => {
-      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
-        conversation: {
-          sessionId: 'resumed-session-id',
-          projectHash: 'project-hash',
-          startTime: new Date(0).toISOString(),
-          lastUpdated: new Date(0).toISOString(),
-          messages: [],
-        },
-        filePath: '/test/session.jsonl',
-        lastCompletedUuid: null,
-      });
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        123_456,
-      );
+    it.each(['selective', 'legacy'])(
+      'does not borrow another session token count during %s restore without usage',
+      async (restore) => {
+        // Both call sites must finish restoring skills before initialize()
+        // resolves.
+        let skillsRestored = false;
+        const restoreLoadedSkillsFromHistory = vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          skillsRestored = true;
+        });
+        vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(
+          (name: string) =>
+            name === ToolNames.SKILL
+              ? ({ restoreLoadedSkillsFromHistory } as never)
+              : undefined,
+        );
+        if (restore === 'selective') {
+          vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+            apiHistory: [
+              { role: 'model', parts: [{ text: 'Saved reply without usage' }] },
+            ],
+            uiTelemetryEvents: [],
+          } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+        }
+        vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+          conversation: {
+            sessionId: 'resumed-session-id',
+            projectHash: 'project-hash',
+            startTime: new Date(0).toISOString(),
+            lastUpdated: new Date(0).toISOString(),
+            messages: [],
+          },
+          filePath: '/test/session.jsonl',
+          lastCompletedUuid: null,
+        });
+        vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+          123_456,
+        );
 
-      const resumedClient = new LlmClient(mockConfig);
-      await resumedClient.initialize();
+        const resumedClient = new LlmClient(mockConfig);
+        await resumedClient.initialize();
 
-      expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
-    });
+        expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(0);
+        expect(resumedClient.getChat().getLastOutputTokenCount()).toBe(0);
+        expect(skillsRestored).toBe(true);
+      },
+    );
 
     it('seeds resumed chat with previous response output token count', async () => {
       const seedResumeTokenCountsSpy = vi.spyOn(
@@ -975,6 +1143,123 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient['recentCompletedToolNames']).toEqual(['read_file']);
+    });
+
+    it('seeds the resolved target name for bridged calls in resumed history', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      args: { name: 'web_fetch', arguments: { url: 'u' } },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      response: { ok: true },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(['web_fetch']);
+    });
+
+    it.each([
+      [
+        'keeps a bridge refusal under the wrapper name',
+        `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}execution denied`,
+        'tool_call',
+      ],
+      [
+        'credits a target that executed and then errored',
+        'target execution failed',
+        'web_fetch',
+      ],
+      [
+        'skips a cancelled bridge call',
+        `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}cancelled`,
+        undefined,
+      ],
+    ])('%s on resume', async (_name, error, expectedName) => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      args: {
+                        name: 'web_fetch',
+                        arguments: { url: 'u' },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'call_bridge',
+                      name: 'tool_call',
+                      response: { error },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient['recentCompletedToolNames']).toEqual(
+        expectedName ? [expectedName] : [],
+      );
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
@@ -1306,7 +1591,9 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? ({} as never)
+          : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1472,7 +1759,9 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       toolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? ({} as never)
+          : null,
       );
       vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
         [
@@ -1506,7 +1795,7 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('startChat — deferred tools', () => {
     // Pulls the registry mock used by the surrounding suite so each test
-    // can stub the deferred-summary + ToolSearch availability per case.
+    // can stub the deferred-summary + bridge availability per case.
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
@@ -1528,9 +1817,10 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
         { name: 'cron_list', description: 'list' },
       ]);
-      // ToolSearch is available so we DON'T enter the eager-reveal branch.
+      // The complete bridge is available, so we DON'T enter the eager-reveal
+      // branch.
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
@@ -1567,7 +1857,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' ? ({} as never) : null,
+        name === 'tool_search' || name === 'tool_call' ? ({} as never) : null,
       );
       const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
 
@@ -1581,9 +1871,9 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
-    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
-      // When ToolSearch is filtered out (deny rule / --exclude-tools
-      // tool_search), the model has no way to reach deferred schemas.
+    it('eagerly reveals ordinary deferred tools when the bridge is unavailable', async () => {
+      // When either bridge tool is filtered out, the model has no safe way to
+      // invoke deferred tools.
       // Silent disappearance is the worst failure mode — instead, reveal
       // ordinary deferred tools eagerly so they land in the declaration
       // list. The token-saving rationale of deferral was predicated on
@@ -1594,7 +1884,7 @@ describe('Gemini Client (client.ts)', () => {
         { name: 'cron_list', description: 'list' },
         { name: 'write_file', description: 'write' },
       ]);
-      reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.getTool.mockReturnValue(null); // Both bridge tools absent.
       reg.isPermissionDeferred.mockImplementation(
         (name: string) => name === 'write_file',
       );
@@ -1607,28 +1897,64 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
     });
 
-    it('does NOT eagerly reveal when ToolSearch is available', async () => {
-      // When ToolSearch IS registered, deferred tools stay hidden until
-      // the model discovers them — that's the whole point of deferral.
+    it('does NOT eagerly reveal when both bridge tools are available', async () => {
+      // With both bridge tools registered, deferred schemas stay hidden while
+      // remaining invocable through tool_search + tool_call.
       const reg = getRegistryMock();
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'cron_create', description: 'schedule' },
       ]);
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.revealDeferredTool.mockClear();
 
       await client.startChat();
 
-      // No history scan match, ToolSearch available → no reveal at all.
+      // No history scan match and a complete bridge → no reveal at all.
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+    });
+
+    it('eagerly reveals deferred tools when ToolCall is unavailable', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+    });
+
+    it('eagerly reveals deferred tools when ToolSearch is unavailable', async () => {
+      // Mirror of the ToolCall-unavailable case: the bridge needs BOTH halves
+      // (--exclude-tools tool_search is production-reachable), so the
+      // eager-reveal fallback and the skipped preload must key on either
+      // missing half, not only on tool_call.
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_CALL ? ({} as never) : null,
+      );
+      reg.revealDeferredTool.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
+      expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
     });
 
     it('preloads deferred tools with a threshold-derived budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.preloadDeferredToolsWithinBudget.mockClear();
 
@@ -1645,7 +1971,7 @@ describe('Gemini Client (client.ts)', () => {
     it('uses the configured context window for the preload budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'test-model',
@@ -1664,7 +1990,7 @@ describe('Gemini Client (client.ts)', () => {
     it('skips deferred preload when the threshold is 0', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(0);
       reg.preloadDeferredToolsWithinBudget.mockClear();
@@ -1677,7 +2003,7 @@ describe('Gemini Client (client.ts)', () => {
     it('skips deferred preload when the threshold is not finite', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(NaN);
       reg.preloadDeferredToolsWithinBudget.mockClear();
@@ -1690,7 +2016,7 @@ describe('Gemini Client (client.ts)', () => {
     it('clamps a threshold above 100% to a full-context budget', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       // A misconfigured threshold (e.g. 200) must not produce a budget larger
       // than the context window, which would unconditionally preload every
@@ -1705,7 +2031,7 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('skips deferred preload when ToolSearch is unavailable', async () => {
+    it('skips deferred preload when the bridge is unavailable', async () => {
       // The eager-reveal branch already exposes everything; running the
       // budget check as well would be redundant.
       const reg = getRegistryMock();
@@ -1949,6 +2275,7 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1957,7 +2284,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.refreshStartupContextReminder();
 
-      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        currentHistory.slice(1),
+        undefined,
+      );
     });
 
     it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
@@ -1987,6 +2317,7 @@ describe('Gemini Client (client.ts)', () => {
         ],
       };
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1999,10 +2330,10 @@ describe('Gemini Client (client.ts)', () => {
       await client.refreshStartupContextReminder();
 
       // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
-      expect(mockChat.setHistory).toHaveBeenCalledWith([
-        newPrelude,
-        ...currentHistory.slice(2),
-      ]);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        [newPrelude, ...currentHistory.slice(2)],
+        undefined,
+      );
     });
   });
 
@@ -2205,6 +2536,219 @@ describe('Gemini Client (client.ts)', () => {
         h.parts?.some((p) => p.functionResponse),
       );
       expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
+  describe('omni passive media-memory recall injection', () => {
+    /** Minimal materialized recall — the client neither builds nor reads
+     * this payload, it only has to get the formatted block onto the wire. */
+    const recallResult = {
+      status: 'hit',
+      files: [{ resourceId: 'media-1-abcdef01', mediaType: 'image' }],
+      entries: [{ entryId: 'e-1', kind: 'derived_media' }],
+      gaps: [],
+    } as unknown as MediaMemoryRecallResult;
+
+    function enableOmni(): void {
+      (
+        mockConfig as unknown as { isOmniEnabled: () => boolean }
+      ).isOmniEnabled = () => true;
+    }
+
+    async function runUserQuery(): Promise<unknown[]> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        [{ text: 'what changed in this clip?' }],
+        new AbortController().signal,
+        'prompt-omni-recall',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+      return mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+    }
+
+    it('prepends the recalled block ahead of the user parts of the outgoing request', async () => {
+      // This is the ONLY place the sideQuery surface reaches a model
+      // request. The whole point of passive recall is that it lands
+      // BEFORE the main request is sent (M §9.3) — retrofitting it after
+      // the systemReminders spread, or dropping the call, leaves a
+      // pipeline that still selects and materializes entries and then
+      // throws them away, with no other symptom than the model behaving
+      // as if memory were empty.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: ['media-1-abcdef01'],
+      });
+
+      const request = await runUserQuery();
+
+      const reminder = formatOmniMemorySideQueryReminder(recallResult);
+      expect(request).toContain(reminder);
+      // The user's own text has been flattened to a bare string by this
+      // point; the reminder block must sit ahead of it.
+      const userPartIndex = request.indexOf('what changed in this clip?');
+      expect(userPartIndex).toBeGreaterThanOrEqual(0);
+      expect(request.indexOf(reminder)).toBeLessThan(userPartIndex);
+
+      // The selector must see the request as it stands BEFORE injection —
+      // that text (and the media handles inside it) is the only thing
+      // scoping passive recall to what this request actually references.
+      const [params] = runOmniMemorySideQueryMock.mock.calls[0] as [
+        { requestParts: unknown[]; promptId?: string },
+      ];
+      expect(params.promptId).toBe('prompt-omni-recall');
+      expect(params.requestParts).toContain('what changed in this clip?');
+      expect(params.requestParts).not.toContain(reminder);
+    });
+
+    it('injects nothing when the selector declines', async () => {
+      // A null outcome is the normal path in active mode (where the recall
+      // TOOL is registered instead — see memory-side-query.test.ts for the
+      // D10 gate), and also covers a request with no handles, a selector
+      // timeout, and every other degraded case. None of them may put an
+      // empty 【媒体记忆】 shell in front of the user's question.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue(null);
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).toHaveBeenCalledTimes(1);
+      expect(
+        request.filter(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            (part as { text?: string }).text?.includes('【媒体记忆】'),
+        ),
+      ).toEqual([]);
+    });
+
+    it('never consults the selector when omni is off', async () => {
+      // Omni is opt-in and experimental: a session without it must pay no
+      // recall latency and touch no memory store.
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: [],
+      });
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).not.toHaveBeenCalled();
+      expect(request).not.toContain(
+        formatOmniMemorySideQueryReminder(recallResult),
+      );
+    });
+  });
+
+  // The turn a workflow's `+500k` budget measures against starts here, in the
+  // one place every front end's turns go through.
+  describe('turn token budget', () => {
+    let turns: TurnBudget;
+    const sessionTokens = vi.fn(() => 1_234);
+
+    beforeEach(() => {
+      turns = new TurnBudget();
+      Object.assign(mockConfig, { getTurnBudget: () => turns });
+      sessionTokens.mockReturnValue(1_234);
+      Object.assign(mockUiTelemetryService, {
+        getTotalOutputTokens: sessionTokens,
+      });
+    });
+
+    async function send(
+      request: Parameters<typeof client.sendMessageStream>[0],
+      promptId: string,
+      options?: Parameters<typeof client.sendMessageStream>[3],
+    ): Promise<void> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        request,
+        new AbortController().signal,
+        promptId,
+        options,
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+    }
+
+    it('opens the turn with the directive the user typed, not the reminder in front of it', async () => {
+      await send(
+        [
+          {
+            text: '<system-reminder>\nbudget +900k\n</system-reminder>\n\nsweep every package +500k',
+          },
+        ],
+        'p1',
+      );
+
+      expect(turns.current('test-session-id')).toEqual({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 500_000,
+        directiveText: '+500k',
+        outputTokensAtTurnStart: 1_234,
+      });
+      expect(sessionTokens).toHaveBeenCalledWith('test-session-id');
+    });
+
+    it('opens a cron turn with no target, whatever its text says', async () => {
+      await send([{ text: 'nightly sweep +500k' }], 'cron-1', {
+        type: SendMessageType.Cron,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'cron-1',
+        budget: null,
+      });
+    });
+
+    it('leaves the turn alone for a tool result and for a side question', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'tool output mentions +1m' }], 'p1', {
+        type: SendMessageType.ToolResult,
+      });
+      await send([{ text: 'quick question +2m' }], 'side-1', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
+    });
+
+    // A retry replaces a failed attempt of the same prompt; what that attempt
+    // spent is still this turn's spend.
+    it('keeps the starting point when the same prompt is retried', async () => {
+      await send([{ text: 'fan out +500k' }], 'p1');
+      sessionTokens.mockReturnValue(9_999);
+
+      await send([{ text: 'fan out +500k' }], 'p1', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(turns.current('test-session-id')).toMatchObject({
+        promptId: 'p1',
+        budget: 500_000,
+        outputTokensAtTurnStart: 1_234,
+      });
     });
   });
 
@@ -2556,7 +3100,7 @@ describe('Gemini Client (client.ts)', () => {
     it('queues and drains a reminder for newly registered MCP deferred tools', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -2654,7 +3198,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not announce MCP removal before an added tool was drained', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2678,7 +3222,7 @@ describe('Gemini Client (client.ts)', () => {
     it('omits already-revealed deferred tools from added reminders', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
@@ -2707,7 +3251,7 @@ describe('Gemini Client (client.ts)', () => {
     it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__flaky__do',
@@ -2743,7 +3287,7 @@ describe('Gemini Client (client.ts)', () => {
     it('announces removed MCP deferred tools after disconnect', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       const tool = {
         name: 'mcp__gone__do',
@@ -2778,6 +3322,116 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('announces removed MCP tools after disconnect when the bridge is incomplete', async () => {
+      // Mirror of the complete-bridge test: with tool_call excluded the
+      // fallback eagerly reveals the MCP tool, and the reminder list is
+      // undefined — the eager-reveal seeding must still survive the
+      // rememberAnnouncedDeferredTools(undefined) reset so the later
+      // disconnect is announced.
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__gone__do',
+        description: 'd',
+        serverName: 'gone',
+      };
+      let registered = true;
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' || (n === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      reg.isPermissionDeferred.mockReturnValue(false);
+
+      await client.startChat();
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(tool.name);
+
+      // startChat() rebuilt the chat; spy on the live instance.
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+
+      // Server disconnects: gone from the summary and the registry.
+      registered = false;
+      reg.getDeferredToolSummary.mockReturnValue([]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__gone__do'],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__gone__do\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('announces a mid-session eager-revealed MCP tool on disconnect and again on a flap (R1-28)', async () => {
+      // The eager-reveal seed alone only reaches announcedMcpToolNames via
+      // rememberAnnouncedDeferredTools, which runs exclusively in startChat.
+      // A server that registers AFTER the initial startChat is eagerly
+      // revealed by a mid-session setTools(); the reveal itself is the
+      // announcement, so its disconnect — before any new startChat — must
+      // still produce the removal reminder, and a reconnect/disconnect flap
+      // must announce it a second time (R1-28).
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__late__do',
+        description: 'd',
+        serverName: 'late',
+      };
+      let registered = false;
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' || (n === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockImplementation(() =>
+        registered ? [tool] : [],
+      );
+      reg.isPermissionDeferred.mockReturnValue(false);
+
+      await client.startChat();
+      // Not registered yet: nothing revealed at the initial startChat.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(tool.name);
+
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+
+      // Mid-session registration: the incomplete bridge eagerly reveals it.
+      registered = true;
+      await client.setTools();
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(tool.name);
+
+      // Disconnect before any new startChat: still announced.
+      registered = false;
+      await client.setTools();
+      await runTurn();
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__late__do'],
+      );
+
+      // Flap: reconnect re-reveals (re-announces), a second disconnect must
+      // announce the removal again instead of staying silent.
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      registered = true;
+      await client.setTools();
+      registered = false;
+      await client.setTools();
+      await runTurn();
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__late__do'],
+      );
+    });
+
     it('does not announce a still-registered tool as removed after history reveals it', async () => {
       const reg = getRegistryMock();
       const tool = {
@@ -2788,7 +3442,9 @@ describe('Gemini Client (client.ts)', () => {
       let revealed = false;
       let registered = true;
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' || (name === tool.name && registered)
+        name === 'tool_search' ||
+        name === 'tool_call' ||
+        (name === tool.name && registered)
           ? ({} as never)
           : null,
       );
@@ -2882,7 +3538,7 @@ describe('Gemini Client (client.ts)', () => {
     it('re-reveals MCP tools from resumed history after progressive discovery', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((name: string) =>
-        name === 'tool_search' ? ({} as never) : null,
+        name === 'tool_search' || name === 'tool_call' ? ({} as never) : null,
       );
 
       // The resumed chat is constructed before progressive MCP discovery, so
@@ -2931,15 +3587,15 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('reveals ordinary deferred tools when ToolSearch is unavailable', async () => {
-      // Mirrors startChat's silent-disappearance guard: without ToolSearch
-      // a deferred MCP tool can't be reached, so the only safe option is
+    it('eagerly reveals every deferred tool when the bridge is unavailable', async () => {
+      // Mirrors startChat's silent-disappearance guard: without the complete
+      // bridge a deferred MCP tool can't be reached, so the only safe option is
       // to reveal it so it lands in the declaration list. If setTools()
       // skipped this branch, an MCP tool registered after startChat() in
       // a session with `--exclude-tools tool_search` would be invisible
       // forever.
       const reg = getRegistryMock();
-      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getTool.mockReturnValue(null); // Both bridge tools absent.
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
         { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
@@ -2969,11 +3625,11 @@ describe('Gemini Client (client.ts)', () => {
 
     it('warns that tools.eager holds tools back with no way to load them', async () => {
       // Holding them back is correct — revealing would send exactly the
-      // schemas the allowlist withholds — but with no tool_search the tools
+      // schemas the allowlist withholds — but with no bridge the tools
       // are unreachable for the session while still listed in `/tools`.
       // #10075 is about silent reshaping of the toolset, so say it.
       const reg = getRegistryMock();
-      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getTool.mockReturnValue(null); // Both bridge halves absent.
       reg.getDeferredToolSummary.mockReturnValue([
         { name: 'write_file', description: 'write' },
         { name: 'mcp__server__alpha', description: 'a', serverName: 'server' },
@@ -2995,15 +3651,49 @@ describe('Gemini Client (client.ts)', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('write_file'),
       );
+      // The remedy clause must enumerate every unregistration cause —
+      // including a tools.disabled entry — so an operator whose bridge half
+      // is disabled (not merely denied) gets an actionable fix (R1-15).
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('tools.disabled'),
+      );
       warnSpy.mockRestore();
     });
 
-    it('does not call a history-revealed eager tool unreachable', async () => {
+    it('names the missing bridge half when only tool_call is excluded', async () => {
+      // The guard withholds on EITHER missing bridge half; the operator-facing
+      // warning must not blame the half that IS registered. With tool_search
+      // present and tool_call excluded the missing half is tool_call.
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === 'write_file',
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('tool_call not registered'),
+      );
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tool_search not registered'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not report a history-revealed eager tool as bridge-hidden', async () => {
       // The history-reveal pass runs before the unreachable warning at both
       // call sites and re-exposes resume-referenced tools even when
       // tools.eager demoted them: the model must be able to repeat a call it
       // already made in the transcript. That tool's schema IS sent in the
-      // declarations, so the "unreachable until restart" warning must not
+      // declarations, so the incomplete-bridge warning must not
       // name it — warning anyway would be false for this session.
       const reg = getRegistryMock();
       reg.getTool.mockReturnValue(null); // ToolSearch absent.
@@ -3071,7 +3761,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not append the same added MCP reminder twice', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -3099,7 +3789,7 @@ describe('Gemini Client (client.ts)', () => {
     it('does not drain queued MCP reminders on tool-result turns', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
+        n === 'tool_search' || n === 'tool_call' ? ({} as never) : null,
       );
       reg.getDeferredToolSummary.mockReturnValue([
         {
@@ -3218,6 +3908,44 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('getMainSessionSystemInstruction', () => {
+    it('does not collect local git or agent context for an execution environment', async () => {
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue(
+        {} as NonNullable<ReturnType<Config['getExecutionEnvironment']>>,
+      );
+      vi.mocked(getRecentGitStatus).mockClear();
+      const listSubagents = mockConfig.getSubagentManager().listSubagents;
+      vi.mocked(listSubagents).mockClear();
+
+      await client.startChat();
+      await client.refreshSystemInstruction();
+
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
+      expect(listSubagents).not.toHaveBeenCalled();
+    });
+
+    it('skips host Git snapshots throughout a sandboxed shell session', async () => {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        workspace: '/test/project/root',
+        installation: '/test/installation',
+        state: '/test/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+      vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getRecentGitStatus).mockReturnValue('Host Git snapshot');
+
+      await client.startChat();
+      await client.addWorkingDirectoryChangedContext(
+        '/test/project/root',
+        '/test/project/root/subdir',
+      );
+
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
+      expect(
+        client.getChat()['generationConfig'].systemInstruction,
+      ).not.toContain('Host Git snapshot');
+    });
+
     it('records the gitStatus-free base as the static system prefix on Config', () => {
       vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
@@ -3341,8 +4069,8 @@ describe('Gemini Client (client.ts)', () => {
 
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
       // resetChat() must call clearRevealedDeferredTools() — without
-      // this, deferred tools revealed via ToolSearch in the previous
-      // session would carry over as phantom declarations, defeating
+      // this, deferred tools revealed by resumed-history compatibility in the
+      // previous session would carry over as phantom declarations, defeating
       // the "clean slate" expectation of `/clear`.
       const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         clearRevealedDeferredTools: ReturnType<typeof vi.fn>;
@@ -4091,6 +4819,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(['mc-call-0']),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4106,13 +4835,48 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalled();
+      expect(setHistory).toHaveBeenCalledWith(expect.any(Array), ['mc-call-0']);
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
+
+    it.each([false, true])(
+      'synchronizes evicted paths with the execution environment (failure=%s)',
+      async (fails) => {
+        const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+        const invalidateReadCache = vi.fn().mockResolvedValue(undefined);
+        if (fails) {
+          invalidateReadCache.mockRejectedValueOnce(
+            new Error('worker unavailable'),
+          );
+        }
+        vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+          invalidateReadCache,
+        } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+        const { history, paths } = await makeReadFileResponses(6);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
+          getHistory: () => history,
+          setHistory: vi.fn(),
+        } as unknown as LlmChat;
+        client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+        for await (const _ of client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'container-compaction',
+          { type: SendMessageType.UserQuery },
+        )) {
+          /* drain */
+        }
+        expect(invalidateReadCache).toHaveBeenCalledWith([paths[0]]);
+        expect(clear).toHaveBeenCalledTimes(fails ? 1 : 0);
+        expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      },
+    );
 
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
@@ -4123,6 +4887,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4151,6 +4916,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4187,6 +4953,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4224,6 +4991,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4273,6 +5041,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4304,6 +5073,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4332,6 +5102,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4391,6 +5162,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(idless),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4450,6 +5222,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4521,6 +5294,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4553,6 +5327,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4579,6 +5354,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4605,6 +5381,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4625,12 +5402,45 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalled();
     });
 
+    it('preserves partial memory coverage after an accepted ToolResult', async () => {
+      const manager = new MemoryManager();
+      vi.mocked(mockConfig.getMemoryManager).mockReturnValue(manager);
+      const coverage = {
+        version: 1,
+        total: 24000,
+        ranges: [{ start: 0, end: 8000 }],
+      };
+      manager.getBodyCoverageInHistory().set('project:guide.md', coverage);
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield { type: LlmEventType.Content, value: 'Received.' };
+      });
+      for await (const _ of client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              name: 'search_memory',
+              response: { output: 'partial body' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'memory-partial-accepted',
+        { type: SendMessageType.ToolResult },
+      )) {
+        // Drain the accepted response.
+      }
+      expect(
+        manager.getBodyCoverageInHistory().get('project:guide.md'),
+      ).toEqual(coverage);
+    });
+
     it('does not run idle microcompaction on SendMessageType.ToolResult', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4658,11 +5468,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockMemoryManager.markMemoryBodiesEvictedFromHistory,
       ).not.toHaveBeenCalled();
-      // The never-accepted ToolResult rollback still rewinds memory body
-      // state (present versions and coverage) from history.
+      expect(
+        mockMemoryManager.reconcileMemoryBodiesPresentInHistory,
+      ).toHaveBeenCalled();
       expect(
         mockMemoryManager.restoreMemoryBodiesPresentInHistory,
-      ).toHaveBeenCalled();
+      ).not.toHaveBeenCalled();
     });
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {
@@ -4674,6 +5485,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4734,6 +5546,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4784,6 +5597,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4830,6 +5644,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4855,6 +5670,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4884,6 +5700,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         getHistoryLength: vi.fn().mockReturnValue(history.length),
         stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -4913,6 +5730,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -5084,6 +5902,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
+    it('preserves fast compression and requires cache resynchronization when worker invalidation fails', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const evictedPath = join(mcTmpDir, 'test-file.ts');
+      const invalidateReadCache = vi
+        .fn()
+        .mockRejectedValue(new Error('worker unavailable'));
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+        invalidateReadCache,
+      } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+      const info = {
+        originalTokenCount: 1000,
+        newTokenCount: 400,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
+      client['chat'] = {
+        compressFast: vi.fn().mockReturnValue({
+          info,
+          microcompactMeta: {
+            unresolvedEvictedReads: 0,
+            evictedReadPaths: [evictedPath],
+          },
+        }),
+      } as unknown as LlmChat;
+      client['forceFullIdeContext'] = false;
+
+      expect(await client.tryCompressChatFast()).toEqual(info);
+      expect(invalidateReadCache).toHaveBeenCalledWith([evictedPath]);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
     it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValue(true); // all match
@@ -5182,6 +6032,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
@@ -5207,11 +6058,29 @@ describe('Gemini Client (client.ts)', () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'completed-call', name: 'update_goal' } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'completed-call',
+                name: 'update_goal',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
       ];
       const originalChat = client.getChat();
       originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
-        originalChat.setHistory(compressedHistory);
+        originalChat.setHistory(compressedHistory, ['completed-call']);
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
@@ -5237,6 +6106,10 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
+      expect(client.getChat().getCompletedToolCallIds()).toEqual([
+        'completed-call',
+      ]);
+      expect(client.getChat().getHistoryForRecovery()).toEqual([]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -5777,6 +6650,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as LlmChat;
@@ -5792,17 +6666,20 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalledWith([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compactedHistory,
-      ]);
+      expect(setHistory).toHaveBeenCalledWith(
+        [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nMocked env context\n</system-reminder>',
+              },
+            ],
+          },
+          ...compactedHistory,
+        ],
+        undefined,
+      );
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
     });
   });
@@ -13855,15 +14732,15 @@ Other open files:
           mockMessageBus.request.mock.calls
             .filter(([request]) => request.eventName === 'Stop')
             .map(([request]) => request.input.stop_hook_active);
-        // Run `toolRun` of the model returns a tool call; every run yields
+        // Selected model runs return a tool call; every run yields
         // plain content.
-        const mockRunsWithToolCallOn = (toolRun: number) => {
+        const mockRunsWithToolCallOn = (...toolRuns: number[]) => {
           let runs = 0;
           mockTurnRunFn.mockImplementation(function (this: {
             pendingToolCalls: unknown[];
           }) {
             runs++;
-            if (runs === toolRun) {
+            if (toolRuns.includes(runs)) {
               this.pendingToolCalls.push({
                 callId: 'tool-1',
                 name: 'read_file',
@@ -13885,6 +14762,155 @@ Other open files:
             },
           },
         ];
+
+        describe('Stop-hook consecutive-block cap across top-level sends', () => {
+          const blockAlways = () => {
+            const bus = blockOnceThenAllow();
+            bus.request.mockReset().mockResolvedValue({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            });
+            vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(2);
+            return bus;
+          };
+          const warning = {
+            type: LlmEventType.HookSystemMessage,
+            value:
+              'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+          };
+          const send = (
+            promptId: string,
+            type = SendMessageType.UserQuery,
+            isConcurrentSideQuery = false,
+          ) =>
+            fromAsync(
+              client.sendMessageStream(
+                type === SendMessageType.ToolResult
+                  ? toolResult
+                  : [{ text: 'Hi' }],
+                new AbortController().signal,
+                promptId,
+                { type, isConcurrentSideQuery },
+              ),
+            );
+
+          it('caps the second blocking decision after a tool round trip', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2);
+            await send('main');
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(3);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('keeps a concurrent side question from resetting or advancing the main chain', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const sideEvents = await send(
+              'side',
+              SendMessageType.UserQuery,
+              true,
+            );
+            expect(sideEvents).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')?.count).toBe(1);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(5);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+          });
+
+          it('starts the count again when retry reuses the prompt id', async () => {
+            const bus = blockAlways();
+            Object.assign(client['chat'] as object, {
+              getHistoryLength: vi.fn(() => 1),
+              stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
+            });
+            mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const events = await send('main', SendMessageType.Retry);
+            expect(stopFlags(bus)).toEqual([false, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['Keep working'],
+            });
+          });
+
+          it('does not accumulate allowed stops across tool results', async () => {
+            const bus = blockAlways();
+            bus.request.mockResolvedValue({ output: undefined });
+            mockRunsWithToolCallOn(1, 2, 3, 4, 5);
+            const events = [...(await send('main'))];
+            for (let i = 0; i < 5; i++) {
+              events.push(...(await send('main', SendMessageType.ToolResult)));
+            }
+            expect(events).not.toContainEqual(warning);
+            expect(stopFlags(bus)).toEqual([false]);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('retires both the count and reasons when a Stop is allowed', async () => {
+            const bus = blockAlways();
+            bus.request
+              .mockResolvedValueOnce({
+                output: { decision: 'block', reason: 'first chain' },
+                stopHookCount: 1,
+              })
+              .mockResolvedValueOnce({ output: undefined })
+              .mockResolvedValue({
+                output: { decision: 'block', reason: 'new chain' },
+                stopHookCount: 1,
+              });
+            mockRunsWithToolCallOn(2, 5);
+            await send('main');
+            await send('main', SendMessageType.ToolResult);
+            expect(client['stopHookChains'].size).toBe(0);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['new chain'],
+            });
+          });
+
+          it('bounds tracked chains and refreshes the least-recently-used order', () => {
+            for (let i = 0; i <= MAX_STOP_HOOK_CHAIN_PROMPT_IDS; i++) {
+              client['recordStopHookBlock'](`p-${i}`, 1, ['r']);
+            }
+            const chains = client['stopHookChains'];
+            expect(chains.size).toBe(MAX_STOP_HOOK_CHAIN_PROMPT_IDS);
+            expect(chains.has('p-0')).toBe(false);
+            expect(chains.has(`p-${MAX_STOP_HOOK_CHAIN_PROMPT_IDS}`)).toBe(
+              true,
+            );
+            client['recordStopHookBlock']('p-5', 2, ['r', 'again']);
+            expect([...chains.keys()].at(-1)).toBe('p-5');
+            expect(chains.get('p-5')).toEqual({
+              count: 2,
+              reasons: ['r', 'again'],
+            });
+          });
+
+          it('starts a re-minted teammate prompt fresh without clearing the original chain', async () => {
+            const bus = blockAlways();
+            mockRunsWithToolCallOn(2, 4);
+            await send('p');
+            const teammateEvents = await send(
+              'p/teammate/1',
+              SendMessageType.Teammate,
+            );
+            expect(teammateEvents).not.toContainEqual(warning);
+            const events = await send('p', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+          });
+        });
 
         it('keeps stop_hook_active across a tool round trip', async () => {
           const mockMessageBus = blockOnceThenAllow();
@@ -15824,6 +16850,7 @@ Other open files:
         undefined,
         false,
         false,
+        { declaredTools: undefined },
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -15858,6 +16885,7 @@ Other open files:
         concise,
         false,
         false,
+        { declaredTools: undefined },
       );
     });
 
@@ -15883,6 +16911,7 @@ Other open files:
         undefined,
         false,
         true,
+        { declaredTools: undefined },
       );
     });
 
@@ -15917,6 +16946,7 @@ Other open files:
           undefined,
           false,
           false,
+          { declaredTools: undefined },
         );
       },
     );

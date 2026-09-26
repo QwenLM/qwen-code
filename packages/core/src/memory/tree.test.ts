@@ -9,7 +9,7 @@ import {
   sanitizeAutoMemoryPromptField,
   type MemorySourceStatus,
   type ScannedAutoMemoryDocument,
-} from './scan.js';
+} from './structured-scan.js';
 import {
   buildAutoMemoryTree,
   createAutoMemoryTreeSnapshot,

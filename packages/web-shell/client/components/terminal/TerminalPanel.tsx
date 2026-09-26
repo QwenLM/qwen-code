@@ -305,9 +305,9 @@ export function TerminalPanel({
           restoreSnapshot(text, ws);
         } else if (awaitingSnapshot) {
           ended = true;
-          term.writeln(
-            '\r\nTerminal protocol changed; restart the daemon and reload this page.',
-          );
+          releaseRequested = true;
+          ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
+          term.writeln(`\r\n${t('terminal.notice.protocolMismatch')}`);
           ws.close(4002, 'Terminal protocol mismatch');
         } else {
           (restoring?.term ?? term).write(text);

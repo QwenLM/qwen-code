@@ -1057,6 +1057,7 @@ describe('mcp and extension feeds', () => {
             },
             mcpServers: { a: {}, b: {} },
             skills: [{}],
+            workflows: [{}, {}],
           },
           {
             name: 'proj-ext',
@@ -1072,7 +1073,7 @@ describe('mcp and extension feeds', () => {
       version: '1.2.3',
       source: 'https://github.com/a/b',
       origin: 'GitHub',
-      components: '2 MCP · 1 Skills',
+      components: '2 MCP · 1 Skills · 2 Workflows',
     });
     expect(rows[1]).toMatchObject({
       favorite: false,
@@ -1696,5 +1697,98 @@ describe('extension management actions (audit 01 G-4)', () => {
       changed: false,
       level: 'error',
     });
+  });
+});
+
+describe('Advisor model selection', () => {
+  it('keeps Off available without models and disables without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(true);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => [],
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual(['$advisor-off']);
+    expect(
+      await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+        selectionKey: '$advisor-off',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenCalledWith(undefined);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: '' },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
+  });
+
+  it('pins and highlights the selected registry endpoint, persisting only after acceptance', async () => {
+    const models: AvailableModel[] = [
+      {
+        id: 'shared',
+        label: 'Default',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Explicit',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        registryBaseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'vision',
+        label: 'Vision',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+    ];
+    const selector = `${AuthType.USE_OPENAI}:shared\0https://api.openai.com/v1`;
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => models,
+      getAdvisorModel: () => selector,
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}:shared\0`,
+      selector,
+    ]);
+    expect(
+      computeModelDialogInitialKey({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+      }),
+    ).toBe(selector);
+    const params = {
+      config,
+      settings,
+      entries,
+      mode: 'advisor' as const,
+      selectionKey: selector,
+    };
+    expect(await applyModelSelection(params)).toMatchObject({ ok: false });
+    expect(written).toEqual([]);
+    setAdvisorModel.mockResolvedValue(true);
+    expect(await applyModelSelection(params)).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenLastCalledWith(selector);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: selector },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
   });
 });

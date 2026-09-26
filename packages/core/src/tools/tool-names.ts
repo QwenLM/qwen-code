@@ -58,8 +58,10 @@ export const ToolNames = {
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
+  TOOL_CALL: 'tool_call',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
+  ADVISOR: 'advisor',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   WORKFLOW: 'workflow',
@@ -69,6 +71,25 @@ export const ToolNames = {
   REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  // Omni media-policy tools (fixed-policy-only by default; modelAccess
+  // config can open them to the model).
+  OMNI_DOWNSAMPLE_IMAGE: 'omni_downsample_image',
+  OMNI_DOWNSCALE_VIDEO: 'omni_downscale_video',
+  OMNI_DOWNSAMPLE_AUDIO: 'omni_downsample_audio',
+  OMNI_EXTRACT_KEYFRAMES: 'omni_extract_keyframes',
+  OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
+  OMNI_CLIP_VIDEO: 'omni_clip_video',
+  OMNI_CONVERT_IMAGE: 'omni_convert_image',
+  OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
+  OMNI_CLIP_IMAGE: 'omni_clip_image',
+  OMNI_CLIP_AUDIO: 'omni_clip_audio',
+  OMNI_CAPTION_IMAGE: 'omni_caption_image',
+  OMNI_CAPTION_AUDIO: 'omni_caption_audio',
+  OMNI_OCR_IMAGE: 'omni_ocr_image',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'omni_understand_video_segments',
+  // Omni memory recall (registered only when omni is enabled AND
+  // `omni.memory.recall.mode === 'active'` — D10 mutual exclusion).
+  OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
   PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
 } as const;
@@ -119,8 +140,10 @@ export const ToolDisplayNames = {
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
+  TOOL_CALL: 'ToolCall',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
+  ADVISOR: 'Advisor',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
   WORKFLOW: 'Workflow',
@@ -130,6 +153,21 @@ export const ToolDisplayNames = {
   REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  OMNI_DOWNSAMPLE_IMAGE: 'DownsampleImage',
+  OMNI_DOWNSCALE_VIDEO: 'DownscaleVideo',
+  OMNI_DOWNSAMPLE_AUDIO: 'DownsampleAudio',
+  OMNI_EXTRACT_KEYFRAMES: 'ExtractKeyframes',
+  OMNI_EXTRACT_AUDIO: 'ExtractAudio',
+  OMNI_CLIP_VIDEO: 'ClipVideo',
+  OMNI_CONVERT_IMAGE: 'ConvertImage',
+  OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
+  OMNI_CLIP_IMAGE: 'ClipImage',
+  OMNI_CLIP_AUDIO: 'ClipAudio',
+  OMNI_CAPTION_IMAGE: 'CaptionImage',
+  OMNI_CAPTION_AUDIO: 'CaptionAudio',
+  OMNI_OCR_IMAGE: 'OcrImage',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'UnderstandVideoSegments',
+  OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
   PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
 } as const;
@@ -152,7 +190,34 @@ export const ToolNamesMigration = {
  * use this so an aliased call is treated identically everywhere.
  */
 export function canonicalToolName(toolName: string): string {
+  if (!Object.prototype.hasOwnProperty.call(ToolNamesMigration, toolName)) {
+    return toolName;
+  }
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+/**
+ * Resolve a model-supplied tool name against the registered names the way
+ * both halves of the deferred-tool bridge must agree on: an exact match wins,
+ * otherwise a single case-insensitive match. Returns the registered name,
+ * the candidate list when several registered names differ from the request
+ * only by case, or `undefined` when nothing matches.
+ *
+ * Returning the candidates instead of picking one keeps the answer
+ * independent of registration order, which `ensureTool` changes when it
+ * moves a lazily-built tool from the factory map into the tool map (#11321).
+ */
+export function resolveRegisteredToolName(
+  requested: string,
+  registered: readonly string[],
+): string | string[] | undefined {
+  if (registered.includes(requested)) return requested;
+  const lower = requested.toLowerCase();
+  const candidates = [
+    ...new Set(registered.filter((name) => name.toLowerCase() === lower)),
+  ].sort();
+  if (candidates.length === 1) return candidates[0];
+  return candidates.length > 1 ? candidates : undefined;
 }
 
 // Migration from old tool display names to new tool display names

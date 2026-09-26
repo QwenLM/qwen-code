@@ -216,6 +216,12 @@ describe('dreamAgentPlanner', () => {
     const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
 
     expect(result).toBe(mockResult);
+    const prompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].systemPrompt;
+    expect(prompt).toContain('category:');
+    expect(prompt).toContain('keywords:');
+    expect(prompt).toContain('usage_scenarios:');
+    expect(prompt).toContain('1,200 characters');
+    expect(prompt).toContain('Do not edit MEMORY.md');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         taskPrompt: expect.stringContaining('.dream-operations.json'),

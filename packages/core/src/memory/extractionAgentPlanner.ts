@@ -26,7 +26,7 @@ import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
-} from './scan.js';
+} from './structured-scan.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';

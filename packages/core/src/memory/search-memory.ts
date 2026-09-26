@@ -19,7 +19,7 @@ import {
   type AutoMemoryScanSnapshot,
   type MemorySourceStatus,
   type ScannedAutoMemoryDocument,
-} from './scan.js';
+} from './structured-scan.js';
 import {
   buildAutoMemoryTree,
   toAutoMemoryRef,

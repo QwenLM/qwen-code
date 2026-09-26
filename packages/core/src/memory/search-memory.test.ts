@@ -10,14 +10,17 @@ import {
   type ExecuteSearchMemoryOptions,
   type SearchMemoryToolResult,
 } from './search-memory.js';
-import { rereadAutoMemoryDocument, scanAutoMemorySnapshot } from './scan.js';
+import {
+  rereadAutoMemoryDocument,
+  scanAutoMemorySnapshot,
+} from './structured-scan.js';
 import type {
   AutoMemoryScanSnapshot,
   ScannedAutoMemoryDocument,
-} from './scan.js';
+} from './structured-scan.js';
 
-vi.mock('./scan.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./scan.js')>();
+vi.mock('./structured-scan.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./structured-scan.js')>();
   return {
     ...actual,
     rereadAutoMemoryDocument: vi.fn(

@@ -41,6 +41,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import {
   logMemoryDream,
   logMemoryExtract,
@@ -351,21 +352,50 @@ function updateRecord(
   record.updatedAt = new Date().toISOString();
 }
 
-function partWritesToMemory(part: Part, projectRoot: string): boolean {
-  const name = part.functionCall?.name;
-  if (name && WRITE_TOOL_NAMES.has(name)) {
-    const args = part.functionCall?.args as Record<string, unknown> | undefined;
-    const filePath =
-      args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
-    if (
-      typeof filePath === 'string' &&
-      (isAnyAutoMemPath(filePath, projectRoot) ||
-        isTeamAutoMemPath(filePath, projectRoot))
-    ) {
-      return true;
+function memoryWritePath(part: Part): string | undefined {
+  let name = part.functionCall?.name
+    ? canonicalToolName(part.functionCall.name)
+    : undefined;
+  let args = part.functionCall?.args as Record<string, unknown> | undefined;
+  if (name === ToolNames.TOOL_CALL) {
+    const targetName = args?.['name'];
+    const targetArgs = args?.['arguments'];
+    if (typeof targetName === 'string') {
+      name = canonicalToolName(targetName);
+      if (
+        typeof targetArgs === 'object' &&
+        targetArgs !== null &&
+        !Array.isArray(targetArgs)
+      ) {
+        args = targetArgs as Record<string, unknown>;
+      } else {
+        args = undefined;
+        if (typeof targetArgs === 'string') {
+          const trimmedArgs = targetArgs.trim();
+          if (trimmedArgs.startsWith('{') && trimmedArgs.endsWith('}')) {
+            try {
+              const parsedArgs: unknown = JSON.parse(trimmedArgs);
+              if (
+                typeof parsedArgs === 'object' &&
+                parsedArgs !== null &&
+                !Array.isArray(parsedArgs)
+              ) {
+                args = parsedArgs as Record<string, unknown>;
+              }
+            } catch {
+              // Invalid JSON cannot describe a memory-writing target.
+            }
+          }
+        }
+      }
     }
   }
-  return false;
+  if (name && WRITE_TOOL_NAMES.has(name)) {
+    const filePath =
+      args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
+    if (typeof filePath === 'string') return filePath;
+  }
+  return undefined;
 }
 
 function historyWritesToMemory(
@@ -373,7 +403,14 @@ function historyWritesToMemory(
   projectRoot: string,
 ): boolean {
   return history.some((msg) =>
-    (msg.parts ?? []).some((p) => partWritesToMemory(p, projectRoot)),
+    (msg.parts ?? []).some((part) => {
+      const filePath = memoryWritePath(part);
+      return (
+        filePath !== undefined &&
+        (isAnyAutoMemPath(filePath, projectRoot) ||
+          isTeamAutoMemPath(filePath, projectRoot))
+      );
+    }),
   );
 }
 
@@ -406,19 +443,13 @@ function latestHistoryWritesToUserMemory(history: Content[]): boolean {
 
   return history.slice(queryIndex + 1).some((message) =>
     (message.parts ?? []).some((part) => {
-      const name = part.functionCall?.name;
-      if (!name || !WRITE_TOOL_NAMES.has(name)) return false;
       if (
         !part.functionCall?.id ||
         !successfulCallIds.has(part.functionCall.id)
       ) {
         return false;
       }
-      const args = part.functionCall?.args as
-        | Record<string, unknown>
-        | undefined;
-      const filePath =
-        args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
+      const filePath = memoryWritePath(part);
       return typeof filePath === 'string' && isUserAutoMemPath(filePath);
     }),
   );
@@ -740,9 +771,10 @@ export class MemoryManager {
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
     this.inFlight.set(taskId, promise);
-    // The .finally() derivative rejects when the tracked promise rejects;
-    // swallow it — the caller's own await/catch handles the rejection.
-    void promise.finally(() => this.inFlight.delete(taskId)).catch(() => {});
+    void promise.then(
+      () => this.inFlight.delete(taskId),
+      () => this.inFlight.delete(taskId),
+    );
     return promise;
   }
 

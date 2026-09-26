@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 const {
   appendFileSync,
@@ -737,7 +738,66 @@ describe('standalone release packaging', () => {
     expect(releaseVerifyScript).not.toContain('assertInstallAliasMatches');
   });
 
+  it('allowlists every npm-published dist entry for standalone packaging', () => {
+    // Regression gate for PR #12067 review: prepare-package.js's npm `files`
+    // list and create-standalone-package.js's allowlists must not drift
+    // apart — an entry missing from both DIST_ALLOWED_ENTRIES (or its
+    // patterns) and DIST_NPM_PACKAGE_ONLY_ENTRIES aborts the release build
+    // with "Unexpected dist asset" at archive time, and an asset that must
+    // ship inside the archive (the sandbox workers) must land in
+    // DIST_ALLOWED_ENTRIES specifically, not the npm-only skip list.
+    const prepareScript = readScript('scripts/prepare-package.js');
+    const packageScript = readScript('scripts/create-standalone-package.js');
+    const filesBlock = /files:\s*\[([\s\S]*?)\]/.exec(prepareScript);
+    expect(filesBlock).not.toBeNull();
+    const entries = [...filesBlock[1].matchAll(/'([^']+)'/g)].map(
+      (match) => match[1],
+    );
+    expect(entries.length).toBeGreaterThan(0);
+    const allowedBlock =
+      /DIST_ALLOWED_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(packageScript);
+    const npmOnlyBlock =
+      /DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set\(\[([\s\S]*?)\]\)/.exec(
+        packageScript,
+      );
+    expect(allowedBlock).not.toBeNull();
+    expect(npmOnlyBlock).not.toBeNull();
+    for (const entry of entries) {
+      if (entry.includes('*')) {
+        // Glob entries (today: '*.sb') are covered by
+        // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
+        expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
+        continue;
+      }
+      const known =
+        allowedBlock[1].includes(`'${entry}'`) ||
+        npmOnlyBlock[1].includes(`'${entry}'`);
+      expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
+        true,
+      );
+    }
+    // The sandbox workers are resolved from the installed bundle at
+    // execution time, so they must be copied into the archive's lib/ —
+    // the npm-only skip list is the wrong home for them — and they must be
+    // required, so an archive that somehow lacked them fails at build time
+    // rather than at first sandbox launch.
+    const requiredBlock = /DIST_REQUIRED_PATHS = \[([\s\S]*?)\]/.exec(
+      packageScript,
+    );
+    expect(requiredBlock).not.toBeNull();
+    for (const asset of ['sandboxBwrapRelay.js', 'sandboxFileWorker.js']) {
+      expect(allowedBlock[1]).toContain(`'${asset}'`);
+      expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
+      expect(requiredBlock[1]).toContain(`'${asset}'`);
+    }
+  });
+
   it('loads the standalone release packaging helper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toMatch(
+      /let pnpmLockedKeys;[\s\S]*if \(isMainModule\(\)\)/,
+    );
+
     const output = execFileSync(
       process.execPath,
       ['scripts/build-standalone-release.js', '--help'],
@@ -836,6 +896,276 @@ describe('standalone release packaging', () => {
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
   });
 
+  it('retries a failed standalone runtime download', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('fetch failed'), {
+          cause: new Error('socket hang up'),
+        }),
+      )
+      .mockResolvedValueOnce(new Response('runtime-bytes'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, sleepImpl },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(sleepImpl).toHaveBeenCalledTimes(1);
+      expect(sleepImpl).toHaveBeenCalledWith(5_000);
+      expect(fetchImpl.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+      // A real undici failure reads only "fetch failed"; the retry warning
+      // has to surface error.cause or the log carries no actionable detail.
+      expect(warnSpy.mock.calls[0][0]).toContain('socket hang up');
+      expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads a runtime archive that fails verification', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const fetchImpl = vi.fn(async () => new Response('runtime-bytes'));
+    const verify = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Checksum verification failed'))
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, verify, sleepImpl: async () => {} },
+      );
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the download after the final attempt', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('boom', {
+          status: 500,
+          statusText: 'Internal Server Error',
+        }),
+    );
+
+    try {
+      await expect(
+        downloadWithRetry(
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+          destination,
+          { fetchImpl, sleepImpl },
+        ),
+      ).rejects.toThrow(/Failed to download/);
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([5_000, 10_000]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads a checksum list that omits the runtime archives', async () => {
+    const { downloadRuntimeChecksums } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const checksumsPath = path.join(tmpDir, 'node-SHASUMS256.txt');
+    const shasumsUrl = 'https://nodejs.org/dist/v22.0.0/SHASUMS256.txt';
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('<html>gateway interstitial</html>'))
+      .mockResolvedValueOnce(
+        new Response(`${'a'.repeat(64)}  node-v22.0.0-linux-x64.tar.xz\n`),
+      );
+
+    try {
+      const checksums = await downloadRuntimeChecksums({
+        runtime: 'node',
+        distUrl: 'https://nodejs.org/dist/v22.0.0',
+        checksumsPath,
+        expectedArchives: ['node-v22.0.0-linux-x64.tar.xz'],
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+        shasumsUrl,
+        shasumsUrl,
+      ]);
+      expect(checksums.get('node-v22.0.0-linux-x64.tar.xz')).toBe(
+        'a'.repeat(64),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      runtime: 'node',
+      label: 'Node.js',
+      distUrl: 'https://nodejs.org/dist/v22.0.0',
+      listedArchive: 'node-v22.0.0-mac-arm64.tar.gz',
+      missingArchives: [
+        'node-v22.0.0-linux-x64.tar.xz',
+        'node-v22.0.0-win-x64.zip',
+      ],
+    },
+    {
+      runtime: 'bun',
+      label: 'Bun',
+      distUrl: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14',
+      listedArchive: 'bun-darwin-aarch64.zip',
+      missingArchives: ['bun-linux-aarch64.zip', 'bun-linux-x64.zip'],
+    },
+  ])(
+    'reports every missing archive under the $label display label',
+    async ({ runtime, label, distUrl, listedArchive, missingArchives }) => {
+      const { downloadRuntimeChecksums } = await import(
+        standaloneReleaseScriptUrl
+      );
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+      const checksumsPath = path.join(tmpDir, `${runtime}-SHASUMS256.txt`);
+      const fetchImpl = vi.fn(
+        async () => new Response(`${'a'.repeat(64)}  ${listedArchive}\n`),
+      );
+
+      try {
+        await expect(
+          downloadRuntimeChecksums({
+            runtime,
+            distUrl,
+            checksumsPath,
+            expectedArchives: missingArchives,
+            fetchImpl,
+            sleepImpl: async () => {},
+          }),
+        ).rejects.toThrow(
+          `ERROR: ${label} SHASUMS256.txt does not list ${missingArchives.join(', ')}`,
+        );
+        expect(fetchImpl).toHaveBeenCalledTimes(3);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('verifies the runtime archive checksum after every download attempt', async () => {
+    const { downloadRuntimeArchive } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const archivePath = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const archiveBytes = 'runtime-bytes';
+    const checksums = new Map([
+      [
+        'node-v22.0.0-linux-x64.tar.xz',
+        crypto.createHash('sha256').update(archiveBytes).digest('hex'),
+      ],
+    ]);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('truncated-bytes'))
+      .mockResolvedValueOnce(new Response(archiveBytes));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadRuntimeArchive({
+        archiveUrl:
+          'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        archivePath,
+        archiveName: 'node-v22.0.0-linux-x64.tar.xz',
+        checksums,
+        label: 'Node.js',
+        fetchImpl,
+        sleepImpl: async () => {},
+      });
+
+      // The truncated first download fails the checksum verify, so the retry
+      // re-fetches: dropping the verify wiring would accept the corrupt
+      // bytes after a single fetch and leave them on disk.
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0][0]).toContain(
+        'Checksum verification failed for node-v22.0.0-linux-x64.tar.xz',
+      );
+      expect(readFileSync(archivePath, 'utf8')).toBe(archiveBytes);
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('derives the runtime archive name per flavor', async () => {
+    const { runtimeArchiveName } = await import(standaloneReleaseScriptUrl);
+    const target = {
+      nodeTarget: 'linux-x64',
+      nodeArchiveExtension: 'tar.xz',
+      bunAsset: 'bun-linux-x64',
+    };
+
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'node', nodeVersion: '22.0.0' }),
+    ).toBe('node-v22.0.0-linux-x64.tar.xz');
+    expect(
+      runtimeArchiveName({ ...target, runtime: 'bun', nodeVersion: '22.0.0' }),
+    ).toBe('bun-linux-x64.zip');
+  });
+
+  it('routes every standalone runtime download through the retry wrapper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    // Pin the wiring, not its spelling: strip comments and collapse
+    // whitespace so a reflow or an added comment cannot turn a source-text
+    // pin red while the wiring is intact. The archive leg's verify wiring is
+    // pinned behaviourally by the downloadRuntimeArchive test above.
+    const normalised = releaseScript
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\s+/g, ' ');
+
+    // The helpers' own tests stay green even when the release path stops
+    // calling them, so pin the call sites and the retry constants by source.
+    // Every needle avoids `//` and newlines, so all can match against
+    // `normalised`; that transform truncates string literals containing
+    // `//`, so a URL-bearing needle here would silently never match.
+    expect(normalised.match(/await downloadWithRetry\(/g)).toHaveLength(2);
+    expect(normalised.match(/await downloadFile\(/g)).toHaveLength(1);
+    // The archive leg: packageTarget must route through the verifying helper
+    // with the shared checksum map and label: dropping the call or either
+    // argument leaves the helper exercised but the release path unverified.
+    expect(normalised.match(/await downloadRuntimeArchive\(/g)).toHaveLength(1);
+    expect(normalised).toMatch(
+      /await downloadRuntimeArchive\(\{[^;]*checksums,[^;]*label: runtimeLabel\(runtime\)/,
+    );
+    // The checksum leg: emptying this derivation (expectedArchives: [])
+    // leaves the whole suite green while a truncated SHASUMS256.txt is
+    // accepted instead of re-downloaded.
+    expect(normalised).toMatch(
+      /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
+    );
+    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(normalised).toContain('const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;');
+    expect(normalised).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
+    expect(normalised).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
+  });
+
   it('stages the locked clipboard packages for every release target', async () => {
     const { readClipboardPackageSpecs } = await import(
       standaloneReleaseScriptUrl
@@ -851,6 +1181,24 @@ describe('standalone release packaging', () => {
     ]);
   });
 
+  it('stages the locked node-pty packages declared in the root manifest', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    // The list tracks the root package.json optionalDependencies, so a newly
+    // pinned platform package is staged automatically.
+    expect(readNodePtyPackageSpecs()).toEqual([
+      '@lydell/node-pty@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64@1.2.0-beta.10',
+    ]);
+  });
+
   it('maps every release target to its clipboard native package', async () => {
     const { TARGET_CLIPBOARD_PACKAGE } = await import(
       standalonePackageScriptUrl
@@ -863,6 +1211,37 @@ describe('standalone release packaging', () => {
       ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
       ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
     ]);
+  });
+
+  it('maps every release target to a pinned node-pty prebuild package', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const { TARGETS, TARGET_PREBUILD_DIR } = await import(
+      standalonePackageScriptUrl
+    );
+
+    // Derive the expectation from the pins so the version list stays
+    // single-sourced. One-directional on purpose: @lydell/node-pty-win32-arm64
+    // is pinned while no target maps to it. The prebuild dir name is not the
+    // target name on Windows ('win-x64' -> 'win32-x64'), so the lookup has to
+    // go through the map instead of comparing targets to package suffixes.
+    // Drive the loop from TARGETS rather than from the map being validated: a
+    // target with no map entry would otherwise never be visited, deleting a
+    // whole entry would merely remove an iteration, and an emptied map would
+    // pass vacuously.
+    const specs = readNodePtyPackageSpecs();
+    for (const target of TARGETS.keys()) {
+      const dir = TARGET_PREBUILD_DIR.get(target);
+      expect(
+        dir,
+        `${target} has no node-pty prebuild dir mapping`,
+      ).toBeDefined();
+      expect(
+        specs.some((spec) => spec.startsWith(`@lydell/node-pty-${dir}@`)),
+        `${target} maps to @lydell/node-pty-${dir}, which no manifest pins`,
+      ).toBe(true);
+    }
   });
 
   it('validates standalone release checksum output', async () => {
@@ -1847,6 +2226,11 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
       ).toBe(true);
       expect(
+        existsSync(
+          path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
+        ),
+      ).toBe(true);
+      expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
       const shim = readScript(
@@ -2156,6 +2540,168 @@ describe('standalone release packaging', () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  itOnUnix('does not package node-pty debug symbols', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeNodePtyModules(tmpDir);
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      // win-x64 is the target that ships PDBs, but the prebuild directory is
+      // the only thing that varies per target and the filter keys off the file
+      // name, so staging them under linux-x64's layout pins the same line
+      // without a Windows host.
+      const prebuildDir = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@lydell',
+        'node-pty-linux-x64',
+        'prebuilds',
+        'linux-x64',
+      );
+      expect(existsSync(path.join(prebuildDir, 'pty.node'))).toBe(true);
+      expect(existsSync(path.join(prebuildDir, 'pty.pdb'))).toBe(false);
+      expect(existsSync(path.join(prebuildDir, 'conpty.pdb'))).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix(
+    'fails the release build when a node-pty prebuild is missing',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const nativeModulesDir = createFakeNodePtyModulesWithoutAddon(tmpDir);
+
+        // `Required ` is what separates the fatal gate from the degrade arm:
+        // copyNodePtyAddon emits the same message on both, so a prefix-less
+        // match is also satisfied by the warning a build prints before dying
+        // for an unrelated reason.
+        expect(() =>
+          packageFakeStandalone(
+            tmpDir,
+            {},
+            {
+              nativeModulesDir,
+              env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
+            },
+          ),
+        ).toThrow(/Required node-pty packages for linux-x64/);
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix('still builds a PTY-less archive when the gate is off', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeNodePtyModulesWithoutAddon(tmpDir);
+
+      // The converse arm: a polarity flip on the gate would throw here instead
+      // of building, and degrade still has to ship an archive — just without
+      // the addon it could not find.
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'node_modules',
+            '@lydell',
+            'node-pty-linux-x64',
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // The two gate arms above stage linux-x64, the one target whose prebuild dir
+  // name equals its target name, so neither can tell `prebuildDirName` apart
+  // from `target` in copyNodePtyAddon. win-x64 is the dialect where the two
+  // diverge ('win-x64' -> 'win32-x64'), and packaging it with the gate on
+  // reddens a swap of either name. Nothing here is POSIX-specific — the
+  // packager is host-independent — so this arm is live on every lane instead
+  // of only on test_windows.
+  itWithZip(
+    'bundles the win-x64 node-pty prebuild under its win32-x64 dir name',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const nativeModulesDir = createFakeNodePtyModules(tmpDir, {
+          prebuildDirName: 'win32-x64',
+          clipboard: '@teddyzhu/clipboard-win32-x64-msvc',
+        });
+        const archive = packageFakeStandalone(
+          tmpDir,
+          {},
+          {
+            nativeModulesDir,
+            target: 'win-x64',
+            nodeArchive: createFakeWindowsNodeArchive(tmpDir),
+            env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
+          },
+        );
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        extractZipForTest(archive, extractDir);
+
+        const scopedDir = path.join(
+          extractDir,
+          'qwen-code',
+          'lib',
+          'node_modules',
+          '@lydell',
+        );
+        expect(
+          existsSync(
+            path.join(
+              scopedDir,
+              'node-pty-win32-x64',
+              'prebuilds',
+              'win32-x64',
+              'pty.node',
+            ),
+          ),
+        ).toBe(true);
+        // The staged package name comes from the prebuild dir, never from the
+        // target name, so the target-spelled directory must not exist.
+        const targetSpelled = path.join(scopedDir, 'node-pty-win-x64');
+        expect(existsSync(targetSpelled)).toBe(false);
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   itOnUnix(
     'packages the bun flavor as an opentui-preview archive with a renderer-default shim',
@@ -2467,6 +3013,19 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).toContain(
       'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
     );
+    // Pin the gate structurally on the step that actually runs the packager:
+    // build-standalone-release.js spawns it with no env override, so the value
+    // reaches create-standalone-package.js only from this step's env. A
+    // whole-file substring stays green when the line is commented out or moved
+    // into a neighbouring step's env, and the gate then silently reverts to
+    // warn-and-degrade. The value stays the conditional expression because the
+    // publish job also runs on forks, where the gate is deliberately off.
+    const archiveStep = parse(releaseWorkflow).jobs.publish.steps.find(
+      (step) => step.name === 'Build Standalone Archives',
+    );
+    expect(archiveStep?.env?.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}",
+    );
     expect(releaseStepScript).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
@@ -2500,6 +3059,9 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(ossWorkflow).toContain('if [ -f pnpm-lock.yaml ]');
+    expect(ossWorkflow).toContain('corepack pnpm install --frozen-lockfile');
+    expect(ossWorkflow).toContain('npm ci --no-audit --progress=false');
     // The sync workflow can be re-dispatched for any tag, and its steps come
     // from the default branch while the checkout and the assets come from that
     // tag, so it derives the flavor from the archives the release actually
@@ -2674,6 +3236,19 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('hosted entrypoint');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+    // The archives ship the node-pty wrapper plus the target prebuild, and the
+    // guide has to say so instead of sending PTY users to an npm install. Bare
+    // 'linux-arm64' also occurs in the release-artifact list, so pin the
+    // sentence that names it as a covered PTY target (#11872).
+    expect(guide).toContain('@lydell/node-pty');
+    const flattenedGuide = guide.replace(/\s+/g, ' ');
+    expect(flattenedGuide).toContain(
+      '`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64` and `win-x64`',
+    );
+    expect(flattenedGuide).not.toContain('package is published yet');
+    expect(guide).not.toContain(
+      'do not currently install every npm optional native module',
+    );
   });
 
   it('provides standalone uninstall scripts that clean install-owned files only', () => {
@@ -4619,8 +5194,11 @@ function ensureMinimalDist({
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+    writeFileSync(path.join(distPath, 'execution-worker.js'), '');
   }
   if (includeNpmPackageArtifacts) {
     writeFileSync(
@@ -4954,16 +5532,16 @@ function extractZipForTest(archive, destination) {
 function packageFakeStandalone(
   tmpDir,
   nodeArchiveOptions = {},
-  { nativeModulesDir } = {},
+  { nativeModulesDir, env, target = 'linux-x64', nodeArchive } = {},
 ) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
   const args = [
     'scripts/create-standalone-package.js',
     '--target',
-    'linux-x64',
+    target,
     '--node-archive',
-    createFakeNodeArchive(tmpDir, nodeArchiveOptions),
+    nodeArchive || createFakeNodeArchive(tmpDir, nodeArchiveOptions),
     '--out-dir',
     outDir,
     '--version',
@@ -4972,8 +5550,12 @@ function packageFakeStandalone(
   if (nativeModulesDir) {
     args.push('--native-modules-dir', nativeModulesDir);
   }
-  execFileSync('node', args, { stdio: 'pipe' });
-  return path.join(outDir, 'qwen-code-linux-x64.tar.gz');
+  execFileSync('node', args, {
+    stdio: 'pipe',
+    env: { ...process.env, ...env },
+  });
+  const extension = target === 'win-x64' ? 'zip' : 'tar.gz';
+  return path.join(outDir, `qwen-code-${target}.${extension}`);
 }
 
 function createFakeClipboardModules(tmpDir, nativePackages) {
@@ -5000,6 +5582,77 @@ function createFakeClipboardModules(tmpDir, nativePackages) {
     writeFileSync(path.join(packageDir, `${binaryName}.node`), 'native\n');
   }
 
+  return modulesDir;
+}
+
+// The clipboard packages are mandatory for --native-modules-dir, and the
+// node-pty prebuild comes from the same directory, so both live here. The
+// .pdb files model the win-x64 prebuild package's payload. `prebuildDirName`
+// is the prebuildify platform-arch name, which differs from the target name on
+// Windows: --target win-x64 stages node-pty-win32-x64/prebuilds/win32-x64.
+function createFakeNodePtyModules(
+  tmpDir,
+  {
+    prebuildDirName = 'linux-x64',
+    clipboard = '@teddyzhu/clipboard-linux-x64-gnu',
+  } = {},
+) {
+  const modulesDir = createFakeClipboardModules(tmpDir, [clipboard]);
+  const wrapperDir = path.join(modulesDir, '@lydell', 'node-pty');
+  const prebuildPackageDir = path.join(
+    modulesDir,
+    '@lydell',
+    `node-pty-${prebuildDirName}`,
+  );
+  const prebuildDir = path.join(
+    prebuildPackageDir,
+    'prebuilds',
+    prebuildDirName,
+  );
+
+  mkdirSync(path.join(wrapperDir, 'lib'), { recursive: true });
+  writeFileSync(
+    path.join(wrapperDir, 'package.json'),
+    JSON.stringify({ name: '@lydell/node-pty', version: '1.2.0-beta.10' }),
+  );
+  writeFileSync(
+    path.join(wrapperDir, 'lib', 'index.js'),
+    'module.exports = {};\n',
+  );
+
+  mkdirSync(prebuildDir, { recursive: true });
+  writeFileSync(
+    path.join(prebuildPackageDir, 'package.json'),
+    JSON.stringify({
+      name: `@lydell/node-pty-${prebuildDirName}`,
+      version: '1.2.0-beta.10',
+    }),
+  );
+  writeFileSync(path.join(prebuildDir, 'pty.node'), 'native\n');
+  writeFileSync(path.join(prebuildDir, 'pty.pdb'), 'debug symbols\n');
+  writeFileSync(path.join(prebuildDir, 'conpty.pdb'), 'debug symbols\n');
+
+  return modulesDir;
+}
+
+// createFakeNodePtyModules minus the addon, so the packager sees a staged dir
+// with valid clipboard packages but no prebuild to copy. Dropping only pty.node
+// matters: copyClipboardAddon runs first and hard-fails on a staged dir that
+// lacks them, while hasNativePrebuild() keys off a .node entry, so the leftover
+// .pdb files do not satisfy it.
+function createFakeNodePtyModulesWithoutAddon(tmpDir, options = {}) {
+  const { prebuildDirName = 'linux-x64' } = options;
+  const modulesDir = createFakeNodePtyModules(tmpDir, options);
+  rmSync(
+    path.join(
+      modulesDir,
+      '@lydell',
+      `node-pty-${prebuildDirName}`,
+      'prebuilds',
+      prebuildDirName,
+      'pty.node',
+    ),
+  );
   return modulesDir;
 }
 

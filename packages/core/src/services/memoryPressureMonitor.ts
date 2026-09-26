@@ -673,7 +673,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private executeStep(step: CleanupStep): void {
     switch (step) {
       case 'clear_file_cache': {
-        this.coreConfig.getFileReadCache().clear();
+        this.coreConfig.getFileReadCache().dropEntries();
         debugLogger.debug('FileReadCache cleared');
         break;
       }
@@ -735,7 +735,7 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
-            chat.setHistory(result.history);
+            chat.setHistory(result.history, chat.getCompletedToolCallIds());
             const memoryManager = this.coreConfig.getMemoryManager();
             if (result.meta.unresolvedEvictedMemoryBodies > 0) {
               memoryManager.markAllMemoryBodiesEvictedFromHistory();

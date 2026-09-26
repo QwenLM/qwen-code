@@ -15,7 +15,12 @@ import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
-import { assertWritableOutPath } from './lib/paths.js';
+import {
+  assertWritableOutPath,
+  commandPrefixed,
+  ensureReviewTmpDir,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -24,7 +29,9 @@ import {
 interface FetchDiffArgs {
   prNumber: number;
   repo: string;
-  out: string;
+  /** As yargs gave it: a repeated --out is an array, ruled by
+   * `assertWritableOutPath` before any use. */
+  out: unknown;
   /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
   host?: string;
 }
@@ -47,6 +54,11 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
   // fetch — classify it before fetching.
   assertWritableOutPath(args.out);
+  // Lightweight mode's first writer into `.qwen/tmp`: refused before the
+  // auth gate and the fetch, like every other guarded command — a
+  // redirected scratch directory is not a round that can run, and nothing
+  // it costs should be paid first.
+  if (writesIntoReviewTmp(args.out)) ensureReviewTmpDir('fetch-diff');
   const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 
@@ -114,12 +126,17 @@ export const fetchDiffCommand: CommandModule = {
       const result = runFetchDiff({
         prNumber,
         repo: String(argv['repo']),
-        out: String(argv['out']),
+        // As yargs gave it: a repeated --out is an array, which the shared
+        // ruling refuses as a usage error. `String()` joined it into one
+        // comma path and wrote there.
+        out: argv['out'],
         host,
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
-      writeStderrLineSafe(`fetch-diff: ${(err as Error).message}`);
+      writeStderrLineSafe(
+        commandPrefixed('fetch-diff', (err as Error).message),
+      );
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },

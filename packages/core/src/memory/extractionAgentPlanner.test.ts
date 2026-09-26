@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { scanAutoMemoryTopicDocuments } from './structured-scan.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -17,8 +17,8 @@ import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
-vi.mock('./scan.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./scan.js')>();
+vi.mock('./structured-scan.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./structured-scan.js')>();
   return {
     ...actual,
     scanAutoMemoryTopicDocuments: vi.fn(),

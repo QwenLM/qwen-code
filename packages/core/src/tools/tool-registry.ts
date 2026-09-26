@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import { type Config, matchesAnyServerPattern } from '../config/config.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -50,6 +51,30 @@ export interface DeferredToolSummary {
 }
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
+
+/**
+ * What a deferred tool looked like when tool_search returned it: the parameter
+ * contract its arguments were written against plus, for an MCP tool, the server
+ * it belongs to. `tool_call` recomputes it and refuses a bridged call whose
+ * live value differs (#11321); a direct call never reaches that comparison.
+ *
+ * The free-text `description` is deliberately excluded. Shipped deferred tools
+ * rebuild it from mutable state on every `schema` access — `WebSearchTool`
+ * interpolates the current month/year and `ReadFileTool` the effective input
+ * modalities — intentionally, so a long-lived `qwen serve`/ACP process is not
+ * stale across a month boundary or a mid-session `/model` switch. Hashing that
+ * prose made an unchanged tool's fingerprint drift and refuse a legitimate call
+ * whose parameters still matched the reviewed schema.
+ */
+export function deferredDeclarationFingerprint(
+  tool: AnyDeclarativeTool,
+): string {
+  const server = tool instanceof DiscoveredMCPTool ? tool.serverName : '';
+  const schema = tool.schema;
+  return `${server}\u0000${schema.name ?? tool.name}\u0000${JSON.stringify(
+    schema.parametersJsonSchema,
+  )}`;
+}
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
@@ -209,18 +234,25 @@ export class ToolRegistry {
   // same name share one promise instead of running the factory multiple times.
   private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
     new Map();
-  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
-  // tool's schema is included in subsequent function-declaration lists even
-  // though it would normally be hidden.
+  // Deferred tools promoted into the declaration list by session setup,
+  // compatibility replay, or an explicit runtime flow.
   private revealedDeferred: Set<string> = new Set();
-  // Reveals that are session SETUP rather than ToolSearch discovery (see
+  // Reveals that are session setup rather than transient runtime state (see
   // pinDeferredToolReveal): they survive the `/clear` reset that
-  // intentionally drops discovered reveals so the new session starts clean.
+  // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
+  // Fingerprint of each tool as tool_search last returned it, kept across
+  // `/clear` and deliberately never pruned: an entry can only match the same
+  // server, schema name and parameter schema, so a stale one either still
+  // describes the live tool or makes tool_call ask for a fresh review.
+  // Pruning it on removal would invert that — a dropped entry reads as "never
+  // reviewed" and passes a replacement through. Bounded by the distinct tool
+  // names reviewed in this process.
+  private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable and loadable via ToolSearch, callable through
+  // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
   // deferred tools they are never auto-revealed by the budget preload:
@@ -252,7 +284,7 @@ export class ToolRegistry {
   }
 
   // Stable declaration order keeps the serialized tools block independent of
-  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  // async registration history (MCP discovery, reconnects, deferred reveals).
   private static compareToolsByDeclarationName(
     a: AnyDeclarativeTool,
     b: AnyDeclarativeTool,
@@ -379,6 +411,10 @@ export class ToolRegistry {
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
   }
 
   /**
@@ -658,8 +694,9 @@ export class ToolRegistry {
         this.tools.delete(name);
         // Drop reveal state too so a re-discovered tool of the same
         // name doesn't inherit a `revealed: true` from before the
-        // disconnect (would surface in declarations before any
-        // ToolSearch call this session).
+        // disconnect (would surface in declarations immediately after
+        // reconnection). The reviewed-declaration record is deliberately
+        // left alone: see `reviewedDeferredDeclarations`.
         this.revealedDeferred.delete(name);
       }
     }
@@ -780,12 +817,13 @@ export class ToolRegistry {
       // three-state outcome. A discovered tool the `tools.eager` allowlist
       // omits is DEFERRED, not dropped: its schema stays out of the eager
       // model request (the #9827 guarantee) while the tool remains listed
-      // in `/tools` and loadable on demand via ToolSearch. Dropping it
-      // instead would recreate exactly the silent-disappearance bug that
-      // #10075 reported for built-ins, just under a different knob.
-      // Whole-tool deny rules still remove the tool outright ("a whole-tool
-      // deny rule also removes the tool from the registry", settings.md),
-      // and deny rules still apply at runtime regardless.
+      // in `/tools` and reachable on demand through the stable ToolSearch +
+      // ToolCall bridge. Dropping it instead would recreate exactly the
+      // silent-disappearance bug that #10075 reported for built-ins, just
+      // under a different knob. Whole-tool deny rules still remove the tool
+      // outright ("a whole-tool deny rule also removes the tool from the
+      // registry", settings.md), and deny rules still apply at runtime
+      // regardless.
       const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
@@ -838,7 +876,7 @@ export class ToolRegistry {
    * Includes discovered (vs registered) tools if configured.
    *
    * By default, tools marked `shouldDefer=true` are excluded (they are
-   * discovered by the model on demand via the ToolSearch tool). Pass
+   * discovered and invoked by the model through the stable bridge). Pass
    * `{ includeDeferred: true }` to include them, e.g. for diagnostics.
    *
    * Tools marked `alwaysLoad=true` are always included regardless of
@@ -924,8 +962,8 @@ export class ToolRegistry {
   /**
    * Marks a deferred tool as revealed. Revealed tools are included in
    * {@link getFunctionDeclarations} output for the rest of the session, even
-   * though they are normally hidden. Called by the ToolSearch tool after it
-   * successfully loads a tool so the model can invoke it on subsequent turns.
+   * though they are normally hidden. Used by startup preload, plan lifecycle
+   * setup, and compatibility replay for histories with direct deferred calls.
    */
   revealDeferredTool(name: string): void {
     this.revealedDeferred.add(name);
@@ -946,15 +984,27 @@ export class ToolRegistry {
   }
 
   /**
-   * Removes a single tool from the revealed-deferred set. Used for rollback
-   * when a `setTools()` re-sync fails after revealing — leaving the tool
-   * "revealed" in the registry while the chat's declaration list never
-   * received the schema would mean future ToolSearch keyword queries
-   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
-   * filter), making it unreachable until `/clear`.
+   * Removes a single tool from the revealed-deferred set. Used to roll back an
+   * explicit reveal when the corresponding declaration refresh fails.
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
+  }
+
+  /** Records the declaration tool_search just returned. */
+  recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
+    this.reviewedDeferredDeclarations.set(
+      tool.name,
+      deferredDeclarationFingerprint(tool),
+    );
+  }
+
+  /**
+   * The fingerprint recorded by {@link recordReviewedDeclaration}, or
+   * `undefined` when tool_search has not returned this tool in the session.
+   */
+  getReviewedDeclaration(name: string): string | undefined {
+    return this.reviewedDeferredDeclarations.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
@@ -985,7 +1035,7 @@ export class ToolRegistry {
   /**
    * Clears the set of revealed deferred tools. Called by {@link LlmClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
-   * with no ToolSearch-discovered reveals — the same state as any fresh
+   * with no transient deferred reveals — the same state as any fresh
    * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
    * survive the reset (while still registered and deferred): they are part
    * of that fresh session's setup, not of the dropped session's discovery.
@@ -1004,7 +1054,7 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * reachable via ToolSearch + ToolCall. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    *
    * Always empty in CodeModeOnly: every schema is already bound into the `exec`
@@ -1041,12 +1091,9 @@ export class ToolRegistry {
   /**
    * Reveals every deferred tool — bundled built-ins and MCP alike — when
    * the combined estimated token footprint of their schemas fits within
-   * `budgetTokens`. Every mid-session reveal rewrites the declaration
-   * list and invalidates the prompt-cache prefix, so the prefix only
-   * stays stable when NOTHING is left for ToolSearch to reveal: a small
-   * deferred set is cheaper to declare upfront in full than to load one
-   * cache-busting piece at a time. All-or-nothing on purpose — a partial
-   * reveal would leave an arbitrary subset behind ToolSearch.
+   * `budgetTokens`. A small deferred set can be cheaper to declare upfront
+   * than to pay for bridge round trips. All-or-nothing on purpose — a partial
+   * reveal would leave an arbitrary subset behind the bridge.
    *
    * Already-revealed tools count toward the total (reveal is
    * idempotent), so repeated calls cannot ratchet past the budget as MCP
@@ -1062,8 +1109,8 @@ export class ToolRegistry {
       // budget preload exists to stabilise the prompt cache for ordinary
       // deferred tools, but auto-revealing a demoted tool would re-add
       // exactly the schema the `settings.tools.eager` allowlist keeps out
-      // of the eager request (#9827). Such tools stay loadable on demand
-      // via ToolSearch.
+      // of the eager request (#9827). Such tools stay reachable on demand
+      // via ToolSearch + ToolCall.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
@@ -1078,7 +1125,7 @@ export class ToolRegistry {
     }
     if (estimatedTokens > budgetTokens) {
       debugLogger.debug(
-        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch + ToolCall ` +
           `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
       );
       return 0;
@@ -1130,6 +1177,10 @@ export class ToolRegistry {
   }
 
   isToolDeclared(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (tool && isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+      return false;
+    }
     return (
       name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
     );

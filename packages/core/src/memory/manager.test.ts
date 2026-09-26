@@ -24,6 +24,7 @@ import {
 } from './paths.js';
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -953,6 +954,36 @@ describe('MemoryManager', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('does not emit an unhandled rejection when the caller handles a failed extraction', async () => {
+      const failure = new Error('extract failed');
+      const unhandled = vi.fn();
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(failure);
+      process.on('unhandledRejection', unhandled);
+
+      try {
+        const mgr = new MemoryManager();
+        await expect(
+          mgr.scheduleExtract({
+            projectRoot,
+            sessionId: 'sess',
+            history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          }),
+        ).rejects.toBe(failure);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+        // The rejection handler must still untrack the task. Hollowing it out
+        // to `() => {}` keeps the assertion above green while the settled
+        // promise and its task id leak for the process lifetime — `inFlight`
+        // has no other delete site and no `clear()`.
+        expect(
+          (mgr as unknown as { inFlight: Map<string, unknown> }).inFlight.size,
+        ).toBe(0);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
     it('runs extract and records a completed task', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: ['user'],
@@ -1031,11 +1062,25 @@ describe('MemoryManager', () => {
     });
 
     it.each([
-      ['private', '.qwen/memory/user/test.md'],
-      ['team', '.qwen/team-memory/test.md'],
+      ['private', '.qwen/memory/user/test.md', false, false],
+      ['team', '.qwen/team-memory/test.md', false, false],
+      ['bridged private', '.qwen/memory/user/test.md', true, false],
+      ['bridged team', '.qwen/team-memory/test.md', true, false],
+      [
+        'bridged private with JSON arguments',
+        '.qwen/memory/user/test.md',
+        true,
+        true,
+      ],
     ])(
       'skips extraction when history writes to a %s memory file',
-      async (_label, filePath) => {
+      async (_label, filePath, bridged, stringified) => {
+        const writeCall = {
+          name: 'write_file',
+          args: {
+            file_path: path.join(projectRoot, filePath),
+          },
+        };
         const mgr = new MemoryManager();
         const result = await mgr.scheduleExtract({
           projectRoot,
@@ -1046,10 +1091,15 @@ describe('MemoryManager', () => {
               parts: [
                 {
                   functionCall: {
-                    name: 'write_file',
-                    args: {
-                      file_path: path.join(projectRoot, filePath),
-                    },
+                    name: bridged ? ToolNames.TOOL_CALL : writeCall.name,
+                    args: bridged
+                      ? {
+                          name: writeCall.name,
+                          arguments: stringified
+                            ? JSON.stringify(writeCall.args)
+                            : writeCall.args,
+                        }
+                      : writeCall.args,
                   },
                 },
               ],
@@ -1062,47 +1112,32 @@ describe('MemoryManager', () => {
       },
     );
 
-    it('records a user mutation when history writes User Memory', async () => {
+    it('does not treat an unrelated bridged call as a memory write', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
       const mgr = new MemoryManager();
-      const recordUserMutation = vi
-        .spyOn(mgr, 'recordUserMutation')
-        .mockResolvedValue();
-      const config = makeMockConfig();
-      const now = new Date('2026-08-27T00:00:00.000Z');
 
       const result = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
-        config,
-        now,
         history: [
-          { role: 'user', parts: [{ text: 'Remember this preference.' }] },
           {
             role: 'model',
             parts: [
               {
                 functionCall: {
-                  id: 'write-user-memory',
-                  name: 'write_file',
+                  name: ToolNames.TOOL_CALL,
                   args: {
-                    file_path: path.join(
-                      getUserAutoMemoryRoot(),
-                      'user',
-                      'preference.md',
-                    ),
+                    name: 'web_fetch',
+                    arguments: {
+                      file_path: path.join(
+                        projectRoot,
+                        '.qwen/memory/user/test.md',
+                      ),
+                    },
                   },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'write-user-memory',
-                  name: 'write_file',
-                  response: { output: 'updated' },
                 },
               },
             ],
@@ -1110,9 +1145,81 @@ describe('MemoryManager', () => {
         ],
       });
 
-      expect(result.skippedReason).toBe('memory_tool');
-      expect(recordUserMutation).toHaveBeenCalledWith(projectRoot, config, now);
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
     });
+
+    it.each(['native', 'bridge-object', 'bridge-json'])(
+      'records a user mutation when %s history writes User Memory',
+      async (mode) => {
+        const mgr = new MemoryManager();
+        const recordUserMutation = vi
+          .spyOn(mgr, 'recordUserMutation')
+          .mockResolvedValue();
+        const config = makeMockConfig();
+        const now = new Date('2026-08-27T00:00:00.000Z');
+
+        const writeArgs = {
+          file_path: path.join(
+            getUserAutoMemoryRoot(),
+            'user',
+            'preference.md',
+          ),
+        };
+        const name = mode === 'native' ? 'write_file' : ToolNames.TOOL_CALL;
+        const args =
+          mode === 'native'
+            ? writeArgs
+            : {
+                name: 'write_file',
+                arguments:
+                  mode === 'bridge-json'
+                    ? JSON.stringify(writeArgs)
+                    : writeArgs,
+              };
+
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          config,
+          now,
+          history: [
+            { role: 'user', parts: [{ text: 'Remember this preference.' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'write-user-memory',
+                    name,
+                    args,
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'write-user-memory',
+                    name,
+                    response: { output: 'updated' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(recordUserMutation).toHaveBeenCalledWith(
+          projectRoot,
+          config,
+          now,
+        );
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (

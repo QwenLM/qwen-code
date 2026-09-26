@@ -6,6 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
 import {
   DaemonHttpError,
+  type DaemonClient,
   type DaemonSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
@@ -14,6 +15,8 @@ import {
   installSidebarDomShims,
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
+import { setLivePresence } from '../../live/live-presence';
+import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 const {
   connection,
@@ -136,6 +139,7 @@ const {
         | undefined,
     },
     workspace: {
+      baseUrl: '',
       capabilities: undefined as
         | {
             qwenCodeVersion: string;
@@ -412,7 +416,6 @@ function renderSidebar(
             | 'hooks'
           )[];
         };
-    onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
@@ -470,7 +473,6 @@ function renderSidebar(
           footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
-          onOpenGitDiff={overrides.onOpenGitDiff}
           onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
@@ -774,6 +776,7 @@ function dialogButton(label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  setLivePresence(workspace.client as unknown as DaemonClient, undefined);
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -784,6 +787,7 @@ beforeEach(() => {
   connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
+  workspace.baseUrl = '';
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
@@ -884,6 +888,30 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('marks each remote workspace folder', () => {
+    workspace.baseUrl = 'https://remote.example.com';
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(capabilities.workspaces.length);
+  });
+
+  it('leaves local workspace folders unmarked', () => {
+    workspace.baseUrl = window.location.origin;
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('delegates Add workspace to the App-owned dialog', () => {
     const onOpenAddWorkspace = vi.fn();
     renderSidebar({ onOpenAddWorkspace });
@@ -1174,8 +1202,10 @@ describe('WebShellSidebar workspace removal', () => {
     });
     await expandWorkspace('other');
 
+    // Current-session delete is allowed while the session is idle (#12619);
+    // archive keeps its current-session restriction.
     expect(inlineSessionAction('Locked current', 'Delete')?.disabled).toBe(
-      true,
+      false,
     );
     expect(
       (await openSessionMenuItem('Locked current', 'Archive')).getAttribute(
@@ -1656,7 +1686,6 @@ describe('WebShellSidebar workspace removal', () => {
       projectFeaturesEnabled: false,
       onOpenAddWorkspace: vi.fn(),
       onOpenWorkspacesOverview: vi.fn(),
-      onOpenGitDiff: vi.fn(),
     });
     await act(async () => {
       await Promise.resolve();
@@ -2450,7 +2479,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rename = inlineSessionAction('Current no-cwd primary', 'Rename');
     const remove = inlineSessionAction('Current no-cwd primary', 'Delete');
     expect(rename?.disabled).toBe(false);
-    expect(remove?.disabled).toBe(true);
+    // Current-session delete is allowed while the session is idle (#12619).
+    expect(remove?.disabled).toBe(false);
     const archive = await openSessionMenuItem(
       'Current no-cwd primary',
       'Archive',
@@ -2459,7 +2489,6 @@ describe('WebShellSidebar workspace removal', () => {
 
     await act(async () => {
       click(archive);
-      click(remove!);
       await Promise.resolve();
     });
     expect(
@@ -2468,8 +2497,16 @@ describe('WebShellSidebar workspace removal', () => {
       ),
     ).toBe(false);
 
-    expect(document.body.textContent).not.toContain('Delete Session');
     expect(active.archiveSession).not.toHaveBeenCalled();
+
+    // Delete is the inverse of archive for the current row: enabled while
+    // idle, and clicking it opens the confirmation dialog (#12619).
+    await act(async () => {
+      click(remove!);
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain('Delete Session');
+    // Opening the confirmation must not delete anything by itself.
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
@@ -3263,49 +3300,79 @@ describe('WebShellSidebar workspace removal', () => {
     );
   });
 
-  it('copies the workspace path and reports a clipboard failure', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const previousClipboard = Object.getOwnPropertyDescriptor(
-      navigator,
-      'clipboard',
-    );
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
-    const onError = vi.fn();
-    try {
-      renderSidebar({ onError });
-      act(() => click(workspaceAction('/tmp/other')!));
-      const copy = () =>
-        Array.from(
-          document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-        ).find((element) => element.textContent === 'Copy path');
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
+  it.each([false, true])(
+    'copies the displayed workspace path and limits local open actions (SSH=%s)',
+    async (remote) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [
+          ...capabilities.features,
+          'workspace_local_open',
+          'workspace_local_terminal',
+        ],
+        workspaces: capabilities.workspaces.map((ws) =>
+          ws.cwd === '/tmp/other' && remote
+            ? {
+                ...ws,
+                ssh: { host: 'host', port: 2222, directory: '/srv/project' },
+              }
+            : ws,
+        ),
+      };
+      workspace.capabilities = connection.capabilities;
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const previousClipboard = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
+      );
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
       });
-      expect(writeText).toHaveBeenCalledWith('/tmp/other');
-      expect(onError).not.toHaveBeenCalled();
+      const onError = vi.fn();
+      try {
+        renderSidebar({ onError });
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        expect(menuItemLabels().includes('Open folder')).toBe(!remote);
+        expect(menuItemLabels().includes('Open terminal')).toBe(!remote);
+        const copy = () =>
+          Array.from(
+            document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+          ).find((element) => element.textContent === 'Copy path');
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+        });
+        expect(writeText).toHaveBeenCalledWith(
+          remote ? '/srv/project' : '/tmp/other',
+        );
+        expect(onError).not.toHaveBeenCalled();
 
-      writeText.mockRejectedValueOnce(new Error('denied'));
-      act(() => click(workspaceAction('/tmp/other')!));
-      await act(async () => {
-        click(copy()!);
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
-    } finally {
-      // Put the shared jsdom stub back rather than leaving a hole behind.
-      if (previousClipboard) {
-        Object.defineProperty(navigator, 'clipboard', previousClipboard);
-      } else {
-        delete (navigator as { clipboard?: unknown }).clipboard;
+        writeText.mockRejectedValueOnce(new Error('denied'));
+        act(() =>
+          click(workspaceAction(remote ? 'host:2222:' : '/tmp/other')!),
+        );
+        await act(async () => {
+          click(copy()!);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError.mock.calls[0]?.[1]).toBe(
+          'Failed to copy workspace path',
+        );
+      } finally {
+        // Put the shared jsdom stub back rather than leaving a hole behind.
+        if (previousClipboard) {
+          Object.defineProperty(navigator, 'clipboard', previousClipboard);
+        } else {
+          delete (navigator as { clipboard?: unknown }).clipboard;
+        }
       }
-    }
-  });
+    },
+  );
 
   it('keeps the rename dialog open and skips the refresh when the daemon rejects', async () => {
     connection.capabilities = {
@@ -3355,7 +3422,6 @@ describe('WebShellSidebar workspace removal', () => {
     const onNewSession = vi.fn(() => true);
     const onNewWorktreeSession = vi.fn();
     renderSidebar({
-      onOpenGitDiff: vi.fn(),
       onNewSession,
       onNewWorktreeSession,
       workspaces: [
@@ -3375,6 +3441,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     act(() => click(workspaceAction('/tmp/other')!));
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(menuItemLabels()).toContain('New worktree task');
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -3419,7 +3488,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
-    act(() => click(workspaceAction('/tmp/project')!));
+    await act(async () => {
+      click(workspaceAction('/tmp/project')!);
+    });
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent === 'New worktree task');
@@ -3548,16 +3619,18 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const clickWorktree = () => {
-      act(() => click(workspaceAction('/tmp/other')!));
+    const clickWorktree = async () => {
+      await act(async () => {
+        click(workspaceAction('/tmp/other')!);
+      });
       const item = Array.from(
         document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
       ).find((element) => element.textContent === 'New worktree task');
       expect(item).toBeDefined();
       act(() => click(item!));
     };
-    clickWorktree();
-    clickWorktree();
+    await clickWorktree();
+    await clickWorktree();
     expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
@@ -3630,8 +3703,7 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    // The selection drives the fetch: skills is never requested.
-    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceMcp).not.toHaveBeenCalled();
     expect(workspaceSkills).not.toHaveBeenCalled();
 
     // Hovering the header lists only the selected facet in the popover.
@@ -3648,6 +3720,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rows = document.querySelectorAll(
       '[role="dialog"] [data-web-shell-workspace-overview]',
     );
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(workspaceSkills).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
       'mcp',
@@ -5959,6 +6033,116 @@ describe('WebShellSidebar session list notices', () => {
 });
 
 describe('WebShellSidebar Live group', () => {
+  it('uses the real Voice chat row for loading and removes it on catalog refresh', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    let sessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'voice-session',
+        workspaceCwd: liveWorkspace.cwd,
+        displayName: 'Voice chat',
+        sourceType: 'qwen-live',
+        sourceId: 'realtime_voice:voice-call',
+      },
+    ];
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd ? sessions : [],
+    );
+    const onLoadSession = vi.fn();
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+      onLoadSession,
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-live-pending-session]')).toBeNull();
+    expect(
+      container.querySelector('[data-live-starting-session]'),
+    ).not.toBeNull();
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    await act(async () => click(voiceRow!));
+    expect(onLoadSession).toHaveBeenCalledWith('voice-session', '/tmp/live');
+
+    sessions = [];
+    await act(async () => {
+      useSessionCatalogController(
+        workspace.client as unknown as DaemonClient,
+      ).refreshWorkspace('/tmp/live');
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('Voice chat');
+    expect(container.querySelector('[data-live-pending-session]')).toBeNull();
+  });
+
+  it('shows a loading Voice row immediately, then the created session without refresh', async () => {
+    renderSidebar({ showLive: true });
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'connecting',
+      });
+    });
+    expect(
+      container.querySelector('[data-live-pending-workspace]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-live-pending-session]'),
+    ).not.toBeNull();
+
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [{ sessionId: 'voice-session', displayName: 'Voice chat' }]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Voice chat');
+    expect(container.querySelector('[data-live-pending-workspace]')).toBeNull();
+    expect(container.querySelector('[data-live-pending-session]')).toBeNull();
+    expect(
+      container.querySelector('[data-live-starting-session]'),
+    ).not.toBeNull();
+  });
   it('hides Live sessions by default', async () => {
     const liveWorkspace: DaemonWorkspaceCapability = {
       id: 'live',
@@ -6703,6 +6887,59 @@ describe('WebShellSidebar standalone grouping', () => {
     const details = document.body.querySelector('[role="dialog"]');
     expect(details?.textContent).toContain('No workspace');
     expect(details?.textContent).not.toContain('/private/standalone');
+  });
+
+  it('keeps delete disabled on the current no-workspace row', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-current';
+    listStandaloneSessionsPage.mockImplementation(
+      async ({ archiveState }: { archiveState: string }) => ({
+        sessions:
+          archiveState === 'archived'
+            ? []
+            : [
+                {
+                  sessionId: 'standalone-current',
+                  displayName: 'Current standalone chat',
+                  context: { kind: 'standalone' },
+                },
+                {
+                  sessionId: 'standalone-other',
+                  displayName: 'Other standalone chat',
+                  context: { kind: 'standalone' },
+                },
+              ],
+      }),
+    );
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    await vi.waitFor(() => {
+      expect(
+        inlineSessionAction('Current standalone chat', 'Delete'),
+      ).toBeDefined();
+    });
+
+    // The attached no-workspace session answers `session_busy`, so the row must
+    // not offer a delete that can never succeed (#12619, option A): it stays
+    // disabled, like on main, and says what unblocks it.
+    const current = inlineSessionAction('Current standalone chat', 'Delete')!;
+    expect(current.disabled).toBe(true);
+    expect(current.title).toContain('Open another chat first');
+
+    // The guard is about the attachment, not about standalone sessions: a
+    // no-workspace row this tab is not attached to stays deletable.
+    const other = inlineSessionAction('Other standalone chat', 'Delete');
+    expect(other).toBeDefined();
+    expect(other!.disabled).toBe(false);
   });
 
   it('puts No workspace in Projects and hides it for a locked workspace', async () => {

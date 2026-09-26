@@ -22,9 +22,8 @@ import {
   CalendarClockIcon,
   FolderClosedIcon,
   FolderOpenIcon,
+  Globe2Icon,
 } from 'lucide-react';
-import { GitBranchIndicator } from '../GitBranchIndicator';
-import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
@@ -40,7 +39,7 @@ import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
-import { workspaceLabel } from '../../utils/workspace';
+import { sshWorkspaceLabel, workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import {
@@ -87,15 +86,30 @@ function getSessionLabel(session: DaemonSessionSummary): string {
   return displayName || session.sessionId.slice(0, 8);
 }
 
-function WorkspaceFolderIcon({ open }: { open: boolean }) {
+function WorkspaceFolderIcon({
+  open,
+  remote,
+}: {
+  open: boolean;
+  remote: boolean;
+}) {
   const Icon = open ? FolderOpenIcon : FolderClosedIcon;
   return (
-    <Icon
-      className={styles.folderIcon}
-      size={14}
-      strokeWidth={1.4}
-      aria-hidden="true"
-    />
+    <span className={styles.folderIconWrap}>
+      <Icon
+        className={styles.folderIcon}
+        size={14}
+        strokeWidth={1.4}
+        aria-hidden="true"
+      />
+      {remote && (
+        <Globe2Icon
+          className={styles.folderRemoteBadge}
+          data-testid="remote-workspace-folder-icon"
+          aria-hidden="true"
+        />
+      )}
+    </span>
   );
 }
 
@@ -107,6 +121,7 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
   reloadToken: number;
@@ -125,6 +140,7 @@ interface WorkspaceSectionProps {
   searchQuery?: string;
   expanded?: boolean;
   autoExpandKey?: string;
+  forceAutoExpand?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   renderSessions?: boolean;
   /**
@@ -138,13 +154,19 @@ interface WorkspaceSectionProps {
     session: DaemonSessionSummary,
     options?: { searchSnippet?: string | undefined },
   ) => ReactNode;
+  pendingSession?: {
+    key: string;
+    sessionId?: string;
+    sourceId?: string;
+    node: ReactNode;
+  };
   mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   /**
    * Hover-revealed actions at the right edge of the folder header. Receives
    * the workspace's overview snapshot — undefined until the first fetch or
-   * when the overview is disabled; the last fetched one while the row is
-   * collapsed — so a menu can show live counts, and the polled git branch
+   * when the overview is disabled; the last fetched one while its consumers
+   * are closed — so a menu can show counts, and the polled git branch
    * so git-only actions can be withheld from non-git workspaces.
    */
   headerActions?: (
@@ -155,13 +177,15 @@ interface WorkspaceSectionProps {
    * Show a details popover on hover with the full path, git branch, session
    * counts and facet counts (MCP, skills, …). Off by default so embedders
    * that render their own header keep today's layout. Facets are fetched
-   * only while the section is expanded and the workspace is trusted.
+   * only while the details or header menu is open and the workspace is trusted.
    */
   overviewEnabled?: boolean;
   overviewItems?: readonly WorkspaceOverviewItem[];
+  /** Whether the header menu is consuming workspace metadata. */
+  overviewMenuOpen?: boolean;
   /**
    * A header action reads the polled git branch (the worktree entry), so the
-   * poll must run even without the diff-chip handler. Off when no consumer
+   * poll runs while the menu is open. Off when no consumer
    * of `gitBranch` is wired.
    */
   gitBranchWanted?: boolean;
@@ -187,13 +211,6 @@ interface WorkspaceSectionProps {
    */
   isPinnedSectionMember?: (session: DaemonSessionSummary) => boolean;
   /**
-   * Open the working-tree Changes dialog for this workspace. When provided, the
-   * folder header shows a live git chip (branch + dirty/ahead-behind state) that
-   * fires this on click. Omitted for untrusted workspaces (no git surface).
-   */
-  onOpenGitDiff?: (workspaceCwd: string) => void;
-  onOpenCommit?: (workspaceCwd: string) => void;
-  /**
    * Open the workspace folder in the daemon host's file manager. Wired only
    * when the daemon advertises `workspace_local_open` and the client is on
    * the same machine; the hover popover's path row shows the button then.
@@ -205,10 +222,19 @@ interface WorkspaceSectionProps {
    * on the same machine.
    */
   onOpenTerminalLocally?: (cwd: string) => Promise<void>;
+  /**
+   * Open the working-tree Changes dialog for this workspace. When wired, the
+   * hover popover's branch row becomes the trigger for that workspace's Git
+   * picker; without it the row stays a plain-text summary.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /** Commit entry for the same picker; the row still opens without it. */
+  onOpenCommit?: (workspaceCwd: string) => void;
 }
 
 export function WorkspaceSection({
   workspace,
+  remote = false,
   renderHeader,
   client,
   reloadToken,
@@ -227,13 +253,16 @@ export function WorkspaceSection({
   searchQuery = '',
   expanded: controlledExpanded,
   autoExpandKey,
+  forceAutoExpand = false,
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  pendingSession,
   mapSession,
   showSessionDetails = true,
   headerActions,
   overviewEnabled = false,
+  overviewMenuOpen = false,
   overviewItems = DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
   gitBranchWanted = false,
   sessionStats,
@@ -245,10 +274,10 @@ export function WorkspaceSection({
   excludePinned = false,
   limitSessions = true,
   isPinnedSectionMember,
-  onOpenGitDiff,
-  onOpenCommit,
   onOpenPathLocally,
   onOpenTerminalLocally,
+  onOpenGitDiff,
+  onOpenCommit,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
@@ -262,9 +291,10 @@ export function WorkspaceSection({
     readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
-  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
@@ -295,11 +325,11 @@ export function WorkspaceSection({
     if (
       controlledExpanded === undefined &&
       autoExpandKey &&
-      !hasWorkspaceExpansionPreference(workspace.id)
+      (forceAutoExpand || !hasWorkspaceExpansionPreference(workspace.id))
     ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded, workspace.id]);
+  }, [autoExpandKey, controlledExpanded, forceAutoExpand, workspace.id]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -462,29 +492,58 @@ export function WorkspaceSection({
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
   // the poll — which qualifies the route with the cwd — is skipped entirely.
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
-  // The poll feeds the header chip (needs the diff handler) and the header
-  // actions' git-gated entries (a worktree task needs a branch), so it runs
-  // when either consumer is wired — the caller says so explicitly, since a
-  // header-actions closure is also passed for rows that render no git entry.
-  const gitStatusEnabled = Boolean(onOpenGitDiff) || gitBranchWanted;
+  const gitStatusEnabled =
+    (overviewEnabled && detailsOpen) || (gitBranchWanted && overviewMenuOpen);
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
+  const gitPollGeneration = useRef(0);
+  // In-flight reads are discarded only when the poll target changes. A
+  // consumer closing keeps the read alive so its snapshot is retained for the
+  // next open instead of being thrown away mid-flight.
+  const gitPollTargetRef = useRef<
+    | {
+        client: DaemonClient;
+        cwd: string | undefined;
+        trusted: boolean;
+      }
+    | undefined
+  >(undefined);
+  useEffect(() => {
+    gitPollTargetRef.current = {
+      client,
+      cwd: gitPollCwd,
+      trusted: workspace.trusted,
+    };
+  }, [client, gitPollCwd, workspace.trusted]);
   const loadGitStatus = useCallback(async () => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
+    const generation = ++gitPollGeneration.current;
+    const target = { client, cwd: gitPollCwd, trusted: workspace.trusted };
+    const isCurrent = () => {
+      const latest = gitPollTargetRef.current;
+      return (
+        generation === gitPollGeneration.current &&
+        latest?.client === target.client &&
+        latest?.cwd === target.cwd &&
+        latest?.trusted === target.trusted
+      );
+    };
     try {
-      // wait: the sidebar chip shows the enriched counters and has no SSE
+      // wait: the hover summary shows the enriched counters and has no SSE
       // fill-in path, so it keeps the blocking semantics instead of the
       // composer's last-known fast path.
       const status = await client
         .workspaceByCwd(gitPollCwd)
         .workspaceGit({ wait: true });
+      if (!isCurrent()) return;
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {
+      if (!isCurrent()) return;
       // Keep the last known status on a transient failure so a brief network
-      // or daemon blip doesn't blank the chip for a whole poll interval; log
+      // or daemon blip doesn't blank the summary for a whole poll interval; log
       // only on the success→failure transition.
       if (!gitPollFailed.current) {
         console.warn('[WorkspaceSection] git status poll failed:', err);
@@ -493,16 +552,13 @@ export function WorkspaceSection({
     }
   }, [client, gitPollCwd, gitStatusEnabled, workspace.trusted]);
 
-  // The git chip lives in the always-visible folder header, so it polls
-  // independently of session expansion: on mount/trust, on window focus, and on
-  // a visibility-gated 60s tick (the daemon recomputes the working-tree summary
-  // per call, so the cadence stays gentle). Skipped entirely when neither
-  // consumer — the chip nor the header actions — is wired.
+  // Poll only while the hover summary or a Git-dependent menu is visible.
   useEffect(() => {
-    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) {
+    if (!workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
       return;
     }
+    if (!gitStatusEnabled) return;
     void loadGitStatus();
     const onFocus = () => void loadGitStatus();
     window.addEventListener('focus', onFocus);
@@ -526,20 +582,16 @@ export function WorkspaceSection({
   // header without wired actions fetches nothing.
   const overviewConsumed =
     overviewEnabled &&
-    expanded &&
     !disabled &&
-    (!renderHeader || Boolean(headerActions));
-  // Facet chips ride the expanded state like the session list: a collapsed
-  // row costs nothing, and an untrusted workspace has no runtime to ask. A
-  // synthetic fallback workspace has no real cwd, so nothing is fetched.
+    ((!renderHeader && detailsOpen) ||
+      (Boolean(headerActions) && overviewMenuOpen));
   const { overview } = useWorkspaceOverview(client, gitPollCwd, {
     enabled: overviewConsumed && workspace.trusted,
     items: overviewItems,
     reloadToken,
   });
-  // The header menu stays reachable on a collapsed row, so it keeps the last
-  // snapshot the row fetched (the same retention the session counts get)
-  // instead of dropping its counts the moment the row collapses.
+  // Keep the last snapshot while consumers are closed so reopening can show
+  // counts before the fresh read completes.
   const [retainedOverview, setRetainedOverview] =
     useState<WorkspaceOverviewSnapshot>();
   useEffect(() => {
@@ -599,6 +651,21 @@ export function WorkspaceSection({
         .join('|'),
     [sessions],
   );
+  const pendingSessionMatched = Boolean(
+    pendingSession &&
+      sessions.some(
+        (session) =>
+          (pendingSession.sessionId !== undefined &&
+            session.sessionId === pendingSession.sessionId) ||
+          (pendingSession.sourceId !== undefined &&
+            session.sourceId === pendingSession.sourceId),
+      ),
+  );
+  useEffect(() => {
+    if (!pendingSession) fulfilledPendingSessions.current.clear();
+    else if (pendingSessionMatched)
+      fulfilledPendingSessions.current.add(pendingSession.key);
+  }, [pendingSession, pendingSessionMatched]);
   const contentSearchHits = useSessionContentSearch(
     sessionsEnabled ? client : undefined,
     workspace.cwd,
@@ -758,10 +825,20 @@ export function WorkspaceSection({
             <span
               className={cx(styles.chevron, expanded && styles.chevronOpen)}
             >
-              <WorkspaceFolderIcon open={expanded} />
+              <WorkspaceFolderIcon
+                open={expanded}
+                remote={remote || !!workspace.ssh}
+              />
             </span>
             <span className={styles.headerContent}>
-              <span className={styles.name} title={workspace.cwd}>
+              <span
+                className={styles.name}
+                title={
+                  workspace.ssh
+                    ? sshWorkspaceLabel(workspace.ssh)
+                    : workspace.cwd
+                }
+              >
                 {workspaceLabel(workspace)}
               </span>
             </span>
@@ -772,32 +849,6 @@ export function WorkspaceSection({
           </>
         )}
       </button>
-      {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-        <BranchPickerPopover
-          open={branchPickerOpen}
-          onOpenChange={setBranchPickerOpen}
-          workspaceCwd={workspace.cwd}
-          onBranchChanged={() => void loadGitStatus()}
-          status={gitStatus}
-          onStatusRefreshed={setGitStatus}
-          onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
-          onOpenCommit={
-            onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined
-          }
-        >
-          <button
-            type="button"
-            className={styles.gitPill}
-            aria-label={`${t('branchPicker.label')} — ${gitStatus.branch}`}
-          >
-            <GitBranchIndicator
-              branch={gitStatus.branch}
-              status={gitStatus}
-              compact
-            />
-          </button>
-        </BranchPickerPopover>
-      )}
       {headerActions?.(actionsVisible, {
         overview: overview ?? retainedOverview,
         gitBranch: gitStatus?.branch,
@@ -809,18 +860,41 @@ export function WorkspaceSection({
       {overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
-          cwd={gitPollCwd}
+          cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
           branch={gitStatus?.branch}
+          gitStatus={gitStatus}
           sessions={stats}
           overview={overview ?? retainedOverview}
           items={overviewItems}
+          gitActions={
+            // Untrusted workspaces have no git runtime, and a synthetic
+            // fallback has no real cwd to scope the picker's routes with.
+            onOpenGitDiff && workspace.trusted && gitPollCwd && !workspace.ssh
+              ? {
+                  workspaceCwd: workspace.cwd,
+                  onOpenDiff: () => onOpenGitDiff(workspace.cwd),
+                  onOpenCommit: onOpenCommit
+                    ? () => onOpenCommit(workspace.cwd)
+                    : undefined,
+                  onStatusRefreshed: setGitStatus,
+                  onBranchChanged: () => void loadGitStatus(),
+                }
+              : undefined
+          }
+          onOpenChange={setDetailsOpen}
           onOpenPathLocally={
-            onOpenPathLocally && gitPollCwd && workspace.trusted
+            onOpenPathLocally &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
               ? () => onOpenPathLocally(workspace.cwd)
               : undefined
           }
           onOpenTerminalLocally={
-            onOpenTerminalLocally && gitPollCwd && workspace.trusted
+            onOpenTerminalLocally &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
               ? () => onOpenTerminalLocally(workspace.cwd)
               : undefined
           }
@@ -834,6 +908,11 @@ export function WorkspaceSection({
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
           <div className={styles.sessions}>
+            {pendingSession &&
+            !pendingSessionMatched &&
+            !fulfilledPendingSessions.current.has(pendingSession.key)
+              ? pendingSession.node
+              : null}
             {loadError ? (
               <div className={styles.error} role="status">
                 {loadErrorLabel}
@@ -854,7 +933,8 @@ export function WorkspaceSection({
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
-              sessionsLoading && sessionsPage === undefined ? null : (
+              pendingSession ||
+              (sessionsLoading && sessionsPage === undefined) ? null : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (

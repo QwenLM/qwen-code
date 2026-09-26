@@ -7,12 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -64,6 +66,9 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-empty on purpose, like `remediation`: a verdict composed before the
+  // field existed reads as `[]`, so the fixture value proves passthrough.
+  waivedFixes: ['reverse audit: the rebuild FIX is withheld — the wall.'],
   // Non-zero on purpose: the copy test then proves passthrough, not just
   // the validator's absent-means-zero default.
   deferredCount: 2,
@@ -428,6 +433,24 @@ describe('saveReviewArtifact', () => {
       expect(existsSync(paths.out)).toBe(false);
     },
   );
+
+  it('reads an absent waivedFixes as none withheld, and refuses a present one of the wrong shape', () => {
+    // A verdict composed before the field existed named nothing withheld;
+    // a present field is the composer's list and must be strings.
+    const bad = fixture();
+    writeJson(bad.composed, { ...verdict, waivedFixes: 'not a list' });
+    expect(() =>
+      saveReviewArtifact({ ...bad, target: 'local', effort: 'medium' }),
+    ).toThrow(/waivedFixes/);
+    expect(existsSync(bad.out)).toBe(false);
+
+    const paths = fixture();
+    const { waivedFixes: _dropped, ...older } = verdict;
+    writeJson(paths.composed, older);
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const document = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(document.verdict.waivedFixes).toEqual([]);
+  });
 
   it('PRESERVES an absent or null postedInline — zero would assert an unobserved count', () => {
     // The one field here whose absence is not defaulted. Its siblings'
@@ -832,6 +855,36 @@ describe('saveReviewArtifact', () => {
       expect(readFileSync(inputPath, 'utf8')).toBe(original);
     },
   );
+
+  // Issue #12578: realpathSync never resolves hard links — two names of one
+  // inode are different path strings, so a string-identity guard admits the
+  // alias and the write goes through to the input. The three labels in the
+  // guard loop (findings, composed, report) share one isSameFile call shape,
+  // so a witness on the findings input pins dev/ino sight for all three.
+  // Since #12568, isSameFile stats with { bigint: true }, so 64-bit ids
+  // above 2^53 arrive exact; the only skip left is an unusable inode, the
+  // same narrow gate the findings.test.ts / repo-context.test.ts witnesses
+  // use.
+  it('refuses to overwrite the findings input when the output is hardlinked to it (#12578)', (ctx) => {
+    const paths = fixture();
+    const alias = join(root, '.qwen/reviews', 'out-findings-alias');
+    linkSync(paths.findings, alias);
+    const inode = statSync(paths.findings).ino;
+    if (inode <= 0) {
+      ctx.skip();
+      return;
+    }
+    const original = readFileSync(paths.findings, 'utf8');
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        out: alias,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite the findings input/);
+    expect(readFileSync(paths.findings, 'utf8')).toBe(original);
+  });
 
   it('refuses an absent output spelled through a symlink onto an absent input', () => {
     // The hardened absent-side semantics: neither file is on disk yet, but

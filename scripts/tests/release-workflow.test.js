@@ -24,6 +24,7 @@ import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { PUBLISHED_PACKAGES } from '../assert-release-version.mjs';
+import { RELEASE_WORKSPACES } from '../release-packages.mjs';
 import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
@@ -55,7 +56,6 @@ const cuaReleaseWorkflow = readFileSync(
 const nodeReplPackage = JSON.parse(
   readFileSync('packages/node-repl/package.json', 'utf8'),
 );
-const rootPackageLock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
@@ -94,15 +94,12 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.3');
+    expect(nodeReplPackage.version).toBe('0.1.6');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
     expect(cuaReleaseWorkflow).not.toContain(
       'NODE_REPL_VERSION does not match release version',
-    );
-    expect(rootPackageLock.packages['packages/node-repl'].version).toBe(
-      nodeReplPackage.version,
     );
     expect(cuaSdkPackageLock.version).toBe(cuaSdkPackage.version);
     expect(cuaSdkPackageLock.packages[''].version).toBe(cuaSdkPackage.version);
@@ -110,7 +107,7 @@ describe('CUA release workflow', () => {
 
   it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
     expect(cuaReleaseWorkflow).toMatch(
-      /verify-node-repl-package:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run typecheck[\s\S]*?npm test[\s\S]*?npm run smoke:mcp[\s\S]*?npm run smoke:lifecycle[\s\S]*?node packages\/node-repl\/scripts\/verify-package\.mjs[\s\S]*?node-repl-mcp-npm-\$\{\{[\s\S]*?node_repl_version/,
+      /verify-node-repl-package:[\s\S]*?pnpm install --frozen-lockfile --ignore-scripts[\s\S]*?npm run typecheck[\s\S]*?npm test[\s\S]*?npm run smoke:mcp[\s\S]*?npm run smoke:lifecycle[\s\S]*?node packages\/node-repl\/scripts\/verify-package\.mjs[\s\S]*?node-repl-mcp-npm-\$\{\{[\s\S]*?node_repl_version/,
     );
   });
 
@@ -348,6 +345,57 @@ describe('release workflow', () => {
     }
   });
 
+  it('gates every pool-routed job on a disk floor before its heavy steps', () => {
+    // The release lane's slice of #10035. ci.yml has gated its heavy jobs on
+    // check-disk-floor.sh since that incident; release validation went
+    // without until a saturated instance died on ENOSPC mid-step — no log,
+    // no annotation — and took the release with it (runs 34998771277 and
+    // 35024357480). The gate fails the job fast instead, and a re-run lands
+    // on an instance with headroom. publish is hosted-only and stays ungated.
+    const isPoolRouted = (job) =>
+      String(job['runs-on'] ?? '').includes('ecs-qwen-hk4-host');
+    const gated = [];
+    for (const [id, job] of Object.entries(releaseYaml.jobs)) {
+      if (!isPoolRouted(job)) continue;
+      gated.push(id);
+      const steps = job.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (step) => step.name === 'Disk floor gate (self-hosted)',
+      );
+      expect(gateIndex, id).toBeGreaterThanOrEqual(0);
+      const gate = steps[gateIndex];
+      expect(gate.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+      // The gate script rides the selected ref's checkout, so the gate can
+      // only stand between that checkout and the first heavy step, and a ref
+      // that predates the script must skip the gate rather than fail on it.
+      expect(gate.run, id).toBe(
+        'if [ -f .github/scripts/check-disk-floor.sh ]; then\n' +
+          '  bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"\n' +
+          'fi',
+      );
+      const checkoutIndex = steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      const installIndex = steps.findIndex(
+        (step) => step.name === 'Install Dependencies',
+      );
+      expect(checkoutIndex, id).toBeGreaterThanOrEqual(0);
+      expect(installIndex, id).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex, id).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex, id).toBeLessThan(installIndex);
+    }
+    expect(gated.sort()).toEqual([
+      'integration_docker',
+      'integration_none',
+      'prepare',
+      'quality_build',
+      'quality_scripts',
+      'quality_static',
+      'quality_typecheck',
+      'workspace_tests',
+    ]);
+  });
+
   it('uses shallow history only for validation jobs', () => {
     const checkoutDepth = (id) =>
       releaseYaml.jobs[id].steps.find((step) =>
@@ -392,7 +440,7 @@ describe('release workflow', () => {
         'fetch-depth': 1,
         'persist-credentials': false,
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -456,32 +504,44 @@ describe('release workflow', () => {
     expect(swept).toBeGreaterThan(10);
   });
 
-  it('keeps the publish allowlist and the guard package set in step', () => {
-    // The push-time guard only probes what `PUBLISHED_PACKAGES` lists. A
-    // channel added to the publish loop but not to that array ships without
-    // ever being probed, so a retry of a partial release reports
-    // "unreleased" and force-pushes over the tip the shipped package anchors
-    // to. Before this, the only tie was a comment pointing at publish steps
-    // that no longer exist in release.yml.
-    const loop = releaseStepScript.match(/for channel in ([^;]+); do/);
-    expect(loop, 'publish-packages channel loop').not.toBeNull();
-    const published = loop[1].trim().split(/\s+/).sort();
-    const guarded = PUBLISHED_PACKAGES.filter((name) =>
-      name.startsWith('@qwen-code/channel-'),
-    )
-      .map((name) => name.replace('@qwen-code/channel-', ''))
-      .filter((name) => name !== 'base')
-      .sort();
-    expect(published).toEqual(guarded);
+  it('uses workflow-pinned manifests for publishing and the version guard', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-selection-'));
+    try {
+      // A release-ref cwd must not change the workflow's trusted selection.
+      writeFileSync(join(directory, 'package.json'), '{"workspaces":[]}');
+      const result = spawnSync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/release-packages.mjs')],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PUBLISH_AUDIO_CAPTURE: 'true',
+            PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect([
+        '@qwen-code/qwen-code',
+        ...result.stdout.trim().split('\n'),
+      ]).toEqual(PUBLISHED_PACKAGES);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('keeps the workflow focused on orchestration', () => {
-    // 830, raised from 800 for the notify_failure fallback: that job may not
-    // depend on the trusted checkout or the extracted runner, because it is
-    // the job that reports their failure, so its last-resort issue filing is
-    // deliberately inline. Every other step stays under the per-step cap
+    // 850, raised from 830 for the pool-wide disk-floor gate: one anchored
+    // step plus one alias per pool-routed job is still orchestration — the
+    // gate's logic lives in .github/scripts/check-disk-floor.sh (#10035).
+    // 830 was raised from 800 for the notify_failure fallback: that job may
+    // not depend on the trusted checkout or the extracted runner, because it
+    // is the job that reports their failure, so its last-resort issue filing
+    // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(830);
+    expect(workflow.split('\n').length).toBeLessThan(850);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -525,40 +585,29 @@ describe('release workflow', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
-    'continues publishing after already-published packages',
-    () => {
+  it.skipIf(process.platform === 'win32').each([
+    { dryRun: 'false', optional: 'false', failure: '0', cliPublished: '1' },
+    { dryRun: 'false', optional: 'true', failure: '0', cliPublished: '0' },
+    { dryRun: 'true', optional: 'true', failure: '0', cliPublished: '0' },
+    { dryRun: 'false', optional: 'true', failure: '7', cliPublished: '1' },
+  ])(
+    'publishes the selected workspaces and CLI safely: %j',
+    ({ dryRun, optional, failure, cliPublished }) => {
       const directory = mkdtempSync(join(tmpdir(), 'release-publish-'));
       const bin = join(directory, 'bin');
       const publishLog = join(directory, 'published');
-      const channels = [
-        'dingtalk',
-        'dws',
-        'feishu',
-        'github',
-        'qqbot',
-        'telegram',
-        'wecom',
-        'weixin',
-      ];
       mkdirSync(bin);
-      for (const path of [
-        'dist',
-        'packages/channels/base',
-        ...channels.map((channel) => `packages/channels/${channel}`),
-      ]) {
-        mkdirSync(join(directory, path), { recursive: true });
-      }
-      writeFileSync(join(bin, 'node'), '#!/bin/sh\nbasename "$PWD"\n', {
+      mkdirSync(join(directory, 'dist'));
+      writeFileSync(
+        join(directory, 'dist/package.json'),
+        JSON.stringify({ name: '@qwen-code/qwen-code' }),
+      );
+      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit "$CLI_PUBLISHED"\n', {
         mode: 0o755,
       });
       writeFileSync(
-        join(bin, 'npm'),
-        '#!/bin/sh\n' +
-          'if [ "$1" = view ]; then\n' +
-          '  case "$PWD" in */channels/base) exit 1 ;; */channels/*) exit 0 ;; *) exit 1 ;; esac\n' +
-          'fi\n' +
-          'if [ "$1" = publish ]; then printf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"; fi\n',
+        join(bin, 'corepack'),
+        '#!/bin/sh\nprintf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"\nexit "$PUBLISH_FAILURE"\n',
         { mode: 0o755 },
       );
       try {
@@ -571,37 +620,51 @@ describe('release workflow', () => {
             env: {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
-              IS_DRY_RUN: 'false',
-              NPM_TAG: 'latest',
-              PUBLISH_AUDIO_CAPTURE: 'false',
-              PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              IS_DRY_RUN: dryRun,
+              NPM_TAG: 'preview',
+              PUBLISH_AUDIO_CAPTURE: optional,
+              PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
+              PUBLISH_FAILURE: failure,
+              CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
               RELEASE_VERSION: '1.2.3',
             },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(Number(failure));
         const canonicalDirectory = realpathSync(directory);
         const publishCalls = readFileSync(publishLog, 'utf8')
           .trim()
           .split('\n')
           .map((line) => line.split('\t'));
+        const publishesCli =
+          failure === '0' && (dryRun === 'true' || cliPublished !== '0');
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
-          join(canonicalDirectory, 'dist'),
-          join(canonicalDirectory, 'packages/channels/base'),
+          canonicalDirectory,
+          ...(publishesCli ? [join(canonicalDirectory, 'dist')] : []),
         ]);
-        // The dist-tag is the reason NPM_TAG is set in this child env at all.
-        // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
-        // nightly would take over the tag every end-user install and the ECS
-        // fleet updater resolve through. `--access public` is here for the
-        // same reason: one array feeds all twelve published packages.
+        const selected = publishCalls[0][1]
+          .split(' ')
+          .filter((arg) => arg.startsWith('--filter='))
+          .map((arg) => arg.slice('--filter='.length));
+        expect(selected).toEqual(
+          RELEASE_WORKSPACES.filter(
+            (name) =>
+              optional === 'true' ||
+              ![
+                '@qwen-code/audio-capture',
+                '@qwen-code/external-context-mem0',
+              ].includes(name),
+          ),
+        );
+        expect(publishCalls[0][1]).toContain('pnpm -r publish');
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
-          expect(args, cwd).toContain('--tag=latest');
+          expect(args, cwd).toContain('--tag=preview');
+          expect(args, cwd).toContain('--provenance');
+          expect(args.includes('--dry-run'), cwd).toBe(dryRun === 'true');
         }
-        expect(result.stdout).toContain(
-          'Every channel package was already published; nothing shipped',
-        );
+        expect(publishCalls[0][1].includes('--force')).toBe(dryRun === 'true');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -2177,7 +2240,9 @@ describe('release workflow', () => {
       expect(setupNode?.if, id).toBe(
         "${{ runner.environment != 'self-hosted' }}",
       );
-      expect(setupNode?.with.cache, id).toBe('npm');
+      // Dependencies install with pnpm, so an npm download cache would be
+      // restored and never read.
+      expect(setupNode?.with.cache, id).toBeUndefined();
       expect(setupNode?.with['package-manager-cache'], id).toBe(false);
       const machineNode = steps.find((step) =>
         String(step.uses ?? '').includes('.github/actions/self-hosted-node'),
@@ -2190,15 +2255,13 @@ describe('release workflow', () => {
     const publishSetupNode = releaseYaml.jobs.publish.steps.find((step) =>
       String(step.uses ?? '').includes('actions/setup-node'),
     );
-    expect(publishSetupNode?.with.cache).toBe(
-      "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
-    );
+    expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
+      'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
     );
   });
 
@@ -2216,13 +2279,6 @@ describe('release workflow', () => {
     expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
       "github.repository == 'QwenLM/qwen-code'",
     );
-    expect(releaseStepScript).toContain(
-      'if [[ "${PUBLISH_AUDIO_CAPTURE}" == "true" ]]; then',
-    );
-    expect(releaseStepScript).toContain('integrations/external-context-mem0');
-    expect(
-      releaseStepScript.indexOf('integrations/external-context-mem0'),
-    ).toBeLessThan(releaseStepScript.indexOf('packages/audio-capture'));
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {

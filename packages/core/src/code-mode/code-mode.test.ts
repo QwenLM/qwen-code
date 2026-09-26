@@ -463,8 +463,8 @@ describe('isolated code mode host', () => {
     // A guest parked in an idle await burns no CPU, so the host-side
     // interrupt handler never fires and no response frame ever arrives; the
     // parent's wall backstop is the only timeout left. It must name the
-    // budget that actually applied — here the host boot bound, since no
-    // started frame ever arrived — not the guest budget alone.
+    // budget that actually applied — the guest budget plus the host startup
+    // grace — not the guest budget alone.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
       const pending = executeCodeMode(
@@ -481,31 +481,12 @@ describe('isolated code mode host', () => {
       void pending.catch(() => {});
       await vi.advanceTimersByTimeAsync(31_000);
       await expect(pending).rejects.toThrow(
-        'JavaScript execution timed out after 30000ms (guest budget 1ms; the code-mode host may not have finished starting).',
+        'JavaScript execution timed out after 30001ms (guest budget 1ms; the code-mode host may not have finished starting).',
       );
     } finally {
       vi.useRealTimers();
     }
   });
-
-  it('does not kill a budget-compliant script for waiting in guest timers', async () => {
-    // Guest setTimeout waits pause the guest CPU budget (host.ts pauses the
-    // budget while timers are pending) but produce no nested tool
-    // controller, so the post-start wall slack is the only bound on them. An
-    // 8s wait against a 1s CPU budget must resolve: the slack absorbs
-    // real-time waits the sandbox itself legalises.
-    const result = await executeCodeMode(
-      'await new Promise((resolve) => setTimeout(resolve, 8_000)); return "slept";',
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
-      { timeoutMs: 1_000 },
-    );
-
-    expect(result.value).toBe('slept');
-  }, 30_000);
 
   it('calls a deferred MCP-style tool through its normalized JavaScript name', async () => {
     const dispatch = vi.fn(async (name: string) => ({

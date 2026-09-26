@@ -71,6 +71,25 @@ describe('User Memory dream', () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
+  it('replaces a linked index without overwriting its external target', async () => {
+    const root = getUserAutoMemoryRoot();
+    await fs.mkdir(root, { recursive: true });
+    const outside = path.join(tempDir, 'outside.md');
+    await fs.writeFile(outside, 'outside sentinel');
+    const index = path.join(root, 'MEMORY.md');
+    await fs.symlink(outside, index, 'file');
+    vi.mocked(planUserAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'No changes.',
+      filesTouched: [],
+    });
+
+    await runManagedUserAutoMemoryDream(projectRoot, config);
+
+    expect(await fs.readFile(outside, 'utf8')).toBe('outside sentinel');
+    expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+  });
+
   it('marks the global state pending after ten successful mutations', async () => {
     const now = new Date('2026-08-01T00:00:00.000Z');
     for (let index = 0; index < 10; index += 1) {

@@ -46,10 +46,6 @@ export type ParentMessage =
   | ToolResultMessage
   | { type: 'terminate' };
 
-export interface StartedMessage {
-  type: 'started';
-}
-
 export interface ToolCallMessage {
   type: 'tool_call';
   id: string;
@@ -71,11 +67,7 @@ export interface ErrorMessage {
   content?: CodeModeContentItem[];
 }
 
-export type HostMessage =
-  | StartedMessage
-  | ToolCallMessage
-  | CompleteMessage
-  | ErrorMessage;
+export type HostMessage = ToolCallMessage | CompleteMessage | ErrorMessage;
 
 function hasBoundedImageContent(message: ParentMessage | HostMessage): boolean {
   if (message.type !== 'tool_result') return false;

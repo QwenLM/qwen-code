@@ -22,7 +22,7 @@ import {
   type AppliedDreamOperations,
   DREAM_OPERATIONS_FILENAME,
 } from './dream-operations.js';
-import { rebuildUserAutoMemoryIndex } from './indexer.js';
+import { rebuildAutoMemoryIndexAtRoot } from './indexer.js';
 import {
   getMemoryBaseDir,
   getUserAutoMemoryMetadataPath,
@@ -278,7 +278,7 @@ export async function runManagedUserAutoMemoryDream(
   }
   const changes = diffDreamSnapshots(before, after, writtenPaths);
   if (!abortSignal?.aborted) {
-    await rebuildUserAutoMemoryIndex();
+    await rebuildAutoMemoryIndexAtRoot(memoryRoot, 'user');
   }
   const summary = agent.finalText?.trim().slice(0, 300) ?? 'completed';
   const result: AutoMemoryDreamResult = {

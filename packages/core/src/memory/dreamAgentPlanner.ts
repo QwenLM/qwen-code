@@ -41,6 +41,7 @@ Rules:
 - Preserve all durable information; do not delete content that is still accurate.
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
 - Keep each file independently retrievable: one coherent fact, rule, preference, or reference per file.
+- Keep the body near or below 1,200 characters; preserve the complete fact or rule.
 - Use description for what the memory says and usage_scenarios for future tasks where it would help.
 - Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter; keep each keyword and usage_scenario at most 64 characters and keywords unique case-insensitively.
 - Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.

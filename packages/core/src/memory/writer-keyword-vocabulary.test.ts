@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { ScannedAutoMemoryDocument } from './scan.js';
+import type { ScannedAutoMemoryDocument } from './structured-scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 function doc(

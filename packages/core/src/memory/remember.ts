@@ -31,7 +31,7 @@ import {
 import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
-} from './scan.js';
+} from './structured-scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');

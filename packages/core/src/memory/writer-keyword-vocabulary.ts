@@ -8,7 +8,7 @@ import type { AutoMemoryScope } from './types.js';
 import {
   normalizeAutoMemoryKeyword,
   type ScannedAutoMemoryDocument,
-} from './scan.js';
+} from './structured-scan.js';
 
 const DEFAULT_MAX_CHARS = 8_000;
 const HIGH_FREQUENCY_BUDGET_RATIO = 0.7;

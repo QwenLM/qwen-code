@@ -30,6 +30,11 @@ import { runForkedAgent } from '../agents/forkedAgent.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual };
+});
+
 function legacyContent(body = 'BODY\nWITH TRAILING NEWLINE\n'): string {
   return [
     '---',
@@ -168,10 +173,6 @@ describe('memory metadata migration', () => {
   });
 
   it('reports not-ready when a memory subdirectory is unreadable', async () => {
-    // chmod 000 does not block root, where this scenario cannot run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      return;
-    }
     // The corpus holds only a fully-structured document, so it is 'ready'
     // today; the unreadable subdirectory can hide legacy files, and ready
     // must flip false or the one-way legacy -> structured switch commits
@@ -196,7 +197,17 @@ describe('memory metadata migration', () => {
     const locked = path.join(memoryRoot, 'reference');
     await fs.mkdir(locked, { recursive: true });
     await fs.writeFile(path.join(locked, 'hidden.md'), legacyContent());
-    await fs.chmod(locked, 0o000);
+    const readdir = fs.readdir.bind(fs);
+    const readDirectory = vi
+      .spyOn(fs, 'readdir')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === locked) {
+          throw Object.assign(new Error('Permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return readdir(...args);
+      });
     try {
       const status = await scanMemoryMetadataCorpusStatus({
         projectRoot,
@@ -206,7 +217,7 @@ describe('memory metadata migration', () => {
 
       expect(status.ready).toBe(false);
     } finally {
-      await fs.chmod(locked, 0o700);
+      readDirectory.mockRestore();
     }
   });
 
@@ -1050,6 +1061,63 @@ describe('memory metadata migration', () => {
     await expect(
       fs.readFile(path.join(teamRoot, 'MEMORY.md'), 'utf-8'),
     ).resolves.toContain('Migrated memory');
+  });
+
+  it.each(['project', 'user'] as const)(
+    'does not follow a %s index symlink outside the memory root',
+    async (scope) => {
+      const root = scope === 'project' ? memoryRoot : getUserAutoMemoryRoot();
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(path.join(root, 'legacy.md'), legacyContent());
+      const outside = path.join(tempDir, 'outside.md');
+      await fs.writeFile(outside, 'outside sentinel');
+      const index = path.join(root, 'MEMORY.md');
+      await fs.rm(index, { force: true });
+      await fs.symlink(outside, index, 'file');
+
+      const result = await runMemoryMetadataMigration({
+        config: {} as Config,
+        projectRoot,
+        root,
+        scope,
+        generateMetadata: async (_config, candidate) => metadata(candidate),
+      });
+
+      expect(result.committed).toBe(1);
+      await expect(fs.readFile(outside, 'utf-8')).resolves.toBe(
+        'outside sentinel',
+      );
+      expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+      await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
+    },
+  );
+
+  it('repairs a failed index write on retry without regenerating metadata', async () => {
+    await write('project/legacy.md', legacyContent());
+    const index = path.join(memoryRoot, 'MEMORY.md');
+    await fs.rm(index, { force: true });
+    await fs.mkdir(index);
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project' as const,
+      generateMetadata,
+    };
+
+    await expect(runMemoryMetadataMigration(params)).rejects.toThrow();
+    await fs.rmdir(index);
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 0,
+      committed: 0,
+      remainingLegacyFiles: 0,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
   });
 
   it('aggregates migration agent latency and token usage', async () => {

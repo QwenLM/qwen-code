@@ -5,6 +5,7 @@
  * restarts.
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
@@ -1465,7 +1466,7 @@ export class CronScheduler {
       this.lockProbeTimer = null;
     }
     if (this.fileWatcher) {
-      this.fileWatcher.close();
+      void closeFileWatcher(this.fileWatcher);
       this.fileWatcher = null;
     }
     if (this.debounceTimer) {
