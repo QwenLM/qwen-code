@@ -3565,6 +3565,10 @@ describe('git extension helpers', () => {
       expect(
         isSupportedArchiveUrl('https://example.com/extension.tar.gz'),
       ).toBe(true);
+      // A query string must not hide the archive extension.
+      expect(
+        isSupportedArchiveUrl('https://example.com/extension.zip?token=1'),
+      ).toBe(true);
       expect(isSupportedArchiveUrl('git@github.com:owner/repo.git')).toBe(
         false,
       );
@@ -3576,6 +3580,10 @@ describe('git extension helpers', () => {
         true,
       );
       expect(isArchiveShapedUrl('HTTP://example.com/ext.zip#frag')).toBe(true);
+      // A query string must not hide the archive extension.
+      expect(isArchiveShapedUrl('http://example.com/ext.zip?token=1')).toBe(
+        true,
+      );
       expect(isArchiveShapedUrl('http://example.com/extension.tgz')).toBe(
         false,
       );

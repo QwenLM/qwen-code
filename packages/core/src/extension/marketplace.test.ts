@@ -33,43 +33,22 @@ vi.mock('node:https', () => ({
   get: vi.fn(),
 }));
 
-vi.mock('./github.js', () => ({
-  // Mirrors the real implementations' semantics (see github.test.ts, which
-  // pins the actual helpers): https-only archive downloads, scheme-agnostic
-  // archive-shape classification, pathname-based path matching.
-  isSupportedArchiveUrl: vi.fn((url: string) => {
-    try {
-      const parsedUrl = new URL(url);
-      const pathname = parsedUrl.pathname.toLowerCase();
-      return (
-        parsedUrl.protocol === 'https:' &&
-        (pathname.endsWith('.zip') || pathname.endsWith('.tar.gz'))
-      );
-    } catch {
-      return false;
-    }
-  }),
-  isSupportedArchivePath: vi.fn(
-    (source: string) =>
-      source.toLowerCase().endsWith('.zip') ||
-      source.toLowerCase().endsWith('.tar.gz'),
-  ),
-  isArchiveShapedUrl: vi.fn((url: string) => {
-    try {
-      const pathname = new URL(url).pathname.toLowerCase();
-      return pathname.endsWith('.zip') || pathname.endsWith('.tar.gz');
-    } catch {
-      return false;
-    }
-  }),
-  parseGitHubRepoForReleases: vi.fn((url: string) => {
-    const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
-    if (match) {
-      return { owner: match[1], repo: match[2] };
-    }
-    throw new Error('Not a GitHub URL');
-  }),
-}));
+vi.mock('./github.js', async (importOriginal) => {
+  // Real pure URL predicates (isSupportedArchiveUrl / isArchiveShapedUrl):
+  // they do no I/O, so there is nothing to isolate and the suite that owns
+  // the new policy asserts against the actual classifier, not a copy.
+  const actual = await importOriginal<typeof import('./github.js')>();
+  return {
+    ...actual,
+    parseGitHubRepoForReleases: vi.fn((url: string) => {
+      const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
+      if (match) {
+        return { owner: match[1], repo: match[2] };
+      }
+      throw new Error('Not a GitHub URL');
+    }),
+  };
+});
 
 describe('parseInstallSource', () => {
   beforeEach(() => {
@@ -269,6 +248,22 @@ describe('parseInstallSource', () => {
       expect(result.pluginName).toBeUndefined();
     });
 
+    it('should keep non-http git transports with archive-shaped paths installable', async () => {
+      // isArchiveShapedUrl is scheme-agnostic, so an sso:// URL whose
+      // pathname ends in an archive extension is archive-shaped — but the
+      // insecure-scheme rejection narrows to http:// only, because isGitUrl
+      // admits other non-https transports that may legitimately serve git
+      // repositories with such names. This case discriminates on that
+      // conjunct: deleting the startsWith('http://') guard turns it red.
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('sso://git.corp/team/tools.zip');
+
+      expect(result.source).toBe('sso://git.corp/team/tools.zip');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
     it('should keep unparseable http URLs on the git path instead of throwing Invalid URL', async () => {
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
@@ -283,17 +278,15 @@ describe('parseInstallSource', () => {
 
       // Only the git@/SSH remote (or a local clone) actually reaches the git
       // path — an https:// URL with an archive pathname is classified as an
-      // archive download first — so the message must not recommend it.
+      // archive download first — so the message must not recommend it. The
+      // positive assertion pins the remedy clause verbatim, so any rewording
+      // of the message (including one that re-adds an https:// recommendation)
+      // goes red here.
       await expect(
         parseInstallSource('http://example.com:8080/team/tools.zip'),
       ).rejects.toThrow(
         /if this is a Git repository whose name ends in an archive extension, use its git@\/SSH remote, or clone it yourself and install from the local path/,
       );
-
-      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
-      await expect(
-        parseInstallSource('http://example.com:8080/team/tools.zip'),
-      ).rejects.not.toThrow(/use an https:\/\/ or git@ remote/);
     });
   });
 

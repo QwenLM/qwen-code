@@ -4096,6 +4096,14 @@ describe('extension tests', () => {
         manager.addSource('http://127.0.0.1:1/plugin.zip'),
       ).rejects.toBeInstanceOf(InsecureArchiveUrlError);
 
+      // The reason the user sees — the offending URL plus the git@/SSH and
+      // local-path remedies — must survive the marketplace.ts → addSource
+      // boundary, not just the error type. A later edit that re-wraps the
+      // probe failure with a stripped-down message goes red here.
+      await expect(
+        manager.addSource('http://127.0.0.1:1/plugin.zip'),
+      ).rejects.toThrow(/Archive URLs must use https:\/\/ \(got /);
+
       // Non-archive probe failures must keep the marketplace-specific
       // guidance rather than surfacing the raw install-source error.
       await expect(
