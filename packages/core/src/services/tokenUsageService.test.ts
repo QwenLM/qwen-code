@@ -12,7 +12,11 @@ import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { makeFakeConfig } from '../test-utils/config.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
+import {
+  ApiCancelEvent,
+  ApiErrorEvent,
+  ApiResponseEvent,
+} from '../telemetry/types.js';
 import { setDebugLogSession } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
@@ -22,6 +26,7 @@ import {
   formatTokenUsageSummaryAsCsv,
   getTokenUsageFilePath,
   queryTokenUsage,
+  recordTokenUsageOutcomeBestEffort,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
   resetTokenUsageFailureLogging,
@@ -162,6 +167,121 @@ describe('tokenUsageService', () => {
     expect(missingTimestampRecord.timestamp).toBe('2026-05-25T10:00:00.000Z');
     expect(missingTimestampRecord.localDate).toBe('2026-05-25');
     expect(missingTimestampRecord.localMonth).toBe('2026-05');
+  });
+
+  it('classifies internal usage and preserves a captured request session', () => {
+    const config = makeFakeConfig({
+      sessionId: 'config-session',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent(
+      'qwen-model',
+      'prompt_suggestion',
+      {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+      },
+      { subagentName: 'Explore' },
+    );
+
+    const record = apiResponseEventToTokenUsageRecord(
+      config,
+      event,
+      'request-session',
+    );
+
+    expect(record).toMatchObject({
+      sessionId: 'request-session',
+      source: 'Explore',
+      feature: 'prompt_suggestion',
+      usageStatus: 'reported',
+    });
+
+    const internalOnly = apiResponseEventToTokenUsageRecord(
+      config,
+      createEvent('qwen-model', 'side-query:session-title', {
+        promptTokenCount: 0,
+        candidatesTokenCount: 0,
+      }),
+    );
+    expect(internalOnly).toMatchObject({
+      source: 'side_query',
+      feature: 'side_query',
+      usageStatus: 'unknown',
+    });
+  });
+
+  it('uses safe fallbacks without invoking event getters', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 0,
+      candidatesTokenCount: 0,
+    });
+    Object.defineProperties(event, {
+      model: {
+        configurable: true,
+        get: () => {
+          throw new Error('model getter invoked');
+        },
+      },
+      auth_type: {
+        configurable: true,
+        get: () => {
+          throw new Error('auth getter invoked');
+        },
+      },
+      prompt_id: {
+        configurable: true,
+        get: () => {
+          throw new Error('prompt getter invoked');
+        },
+      },
+    });
+
+    expect(apiResponseEventToTokenUsageRecord(config, event)).toMatchObject({
+      model: 'unknown',
+      authType: 'unknown',
+      source: 'main',
+      feature: 'main',
+      usageStatus: 'unknown',
+    });
+  });
+
+  it('keeps long side-query IDs private while retaining their feature', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent(
+      'qwen-model',
+      `side-query:${'x'.repeat(200)}`,
+      { promptTokenCount: 1 },
+      { subagentName: 'https://subagent.invalid' },
+    );
+
+    expect(apiResponseEventToTokenUsageRecord(config, event)).toMatchObject({
+      source: 'side_query',
+      feature: 'side_query',
+    });
+  });
+
+  it('omits structured fragments and embedded URLs from identity fields', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('{"error":"secret"}', 'user_query', {
+      promptTokenCount: 1,
+    });
+    event.auth_type = 'provider://secret';
+
+    expect(apiResponseEventToTokenUsageRecord(config, event)).toMatchObject({
+      model: 'unknown',
+      authType: 'unknown',
+    });
   });
 
   it('persists API usage to monthly JSONL and aggregates daily totals', async () => {
@@ -655,25 +775,140 @@ describe('tokenUsageService', () => {
     expect(summary.totals.requests).toBe(1);
   });
 
-  it('exports summaries as JSON and escaped CSV', async () => {
+  it('reports usage coverage while accepting legacy rows', async () => {
+    const filePath = getTokenUsageFilePath('2026-05');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      [
+        '{"schemaVersion":1,"id":"legacy","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":0,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":1,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"unknown","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","feature":"main","usageStatus":"unknown","inputTokens":0,"outputTokens":0,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":0,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"reported","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","feature":"main","usageStatus":"reported","inputTokens":2,"outputTokens":3,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":5,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"reported-zero","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","feature":"main","usageStatus":"reported","inputTokens":0,"outputTokens":0,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":0,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"unknown-positive","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","feature":"main","usageStatus":"unknown","inputTokens":1,"outputTokens":0,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":1,"apiDurationMs":4}',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.usageCoverage).toEqual({
+      reported: 1,
+      unknown: 1,
+      legacy: 1,
+    });
+    expect(summary.totals).toMatchObject({
+      requests: 3,
+      totalTokens: 6,
+    });
+  });
+
+  it('writes safe error and cancellation outcomes to a companion file', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
     });
-    await recordTokenUsageFromApiResponse(
+    const error = new ApiErrorEvent({
+      model: 'https://provider.invalid/model',
+      authType: '/private/auth',
+      promptId: 'prompt_suggestion',
+      subagentName: 'raw subagent/path',
+      durationMs: 10,
+      errorMessage: 'do not persist this',
+      errorType: 'secret-error',
+      responseId: 'provider-response-id',
+    });
+    error['event.timestamp'] = '2026-05-25T10:00:00.000Z';
+    const cancel = new ApiCancelEvent(
+      'model-a',
+      'user_query',
+      AuthType.USE_GEMINI,
+    );
+    cancel['event.timestamp'] = '2026-05-25T11:00:00.000Z';
+
+    recordTokenUsageOutcomeBestEffort(
       config,
-      createEvent(
-        '=cmd|quoted',
-        'prompt-1',
-        {
-          promptTokenCount: 1,
-          candidatesTokenCount: 2,
-          totalTokenCount: 3,
-        },
-        {
-          authType: 'auth"quoted',
-        },
-      ),
+      error,
+      'error',
+      'request-session',
+    );
+    recordTokenUsageOutcomeBestEffort(config, cancel, 'cancelled');
+
+    const eventsPath = path.join(
+      path.dirname(getTokenUsageFilePath('2026-05')),
+      'usage-events-2026-05.jsonl',
+    );
+    const lines = await vi.waitFor(async () => {
+      const content = await readFile(eventsPath, 'utf-8');
+      const records = content.trim().split('\n');
+      expect(records).toHaveLength(2);
+      return records;
+    });
+    const errorRecord = JSON.parse(lines[0]!);
+    expect(errorRecord).toMatchObject({
+      schemaVersion: 1,
+      recordType: 'usage_outcome',
+      status: 'error',
+      scope: 'telemetry_event',
+      usageStatus: 'unknown',
+      tokens: null,
+      sessionId: 'request-session',
+      model: 'unknown',
+      authType: 'unknown',
+      feature: 'prompt_suggestion',
+      localDate: '2026-05-25',
+      localMonth: '2026-05',
+    });
+    for (const forbiddenKey of [
+      'errorMessage',
+      'errorType',
+      'responseId',
+      'subagentName',
+      'promptId',
+    ]) {
+      expect(errorRecord).not.toHaveProperty(forbiddenKey);
+    }
+    expect(JSON.stringify(errorRecord)).not.toContain('do not persist this');
+    expect(JSON.stringify(errorRecord)).not.toContain('secret-error');
+    expect(JSON.stringify(errorRecord)).not.toContain('provider-response-id');
+    expect(JSON.stringify(errorRecord)).not.toContain('raw subagent/path');
+    expect(JSON.parse(lines[1]!)).toMatchObject({
+      status: 'cancelled',
+      scope: 'interaction',
+      model: 'model-a',
+      authType: AuthType.USE_GEMINI,
+      feature: 'main',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('normalizes accepted event timestamps before writing records', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent(
+      'model-a',
+      'user_query',
+      { promptTokenCount: 1 },
+      { timestamp: '2026-05-25T12:00:00+02:00' },
+    );
+
+    expect(apiResponseEventToTokenUsageRecord(config, event).timestamp).toBe(
+      '2026-05-25T10:00:00.000Z',
+    );
+  });
+
+  it('exports summaries as JSON and escaped CSV', async () => {
+    const filePath = getTokenUsageFilePath('2026-05');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      String.raw`{"schemaVersion":1,"id":"legacy-csv","timestamp":"2026-05-25T10:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"session-1","model":"=cmd|quoted","authType":"auth\"quoted","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":100}`,
+      'utf-8',
     );
 
     const json = await exportTokenUsageSummary({
