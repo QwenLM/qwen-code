@@ -1238,6 +1238,7 @@ export class McpClientManager {
   async discoverMcpToolsForServer(
     serverName: string,
     cliConfig: Config,
+    reconnect = false,
   ): Promise<void> {
     const servers = this.getEffectiveMcpServers();
     const serverConfig = servers[serverName];
@@ -1245,7 +1246,20 @@ export class McpClientManager {
       return;
     }
     if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
+      const previous = this.pooledConnections.get(serverName);
       await this.discoverAllMcpToolsViaPool(cliConfig);
+      if (
+        reconnect &&
+        previous &&
+        this.pooledConnections.get(serverName) === previous
+      ) {
+        const [result] = await this.pool.restartByName(serverName, {
+          entryIndex: previous.entryIndex,
+        });
+        if (!result?.restarted) {
+          throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+        }
+      }
       return;
     }
 

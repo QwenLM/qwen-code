@@ -4939,6 +4939,8 @@ export interface MCPServerConfigShape {
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
   readonly versionNegotiation?: 'auto' | 'legacy';
+  readonly appResourceMaxBytes?: number;
+  readonly appResourceTimeoutMs?: number;
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;
@@ -5716,4 +5718,24 @@ export interface ExtensionUpdateCheckResponse {
 export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
+}
+
+export interface DaemonMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface DaemonMcpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
 }

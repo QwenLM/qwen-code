@@ -592,7 +592,7 @@ function compactMcpAppResultDisplay(
   // it to the recorder, so those transcripts still carry blanks.
   //
   // `html` is retained whole: the producer rejects any resource over
-  // MCP_APP_RESOURCE_MAX_BYTES (1 MiB, tools/mcp-tool.ts), and a document
+  // the configured App limit (default 1 MiB, tools/mcp-tool.ts), and a document
   // truncated mid-markup would not render either, so `''` -- which degrades to
   // `fallbackText` -- is the only useful over-budget value.
   //

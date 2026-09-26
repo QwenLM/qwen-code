@@ -670,6 +670,7 @@ interface ChannelInfo {
 }
 
 interface SessionEntry {
+  mcpAppCalls?: Map<string, { clientId: string; cancel: () => void }>;
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
@@ -2755,6 +2756,7 @@ export function createSessionControlPlane(
    */
   function entryHasLocalWork(entry: SessionEntry): boolean {
     return (
+      (entry.mcpAppCalls?.size ?? 0) > 0 ||
       entry.pendingPromptCount > 0 ||
       entry.pendingAgentNotificationCount > 0 ||
       !!entry.backgroundTurn
@@ -3985,6 +3987,9 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      for (const call of entry.mcpAppCalls?.values() ?? []) {
+        if (call.clientId === clientId) call.cancel();
+      }
       // Drop the last-seen entry alongside the registration ref.
       // Otherwise a long-lived daemon servicing a churn of disconnect/
       // reconnect clients (each picking a fresh `clientId`) would
@@ -12744,6 +12749,43 @@ export function createSessionControlPlane(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       );
+    },
+
+    async callMcpAppTool(sessionId, request, signal, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context.clientId);
+      if (!clientId) throw new Error('A session-bound client id is required');
+      if (entry.closing) throw new SessionNotFoundError(sessionId);
+      assertSessionResetNotPending(sessionId);
+      signal.throwIfAborted();
+      const callId = `mcp-app-${randomUUID()}`;
+      const calls = (entry.mcpAppCalls ??= new Map());
+      const cancel = () => {
+        calls.delete(callId);
+        permissionMediator.cancelForPrompt(sessionId, callId);
+        void entry.connection
+          .extMethod('qwen/session/mcp-app/cancel', {
+            sessionId,
+            callId,
+          })
+          .catch(() => undefined);
+      };
+      calls.set(callId, { clientId, cancel });
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        return await requestSessionStatus<
+          import('./bridgeTypes.js').BridgeMcpAppToolResult
+        >(
+          sessionId,
+          'qwen/session/mcp-app/call',
+          { ...request, callId },
+          300_000,
+        );
+      } finally {
+        signal.removeEventListener('abort', cancel);
+        cancel();
+      }
     },
 
     async getSessionResourcesStatus(sessionId) {

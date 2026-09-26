@@ -182,6 +182,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/lsp',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mcp-app/tools/call',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
     method: 'GET',
     path: '/session/:id/resources',
     attribution: 'handler_resolved',

@@ -643,6 +643,6 @@ describe('configured MCP SDK v2 negotiation', () => {
       isMcpToolVisibleToModel({
         _meta: { ui: { visibility: null } },
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

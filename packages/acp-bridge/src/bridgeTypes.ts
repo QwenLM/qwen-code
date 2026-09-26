@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  McpAppToolResult,
   BackgroundNotificationTurn,
   ManagedToolV2Client,
   GoalControlRequest,
@@ -2378,6 +2379,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
+  /** Execute an App-visible tool through the bound session permission pipeline. */
+  callMcpAppTool(
+    sessionId: string,
+    request: BridgeMcpAppToolCall,
+    signal: AbortSignal,
+    context: { clientId: string },
+  ): Promise<McpAppToolResult>;
+
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,
@@ -3057,3 +3066,12 @@ export interface ShellCommandResult {
 
 /** @deprecated Use `AcpSessionBridge` instead. */
 export type HttpAcpBridge = AcpSessionBridge;
+
+export interface BridgeMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type BridgeMcpAppToolResult = McpAppToolResult;

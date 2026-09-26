@@ -266,7 +266,7 @@ describe('SystemController', () => {
   });
 
   describe('initialize MCP configuration', () => {
-    it('preserves explicit automatic version negotiation', async () => {
+    it('preserves MCP negotiation and App resource limits', async () => {
       const context = createContext();
       const controller = new SystemController(
         context,
@@ -281,6 +281,8 @@ describe('SystemController', () => {
             automatic: {
               command: 'node',
               versionNegotiation: 'auto',
+              appResourceMaxBytes: 4_194_304,
+              appResourceTimeoutMs: 30_000,
             },
           },
         },
@@ -291,6 +293,8 @@ describe('SystemController', () => {
         automatic: expect.objectContaining({
           command: 'node',
           versionNegotiation: 'auto',
+          appResourceMaxBytes: 4_194_304,
+          appResourceTimeoutMs: 30_000,
         }),
       });
     });
