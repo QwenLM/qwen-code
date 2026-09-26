@@ -1048,6 +1048,15 @@ export async function main() {
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 
+    // The interactive UI segments text through Intl.Segmenter; on an ICU-less
+    // Node the first segmentation segfaults the process (#11747). Probe here,
+    // where interactivity is known, so headless and ACP runs (which never
+    // segment) are untouched by the gate.
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const { assertFullIcuAvailable } = await import('./startup/icu-check.js');
+      assertFullIcuAvailable();
+    }
+
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
         ? await import('./services/housekeeping/scheduler.js')
