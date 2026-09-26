@@ -35,7 +35,11 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
+  type BackslashReading,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2055,7 +2059,11 @@ type CdResolution =
   | { kind: 'static'; cwd: string; cwdUnknown: boolean };
 
 function isDynamicShellPath(word: string): boolean {
-  return word.includes('$') || word.includes('`');
+  // A `cd` target carrying shell metacharacters can only be a quoting
+  // artifact of the segment split — no real directory argument arrives
+  // with them — so it must escalate like a `$`/backtick target instead of
+  // becoming a concrete cwd writes get attributed to (#12246 variant).
+  return word.includes('$') || word.includes('`') || /[;|&><]/.test(word);
 }
 
 function resolveCdTargetCwd(
@@ -2121,7 +2129,13 @@ function resolveCdTargetCwd(
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments within one quote reading.
+ *     Commands containing a backslash are also walked under bash's
+ *     literal-backslash-in-single-quotes reading and the two operation sets
+ *     are merged (deduped), so a boundary only one reading sees cannot hide
+ *     a write behind a `cd` attribution mismatch (#12246); merged results
+ *     may append the second reading's extra ops at the tail rather than in
+ *     command order.
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2140,7 +2154,27 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  if (!command.includes('\\')) {
+    return walkCompoundCommand(command, cwd, 0, false, undefined);
+  }
+  // The two quote readings can disagree on where the operators are when a
+  // backslash appears: the escape-everywhere reading sees terminators that
+  // bash's literal-backslash-in-single-quotes reading does not (and vice
+  // versa). Each reading is walked on its own because it is self-consistent;
+  // the union split's mixed boundaries would attribute writes to phantom
+  // cwds that no shell produces. Both operation sets are kept, since the
+  // permission layer aggregates to the most restrictive verdict (#12246).
+  const ops = walkCompoundCommand(command, cwd, 0, false, 'escape-everywhere');
+  const bashOps = walkCompoundCommand(command, cwd, 0, false, 'bash');
+  const seen = new Set(ops.map((op) => JSON.stringify(op)));
+  for (const op of bashOps) {
+    const key = JSON.stringify(op);
+    if (!seen.has(key)) {
+      ops.push(op);
+      seen.add(key);
+    }
+  }
+  return ops;
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2262,8 +2296,12 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  reading?: BackslashReading,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const stripped = stripHeredocBodies(command);
+  const subCommands = reading
+    ? splitCompoundCommandSegmentsForReading(stripped, reading)
+    : splitCompoundCommandSegments(stripped);
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
@@ -2303,6 +2341,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            reading,
           ),
         );
         continue;

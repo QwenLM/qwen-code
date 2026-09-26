@@ -498,8 +498,7 @@ export function parseRule(raw: string): PermissionRule {
   //   specifier = "coder", toolParamMatchers = [{model,opus},{type,*}]
   let specifier: string | undefined = rawSpecifier;
   let toolParamMatchers:
-    | Array<{ key: string; valuePattern: string }>
-    | undefined;
+    Array<{ key: string; valuePattern: string }> | undefined;
 
   if (
     specifierKind === 'literal' &&
@@ -992,7 +991,29 @@ export function splitCompoundCommandSegments(
         ...findOperatorBoundaries(command, 'escape-everywhere'),
       ].sort((a, b) => a.start - b.start)
     : findOperatorBoundaries(command, 'bash');
+  return assembleSegments(command, boundaries);
+}
 
+/**
+ * Split under one backslash reading only.
+ *
+ * The union split above is the safe default for finding boundaries, but a
+ * boundary only one reading sees can sit inside what bash treats as one
+ * quoted word, and the phantom segments then misattribute a `cd`'s effect on
+ * the write path (#12246). The shell semantics walker evaluates this
+ * single-reading split alongside the union and keeps both operation sets.
+ */
+export function splitCompoundCommandSegmentsForReading(
+  command: string,
+  reading: BackslashReading,
+): CompoundCommandSegment[] {
+  return assembleSegments(command, findOperatorBoundaries(command, reading));
+}
+
+function assembleSegments(
+  command: string,
+  boundaries: OperatorBoundary[],
+): CompoundCommandSegment[] {
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
   for (const { start, end, operator } of boundaries) {
@@ -1029,7 +1050,7 @@ interface OperatorBoundary {
   operator: string;
 }
 
-type BackslashReading = 'bash' | 'escape-everywhere';
+export type BackslashReading = 'bash' | 'escape-everywhere';
 
 function findOperatorBoundaries(
   command: string,

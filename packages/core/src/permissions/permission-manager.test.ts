@@ -22,6 +22,7 @@ import {
   toolMatchesRuleToolName,
   splitCompoundCommand,
   splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -919,6 +920,33 @@ describe('splitCompoundCommandSegments', () => {
     ).toEqual([
       { command: "cd 'a\\'", terminator: '&&' },
       { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it('bash reading reads a backslash as literal inside plain single quotes (#R1-7)', () => {
+    const payload = `cd 'x\\'';echo ' & echo {} > settings.json`;
+    // The union split (default) also finds the phantom `;` the
+    // escape-everywhere reading sees inside what bash treats as one quoted
+    // word.
+    expect(splitCompoundCommandSegments(payload)).toEqual([
+      { command: "cd 'x\\''", terminator: ';' },
+      { command: "echo '", terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+    // bash reading: `'x\''` closes, `';echo '` is a second span, the only
+    // boundary is the real ` & `
+    expect(splitCompoundCommandSegmentsForReading(payload, 'bash')).toEqual([
+      { command: `cd 'x\\'';echo '`, terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it("bash reading still processes escapes inside ANSI-C $'...' spans (#R1-7)", () => {
+    // $'a\' ; rm...' is one ANSI-C string to bash (the \' is an escaped
+    // quote), so the bash reading must not split at that `;` either.
+    const payload = `printf $'a\\' ; rm -rf src/keepme'`;
+    expect(splitCompoundCommandSegmentsForReading(payload, 'bash')).toEqual([
+      { command: `printf $'a\\' ; rm -rf src/keepme'`, terminator: '' },
     ]);
   });
 });
@@ -2530,6 +2558,34 @@ describe('PermissionManager', () => {
           command: 'git log | grep fix',
         }),
       ).toBe('allow');
+    });
+
+    it('deny rule applies when quoting hides the async operator from the splitter (#12246)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash reads `'x\''` + `';echo '` as one concatenated argument, so the
+      // second `cd` is backgrounded by the real ` & ` and the write lands in
+      // .qwen — the deny rule must fire, not a phantom foreground reading.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+      // Controls keep their verdicts.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen ; cd x & echo {} > settings.json',
+        }),
+      ).toBe('deny');
     });
 
     it('semicolon compound: deny in second → deny', async () => {
