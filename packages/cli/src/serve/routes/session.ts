@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -2035,9 +2039,18 @@ export function registerSessionRoutes(
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
+      const session = await readLoadableConversationSession(sessionId, service);
+      if (session === undefined) return false;
+      // Beyond what the Live-only compatibility adapter admitted, only a
+      // top-level explicit standalone session is in scope here: the dedicated
+      // standalone surface refuses child sessions, so they stay unreachable
+      // from the generic transcript routes.
+      if (session.metadata.parentSessionId === undefined) return true;
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
-        undefined
+        session.kind === 'live' ||
+        (session.kind === 'standalone' &&
+          session.persistence === 'legacy' &&
+          session.parentSource?.persistence === 'legacy')
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -2876,6 +2889,13 @@ export function registerSessionRoutes(
     }
     const assertRuntimeGenerationOpen =
       captureRuntimeGenerationAssertion(runtime);
+    let startupConfig;
+    try {
+      startupConfig = parseSessionStartupConfig(body['startupConfig'], body);
+    } catch (error) {
+      sendBridgeError(res, error, { route: 'POST /session' });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -3233,6 +3253,7 @@ export function registerSessionRoutes(
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
+        ...(startupConfig ? { startupConfig } : {}),
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
@@ -3623,6 +3644,54 @@ export function registerSessionRoutes(
           daemonLog,
         );
       }
+      // A definite startup-config rejection already closed the live
+      // session in the bridge, but the recording the spawn persisted
+      // survives — and reserveCreate would answer every retry of the
+      // caller-supplied id with 409 session_id_conflict, while a
+      // daemon-generated id leaves a listed, resumable phantom. Roll the
+      // recording back the way the other spawn-failure paths do, naming
+      // the session the rejection was actually applied to. Uncertain
+      // outcomes keep it: the close result is unknown.
+      const rejectedSessionId =
+        (isSessionStartupConfigError(err) ? err.sessionId : undefined) ??
+        requestedSessionId;
+      if (
+        rejectedSessionId !== undefined &&
+        isSessionStartupConfigError(err) &&
+        err.code === 'startup_config_rejected'
+      ) {
+        let rollbackError: unknown;
+        const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          deleteDaemonSessionIfOrphan({
+            sessionId: rejectedSessionId,
+            service: createWorkspaceRuntimeSessionService(runtime),
+            bridge: runtime.bridge,
+            coordinator: archiveCoordinator,
+          }),
+        ).catch((cleanupError: unknown) => {
+          rollbackError = cleanupError;
+          return false;
+        });
+        if (!removed) {
+          // The definite rejection still owes the caller its 422, so an
+          // inconclusive rollback — refused because the session stayed
+          // live, or failed outright — is a daemon-log line, not a throw.
+          daemonLog?.warn(
+            'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+            {
+              sessionId: rejectedSessionId,
+              ...(rollbackError === undefined
+                ? {}
+                : {
+                    error:
+                      rollbackError instanceof Error
+                        ? rollbackError.message
+                        : String(rollbackError),
+                  }),
+            },
+          );
+        }
+      }
       // Only the plain creation path can promise that the initialize
       // handshake preceded every durable mutation: `branch`/`worktree`
       // bodies mutate git BEFORE spawn, and their rollback above is
@@ -3718,13 +3787,18 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
-      const liveReplayMode = parseReplayMode(body ?? {}, res, 'liveReplayMode');
+      // Load replays history; resume restores the full journal, so the
+      // load-only replay fields are parsed only for load — resume neither
+      // uses nor rejects them (see restore-request-fields.ts).
+      const liveReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'liveReplayMode')
+          : undefined;
       if (liveReplayMode === null) return;
-      const compactedReplayMode = parseReplayMode(
-        body ?? {},
-        res,
-        'compactedReplayMode',
-      );
+      const compactedReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'compactedReplayMode')
+          : undefined;
       if (compactedReplayMode === null) return;
       const restoreSource = parseRequestedSessionSource(body, res);
       if (restoreSource === null) return;

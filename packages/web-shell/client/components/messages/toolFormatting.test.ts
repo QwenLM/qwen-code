@@ -400,6 +400,16 @@ describe('toolFormatting', () => {
     ).toBe('3 line(s)');
   });
 
+  it('extracts free-form Advisor advice without JSON wrappers', () => {
+    expect(
+      extractRawOutputText({
+        type: 'advisor_advice',
+        model: 'advisor-model',
+        text: 'Check the retry boundary.',
+      }),
+    ).toBe('Check the retry boundary.');
+  });
+
   it('formats structured Advisor output as readable markdown', () => {
     const advisor = tool({
       toolName: 'advisor',

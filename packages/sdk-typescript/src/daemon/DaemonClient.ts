@@ -5,6 +5,10 @@
  */
 
 import {
+  validateStartupConfigRequest,
+  assertStartupConfigApplied,
+} from './session-startup-config.js';
+import {
   MCP_RESTART_SERVER_DEADLINE_MS,
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
@@ -42,6 +46,7 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
   BranchSessionRequest,
   DaemonBranchSessionRequest,
   DaemonBranchSessionResult,
@@ -86,6 +91,7 @@ import type {
   DaemonUsageDashboard,
   DaemonUsageRange,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -636,6 +642,7 @@ export function isStaleBranchPointError(
 }
 
 export interface CreateSessionRequest {
+  startupConfig?: SessionStartupConfig;
   /**
    * Workspace path the daemon must have registered. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
@@ -692,19 +699,18 @@ export interface CreateSessionRequest {
   branch?: { name: string };
 }
 
-export interface RestoreSessionRequest {
+/**
+ * Fields accepted by `POST /session/:id/resume`. Resume restores the full
+ * journal without history replay, so the load-only replay fields are not
+ * part of this request — the daemon neither uses nor validates them there.
+ */
+export interface ResumeSessionRequest {
   /**
    * Workspace path the daemon must have registered. Omit to let the daemon use
    * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
   approvalMode?: string;
-  /** Latest persisted records to include in the initial load replay. */
-  historyPageSize?: number;
-  /** Load-only live-turn replay projection. Omit for the complete journal. */
-  liveReplayMode?: 'full' | 'summary';
-  /** Load-only response projection for durable replay; defaults to full. */
-  compactedReplayMode?: 'full' | 'summary';
   /** Restore-time attribution for legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
@@ -714,6 +720,19 @@ export interface RestoreSessionRequest {
    * timer and relies on the daemon's own restore deadline.
    */
   timeoutMs?: number;
+}
+
+/**
+ * Fields accepted by `POST /session/:id/load`: the shared restore fields
+ * plus the replay-shaping fields below, which only load consumes.
+ */
+export interface RestoreSessionRequest extends ResumeSessionRequest {
+  /** Latest persisted records to include in the initial load replay. */
+  historyPageSize?: number;
+  /** Load-only live-turn replay projection. Omit for the complete journal. */
+  liveReplayMode?: 'full' | 'summary';
+  /** Load-only response projection for durable replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
 }
 
 export interface WorktreeResetSessionRequest {
@@ -1375,6 +1394,33 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonStatusReport>(
       `/daemon/status${query}`,
       'GET /daemon/status',
+    );
+  }
+
+  /** Check the daemon installation; refresh bypasses its cached release check. */
+  async daemonUpdateStatus(refresh = false): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      `/daemon/update${refresh ? '?refresh=true' : ''}`,
+      'GET /daemon/update',
+      { mode: 'rest' },
+    );
+  }
+
+  /** Download and verify the checked release without activating it. */
+  async prepareDaemonUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/prepare',
+      'POST /daemon/update/prepare',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /** Activate a prepared release and restart the daemon after responding. */
+  async restartDaemonForUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/restart',
+      'POST /daemon/update/restart',
+      { method: 'POST', body: {}, mode: 'rest' },
     );
   }
 
@@ -2961,11 +3007,16 @@ export class DaemonClient {
   async createStandaloneSession(
     options: CreateStandaloneSessionOptions = {},
   ): Promise<DaemonStandaloneSession> {
+    validateStartupConfigRequest(options);
     await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    if (options.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
       requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
+    let session: DaemonStandaloneSession;
     try {
       const response = await this.jsonRequest<unknown>(
         '/standalone/sessions',
@@ -2976,7 +3027,7 @@ export class DaemonClient {
           mode: 'rest',
         },
       );
-      return parseStandaloneSession(
+      session = parseStandaloneSession(
         response,
         'POST /standalone/sessions',
         sessionId,
@@ -2995,6 +3046,8 @@ export class DaemonClient {
         error,
       );
     }
+    assertStartupConfigApplied(session, options.startupConfig);
+    return session;
   }
 
   async listStandaloneSessions(
@@ -3221,6 +3274,10 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    validateStartupConfigRequest(req);
+    if (req.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     if (req.sessionId !== undefined && req.sessionId !== null) {
       await this.requireCapability('session_id_override');
     }
@@ -3246,6 +3303,9 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.startupConfig !== undefined
+            ? { startupConfig: req.startupConfig }
+            : {}),
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
@@ -3271,6 +3331,7 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
         const session = (await res.json()) as DaemonSession;
+        assertStartupConfigApplied(session, req.startupConfig);
         if (
           typeof req.sessionId === 'string' &&
           session.sessionId !== req.sessionId.toLowerCase()
@@ -3571,7 +3632,7 @@ export class DaemonClient {
 
   async resumeSession(
     sessionId: string,
-    req: RestoreSessionRequest = {},
+    req: ResumeSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);

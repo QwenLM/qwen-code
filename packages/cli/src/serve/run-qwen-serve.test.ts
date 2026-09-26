@@ -5669,6 +5669,72 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('wires every workspace service to workspace-control liveness', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-control-liveness-')),
+    );
+    const workspaces = ['primary', 'secondary', 'added'].map((name) => {
+      const cwd = path.join(tmpDir, name);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    // Another engine keeps the runtime live while workspace control is not.
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () =>
+        Object.assign(makeRuntimeBridge(), {
+          isWorkspaceControlLive: vi.fn().mockReturnValue(false),
+        }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const createWorkspaceService = vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces.slice(0, 2),
+        token: 'control-liveness-token',
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer control-liveness-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: workspaces[2] }),
+      });
+      expect(added.status).toBe(201);
+      const liveness = new Map(
+        createWorkspaceService.mock.calls.map(([deps]) => [
+          deps.boundWorkspace,
+          deps.isChannelLive?.(),
+        ]),
+      );
+      for (const cwd of workspaces) {
+        expect(liveness.get(canonicalizeWorkspace(cwd))).toBe(false);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('accepts an explicit zero channel idle timeout', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-idle-timeout-')),
@@ -5881,6 +5947,136 @@ describe('runQwenServe telemetry validation', () => {
       ]);
     } finally {
       await handle.close();
+    }
+  });
+});
+
+describe('runQwenServe deployment profiles', () => {
+  it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
+    );
+    fs.mkdirSync(path.join(workspace, '.qwen'));
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    const createApp = vi
+      .spyOn(serverModule, 'createServeApp')
+      .mockImplementation((...args) => originalCreateServeApp(...args));
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
+        false,
+      );
+    } finally {
+      await handle?.close();
+      createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Hosted Harness bootstrap private until its runtime is ready', async () => {
+    const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
+      serveOptions: {
+        profile: 'hosted-harness',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      },
+    });
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer secret-token' };
+      expect(
+        (await fetch(`${handle.url}/capabilities`, { headers })).status,
+      ).toBe(503);
+      expect(
+        (await fetch(`${handle.url}/daemon/status`, { headers })).status,
+      ).toBe(404);
+      expect((await fetch(`${handle.url}/workspace`, { headers })).status).toBe(
+        404,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    { experimentalManagedAgents: true },
+    { experimentalManagedRuntimeWorker: true },
+    { experimentalManagedRuntimeAutoLocal: true },
+    { experimentalManagedRuntimeUrl: 'http://127.0.0.1:8080' },
+    { experimentalManagedRuntimeToken: 'test-token' },
+    { managedRuntimeBrokerUrl: 'http://127.0.0.1:8080' },
+    { managedRuntimeBrokerToken: 'test-token' },
+  ])('rejects before listening: %j', async (option) => {
+    const listen = vi
+      .spyOn(net.Server.prototype, 'listen')
+      .mockImplementation(() => {
+        throw new Error('Unexpected listener for an unavailable mode.');
+      });
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: isolatedTestRuntimeDir,
+          ...option,
+        }),
+      ).rejects.toThrow(
+        /not (available|implemented)|require --profile hosted-harness/,
+      );
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
+  it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: isolatedTestRuntimeDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/outside the loopback interface/);
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
     }
   });
 });

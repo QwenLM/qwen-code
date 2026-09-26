@@ -196,6 +196,7 @@ interface ChatEditorProps {
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  btwEnabled?: boolean;
   onCycleMode?: () => void;
   cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
@@ -1387,6 +1388,7 @@ export const ChatEditor = memo(
       onSubmit,
       onInputTextChange,
       onAttachmentsChange,
+      btwEnabled = false,
       onCycleMode,
       cycleModeOnTab = false,
       onToggleShortcuts,
@@ -1891,6 +1893,25 @@ export const ChatEditor = memo(
       },
       [core, focusComposer],
     );
+    const handleAddMenuBtw = () => {
+      if (
+        !btwEnabled ||
+        disabled ||
+        isPreparing ||
+        core.shellMode ||
+        core.pendingImageBatchCount > 0 ||
+        core.handle.hasAttachments()
+      ) {
+        return;
+      }
+      const text = core.getText();
+      const prefix = /^\s*\/btw(?=\s|$)/i;
+      const nextText = prefix.test(text)
+        ? text.replace(prefix, '/btw')
+        : `/btw ${text}`;
+      if (nextText !== text) core.setText(nextText);
+      focusComposer();
+    };
     const handleUploadPickerChange = useCallback(
       (event: ReactChangeEvent<HTMLInputElement>) => {
         const files = Array.from(event.target.files ?? []);
@@ -3354,6 +3375,20 @@ export const ChatEditor = memo(
                       skillsLoading={skillsLoading}
                       skillsLoadError={skillsLoadError}
                       skillsLoaded={skillsLoaded}
+                      btw={
+                        btwEnabled && !core.shellMode
+                          ? {
+                              onSelect: handleAddMenuBtw,
+                              disabledReason:
+                                core.hasAttachments ||
+                                core.pendingImageBatchCount > 0
+                                  ? t('composerAdd.btw.textOnly')
+                                  : isPreparing
+                                    ? t('common.loading')
+                                    : undefined,
+                            }
+                          : undefined
+                      }
                       plan={
                         showPlanInAddMenu
                           ? {
