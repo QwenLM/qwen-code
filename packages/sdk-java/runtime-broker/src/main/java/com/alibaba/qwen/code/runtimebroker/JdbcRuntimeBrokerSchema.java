@@ -28,9 +28,26 @@ public final class JdbcRuntimeBrokerSchema {
                     statement.execute(command);
                 }
             }
+            addStorageColumn(statement, "qwen_runtime_binding_slot");
+            addStorageColumn(statement, "qwen_runtime_binding");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }
+    }
+
+    private static void addStorageColumn(Statement statement, String table)
+            throws SQLException {
+        try (java.sql.ResultSet result = statement.executeQuery(
+                "SELECT * FROM " + table + " WHERE 1 = 0")) {
+            java.sql.ResultSetMetaData columns = result.getMetaData();
+            for (int index = 1; index <= columns.getColumnCount(); index++) {
+                if ("storage_id".equalsIgnoreCase(columns.getColumnName(index))) {
+                    return;
+                }
+            }
+        }
+        statement.execute("ALTER TABLE " + table
+                + " ADD COLUMN storage_id VARCHAR(256)");
     }
 
     private static String readSchema() {

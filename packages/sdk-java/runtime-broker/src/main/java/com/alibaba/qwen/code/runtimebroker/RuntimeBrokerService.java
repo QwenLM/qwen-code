@@ -875,7 +875,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             RuntimeBindingRecord claimed) {
         RuntimeProvisionRequest request = claimed.getRequest();
         RuntimeProvisionSeed seed = claimed.getProvisionSeed();
-        if (seed == null) {
+        if (seed == null || (request.isManagedContext()
+                && claimed.getResourceHandle() != null)) {
             blockRecovery(claimed);
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
@@ -895,11 +896,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ScheduledFuture<?> deadlineTask;
         try {
             deadlineTask = scheduler.schedule(() -> {
-                renewal.close();
-                releaseOperationQuietly(bindingId, operationGeneration);
-                operation.completeExceptionally(unavailable(
-                        "runtime_broker_provision_timeout",
-                        "Managed Runtime provisioning timed out."));
+                try {
+                    RuntimeBindingRecord timedOut = renewal.stopAndGet();
+                    if (request.isManagedContext() && timedOut != null) {
+                        blockRecovery(timedOut);
+                    }
+                } finally {
+                    releaseOperationQuietly(bindingId, operationGeneration);
+                    operation.completeExceptionally(unavailable(
+                            "runtime_broker_provision_timeout",
+                            "Managed Runtime provisioning timed out."));
+                }
             }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
         } catch (RuntimeException scheduleFailure) {
             renewal.stopAndGet();
@@ -935,9 +942,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (error != null) {
                             Throwable cause = unwrap(error);
                             if (currentClaim != null) {
-                                if (cause instanceof RuntimeBrokerException
-                                        brokerFailure
-                                        && !brokerFailure.isRetryable()) {
+                                if (request.isManagedContext()
+                                        || (cause instanceof RuntimeBrokerException
+                                                brokerFailure
+                                                && !brokerFailure.isRetryable())) {
                                     blockRecovery(currentClaim);
                                 } else if (currentClaim
                                         .getResourceHandle() == null) {
@@ -1398,6 +1406,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 && lease.getLeaseId().equals(attestation.getLeaseId())
                 && lease.getEpoch() == attestation.getEpoch()
                 && request.getScope().equals(attestation.getScope())
+                && java.util.Objects.equals(request.getStorageId(),
+                        attestation.getStorageId())
                 && seed.getProvisionRequestId().equals(
                         attestation.getProvisionRequestId());
     }
@@ -2048,10 +2058,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private RuntimeProvisionRequest provisionRequest(
             RuntimeScope scope, String harnessSessionId) {
-        return new RuntimeProvisionRequest(scope,
+        return provisioner.createRequest(scope,
                 "session".equals(scope.getIsolationClass())
-                        ? harnessSessionId : null,
-                provisioner.kind());
+                        ? harnessSessionId : null);
     }
 
     private static void requireSameSession(RuntimeSession actual,

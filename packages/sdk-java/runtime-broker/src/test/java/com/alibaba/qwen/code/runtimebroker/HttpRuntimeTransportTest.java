@@ -94,6 +94,87 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void admitsOnlyTheExactV3AttestationAndInstallationReceipt() throws Exception {
+        RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
+        RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
+        RuntimeLease lease = contextLease(seed);
+        Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
+        Map<String, Object> proof = ManagedContextProtocol.attestationResponse(boot);
+        reply.set(json(200, JsonCodec.encode(proof)));
+        assertEquals(request.getStorageId(), transport.attest(lease, request, seed)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).getStorageId());
+        assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
+        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot)),
+                JSON.readTree(captured.get()));
+        for (String field : proof.keySet()) {
+            Map<String, Object> wrong = new LinkedHashMap<>(proof);
+            wrong.remove(field);
+            reply.set(json(200, JsonCodec.encode(wrong)));
+            assertThrows(ExecutionException.class, () -> transport.attest(lease, request, seed)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS), field);
+        }
+        var binding = ManagedContextProtocolTest.binding();
+        Map<String, Object> receipt = ManagedContextProtocol.receipt(seed, "op-1", "会话-𝄞", binding);
+        reply.set(json(200, JsonCodec.encode(receipt)));
+        assertTrue(BrokerValues.sameJsonMap(receipt, transport.installContext(lease, request,
+                seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS)));
+        assertEquals(ManagedContextProtocol.CONTEXT_PATH, capturedPath.get());
+        assertEquals("会话-𝄞", JSON.readTree(captured.get()).required("sessionId").asText());
+        for (String field : receipt.keySet()) {
+            Map<String, Object> wrong = new LinkedHashMap<>(receipt);
+            wrong.put(field, receipt.get(field) instanceof Number
+                    ? new BigDecimal("4.0000000000000000001") : "wrong");
+            reply.set(json(200, JsonCodec.encode(wrong)));
+            assertThrows(ExecutionException.class, () -> transport.installContext(lease, request,
+                    seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS), field);
+        }
+        Map<String, Object> extra = new LinkedHashMap<>(receipt);
+        extra.put("unexpected", true);
+        reply.set(json(200, JsonCodec.encode(extra)));
+        assertThrows(ExecutionException.class, () -> transport.installContext(lease, request,
+                seed, "op-1", "会话-𝄞", binding).toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void contextClientBoundsBodiesRejectsOldPeersAndPreservesSessionRefusals() throws Exception {
+        RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
+        RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
+        RuntimeLease lease = contextLease(seed);
+        for (String code : List.of("managed_context_unavailable", "managed_context_conflict")) {
+            reply.set(json(409, JsonCodec.encode(Map.of("code", code, "error", "private detail"))));
+            ExecutionException error = assertThrows(ExecutionException.class, () -> transport
+                    .installContext(lease, request, seed, "op", "session",
+                            ManagedContextProtocolTest.binding()).toCompletableFuture().get(2, TimeUnit.SECONDS));
+            RuntimeBrokerException failure = (RuntimeBrokerException) error.getCause();
+            assertEquals(code, failure.getCode());
+            assertFalse(failure.isRetryable());
+            assertFalse(failure.getMessage().contains("private detail"));
+        }
+        for (int status : List.of(404, 405)) {
+            reply.set(json(status, "{}".getBytes(StandardCharsets.UTF_8)));
+            ExecutionException error = assertThrows(ExecutionException.class, () -> transport
+                    .attest(lease, request, seed).toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals("managed_runtime_incompatible", ((RuntimeBrokerException) error.getCause()).getCode());
+            assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
+        }
+        reply.set(json(200, new byte[HttpRuntimeTransport.BODY_LIMIT_BYTES + 1]));
+        ExecutionException error = assertThrows(ExecutionException.class, () -> transport.installContext(
+                lease, request, seed, "op", "session", ManagedContextProtocolTest.binding())
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(413, ((RuntimeBrokerException) error.getCause()).getStatusCode());
+        captured.set(null);
+        assertThrows(IllegalArgumentException.class, () -> transport.installContext(
+                lease, request, seed, "op", "bad\ud800", ManagedContextProtocolTest.binding()));
+        assertNull(captured.get());
+    }
+
+    private RuntimeLease contextLease(RuntimeProvisionSeed seed) {
+        return new RuntimeLease(seed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+    }
+
+    @Test
     void sendsThePreviewAttestRequestForTheSharedSuccessFixture()
             throws Exception {
         JsonNode success = find("success");
