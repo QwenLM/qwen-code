@@ -19,6 +19,7 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+import { hasPostCompactAttachmentSentinel } from '../services/post-compact-attachment-mark.js';
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
@@ -677,24 +678,44 @@ function detectCompressedPrefixLength(
   return 2;
 }
 
+/**
+ * Frozen historical attachment templates from before the sentinel. Never
+ * sync these to a producer change; current output is recognized by the
+ * sentinel. `startsWith` (not equality) allows a producer to append dynamic
+ * rows after the static template. These are the full static templates, not
+ * a bare `<background-tasks>` or `<plan-mode-active>` tag.
+ */
+const LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES = [
+  'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+  'Recently accessed file (full current content embedded):\n\n',
+  'Recent visual snapshots preserved from before context was compacted (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:',
+  '<plan-mode-active>\n' +
+    'You are currently in PLAN mode. You may research, read files, and ' +
+    'propose plans, but you may not execute modification tools (' +
+    'write_file, edit, run_shell_command, etc.) ' +
+    'until the user exits plan mode. The summary above may not reflect this ' +
+    'constraint — honor plan mode regardless.\n' +
+    '</plan-mode-active>',
+  '<background-tasks>\n' +
+    'The following background subagent tasks were active at compaction. ' +
+    'The summary above does not include their per-task state. Use ' +
+    '`task_stop` / `send_message` to interact; do not assume they ' +
+    'completed.\n',
+];
+
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
   if (content?.role !== 'user') return false;
+  if (hasPostCompactAttachmentSentinel(content)) return true;
   const parts = content.parts ?? [];
-  return parts.some(
-    (part) =>
-      typeof part.text === 'string' &&
-      (part.text.startsWith('<plan-mode-active>') ||
-        part.text.startsWith('<background-tasks>') ||
-        part.text.startsWith(
-          'The following files were recently accessed before context was compacted.',
-        ) ||
-        part.text.startsWith(
-          'Recently accessed file (full current content embedded):',
-        ) ||
-        part.text.startsWith(
-          'Recent visual snapshots preserved from before context was compacted',
-        )),
-  );
+  return parts.some((part) => {
+    const text = part.text;
+    return (
+      typeof text === 'string' &&
+      LEGACY_POST_COMPACT_ATTACHMENT_PREFIXES.some((prefix) =>
+        text.startsWith(prefix),
+      )
+    );
+  });
 }
 
 function isModelFunctionCallEntry(content: Content | undefined): boolean {

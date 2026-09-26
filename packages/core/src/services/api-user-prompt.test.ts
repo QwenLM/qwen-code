@@ -15,6 +15,7 @@ import {
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '../core/environmentContext.js';
+import { POST_COMPACT_ATTACHMENT_SENTINEL } from './post-compact-attachment-mark.js';
 
 const user = (text: string): Content => ({
   role: 'user',
@@ -209,6 +210,33 @@ describe('countApiUserPrompts', () => {
     ];
     expect(countApiUserPrompts(history)).toBe(2);
     expect(countApiUserPrompts([])).toBe(0);
+  });
+
+  it('counts a prefix-like prompt after an attachment-less compress', () => {
+    const history: Content[] = [
+      user('summary\n\nResume the prior task from where it left off.'),
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      user('<background-tasks> check the jobs'),
+    ];
+    expect(countApiUserPrompts(history)).toBe(1);
+    expect(findApiRewindCutPoint(history, 0)).toBe(2);
+  });
+
+  it('skips a structurally marked post-compact attachment', () => {
+    const history: Content[] = [
+      user('summary\n\nResume the prior task from where it left off.'),
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      user(POST_COMPACT_ATTACHMENT_SENTINEL + '<background-tasks> restored'),
+      user('real prompt'),
+    ];
+    expect(countApiUserPrompts(history)).toBe(1);
+    expect(findApiRewindCutPoint(history, 0)).toBe(3);
   });
 
   it('does not count a summarizing-compressed prefix as a prompt', () => {

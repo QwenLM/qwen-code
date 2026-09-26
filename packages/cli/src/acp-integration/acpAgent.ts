@@ -6129,6 +6129,9 @@ class QwenAgent implements Agent {
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
                 );
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
+                );
                 copyCumulativeUsage(
                   createdSession.cumulativeUsage,
                   replayUsage,
@@ -6173,6 +6176,14 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
+              }
+              // The replay page is a suffix and can omit the offset record.
+              // Re-apply the active-chain value so a partial page cannot
+              // replace it with an older one.
+              if (projection) {
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
+                );
               }
               try {
                 for (const update of streamGoalUpdates) {
@@ -6420,6 +6431,9 @@ class QwenAgent implements Agent {
                 createdSession.primeTurnState(
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
+                );
+                createdSession.applyRecordedRewindOffset?.(
+                  projection.runtime.absorbedSnapshotOffset,
                 );
               });
             },
@@ -10248,7 +10262,8 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
-        const rewindableTurnCount = session.getRewindableUserTurnCount();
+        const rewindableTurnRange = session.getRewindableTurnRange();
+        const rewindHoles = new Set(rewindableTurnRange.holes ?? []);
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -10258,7 +10273,12 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .filter(({ idx }) => idx < rewindableTurnCount)
+            .filter(
+              ({ idx }) =>
+                idx >= rewindableTurnRange.start &&
+                idx < rewindableTurnRange.end &&
+                !rewindHoles.has(idx),
+            )
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {

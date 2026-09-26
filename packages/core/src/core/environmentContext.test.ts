@@ -13,6 +13,9 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createUserContent, type Content } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
@@ -38,6 +41,12 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
+import { POST_COMPACT_ATTACHMENT_SENTINEL } from '../services/post-compact-attachment-mark.js';
+import {
+  buildFileRestorationBlocks,
+  buildImageRestorationBlock,
+  buildStateReminderParts,
+} from '../services/postCompactAttachments.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -908,7 +917,7 @@ describe('getStartupContextLength', () => {
     );
   });
 
-  it('is 4 for rewind with attachments and a trailing function call', () => {
+  it('is 2 when the first post-compress prompt only looks like an attachment', () => {
     const history: Content[] = [
       {
         role: 'user',
@@ -920,7 +929,219 @@ describe('getStartupContextLength', () => {
       },
       {
         role: 'user',
-        parts: [{ text: '<plan-mode-active>\nplan\n</plan-mode-active>' }],
+        parts: [{ text: '<background-tasks> check the jobs' }],
+      },
+    ];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+  });
+
+  // Hand-typed copies of the full static producer templates. A producer
+  // reword that also updates the legacy list leaves the live-producer
+  // assertion green and these red. Truncated openings must stay prompts.
+  const frozenAttachmentTemplates = [
+    [
+      'file references',
+      'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+    ],
+    [
+      'embedded file',
+      'Recently accessed file (full current content embedded):\n\n',
+    ],
+    [
+      'visual snapshots',
+      'Recent visual snapshots preserved from before context was compacted (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:',
+    ],
+    [
+      'plan mode',
+      '<plan-mode-active>\n' +
+        'You are currently in PLAN mode. You may research, read files, and ' +
+        'propose plans, but you may not execute modification tools (' +
+        'write_file, edit, run_shell_command, etc.) ' +
+        'until the user exits plan mode. The summary above may not reflect this ' +
+        'constraint — honor plan mode regardless.\n' +
+        '</plan-mode-active>',
+    ],
+    [
+      'background tasks',
+      '<background-tasks>\n' +
+        'The following background subagent tasks were active at compaction. ' +
+        'The summary above does not include their per-task state. Use ' +
+        '`task_stop` / `send_message` to interact; do not assume they ' +
+        'completed.\n',
+    ],
+  ] as const;
+  const compressedAttachmentLength = (
+    text: string,
+    withFunctionCall = false,
+  ) => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      { role: 'user', parts: [{ text }] },
+    ];
+    if (withFunctionCall) {
+      history.push({
+        role: 'model',
+        parts: [{ functionCall: { name: 'fn', args: {} } }],
+      });
+    }
+    return getStartupContextLength(history, { includeCompressed: true });
+  };
+
+  it.each(frozenAttachmentTemplates)(
+    'counts the full frozen %s template as a compressed attachment',
+    (_label, template) => {
+      expect(compressedAttachmentLength(template)).toBe(3);
+      expect(compressedAttachmentLength(`${template}\n- dynamic row`)).toBe(3);
+    },
+  );
+
+  it('counts a full frozen plan-mode template plus a trailing function call', () => {
+    const plan = frozenAttachmentTemplates.find(
+      ([label]) => label === 'plan mode',
+    )?.[1];
+    expect(plan).toBeDefined();
+    expect(compressedAttachmentLength(plan ?? '', true)).toBe(4);
+  });
+
+  it.each([
+    [
+      'file references',
+      'The following files were recently accessed before context was compacted.',
+    ],
+    [
+      'embedded file',
+      'Recently accessed file (full current content embedded):',
+    ],
+    [
+      'visual snapshots',
+      'Recent visual snapshots preserved from before context was compacted',
+    ],
+    ['plan mode', '<plan-mode-active>\nYou are currently in PLAN mode.'],
+    [
+      'background tasks',
+      '<background-tasks>\nThe following background subagent tasks were active at compaction.',
+    ],
+    ['bare background tag', '<background-tasks> check the jobs'],
+  ] as const)(
+    'does not treat a truncated %s opening as an attachment',
+    (_label, opening) => {
+      expect(compressedAttachmentLength(opening)).toBe(2);
+    },
+  );
+
+  it('counts unmarked producer attachments by their frozen openings', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'legacy-attach-'));
+    const compressedLength = (text: string, withFunctionCall = false) => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'summary\n\nResume the prior task from here.' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: text.replaceAll(POST_COMPACT_ATTACHMENT_SENTINEL, ''),
+            },
+          ],
+        },
+      ];
+      if (withFunctionCall) {
+        history.push({
+          role: 'model',
+          parts: [{ functionCall: { name: 'fn', args: {} } }],
+        });
+      }
+      return getStartupContextLength(history, { includeCompressed: true });
+    };
+    const textOf = (content: Content | null | undefined) => {
+      const text = content?.parts?.find(
+        (part) => typeof part.text === 'string',
+      )?.text;
+      if (typeof text !== 'string') {
+        throw new Error('attachment producer emitted no text');
+      }
+      return text;
+    };
+
+    try {
+      const small = join(dir, 'small.ts');
+      const large = join(dir, 'large.ts');
+      writeFileSync(small, 'export const x = 1;\n');
+      writeFileSync(large, 'x'.repeat(30_000));
+      const fileBlocks = await buildFileRestorationBlocks([large, small]);
+      const image = buildImageRestorationBlock([
+        {
+          part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
+          turnIndex: 1,
+        },
+      ]);
+      const plan = buildStateReminderParts({ planModeActive: true });
+      const tasks = buildStateReminderParts({
+        runningSubagents: [
+          {
+            id: 'agent-1',
+            description: 'still running',
+            status: 'running',
+            startTime: 1,
+          },
+        ],
+      });
+      expect(fileBlocks).toHaveLength(2);
+      expect(image).not.toBeNull();
+      expect(plan).toHaveLength(1);
+      expect(tasks).toHaveLength(1);
+
+      const openings = [
+        textOf(fileBlocks[0]),
+        textOf(fileBlocks[1]),
+        textOf(image),
+        textOf({ role: 'user', parts: plan }),
+        textOf({ role: 'user', parts: tasks }),
+      ];
+      expect(openings.map((text) => compressedLength(text))).toEqual([
+        3, 3, 3, 3, 3,
+      ]);
+      expect(
+        compressedLength(textOf({ role: 'user', parts: plan }), true),
+      ).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is 4 for rewind with a marked attachment and a trailing function call', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'summary\n\nResume the prior task...' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the additional context!' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            text:
+              POST_COMPACT_ATTACHMENT_SENTINEL +
+              '<plan-mode-active>\nplan\n</plan-mode-active>',
+          },
+        ],
       },
       {
         role: 'model',

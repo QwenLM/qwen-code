@@ -329,6 +329,7 @@ export interface ChatRecord {
     | 'agent_retry'
     | 'agent_session_ready'
     | 'file_history_snapshot'
+    | 'absorbed_snapshot_offset'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
@@ -397,6 +398,7 @@ export interface ChatRecord {
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
+    | AbsorbedSnapshotOffsetRecordPayload
     | AgentBootstrapRecordPayload
     | AgentRetryRecordPayload
     | AgentSessionReadyRecordPayload
@@ -692,6 +694,60 @@ export interface RewindRecordPayload {
 }
 
 /**
+ * Absolute rewind offset recorded when compression succeeds, plus how many
+ * file-inclusive rewinds have since kept their target snapshot.
+ */
+export interface AbsorbedSnapshotOffsetRecordPayload {
+  absorbedSnapshotCount: number;
+  retainedTargetSnapshots: number;
+  /** First live snapshot. Resolved with findIndex so front eviction can rebase. */
+  boundaryPromptId?: string;
+  /** Target snapshots kept after a file-inclusive rewind, in list order. */
+  retainedPromptIds?: string[];
+  /** Turn-boundary index of `boundaryPromptId`. Differs from the snapshot index when holes were folded. */
+  absorbedTurnCount?: number;
+}
+
+export function isAbsorbedSnapshotOffsetPayload(
+  payload: unknown,
+): payload is AbsorbedSnapshotOffsetRecordPayload {
+  if (typeof payload !== 'object' || payload === null) return false;
+  const record = payload as AbsorbedSnapshotOffsetRecordPayload;
+  if (
+    !Number.isInteger(record.absorbedSnapshotCount) ||
+    record.absorbedSnapshotCount < 0 ||
+    !Number.isInteger(record.retainedTargetSnapshots) ||
+    record.retainedTargetSnapshots < 0
+  ) {
+    return false;
+  }
+  if (
+    record.boundaryPromptId !== undefined &&
+    (typeof record.boundaryPromptId !== 'string' ||
+      record.boundaryPromptId.length === 0)
+  ) {
+    return false;
+  }
+  if (
+    record.retainedPromptIds !== undefined &&
+    (!Array.isArray(record.retainedPromptIds) ||
+      record.retainedPromptIds.some(
+        (id) => typeof id !== 'string' || id.length === 0,
+      ))
+  ) {
+    return false;
+  }
+  if (
+    record.absorbedTurnCount !== undefined &&
+    (!Number.isInteger(record.absorbedTurnCount) ||
+      record.absorbedTurnCount < 0)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Stored payload for file history snapshot persistence.
  * Each entry records one or more snapshots for session resume.
  */
@@ -970,6 +1026,10 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
+  /** Last accepted rewind offset. Re-appended after a rewind re-roots the chain. */
+  private currentAbsorbedSnapshotOffset:
+    | AbsorbedSnapshotOffsetRecordPayload
+    | undefined;
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -2625,6 +2685,17 @@ export class ChatRecordingService {
         });
       }
 
+      // The offset record is last-wins on the active chain. One written before
+      // this re-root is not an ancestor of the new leaf, so resume cannot see it.
+      if (this.currentAbsorbedSnapshotOffset) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'absorbed_snapshot_offset',
+          systemPayload: this.currentAbsorbedSnapshotOffset,
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -2633,6 +2704,100 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
     }
+  }
+
+  /**
+   * Persists the compression rewind offset so resume does not re-infer it
+   * from the live snapshot and prompt counts.
+   */
+  recordAbsorbedSnapshotOffset(
+    payload: AbsorbedSnapshotOffsetRecordPayload,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
+      return;
+    }
+    this.currentAbsorbedSnapshotOffset = payload;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'absorbed_snapshot_offset',
+        systemPayload: payload,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving absorbed snapshot offset:', error);
+    }
+  }
+
+  /**
+   * Absorbed prefix for a compressed transcript that never recorded one.
+   * A snapshot is absorbed when its promptId was stored before the latest
+   * chat_compression checkpoint and was not stored again after it. Returns
+   * undefined when that identity walk is missing or out of order.
+   */
+  deriveUnrecordedAbsorbedOffset(snapshotPromptIds: readonly string[]):
+    | {
+        absorbedSnapshotCount: number;
+        boundaryPromptId?: string;
+        absorbedTurnCount: number;
+      }
+    | undefined {
+    let compressionAt = -1;
+    for (let i = 0; i < this.activeBranchRecords.length; i++) {
+      const record = this.activeBranchRecords[i];
+      if (record?.type === 'system' && record.subtype === 'chat_compression') {
+        compressionAt = i;
+      }
+    }
+    if (compressionAt < 0) return undefined;
+
+    const before = new Set<string>();
+    const after = new Set<string>();
+    for (let i = 0; i < this.activeBranchRecords.length; i++) {
+      const record = this.activeBranchRecords[i];
+      if (
+        record?.type !== 'system' ||
+        record.subtype !== 'file_history_snapshot'
+      ) {
+        continue;
+      }
+      const snapshots = (
+        record.systemPayload as { snapshots?: Array<{ promptId?: string }> }
+      )?.snapshots;
+      if (!Array.isArray(snapshots)) continue;
+      const bucket = i < compressionAt ? before : after;
+      for (const snapshot of snapshots) {
+        if (
+          typeof snapshot?.promptId === 'string' &&
+          snapshot.promptId.length > 0
+        ) {
+          bucket.add(snapshot.promptId);
+        }
+      }
+    }
+    if (before.size === 0) return undefined;
+
+    let absorbed = 0;
+    let boundaryPromptId: string | undefined;
+    let tailStarted = false;
+    for (const promptId of snapshotPromptIds) {
+      const absorbedId = before.has(promptId) && !after.has(promptId);
+      if (absorbedId) {
+        if (tailStarted) return undefined;
+        absorbed++;
+        continue;
+      }
+      if (!tailStarted) {
+        tailStarted = true;
+        boundaryPromptId = promptId;
+      }
+    }
+    return {
+      absorbedSnapshotCount: absorbed,
+      absorbedTurnCount: absorbed,
+      ...(boundaryPromptId ? { boundaryPromptId } : {}),
+    };
   }
 
   /**
