@@ -391,6 +391,27 @@ describe('isShellCommandReadOnlyAST', () => {
         await isShellCommandReadOnlyAST("sed --in-place 's/foo/bar/' file.txt"),
       ).toBe(false);
     });
+
+    it('allows sed with --quiet/--silent read-only flags', async () => {
+      expect(await isShellCommandReadOnlyAST("sed -n 's/a/b/' file")).toBe(
+        true,
+      );
+      expect(await isShellCommandReadOnlyAST("sed --quiet 's/a/b/' file")).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyAST("sed --silent 's/a/b/' file"),
+      ).toBe(true);
+    });
+
+    it('still rejects sed write scripts with --quiet', async () => {
+      expect(await isShellCommandReadOnlyAST("sed --quiet 'w out' file")).toBe(
+        false,
+      );
+      expect(await isShellCommandReadOnlyAST("sed --silent 'w out' file")).toBe(
+        false,
+      );
+    });
   });
 
   // =======================================================================
@@ -558,6 +579,7 @@ describe('classifyShellCommandSafety', () => {
     "sed 's/hello/world/' file",
     "sed 's/error/warning/g' file",
     "sed -n '/needle/p' file",
+    "sed --quiet 's/a/b/' file",
     "sed '/pattern/d' file",
     "sed 's/a/woutput/' file",
     "sed 's#x#s/a/b/woutput#' file",
@@ -675,6 +697,8 @@ describe('classifyShellCommandSafety', () => {
     "sed 's/a/;/;w output' file",
     "sed -l 80 'w output' file",
     "sed --line-length 80 'w output' file",
+    "sed --quiet 'w out' file",
+    "sed --silent 'w out' file",
     'awk \'{ print > "output" }\' file',
     'awk -- \'BEGIN { print > "out" }\'',
     'awk \'BEGIN { print "x" > "out" }\'',
@@ -806,6 +830,8 @@ describe('classifyShellCommandSafety', () => {
     'sed -fscript.sed file',
     "sed --in-pl=.bak 's/a/b/' file",
     'sed --f script.sed file',
+    "sed --posix 's/a/b/' file",
+    "sed --follow-symlinks 's/a/b/' file",
     'sed -newout input',
     'sed -nEewout input',
     'sed "$SCRIPT" file',
