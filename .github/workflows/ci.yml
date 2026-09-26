@@ -1277,9 +1277,17 @@ jobs:
       # test:ci` (vitest) does not collect `node:test` files — so run them here
       # too, or a compositor/publisher change could pass CI without its
       # regression tests. Linux-only (they're platform-independent).
+      # One retry, the unit lane's contention doctrine (#10868): the battery
+      # spawns real subprocess loops on the shared ECS pool, and a main push
+      # has no flaky-rerun patrol — a single host hiccup failed the lane on a
+      # CSS-only commit (#12772). A real break still fails both attempts.
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
+        run: |-
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} || {
+            echo '::warning::helper tests failed once; retrying against a contention flake'
+            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}
+          }
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
