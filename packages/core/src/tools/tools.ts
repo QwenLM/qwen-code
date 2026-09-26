@@ -928,6 +928,7 @@ export type ToolResultDisplay =
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay
+  | AdvisorAdviceDisplay
   | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
@@ -942,6 +943,32 @@ export type ToolResultDisplay =
   | VisionBridgeNoticeDisplay
   | ShellProgressData
   | TerminalImageDisplay;
+
+export interface AdvisorAdviceDisplay {
+  type: 'advisor_advice';
+  model?: string;
+  text: string;
+}
+
+export type AdvisorDisplay = AdvisorReviewDisplay | AdvisorAdviceDisplay;
+
+export function isAdvisorDisplay(display: unknown): display is AdvisorDisplay {
+  return (
+    isAdvisorReviewDisplay(display) ||
+    (typeof display === 'object' &&
+      display !== null &&
+      'type' in display &&
+      display.type === 'advisor_advice' &&
+      'text' in display &&
+      typeof display.text === 'string')
+  );
+}
+
+export function formatAdvisorDisplay(display: AdvisorDisplay): string {
+  return display.type === 'advisor_advice'
+    ? display.text
+    : formatAdvisorReview(display);
+}
 
 export interface AdvisorReviewDisplay {
   type: 'advisor_review';

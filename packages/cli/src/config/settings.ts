@@ -11,6 +11,7 @@ import process from 'node:process';
 import {
   FatalConfigError,
   getErrorMessage,
+  isValidAdvisorMaxUses,
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
@@ -439,6 +440,18 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         );
       }
     }
+  }
+  // Core falls back to unlimited for an invalid value instead of refusing to
+  // start; say so, since the user asked for a limit.
+  const advisorMaxUses: unknown = loadedSettings.merged.advisorMaxUses;
+  if (
+    advisorMaxUses !== undefined &&
+    advisorMaxUses !== null &&
+    !isValidAdvisorMaxUses(advisorMaxUses)
+  ) {
+    warningSet.add(
+      `Warning: advisorMaxUses must be a non-negative integer (0 means unlimited); ignoring ${JSON.stringify(advisorMaxUses)}. Advisor consultations are not limited in this session.`,
+    );
   }
   return [...warningSet];
 }
