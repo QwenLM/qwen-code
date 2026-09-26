@@ -67,6 +67,26 @@ The local-process adapter supports same-host adoption; the Kubernetes adapter
 still requires the real-cluster fault matrix described in the P3 design before
 production rollout.
 
+## Fault gates
+
+The Stage F fault gates run the service in real Broker JVMs against the real
+bundled worker, with a fault-injecting HTTP proxy between them and a
+file-backed H2 database behind a relay that can be cut. They drop, reset or
+hold Runtime answers, kill workers and Broker JVMs, freeze a Broker past its
+lease, and take the database away, then check that no tool call runs twice
+or settles without the Runtime's evidence; see
+[Runtime Broker Fault Gates](../../../docs/design/2026-09-26-runtime-broker-fault-gates.md).
+They need the bundle, Node.js and POSIX signals, and fail when any is
+missing. The default `mvn test` excludes them. From the repository root, run
+`npm run build && npm run bundle`, then in this module:
+
+```bash
+mvn -Pfault-gates test
+```
+
+`-Dqwen.cli.entry=/path/to/dist/cli.js` points them at another bundle, with
+its `managed-runtime-worker.js` next to it.
+
 ## Workspace binding
 
 The `com.alibaba.qwen.code.runtimebroker.managedworkspace` package holds the

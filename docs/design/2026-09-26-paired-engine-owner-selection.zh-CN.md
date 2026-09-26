@@ -108,7 +108,8 @@ REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不�
 直接创建方保留各自的错误词汇。`LocalManagedRuntimeProvider` 把已存活 ID 的拒绝
 映射为不可重试的 `managed_runtime_identity_conflict`。standalone 服务把未派发的
 已存活 ID 拒绝映射为 `standalone_session_conflict`，而不是
-`standalone_creation_rolled_back`。
+`standalone_creation_rolled_back`。此时它不检查该 ID 是否有已持久化的内容，因为存活
+owner 自己的 transcript 本就应当存在；发现它不能导致 runtime 被隔离。
 
 ## 文件与消费者
 

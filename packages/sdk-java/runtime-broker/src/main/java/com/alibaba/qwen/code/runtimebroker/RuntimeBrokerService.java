@@ -440,13 +440,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
      * Runtime can answer for it.
      */
     private void requireAnswerableBinding(ToolExecutionRecord record) {
-        RuntimeBindingRecord binding = bindingRepository.findById(
-                record.getBindingId());
-        if (binding == null
-                || binding.getGeneration() != record.getRuntimeGeneration()
-                || (binding.getState() != RuntimeBindingRecord.State.READY
-                        && binding.getState()
-                                != RuntimeBindingRecord.State.DRAINING)) {
+        if (!executionBindingAnswerable(record)) {
             throw evidenceUnavailable();
         }
     }
@@ -842,12 +836,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
-    private boolean executionBindingAvailable(ToolExecutionRecord execution) {
+    /**
+     * Whether the binding generation an execution was dispatched to can
+     * still answer for it. A LOST or blocked generation stays active for its
+     * Sessions, but no Runtime behind it answers.
+     */
+    private boolean executionBindingAnswerable(ToolExecutionRecord execution) {
         RuntimeBindingRecord binding = bindingRepository.findById(
                 execution.getBindingId());
-        return binding != null && binding.isActive()
-                && binding.getGeneration()
-                        == execution.getRuntimeGeneration();
+        return binding != null
+                && binding.getGeneration() == execution.getRuntimeGeneration()
+                && (binding.getState() == RuntimeBindingRecord.State.READY
+                        || binding.getState()
+                                == RuntimeBindingRecord.State.DRAINING);
     }
 
     private static boolean withoutIdentityEvidence(Throwable cause) {
@@ -1886,6 +1887,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return requested;
         }
 
+        /**
+         * Checks the Runtime now, however recent the last check: a dispatch
+         * that lost an answer cannot tell a slow Runtime from a dead one.
+         */
+        CompletionStage<RuntimeLease> verifyLiveness(RuntimeLease lease) {
+            synchronized (this) {
+                lastHealthNanos = 0;
+            }
+            return ensureHealthy(lease);
+        }
+
         CompletionStage<RuntimeLease> ensureHealthy(RuntimeLease lease) {
             CompletableFuture<RuntimeLease> check;
             synchronized (this) {
@@ -2869,6 +2881,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final AtomicBoolean invoking = new AtomicBoolean();
         private CompletableFuture<Map<String, Object>> cancellation;
         private ScheduledFuture<?> dispatchRenewal;
+        // The pause before the next lookup after a lost answer; it grows
+        // while answers keep failing and resets once one arrives.
+        private long failureDelayMillis;
 
         ExecutionRecord(ToolExecutionRecord record, SessionBinding session) {
             executionCallId = record.getExecutionCallId();
@@ -2879,8 +2894,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (!started.compareAndSet(false, true)) {
                 return;
             }
-            ToolExecutionRecord claimed = executionRepository.claimDispatch(
-                    executionCallId, brokerOwnerId, dispatchLeaseDuration);
+            ToolExecutionRecord claimed;
+            try {
+                claimed = executionRepository.claimDispatch(executionCallId,
+                        brokerOwnerId, dispatchLeaseDuration);
+            } catch (RuntimeException failure) {
+                started.set(false);
+                throw failure;
+            }
             if (claimed == null
                     || !brokerOwnerId.equals(claimed.getDispatchOwner())) {
                 started.set(false);
@@ -2888,16 +2909,28 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             startDispatchRenewal(claimed.getDispatchGeneration(), transport);
             session.ready.whenComplete((lease, error) -> {
-                if (error != null) {
-                    settleOwned(errorResult());
-                    return;
+                try {
+                    if (error != null) {
+                        settleOwned(errorResult());
+                        return;
+                    }
+                    reconcile(transport, lease);
+                } catch (RuntimeException failure) {
+                    abandonDispatch();
                 }
-                reconcile(transport, lease);
             });
         }
 
         private void reconcile(RuntimeTransport transport,
                 RuntimeLease lease) {
+            try {
+                lookUp(transport, lease);
+            } catch (RuntimeException failure) {
+                abandonDispatch();
+            }
+        }
+
+        private void lookUp(RuntimeTransport transport, RuntimeLease lease) {
             ToolExecutionRecord current = record();
             if (current == null || current.isSettled()
                     || !ownsDispatch(current)) {
@@ -2905,7 +2938,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 stopDispatchRenewal();
                 return;
             }
-            if (!executionBindingAvailable(current)) {
+            if (!executionBindingAnswerable(current)) {
+                // Nothing behind a retired or lost generation can answer for
+                // the call, so its outcome stays unknown.
                 markExecutionUnknown(executionCallId);
                 started.set(false);
                 stopDispatchRenewal();
@@ -2922,9 +2957,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             transport.status(lease, session.session, renewed.getReference(),
                     renewed.getLastSequence()).whenComplete((status, error) -> {
                         if (error != null) {
-                            scheduleReconcile(transport, lease);
+                            recoverAfterFailure(transport, lease);
                             return;
                         }
+                        answered();
                         try {
                             absorbStatus(status);
                             ToolExecutionRecord observed = record();
@@ -2967,28 +3003,80 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         // invocation as running.
                         invoking.set(false);
                         if (error != null) {
-                            scheduleReconcile(transport, lease);
+                            recoverAfterFailure(transport, lease);
                             return;
                         }
+                        answered();
+                        Map<String, Object> result;
                         try {
-                            settleOwned(validateExecutionResult(
-                                    physicalResult));
+                            result = validateExecutionResult(physicalResult);
                         } catch (RuntimeException invalidResult) {
-                            settleOwned(errorResult());
+                            result = errorResult();
+                        }
+                        try {
+                            settleOwned(result);
+                        } catch (RuntimeException commitFailure) {
+                            // A write that failed is not a result: the call
+                            // is settled from the Runtime's record later.
+                            abandonDispatch();
                         }
                     });
         }
 
         private void scheduleReconcile(RuntimeTransport transport,
                 RuntimeLease lease) {
+            scheduleReconcile(transport, lease, 25);
+        }
+
+        private void scheduleReconcile(RuntimeTransport transport,
+                RuntimeLease lease, long delayMillis) {
             try {
-                scheduler.schedule(() -> reconcile(transport, lease), 25,
-                        TimeUnit.MILLISECONDS);
+                scheduler.schedule(() -> reconcile(transport, lease),
+                        delayMillis, TimeUnit.MILLISECONDS);
             } catch (RuntimeException ignored) {
                 if (!closed.get()) {
                     throw ignored;
                 }
             }
+        }
+
+        /**
+         * A lost answer and a dead Runtime look alike from here. The
+         * binding's liveness check tells them apart: a Runtime found gone
+         * retires its generation, and the next lookup then leaves the call
+         * UNKNOWN instead of polling a dead endpoint.
+         */
+        private void recoverAfterFailure(RuntimeTransport transport,
+                RuntimeLease lease) {
+            long delay;
+            synchronized (this) {
+                failureDelayMillis = failureDelayMillis == 0 ? 25
+                        : Math.min(1_000, failureDelayMillis * 2);
+                delay = failureDelayMillis;
+            }
+            CompletionStage<RuntimeLease> liveness;
+            try {
+                liveness = session.binding.verifyLiveness(lease);
+            } catch (RuntimeException failure) {
+                liveness = failed(failure);
+            }
+            liveness.whenComplete((ignored, error) ->
+                    scheduleReconcile(transport, lease, delay));
+        }
+
+        private synchronized void answered() {
+            failureDelayMillis = 0;
+        }
+
+        /**
+         * Ends this process's dispatch after a failure it cannot act on,
+         * such as a lost database, so the next start claims the call again:
+         * a live claim resumes it, and a lapsed one is fenced UNKNOWN.
+         * Nothing retries the failed write in the background.
+         */
+        private void abandonDispatch() {
+            stopDispatchRenewal();
+            started.set(false);
         }
 
         synchronized CompletionStage<Map<String, Object>> cancel(
@@ -3162,22 +3250,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     dispatchLeaseDuration.toNanos() / 3);
             try {
                 dispatchRenewal = scheduler.scheduleWithFixedDelay(() -> {
-                    ToolExecutionRecord current = record();
-                    if (current == null || current.isSettled()
-                            || !ownsDispatch(current)
-                            || current.getDispatchGeneration() != generation) {
-                        started.set(false);
-                        stopDispatchRenewal();
-                        return;
-                    }
-                    ToolExecutionRecord renewed = executionRepository
-                            .renewDispatch(executionCallId, brokerOwnerId,
-                                    generation, dispatchLeaseDuration);
-                    if (renewed == null) {
-                        started.set(false);
-                        stopDispatchRenewal();
-                    } else if (renewed.isCancelRequested()) {
-                        cancelOwned(transport, renewed);
+                    // A failure here would otherwise cancel the renewal
+                    // silently and leave this dispatch started for good.
+                    try {
+                        renewDispatch(generation, transport);
+                    } catch (RuntimeException failure) {
+                        abandonDispatch();
                     }
                 }, interval, interval, TimeUnit.NANOSECONDS);
             } catch (RuntimeException error) {
@@ -3185,6 +3263,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 if (!closed.get()) {
                     throw error;
                 }
+            }
+        }
+
+        private void renewDispatch(long generation,
+                RuntimeTransport transport) {
+            ToolExecutionRecord current = record();
+            if (current == null || current.isSettled()
+                    || !ownsDispatch(current)
+                    || current.getDispatchGeneration() != generation) {
+                started.set(false);
+                stopDispatchRenewal();
+                return;
+            }
+            ToolExecutionRecord renewed = executionRepository.renewDispatch(
+                    executionCallId, brokerOwnerId, generation,
+                    dispatchLeaseDuration);
+            if (renewed == null) {
+                started.set(false);
+                stopDispatchRenewal();
+            } else if (renewed.isCancelRequested()) {
+                cancelOwned(transport, renewed);
             }
         }
 

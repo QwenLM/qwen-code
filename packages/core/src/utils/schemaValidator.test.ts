@@ -2440,6 +2440,61 @@ describe('SchemaValidator compile cache', () => {
     }
   });
 
+  it('does not compile a copy for each rebuilt schema that fails to compile', () => {
+    // A per-call tool build or a rediscovery hands over a new object each
+    // time. Only the first one is compiled from a copy parsed from its text.
+    const schema = () => ({
+      $schema: 'http://json-schema.org/draft-04/schema#',
+      type: 'object',
+      properties: { rebuiltDraftProbe: { type: 'integer' } },
+      required: ['rebuiltDraftProbe'],
+    });
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      for (let i = 0; i < 3; i++) {
+        expect(SchemaValidator.validate(schema(), {})).toBeNull();
+      }
+      // As before, Ajv compiles such an object on its second use, and the
+      // object is not serialized again.
+      const reused = schema();
+      expect(SchemaValidator.validate(reused, {})).toBeNull();
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        expect(SchemaValidator.validate(reused, {})).toContain(
+          'rebuiltDraftProbe',
+        );
+        expect(stringify.mock.calls.map(([value]) => value)).not.toContain(
+          reused,
+        );
+      } finally {
+        stringify.mockRestore();
+      }
+      // An object rebuilt after that still fails its own first compile.
+      expect(SchemaValidator.validate(schema(), {})).toBeNull();
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('validates each rebuilt schema with an $id that fails to compile on its second use', () => {
+    // The copy parsed from the text claims the $id first, so each object's
+    // first compile fails as a duplicate of it. Ajv still keeps the object
+    // and compiles it on its second use, as it did before.
+    const schema = () => ({
+      $id: 'https://example.com/schemas/id-fail-probe.json',
+      $schema: 'http://json-schema.org/draft-04/schema#',
+      type: 'object',
+      properties: { idFailProbe: { type: 'integer' } },
+      required: ['idFailProbe'],
+    });
+    for (let i = 0; i < 2; i++) {
+      const object = schema();
+      expect(SchemaValidator.validate(object, {})).toBeNull();
+      expect(SchemaValidator.validate(object, {})).toContain('idFailProbe');
+    }
+  });
+
   it('shares no validator with a caller that mutates its schema object', () => {
     const schema = () => ({
       type: 'object',
@@ -2486,9 +2541,17 @@ describe('SchemaValidator compile cache', () => {
         {},
       ),
     ).toContain('disguisedProbe');
-    expect(
-      SchemaValidator.validate({ type: 'object', required: listed }, {}),
-    ).toContain('listedProbe');
+    // Its text is that of a plain array with the same items, so only the
+    // absence of a parsed copy shows that it was compiled from the object.
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      expect(
+        SchemaValidator.validate({ type: 'object', required: listed }, {}),
+      ).toContain('listedProbe');
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
     expect(
       SchemaValidator.validate(
         {
@@ -2500,16 +2563,56 @@ describe('SchemaValidator compile cache', () => {
     ).toBeNull();
   });
 
-  it('does not serialize a schema object it has already compiled', () => {
+  it.each([
+    [
+      'that JSON text describes',
+      { type: 'object', properties: { reuseProbe: { type: 'string' } } },
+    ],
+    [
+      'that JSON text does not describe',
+      {
+        type: 'object',
+        properties: {
+          reuseProbe: { type: 'string' },
+          nanProbe: { const: Number.NaN },
+        },
+      },
+    ],
+  ])(
+    'does not serialize a second time a schema object %s',
+    (_label, schema) => {
+      expect(SchemaValidator.validate(schema, { reuseProbe: 'x' })).toBeNull();
+      const stringify = vi.spyOn(JSON, 'stringify');
+      try {
+        expect(
+          SchemaValidator.validate(schema, { reuseProbe: 'y' }),
+        ).toBeNull();
+        expect(stringify).not.toHaveBeenCalled();
+      } finally {
+        stringify.mockRestore();
+      }
+    },
+  );
+
+  it('does not serialize a second time a schema object whose first compile failed', () => {
     const schema = {
+      $schema: 'http://json-schema.org/draft-04/schema#',
       type: 'object',
-      properties: { reuseProbe: { type: 'string' } },
+      properties: { failedReuseProbe: { type: 'string' } },
     };
-    expect(SchemaValidator.validate(schema, { reuseProbe: 'x' })).toBeNull();
+    expect(
+      SchemaValidator.validate(schema, { failedReuseProbe: 'x' }),
+    ).toBeNull();
     const stringify = vi.spyOn(JSON, 'stringify');
     try {
-      expect(SchemaValidator.validate(schema, { reuseProbe: 'y' })).toBeNull();
-      expect(stringify).not.toHaveBeenCalled();
+      expect(
+        SchemaValidator.validate(schema, { failedReuseProbe: 'y' }),
+      ).toBeNull();
+      // Ajv compiles the object now, which serializes parts of it but never
+      // the object itself.
+      expect(stringify.mock.calls.map(([value]) => value)).not.toContain(
+        schema,
+      );
     } finally {
       stringify.mockRestore();
     }

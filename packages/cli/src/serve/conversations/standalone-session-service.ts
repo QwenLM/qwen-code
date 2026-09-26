@@ -2841,16 +2841,19 @@ export class StandaloneSessionService {
       if (attempt.diagnostic.dispatchState !== 'not_dispatched')
         attempt.diagnostic.phase = 'spawn_dispatched';
       if (error instanceof StandaloneSessionSpawnError && !error.dispatched) {
-        try {
-          await this.assertPersistedSessionAbsent(runtime, sessionId);
-        } catch {
-          this.beginTerminalQuarantine(runtime);
-        }
         // A paired Bridge refuses an ID a direct creator registered after
-        // shared admission; nothing was dispatched, so nothing is rolled back.
+        // shared admission. Nothing was dispatched, so nothing is rolled back,
+        // and the live owner's transcript on disk is expected.
         const conflict =
           error.cause instanceof RequestedSessionIdRejectedError &&
           error.cause.errorKind === 'session_id_conflict';
+        if (!conflict) {
+          try {
+            await this.assertPersistedSessionAbsent(runtime, sessionId);
+          } catch {
+            this.beginTerminalQuarantine(runtime);
+          }
+        }
         const outcome = conflict
           ? serviceError('standalone_session_conflict', sessionId, false, error)
           : serviceError(

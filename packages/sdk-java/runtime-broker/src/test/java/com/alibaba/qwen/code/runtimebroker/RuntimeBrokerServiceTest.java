@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -254,6 +255,91 @@ class RuntimeBrokerServiceTest {
                         field);
             }
             assertEquals(0, transport.executions.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    void aFailedResultWriteIsNeverRecordedAsAnError() throws Exception {
+        FakeTransport transport = new FakeTransport();
+        FlakyExecutionRepository executions = new FlakyExecutionRepository();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                ignored -> CompletableFuture.completedFuture(LEASE),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker-one");
+        try {
+            service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                    .toCompletableFuture().get(1, TimeUnit.SECONDS);
+            String executionCallId = (String) service.createExecution(
+                    "key-1", HARNESS_SESSION, RUNTIME_SESSION, "turn-1",
+                    "tool-1", "args-1", reference("args-1"))
+                    .get("executionCallId");
+            waitForCount(transport.executions, 1);
+
+            // The Runtime answers while the store refuses the write once.
+            executions.failNextSettle.set(true);
+            transport.execution.complete(executionResult("success"));
+            assertFalse(executions.failNextSettle.get());
+            ToolExecutionRecord pending = executions.findByExecutionCallId(
+                    executionCallId);
+            assertFalse(pending.isSettled(), "a failed write settled as "
+                    + pending.getResult());
+
+            // The next start takes the call up again and settles it from
+            // the Runtime's record of it.
+            service.startExecution(HARNESS_SESSION, RUNTIME_SESSION,
+                    executionCallId);
+            assertEquals("success", result(waitForSettled(service,
+                    executionCallId)).get("executionStatus"));
+            assertEquals(1, transport.executions.get());
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    void aFailedDispatchRenewalHandsTheCallToTheNextStart()
+            throws Exception {
+        FakeTransport transport = new FakeTransport();
+        FlakyExecutionRepository executions = new FlakyExecutionRepository();
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                ignored -> CompletableFuture.completedFuture(LEASE),
+                transport, new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(), executions,
+                "broker-one", Duration.ofSeconds(30), Duration.ofMillis(300),
+                Duration.ofMinutes(5), Duration.ofSeconds(30));
+        try {
+            service.acquire(HARNESS_SESSION, RUNTIME_SESSION, "bootstrap")
+                    .toCompletableFuture().get(1, TimeUnit.SECONDS);
+            String executionCallId = (String) service.createExecution(
+                    "key-1", HARNESS_SESSION, RUNTIME_SESSION, "turn-1",
+                    "tool-1", "args-1", reference("args-1"))
+                    .get("executionCallId");
+            waitForCount(transport.executions, 1);
+
+            // The store refuses a renewal while the call runs, so this
+            // process stops holding the claim and lets it lapse.
+            executions.failRenewals.set(true);
+            waitForCount(executions.renewalFailures, 1);
+            executions.failRenewals.set(false);
+            Thread.sleep(600);
+
+            // The next start fences the lapsed claim instead of doing
+            // nothing.
+            RuntimeBrokerException unknown = assertThrows(
+                    RuntimeBrokerException.class,
+                    () -> service.startExecution(HARNESS_SESSION,
+                            RUNTIME_SESSION, executionCallId));
+            assertEquals("runtime_broker_execution_unknown",
+                    unknown.getCode());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    executions.findByExecutionCallId(executionCallId)
+                            .getState());
+            assertEquals(1, transport.executions.get());
         } finally {
             service.close();
         }
@@ -2225,6 +2311,97 @@ class RuntimeBrokerServiceTest {
         public ToolExecutionRecord renewDispatch(String executionCallId,
                 String owner, long dispatchGeneration,
                 Duration leaseDuration) {
+            return delegate.renewDispatch(executionCallId, owner,
+                    dispatchGeneration, leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord requestCancel(String executionCallId,
+                long expectedVersion) {
+            return delegate.requestCancel(executionCallId, expectedVersion);
+        }
+
+        @Override
+        public ToolExecutionRecord resolveUnknown(
+                ToolExecutionRecord expected,
+                Map<String, Object> resolutionResult,
+                Instant resolutionTime) {
+            return delegate.resolveUnknown(expected, resolutionResult,
+                    resolutionTime);
+        }
+
+        @Override
+        public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
+            return delegate.hasActiveByRuntimeSession(runtimeSessionId);
+        }
+
+        @Override
+        public boolean hasActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.hasActiveByBinding(bindingId, runtimeGeneration);
+        }
+    }
+
+    /** Refuses chosen writes the way a lost database does. */
+    private static final class FlakyExecutionRepository
+            implements ToolExecutionRepository {
+        private final InMemoryToolExecutionRepository delegate =
+                new InMemoryToolExecutionRepository();
+        private final AtomicBoolean failNextSettle = new AtomicBoolean();
+        private final AtomicBoolean failRenewals = new AtomicBoolean();
+        private final AtomicInteger renewalFailures = new AtomicInteger();
+
+        private static RuntimeBrokerException unavailable() {
+            return new RuntimeBrokerException(503,
+                    "runtime_broker_store_unavailable",
+                    "Runtime Broker store is unavailable.", true);
+        }
+
+        @Override
+        public ToolExecutionRecord findOrCreate(
+                ToolExecutionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord findByExecutionCallId(
+                String executionCallId) {
+            return delegate.findByExecutionCallId(executionCallId);
+        }
+
+        @Override
+        public ToolExecutionRecord findByIdempotencyKey(
+                String idempotencyKey) {
+            return delegate.findByIdempotencyKey(idempotencyKey);
+        }
+
+        @Override
+        public ToolExecutionRecord compareAndSet(
+                ToolExecutionRecord expected, ToolExecutionRecord replacement,
+                String owner, long dispatchGeneration) {
+            if (replacement.isSettled()
+                    && failNextSettle.compareAndSet(true, false)) {
+                throw unavailable();
+            }
+            return delegate.compareAndSet(expected, replacement, owner,
+                    dispatchGeneration);
+        }
+
+        @Override
+        public ToolExecutionRecord claimDispatch(String executionCallId,
+                String owner, Duration leaseDuration) {
+            return delegate.claimDispatch(executionCallId, owner,
+                    leaseDuration);
+        }
+
+        @Override
+        public ToolExecutionRecord renewDispatch(String executionCallId,
+                String owner, long dispatchGeneration,
+                Duration leaseDuration) {
+            if (failRenewals.get()) {
+                renewalFailures.incrementAndGet();
+                throw unavailable();
+            }
             return delegate.renewDispatch(executionCallId, owner,
                     dispatchGeneration, leaseDuration);
         }

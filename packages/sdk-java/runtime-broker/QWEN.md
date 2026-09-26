@@ -33,6 +33,15 @@ Keep the core independent of Spring or a specific scheduler. Product services
 adapt their authenticated Session store through `HarnessSessionResolver` and
 their placement system through `RuntimeProvisioner`.
 
+## Fault gates
+
+The `fault-gate` tests (profile `fault-gates`) inject faults only through
+the network, the database link and the process table. Never add a fault
+hook to production code for them. Two gates pin the #12670 `LOST` wedge: a
+host crash, and a killed worker whose call stays `UNKNOWN` until an operator
+resolves it. A change to that behaviour updates both pins and the design
+document in the same change.
+
 ## Workspace binding package
 
 Keep `com.alibaba.qwen.code.runtimebroker.managedworkspace` on the JDK alone:
