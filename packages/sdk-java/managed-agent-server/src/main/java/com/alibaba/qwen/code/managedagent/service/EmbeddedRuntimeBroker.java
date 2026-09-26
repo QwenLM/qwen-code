@@ -69,6 +69,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         "Session is not owned by this service"));
                 return failed;
             }
+            if (session.workspace() != null) {
+                return CompletableFuture.failedFuture(
+                        new RuntimeBrokerException(409,
+                                "workspace_unavailable",
+                                "Hosted Workspace execution is not available.",
+                                false));
+            }
             return CompletableFuture.completedFuture(new RuntimeScope(
                     session.tenantId(), workspaceId,
                     broker.getWorkspaceGeneration(),

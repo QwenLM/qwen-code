@@ -258,6 +258,38 @@ describe('Managed Runtime tool worker', () => {
     }
   });
 
+  it('takes the workspace at startup, as it always has', async () => {
+    // The workspace is missing at startup, so it never covers a directory
+    // created later, whatever the first call finds.
+    const late = path.join(workspace, 'late');
+    worker = await startManagedRuntimeAttestationWorker({
+      ...BOOT,
+      workspaceCwd: late,
+    });
+    fs.mkdirSync(path.join(late, 'sub'), { recursive: true });
+
+    const response = await fetch(
+      `${worker.ready.url}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          ...executeBody({
+            command: 'echo probe > probe.txt',
+            directory: path.join(late, 'sub'),
+          }),
+          toolName: 'run_shell_command',
+        }),
+      },
+    );
+
+    expect(await response.json()).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'error' },
+    });
+    expect(fs.existsSync(path.join(late, 'sub', 'probe.txt'))).toBe(false);
+  });
+
   it('answers unknown for a reference the Runtime never saw', async () => {
     const origin = await start();
     const reference = {

@@ -453,6 +453,8 @@ export interface HostedHarnessCapabilities {
 
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.

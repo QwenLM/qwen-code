@@ -5885,9 +5885,75 @@ describe('runQwenServe telemetry validation', () => {
   });
 });
 
-describe('runQwenServe unsupported deployment profiles', () => {
+describe('runQwenServe deployment profiles', () => {
+  it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
+    );
+    fs.mkdirSync(path.join(workspace, '.qwen'));
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    const createApp = vi
+      .spyOn(serverModule, 'createServeApp')
+      .mockImplementation((...args) => originalCreateServeApp(...args));
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
+        false,
+      );
+    } finally {
+      await handle?.close();
+      createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Hosted Harness bootstrap private until its runtime is ready', async () => {
+    const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
+      serveOptions: {
+        profile: 'hosted-harness',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      },
+    });
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer secret-token' };
+      expect(
+        (await fetch(`${handle.url}/capabilities`, { headers })).status,
+      ).toBe(503);
+      expect(
+        (await fetch(`${handle.url}/daemon/status`, { headers })).status,
+      ).toBe(404);
+      expect((await fetch(`${handle.url}/workspace`, { headers })).status).toBe(
+        404,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
   it.each([
-    { profile: 'hosted-harness' as const },
     { experimentalManagedAgents: true },
     { experimentalManagedRuntimeWorker: true },
     { experimentalManagedRuntimeAutoLocal: true },
@@ -5910,7 +5976,38 @@ describe('runQwenServe unsupported deployment profiles', () => {
           workspace: isolatedTestRuntimeDir,
           ...option,
         }),
-      ).rejects.toThrow(/not (available|implemented)/);
+      ).rejects.toThrow(
+        /not (available|implemented)|require --profile hosted-harness/,
+      );
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
+  it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: isolatedTestRuntimeDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/outside the loopback interface/);
       expect(listen).not.toHaveBeenCalled();
     } finally {
       listen.mockRestore();

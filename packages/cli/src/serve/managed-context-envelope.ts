@@ -15,7 +15,7 @@ import {
 // TypeScript half of the managed-context/1 envelope contract (W0a-2). The
 // shared fixtures in contracts/managed-context-v1.fixtures.json pin it, and a
 // conformance test in packages/sdk-java/runtime-broker pins the same key sets,
-// routes and digests. Nothing wires this into the Runtime worker yet.
+// routes and digests. The Runtime worker serves it for boot v2 (W0c-1).
 
 export const MANAGED_CONTEXT_PROTOCOL = 'managed-context/1';
 export const MANAGED_CONTEXT_BOOT_VERSION = 2;
@@ -208,7 +208,8 @@ export type ManagedContextRefusal =
       readonly status: 409;
       readonly code: 'managed_runtime_identity_conflict';
     }
-  | { readonly status: 409; readonly code: 'managed_context_conflict' };
+  | { readonly status: 409; readonly code: 'managed_context_conflict' }
+  | { readonly status: 409; readonly code: 'managed_context_unavailable' };
 
 export type ManagedContextOutcome<Body> =
   | { readonly status: 200; readonly body: Body }
@@ -225,6 +226,10 @@ const IDENTITY_CONFLICT: ManagedContextRefusal = Object.freeze({
 const CONTEXT_CONFLICT: ManagedContextRefusal = Object.freeze({
   status: 409,
   code: 'managed_context_conflict',
+});
+const CONTEXT_UNAVAILABLE: ManagedContextRefusal = Object.freeze({
+  status: 409,
+  code: 'managed_context_unavailable',
 });
 
 /**
@@ -332,22 +337,60 @@ interface Installation {
   readonly receipt: ManagedContextReceipt;
 }
 
+/** An installation request that passed steps 1 to 3, read once. */
+interface InstallationRequest {
+  readonly operationId: string;
+  readonly sessionId: string;
+  readonly contextDigest: string;
+  readonly binding: ManagedContextBinding;
+}
+
 /**
- * The context installations of one Runtime. Each request is checked in the
- * contract's order; a repeated installation returns its original receipt,
- * and a refused request records nothing.
+ * The context installations of one Runtime, kept for its lifetime. Each
+ * request is checked in the contract's order; a repeated installation
+ * returns its original receipt, and a refused request records nothing.
  */
 export class ManagedContextInstallations {
   readonly #boot: ManagedContextBoot;
   readonly #operations = new Map<string, Installation>();
-  /** The context digest installed for each Session. */
-  readonly #sessions = new Map<string, string>();
+  /** The context installed for each Session. */
+  readonly #sessions = new Map<string, InstallationRequest>();
 
   constructor(boot: ManagedContextBoot) {
     this.#boot = parseManagedContextBoot(boot);
   }
 
-  install(body: unknown): ManagedContextOutcome<ManagedContextReceipt> {
+  /**
+   * Installs one Session's context. `verify` is step 6: it answers whether
+   * the binding's effective directory can be verified.
+   */
+  async install(
+    body: unknown,
+    verify: (binding: ManagedContextBinding) => Promise<boolean>,
+  ): Promise<ManagedContextOutcome<ManagedContextReceipt>> {
+    const request = this.#read(body);
+    if ('status' in request) {
+      return request;
+    }
+    const earlier = this.#match(request);
+    if (earlier) {
+      return earlier;
+    }
+    const verified = await verify(request.binding);
+    // Another installation may have been recorded during the verification.
+    return (
+      this.#match(request) ??
+      (verified ? this.#record(request) : CONTEXT_UNAVAILABLE)
+    );
+  }
+
+  /** The binding installed for a Session, if any. */
+  installed(sessionId: string): ManagedContextBinding | undefined {
+    return this.#sessions.get(sessionId)?.binding;
+  }
+
+  /** Steps 1 to 3: the shape, the digest and the Workspace part. */
+  #read(body: unknown): InstallationRequest | ManagedContextRefusal {
     const request = readClosed(body, INSTALLATION_KEYS);
     const binding = request && readClosed(request.binding, BINDING_KEYS);
     if (
@@ -361,8 +404,6 @@ export class ManagedContextInstallations {
     ) {
       return INVALID;
     }
-    const operationId = request.operationId;
-    const sessionId = request.sessionId;
     const contextDigest = digestOf(binding);
     if (
       contextDigest === undefined ||
@@ -373,17 +414,37 @@ export class ManagedContextInstallations {
     if (WORKSPACE_KEYS.some((key) => binding[key] !== this.#boot[key])) {
       return IDENTITY_CONFLICT;
     }
-    const previous = this.#operations.get(operationId);
+    return {
+      operationId: request.operationId,
+      sessionId: request.sessionId,
+      contextDigest,
+      binding: Object.freeze(binding) as ManagedContextBinding,
+    };
+  }
+
+  /** Steps 4 and 5: the original receipt, a conflict, or nothing. */
+  #match(
+    request: InstallationRequest,
+  ): ManagedContextOutcome<ManagedContextReceipt> | undefined {
+    const previous = this.#operations.get(request.operationId);
     if (previous) {
-      return previous.sessionId === sessionId &&
-        previous.contextDigest === contextDigest
+      return previous.sessionId === request.sessionId &&
+        previous.contextDigest === request.contextDigest
         ? { status: 200, body: previous.receipt }
         : CONTEXT_CONFLICT;
     }
-    const installed = this.#sessions.get(sessionId);
-    if (installed !== undefined && installed !== contextDigest) {
-      return CONTEXT_CONFLICT;
-    }
+    const installed = this.#sessions.get(request.sessionId);
+    return installed !== undefined &&
+      installed.contextDigest !== request.contextDigest
+      ? CONTEXT_CONFLICT
+      : undefined;
+  }
+
+  /** Step 7: records the installation and returns its receipt. */
+  #record(
+    request: InstallationRequest,
+  ): ManagedContextOutcome<ManagedContextReceipt> {
+    const { operationId, sessionId, contextDigest, binding } = request;
     const receipt: ManagedContextReceipt = Object.freeze({
       protocolVersion: PROTOCOL_VERSION,
       managedContext: MANAGED_CONTEXT_PROTOCOL,
@@ -393,14 +454,14 @@ export class ManagedContextInstallations {
       runtimeIncarnation: this.#boot.runtimeIncarnation,
       epoch: this.#boot.epoch,
       contextDigest,
-      contextRevision: binding.contextRevision as string,
-      workspaceGeneration: binding.workspaceGeneration as string,
+      contextRevision: binding.contextRevision,
+      workspaceGeneration: binding.workspaceGeneration,
     });
     this.#operations.set(
       operationId,
       Object.freeze({ sessionId, contextDigest, receipt }),
     );
-    this.#sessions.set(sessionId, contextDigest);
+    this.#sessions.set(sessionId, request);
     return { status: 200, body: receipt };
   }
 }
