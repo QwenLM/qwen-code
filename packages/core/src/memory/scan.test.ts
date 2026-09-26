@@ -8,12 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryFilePath, getTeamAutoMemoryRoot } from './paths.js';
+import { getAutoMemoryFilePath } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
   scanAutoMemoryTopicDocuments,
-  scanTeamAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -118,7 +116,7 @@ describe('auto-memory topic scanning', () => {
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
 
-  it('ignores directories whose names end in .md', async () => {
+  it('survives an unreadable file instead of dropping the whole index', async () => {
     const goodPath = getAutoMemoryFilePath(
       projectRoot,
       path.join('feedback', 'good.md'),
@@ -129,8 +127,9 @@ describe('auto-memory topic scanning', () => {
       '---\ntype: feedback\nname: Good\ndescription: kept\n---\nbody',
       'utf-8',
     );
-    // Only regular Markdown files belong in the scan; a directory with the
-    // same suffix must not displace valid documents.
+    // A directory named like a `.md` file forces an EISDIR on readFile — a
+    // deterministic stand-in for a permission error or a TOCTOU delete during
+    // `git pull`. The good file must still be scanned.
     await fs.mkdir(
       getAutoMemoryFilePath(projectRoot, path.join('feedback', 'broken.md')),
       { recursive: true },
@@ -145,96 +144,4 @@ describe('auto-memory topic scanning', () => {
       false,
     );
   });
-
-  it.skipIf(process.platform === 'win32')(
-    'does not follow symlinks inside a memory root',
-    async () => {
-      const outsideFile = path.join(tempDir, 'outside.md');
-      await fs.writeFile(
-        outsideFile,
-        '---\ntype: project\nname: Outside\ndescription: outside\n---\nsecret',
-        'utf-8',
-      );
-      const linkedFile = getAutoMemoryFilePath(projectRoot, 'linked.md');
-      await fs.symlink(outsideFile, linkedFile);
-
-      const outsideDir = path.join(tempDir, 'outside-dir');
-      await fs.mkdir(outsideDir);
-      await fs.writeFile(
-        path.join(outsideDir, 'nested.md'),
-        '---\ntype: project\nname: Nested\ndescription: outside\n---\nsecret',
-        'utf-8',
-      );
-      await fs.symlink(
-        outsideDir,
-        getAutoMemoryFilePath(projectRoot, 'linked-dir'),
-      );
-
-      const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-
-      expect(docs.some((doc) => doc.title === 'Outside')).toBe(false);
-      expect(docs.some((doc) => doc.title === 'Nested')).toBe(false);
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'rejects a symlinked team memory root',
-    async () => {
-      const outsideRoot = path.join(tempDir, 'outside-team-memory');
-      await fs.mkdir(outsideRoot);
-      const teamRoot = getTeamAutoMemoryRoot(projectRoot);
-      await fs.mkdir(path.dirname(teamRoot), { recursive: true });
-      await fs.symlink(outsideRoot, teamRoot);
-
-      await expect(
-        scanTeamAutoMemoryTopicDocuments(projectRoot),
-      ).rejects.toThrow('Refusing symlinked memory root');
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'rejects a team memory root redirected by an ancestor symlink',
-    async () => {
-      const linkedProject = path.join(tempDir, 'linked-project');
-      const outsideQwen = path.join(tempDir, 'outside-qwen');
-      await fs.mkdir(linkedProject);
-      await fs.mkdir(path.join(outsideQwen, 'team-memory'), {
-        recursive: true,
-      });
-      await fs.symlink(outsideQwen, path.join(linkedProject, '.qwen'));
-
-      await expect(
-        scanTeamAutoMemoryTopicDocuments(linkedProject),
-      ).rejects.toThrow('Memory root is outside its trusted anchor');
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'allows a user-owned memory root symlink',
-    async () => {
-      const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-      const memoryBase = path.join(tempDir, 'memory-base');
-      const userTarget = path.join(tempDir, 'user-memory');
-      await fs.mkdir(memoryBase);
-      await fs.mkdir(userTarget);
-      await fs.writeFile(
-        path.join(userTarget, 'user.md'),
-        '---\ntype: user\nname: User\ndescription: private\n---\nbody',
-        'utf-8',
-      );
-      await fs.symlink(userTarget, path.join(memoryBase, 'memories'));
-      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBase;
-
-      try {
-        const docs = await scanUserAutoMemoryTopicDocuments();
-        expect(docs.map((doc) => doc.title)).toContain('User');
-      } finally {
-        if (previousBaseDir === undefined) {
-          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-        } else {
-          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
-        }
-      }
-    },
-  );
 });

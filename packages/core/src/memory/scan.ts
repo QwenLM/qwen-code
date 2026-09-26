@@ -19,16 +19,6 @@ const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
 
 const MAX_SCANNED_MEMORY_FILES = 200;
 
-function isWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === '' ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== '..' &&
-      !path.isAbsolute(relative))
-  );
-}
-
 export interface ScannedAutoMemoryDocument {
   type: AutoMemoryType;
   filePath: string;
@@ -94,42 +84,16 @@ export function parseAutoMemoryTopicDocument(
   };
 }
 
-async function listMarkdownFiles(
-  root: string,
-  followRootSymlink: boolean,
-  trustedAnchor?: string,
-): Promise<string[]> {
+async function listMarkdownFiles(root: string): Promise<string[]> {
   try {
-    const rootStats = await fs.lstat(root);
-    if (rootStats.isSymbolicLink()) {
-      if (!followRootSymlink || !(await fs.stat(root)).isDirectory()) {
-        throw new Error(`Refusing symlinked memory root: ${root}`);
-      }
-    } else if (!rootStats.isDirectory()) {
-      throw new Error(`Memory root is not a directory: ${root}`);
-    }
-
-    const resolvedRoot = await fs.realpath(root);
-    if (
-      trustedAnchor &&
-      !isWithin(await fs.realpath(trustedAnchor), resolvedRoot)
-    ) {
-      throw new Error(`Memory root is outside its trusted anchor: ${root}`);
-    }
-    const entries = await fs.readdir(resolvedRoot, {
-      recursive: true,
-      withFileTypes: true,
-    });
+    const entries = await fs.readdir(root, { recursive: true });
     return (
       entries
         .filter(
-          (entry) =>
-            entry.isFile() &&
-            entry.name.endsWith('.md') &&
-            entry.name !== AUTO_MEMORY_INDEX_FILENAME,
-        )
-        .map((entry) =>
-          path.relative(resolvedRoot, path.join(entry.parentPath, entry.name)),
+          (entry): entry is string =>
+            typeof entry === 'string' &&
+            entry.endsWith('.md') &&
+            path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
         )
         // Normalize to forward slashes so relative paths are valid URL segments
         // on all platforms (Windows readdir returns backslash-separated paths).
@@ -147,18 +111,9 @@ async function listMarkdownFiles(
 
 async function scanAutoMemoryDocumentsFromRoot(
   root: string,
-  opts: {
-    deterministic?: boolean;
-    uncapped?: boolean;
-    followRootSymlink?: boolean;
-    trustedAnchor?: string;
-  } = {},
+  opts: { deterministic?: boolean; uncapped?: boolean } = {},
 ): Promise<ScannedAutoMemoryDocument[]> {
-  const relativePaths = await listMarkdownFiles(
-    root,
-    opts.followRootSymlink === true,
-    opts.trustedAnchor,
-  );
+  const relativePaths = await listMarkdownFiles(root);
   const docs = await Promise.all(
     relativePaths.map(async (relativePath) => {
       const filePath = path.join(root, relativePath);
@@ -210,11 +165,7 @@ async function scanAutoMemoryDocumentsFromRoot(
 export async function scanAutoMemoryTopicDocuments(
   projectRoot: string,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot), {
-    followRootSymlink: process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1',
-    trustedAnchor:
-      process.env['QWEN_CODE_MEMORY_LOCAL'] === '1' ? projectRoot : undefined,
-  });
+  return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot));
 }
 
 export async function scanAllAutoMemoryTopicDocuments(
@@ -224,9 +175,6 @@ export async function scanAllAutoMemoryTopicDocuments(
   // measured topic counts make recall scanning too slow.
   return scanAutoMemoryDocumentsFromRoot(getAutoMemoryRoot(projectRoot), {
     uncapped: true,
-    followRootSymlink: process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1',
-    trustedAnchor:
-      process.env['QWEN_CODE_MEMORY_LOCAL'] === '1' ? projectRoot : undefined,
   });
 }
 
@@ -238,9 +186,7 @@ export async function scanAllAutoMemoryTopicDocuments(
 export async function scanUserAutoMemoryTopicDocuments(): Promise<
   ScannedAutoMemoryDocument[]
 > {
-  return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot(), {
-    followRootSymlink: true,
-  });
+  return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot());
 }
 
 export async function scanAllUserAutoMemoryTopicDocuments(): Promise<
@@ -248,7 +194,6 @@ export async function scanAllUserAutoMemoryTopicDocuments(): Promise<
 > {
   return scanAutoMemoryDocumentsFromRoot(getUserAutoMemoryRoot(), {
     uncapped: true,
-    followRootSymlink: true,
   });
 }
 
@@ -259,11 +204,9 @@ export async function scanAllUserAutoMemoryTopicDocuments(): Promise<
 export async function scanTeamAutoMemoryTopicDocuments(
   projectRoot: string,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  const root = getTeamAutoMemoryRoot(projectRoot);
   // Deterministic cap: the team index is committed and shared, so the subset
   // that survives MAX_SCANNED_MEMORY_FILES must be machine-independent.
-  return scanAutoMemoryDocumentsFromRoot(root, {
+  return scanAutoMemoryDocumentsFromRoot(getTeamAutoMemoryRoot(projectRoot), {
     deterministic: true,
-    trustedAnchor: path.dirname(path.dirname(root)),
   });
 }
