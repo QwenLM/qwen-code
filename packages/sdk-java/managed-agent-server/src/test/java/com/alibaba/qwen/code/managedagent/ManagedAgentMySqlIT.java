@@ -236,7 +236,7 @@ class ManagedAgentMySqlIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"UTC", "+08:00"})
+    @ValueSource(strings = {"LOCAL", "UTC", "+08:00", "Asia/Shanghai"})
     @Order(2)
     void shortWriterLeaseKeepsSubsecondDatabasePrecision(String connectionTimeZone)
             throws InterruptedException {
@@ -297,6 +297,7 @@ class ManagedAgentMySqlIT {
                         new AcquireWriterRequest("mysql-lease-workspace",
                                 "mysql-lease-writer", 60_000L)));
         assertThat(reacquired.writerGeneration()).isEqualTo(1);
+        assertThat(reacquired.replayed()).isTrue();
         assertLeaseDeadline(jdbc, tenant, session, reacquired);
 
         WriterGrant renewed = inTransaction(transactions,
@@ -317,6 +318,19 @@ class ManagedAgentMySqlIT {
                                 "mysql-replacement-writer", 60_000L)));
         assertThat(takenOver.writerGeneration()).isEqualTo(2);
         assertLeaseDeadline(jdbc, tenant, session, takenOver);
+
+        inTransaction(transactions,
+                () -> store.sealWriter(tenant, session,
+                        "dddddddddddddddddddddddddddddddd",
+                        new SealWriterRequest("mysql-lease-workspace",
+                                "mysql-replacement-writer", 2)));
+        WriterGrant afterSeal = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-post-seal-writer", 1_000L)));
+        assertThat(afterSeal.writerGeneration()).isEqualTo(3);
+        assertLeaseDeadline(jdbc, tenant, session, afterSeal);
     }
 
     private static void assertLeaseDeadline(JdbcTemplate jdbc, String tenant,

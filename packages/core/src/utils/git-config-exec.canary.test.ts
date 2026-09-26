@@ -30,8 +30,10 @@ import { join } from 'node:path';
 import { getRecentGitStatus } from './gitUtils.js';
 import { getGitWorkingTreeStatus } from './gitDiff.js';
 import { isGitIgnored } from './git-ignore.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
-import { __test__ as worktreeCleanupInternals } from '../services/worktreeCleanup.js';
+import {
+  GitWorktreeService,
+  worktreeHasWork,
+} from '../services/gitWorktreeService.js';
 
 // The plant is a `/bin/sh` script, so the attack itself does not exist on
 // Windows and the question has no answer there.
@@ -70,7 +72,7 @@ describe('a planted git program reaches no automatic git call', () => {
    * tracked file dirty so the index refresh actually re-stats and the diff has
    * content to render.
    */
-  const planted = (plant: Plant = 'core.fsmonitor') => {
+  const planted = (plant: Plant = 'core.fsmonitor', helperOutside = false) => {
     const repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-fsmonitor-')));
     made.push(repo);
     const canary = join(repo, 'PWNED');
@@ -94,10 +96,21 @@ describe('a planted git program reaches no automatic git call', () => {
     g('add', 'a.ts', '.gitignore', '.gitattributes');
     g('commit', '-qm', 'init');
 
-    const helper =
-      plant === 'post-index-change'
-        ? join(repo, '.git', 'hooks', 'post-index-change')
-        : join(repo, 'plant.sh');
+    let helper: string;
+    if (plant === 'post-index-change') {
+      helper = join(repo, '.git', 'hooks', 'post-index-change');
+    } else if (helperOutside) {
+      // The shared worktree probe reads untracked and ignored entries as
+      // work, so a helper sitting in the tree would make the "clean"
+      // control read dirty for reasons unrelated to the plant.
+      const helperDir = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-plant-')),
+      );
+      made.push(helperDir);
+      helper = join(helperDir, 'plant.sh');
+    } else {
+      helper = join(repo, 'plant.sh');
+    }
     // An fsmonitor helper reports "trust nothing" by failing, so the status
     // stays correct; a textconv or external diff helper is expected to exit
     // clean and hand git the rendered content on stdout.
@@ -224,16 +237,14 @@ describe('a planted git program reaches no automatic git call', () => {
   itWherePlantRuns.each(['core.fsmonitor', 'post-index-change'] as const)(
     'the stale-worktree cleanup probe does not run %s',
     async (plant) => {
-      const { repo, fired } = planted(plant);
-      // `hasTrackedChanges` fail-closes to `true`, so asserting only the dirty
+      const { repo, fired } = planted(plant, true);
+      // `worktreeHasWork` fail-closes to `true`, so asserting only the dirty
       // answer cannot tell a real status read from a swallowed git error. Read
       // the clean tree first: only a successful `status` can return `false`.
       writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(
-        false,
-      );
+      expect(await worktreeHasWork(repo)).toBe(false);
       writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-      expect(await worktreeCleanupInternals.hasTrackedChanges(repo)).toBe(true);
+      expect(await worktreeHasWork(repo)).toBe(true);
       expect(fired()).toBe(false);
     },
     PLANT_TIMEOUT_MS,

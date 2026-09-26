@@ -29,7 +29,10 @@ vi.mock('node:fs/promises', { spy: true });
 const realFsPromises =
   await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import {
+  SESSION_EXECUTION_ENGINE_META_KEY,
+  SessionExecutionEngineError,
+} from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -4515,6 +4518,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it.each([undefined, 'legacy'] as const)(
+    'binds a new session to the paired engine %s and returns its receipt',
+    async (engine) => {
+      await setupSessionMocks('engine-session');
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const response = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          ...(engine
+            ? { _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } }
+            : {}),
+        })) as { _meta?: Record<string, unknown> };
+
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        expect(hostPolicy?.executionEngine).toBe(engine);
+        expect(response._meta).toEqual(
+          engine ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } : undefined,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('refuses a Managed selection before creating a Legacy Config', async () => {
+    await setupSessionMocks('engine-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await expect(
+        agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        }),
+      ).rejects.toMatchObject({
+        code: -32024,
+        data: { errorKind: 'session_execution_engine_unavailable' },
+      });
+      expect(loadCliConfig).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it.each([false, true])(
@@ -27695,6 +27745,77 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             sessionId: 'persisted-1',
           },
         });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    ['load', undefined],
+    ['load', 'legacy'],
+    ['resume', undefined],
+    ['resume', 'legacy'],
+  ] as const)(
+    '%s verifies the paired engine %s before returning its receipt',
+    async (action, engine) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          ...(engine
+            ? { _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } }
+            : {}),
+        };
+        const response = (
+          action === 'load'
+            ? await agent.loadSession(params)
+            : await agent.unstable_resumeSession(params)
+        ) as { _meta?: Record<string, unknown> };
+
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        expect(hostPolicy?.executionEngine).toBe(engine);
+        expect(hostPolicy?.sessionRestore).toBeDefined();
+        expect(response._meta?.[SESSION_EXECUTION_ENGINE_META_KEY]).toBe(
+          engine,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s refuses a Managed selection before loading a Legacy Config',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        };
+        await expect(
+          action === 'load'
+            ? agent.loadSession(params)
+            : agent.unstable_resumeSession(params),
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: {
+            errorKind: 'session_execution_engine_unavailable',
+            sessionId: 'persisted-1',
+          },
+        });
+        expect(loadCliConfig).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

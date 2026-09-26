@@ -311,6 +311,10 @@ import type {
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
 import {
+  assertSessionExecutionEngine,
+  type SessionExecutionEngine,
+} from '../services/session-execution-engine.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
@@ -976,6 +980,12 @@ export interface ConfigParameters {
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /**
+   * Engine a paired host selected for this session. Initialization records it
+   * as the owner of a new transcript, or requires the restored transcript to
+   * prove it, before hooks, MCP or tools start.
+   */
+  sessionExecutionEngine?: SessionExecutionEngine;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2574,6 +2584,7 @@ export class Config {
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  private readonly sessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -3118,6 +3129,7 @@ export class Config {
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.sessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3810,6 +3822,7 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -3844,6 +3857,25 @@ export class Config {
       }
       throw error;
     }
+  }
+
+  /**
+   * Runs after the writer can take records and before any initialization side
+   * effect. A restore is checked against the owner read from its own snapshot;
+   * without chat recording there is no durable session to own.
+   */
+  private async bindSessionExecutionEngine(): Promise<void> {
+    const engine = this.sessionExecutionEngine;
+    if (engine === undefined) return;
+    if (this.sessionRestoreProjectionSource || this.sessionData) {
+      assertSessionExecutionEngine(
+        this.pendingSessionRestoreProjection?.executionEngine,
+        this.sessionId,
+        engine,
+      );
+      return;
+    }
+    await this.chatRecordingService?.recordExecutionEngine(engine);
   }
 
   private async initializeInternal(
