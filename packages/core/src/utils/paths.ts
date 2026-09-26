@@ -483,7 +483,8 @@ export function realpathNearestExisting(inputPath: string): string {
   }
 
   try {
-    return path.join(fs.realpathSync(current), ...missingSegments);
+    const realpath = fs.realpathSync.native ?? fs.realpathSync;
+    return path.join(realpath(current), ...missingSegments);
   } catch {
     return resolved;
   }

@@ -8,14 +8,22 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { globalMemoryManager, MemoryManager } from './manager.js';
+import {
+  globalMemoryManager,
+  MemoryManager,
+  type MemoryTaskRecord,
+} from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
   getAutoMemoryConsolidationLockPath,
   clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import type { Config } from '../config/config.js';
+import * as metadataMigration from './metadata-migration.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -37,6 +45,11 @@ vi.mock('./dream.js', () => ({
   runManagedAutoMemoryDream: vi.fn(),
 }));
 
+vi.mock('./user-dream.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./user-dream.js')>()),
+  runManagedUserAutoMemoryDream: vi.fn(),
+}));
+
 vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./skillReviewAgentPlanner.js')>()),
   runSkillReviewByAgent: vi.fn(),
@@ -44,6 +57,11 @@ vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
 
 import { runAutoMemoryExtract } from './extract.js';
 import { runManagedAutoMemoryDream } from './dream.js';
+import {
+  recordUserAutoMemoryMutation,
+  runManagedUserAutoMemoryDream,
+} from './user-dream.js';
+import * as userDream from './user-dream.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -52,6 +70,8 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
   return {
     getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
+    getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
+    isTrustedFolder: vi.fn().mockReturnValue(true),
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('test-model'),
     logEvent: vi.fn(),
@@ -62,6 +82,812 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
 // ─── MemoryManager ────────────────────────────────────────────────────────────
 
 describe('MemoryManager', () => {
+  describe('metadata migration scheduling', () => {
+    let tempDir: string;
+    let projectRoot: string;
+
+    beforeEach(async () => {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-migration-'));
+      projectRoot = path.join(tempDir, 'project');
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+      clearAutoMemoryRootCache();
+      await ensureAutoMemoryScaffold(projectRoot);
+    });
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    async function writeLegacy(root: string, name: string): Promise<void> {
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(
+        path.join(root, name),
+        ['---', 'type: project', '---', 'Legacy body.'].join('\n'),
+        'utf-8',
+      );
+    }
+
+    it('runs one task per domain while project and user migrate independently', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const scan = vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      );
+      const resolvers = new Map<string, () => void>();
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ scope }) =>
+          new Promise((resolve) => {
+            resolvers.set(scope, () =>
+              resolve({
+                filesScanned: 1,
+                legacyFiles: 1,
+                remainingLegacyFiles: 0,
+                attempted: 1,
+                committed: 1,
+                conflicts: 0,
+                failed: 0,
+                agentDurationMs: 1,
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              }),
+            );
+          }),
+      );
+
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+      const project = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      const user = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'user',
+        config,
+      });
+
+      expect(project.status).toBe('scheduled');
+      expect(user.status).toBe('scheduled');
+      await expect(manager.getStatus(projectRoot)).resolves.toMatchObject({
+        migrationRunning: true,
+        migrationTasks: expect.arrayContaining([
+          expect.objectContaining({ id: project.taskId, status: 'running' }),
+          expect.objectContaining({ id: user.taskId, status: 'running' }),
+        ]),
+      });
+      const scansBeforeDuplicate = scan.mock.calls.length;
+      expect(
+        await manager.scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config,
+        }),
+      ).toMatchObject({ status: 'skipped', skippedReason: 'running' });
+      expect(scan).toHaveBeenCalledTimes(scansBeforeDuplicate);
+      expect(
+        await new MemoryManager().scheduleMetadataMigration({
+          projectRoot,
+          scope: 'user',
+          config,
+        }),
+      ).toMatchObject({ status: 'skipped', skippedReason: 'running' });
+
+      resolvers.get('project')?.();
+      resolvers.get('user')?.();
+      await manager.drain({ timeoutMs: 1000 });
+      expect(manager.getTask(project.taskId!)?.status).toBe('completed');
+      expect(manager.getTask(user.taskId!)?.status).toBe('completed');
+      await expect(manager.getStatus(projectRoot)).resolves.toMatchObject({
+        migrationRunning: false,
+        migrationTasks: expect.arrayContaining([
+          expect.objectContaining({ id: project.taskId, status: 'completed' }),
+          expect.objectContaining({ id: user.taskId, status: 'completed' }),
+        ]),
+      });
+    });
+
+    it('reports a running migration outside the display task limit', async () => {
+      const manager = new MemoryManager();
+      const records: MemoryTaskRecord[] = Array.from(
+        { length: 9 },
+        (_, index) => ({
+          id: `completed-${index}`,
+          taskType: 'migration',
+          projectRoot,
+          status: 'completed',
+          createdAt: `2026-01-01T00:00:${index.toString().padStart(2, '0')}.000Z`,
+          updatedAt: `2026-01-01T00:00:${index.toString().padStart(2, '0')}.000Z`,
+        }),
+      );
+      records.push({
+        id: 'older-running',
+        taskType: 'migration',
+        projectRoot,
+        status: 'running',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+      });
+      vi.spyOn(manager, 'listTasksByType').mockImplementation((taskType) =>
+        taskType === 'migration' ? records : [],
+      );
+
+      await expect(manager.getStatus(projectRoot)).resolves.toMatchObject({
+        migrationRunning: true,
+        migrationTasks: expect.not.arrayContaining([
+          expect.objectContaining({ id: 'older-running' }),
+        ]),
+      });
+    });
+
+    it('skips structured migration without scanning candidates', async () => {
+      const scan = vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      );
+      const manager = new MemoryManager();
+
+      await expect(
+        manager.scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config: makeMockConfig({
+            getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+          }),
+        }),
+      ).resolves.toEqual({ status: 'skipped', skippedReason: 'complete' });
+      expect(scan).not.toHaveBeenCalled();
+    });
+
+    it('scans team migration candidates in structured mode', async () => {
+      await writeLegacy(getTeamAutoMemoryRoot(projectRoot), 'team.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      });
+
+      const result = await new MemoryManager().scheduleMetadataMigration({
+        projectRoot,
+        scope: 'team',
+        config: makeMockConfig({
+          getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+        }),
+      });
+
+      expect(result.status).toBe('scheduled');
+      await result.promise;
+    });
+
+    it('claims a migration domain before scanning candidates', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const scanCandidates =
+        metadataMigration.scanMemoryMetadataMigrationCandidates;
+      let releaseScan: (() => void) | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      ).mockImplementationOnce(async (...args) => {
+        await new Promise<void>((resolve) => {
+          releaseScan = resolve;
+        });
+        return scanCandidates(...args);
+      });
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      });
+      const config = makeMockConfig();
+      const first = new MemoryManager().scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      await vi.waitFor(() => expect(releaseScan).toBeDefined());
+
+      await expect(
+        new MemoryManager().scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config,
+        }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'running',
+      });
+
+      releaseScan?.();
+      const scheduled = await first;
+      await scheduled.promise;
+    });
+
+    it('cancels a migration during the candidate scan and never spawns the agent', async () => {
+      // The scan phase reads the whole corpus and used to run untracked:
+      // cancelMigrations() had no controller to abort and drain() no promise
+      // to await, so a forked migration agent could still be spawned after
+      // shutdown was requested.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const runMigration = vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      );
+      let releaseScan: (() => void) | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      ).mockImplementationOnce(
+        () =>
+          new Promise<metadataMigration.MemoryMetadataMigrationCandidate[]>(
+            (resolve) => {
+              releaseScan = () => resolve([]);
+            },
+          ),
+      );
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+
+      const scheduled = manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      await vi.waitFor(() => expect(releaseScan).toBeDefined());
+
+      // drain() must see the scan phase, not just the forked-agent phase.
+      await expect(manager.drain({ timeoutMs: 50 })).resolves.toBe(false);
+
+      manager.cancelMigrations();
+      releaseScan?.();
+
+      await expect(scheduled).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'cancelled',
+      });
+      expect(runMigration).not.toHaveBeenCalled();
+    });
+
+    it('emits no unhandledRejection when a cancelled scan rejects', async () => {
+      // The real scan rejects with AbortError when its signal fires
+      // (abortSignal.throwIfAborted); the manager's task tracking must not
+      // let a derivative promise turn that expected rejection into a
+      // process-level unhandledRejection on top of the handled 'cancelled'
+      // result.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const scan = vi
+        .spyOn(metadataMigration, 'scanMemoryMetadataMigrationCandidates')
+        .mockImplementation(
+          (_root, _scope, abortSignal?: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              if (abortSignal?.aborted) {
+                reject(new DOMException('aborted', 'AbortError'));
+                return;
+              }
+              abortSignal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError')),
+              );
+            }),
+        );
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const manager = new MemoryManager();
+        const scheduled = manager.scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config: makeMockConfig(),
+        });
+        await vi.waitFor(() => expect(scan).toHaveBeenCalled());
+        manager.cancelMigrations();
+
+        await expect(scheduled).resolves.toEqual({
+          status: 'skipped',
+          skippedReason: 'cancelled',
+        });
+        await manager.drain({ timeoutMs: 1000 });
+        // unhandledRejection fires once the microtask queue has drained.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('cancels a running migration without overwriting the terminal state', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      let capturedSignal: AbortSignal | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ abortSignal }) =>
+          new Promise((_resolve, reject) => {
+            capturedSignal = abortSignal;
+            abortSignal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      );
+
+      const manager = new MemoryManager();
+      const scheduled = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config: makeMockConfig(),
+      });
+
+      expect(manager.cancelTask(scheduled.taskId!)).toBe(true);
+      expect(capturedSignal?.aborted).toBe(true);
+      await manager.drain({ timeoutMs: 1000 });
+      expect(manager.getTask(scheduled.taskId!)?.status).toBe('cancelled');
+    });
+
+    it('cancels all running migrations during shutdown', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ abortSignal }) =>
+          new Promise((_resolve, reject) => {
+            abortSignal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      );
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+      const project = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      const user = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'user',
+        config,
+      });
+
+      manager.cancelMigrations();
+      await manager.drain({ timeoutMs: 1000 });
+
+      expect(manager.getTask(project.taskId!)?.status).toBe('cancelled');
+      expect(manager.getTask(user.taskId!)?.status).toBe('cancelled');
+    });
+
+    it('records migration failures and releases the domain for retry', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(metadataMigration, 'runMemoryMetadataMigration')
+        .mockRejectedValueOnce(new Error('agent failed'))
+        .mockResolvedValueOnce({
+          filesScanned: 1,
+          legacyFiles: 1,
+          remainingLegacyFiles: 0,
+          attempted: 1,
+          committed: 1,
+          conflicts: 0,
+          failed: 0,
+          agentDurationMs: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          totalTokens: 2,
+        });
+      const manager = new MemoryManager();
+      const params = {
+        projectRoot,
+        scope: 'project' as const,
+        config: makeMockConfig(),
+      };
+
+      const first = await manager.scheduleMetadataMigration(params);
+      await first.promise;
+      expect(manager.getTask(first.taskId!)).toMatchObject({
+        status: 'failed',
+        error: 'agent failed',
+      });
+
+      const retry = await manager.scheduleMetadataMigration(params);
+      expect(retry.status).toBe('scheduled');
+      await retry.promise;
+      expect(manager.getTask(retry.taskId!)?.status).toBe('completed');
+    });
+
+    it('pauses project and user dream while their legacy files remain', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+
+      await expect(
+        manager.scheduleDream({
+          projectRoot,
+          sessionId: 'session',
+          config,
+        }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'migration_pending',
+      });
+      await expect(
+        manager.scheduleUserDream({ projectRoot, config }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'migration_pending',
+      });
+      expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+
+    it('stops rescheduling a migration that never makes progress', async () => {
+      // A file the migration agent can never enrich must not spawn a forked
+      // agent on every user turn: after a few consecutive non-progressing
+      // runs the domain stops being scheduled, the terminal record is marked
+      // failed (not 'completed'), and consolidation is no longer blocked by
+      // the unmigratable candidate.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const nonProgressing = {
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 1,
+        attempted: 1,
+        committed: 0,
+        conflicts: 1,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      };
+      const runMigration = vi
+        .spyOn(metadataMigration, 'runMemoryMetadataMigration')
+        .mockResolvedValue(nonProgressing);
+      const manager = new MemoryManager(async () => [
+        's1',
+        's2',
+        's3',
+        's4',
+        's5',
+        's6',
+      ]);
+      const config = makeMockConfig();
+      const params = { projectRoot, scope: 'project' as const, config };
+
+      let lastTaskId: string | undefined;
+      for (let i = 0; i < 3; i++) {
+        const scheduled = await manager.scheduleMetadataMigration(params);
+        expect(scheduled.status).toBe('scheduled');
+        lastTaskId = scheduled.taskId;
+        await scheduled.promise;
+      }
+      expect(runMigration).toHaveBeenCalledTimes(3);
+      expect(manager.getTask(lastTaskId!)?.status).toBe('failed');
+
+      await expect(manager.scheduleMetadataMigration(params)).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'stalled',
+      });
+      expect(runMigration).toHaveBeenCalledTimes(3);
+
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      });
+      const dream = await manager.scheduleDream({
+        projectRoot,
+        sessionId: 's6',
+        config,
+        minHoursBetweenDreams: 0,
+        minSessionsBetweenDreams: 1,
+      });
+      expect(dream.status).toBe('scheduled');
+      if (dream.status === 'scheduled') {
+        await dream.promise;
+      }
+    });
+
+    it('does not pause project dream for user-scope legacy files', async () => {
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const manager = new MemoryManager();
+
+      const result = await manager.scheduleDream({
+        projectRoot,
+        sessionId: 'session',
+        config: makeMockConfig(),
+      });
+
+      expect(result.skippedReason).not.toBe('migration_pending');
+    });
+
+    it('does not pause user dream for project-scope legacy files', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const manager = new MemoryManager();
+
+      const result = await manager.scheduleUserDream({
+        projectRoot,
+        config: makeMockConfig(),
+      });
+
+      expect(result.skippedReason).not.toBe('migration_pending');
+    });
+
+    it('records a user mutation after forgetting a user-memory entry', async () => {
+      const userFile = path.join(getUserAutoMemoryRoot(), 'user', 'note.md');
+      await fs.mkdir(path.dirname(userFile), { recursive: true });
+      await fs.writeFile(
+        userFile,
+        [
+          '---',
+          'name: User note',
+          'description: User preference',
+          'type: user',
+          'category: communication_preference',
+          'keywords:',
+          '  - concise answers',
+          'usage_scenarios:',
+          '  - Responding to the user',
+          '---',
+          '',
+          '# User Memory',
+          '',
+          '- Prefer concise answers',
+          '',
+        ].join('\n'),
+      );
+      const manager = new MemoryManager();
+      const recordUserMutation = vi
+        .spyOn(manager, 'recordUserMutation')
+        .mockResolvedValue();
+      const config = makeMockConfig();
+
+      const result = await manager.forgetMatches(
+        projectRoot,
+        [
+          {
+            topic: 'user',
+            summary: 'Prefer concise answers',
+            filePath: userFile,
+            entryIndex: 0,
+          },
+        ],
+        new Date('2026-08-27T00:00:00.000Z'),
+        { config },
+      );
+
+      expect(result.touchedScopes).toContain('user');
+      expect(recordUserMutation).toHaveBeenCalledWith(
+        projectRoot,
+        config,
+        expect.any(Date),
+      );
+    });
+
+    it('records completed and failed User Dream tasks', async () => {
+      const now = new Date('2026-08-27T00:00:00.000Z');
+      for (let index = 0; index < 10; index += 1) {
+        await recordUserAutoMemoryMutation(now);
+      }
+      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+      });
+      const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+      });
+
+      const completed = await manager.scheduleUserDream({
+        projectRoot,
+        config,
+        now,
+      });
+      await completed.promise;
+      expect(manager.getTask(completed.taskId!)).toMatchObject({
+        status: 'completed',
+        metadata: { scope: 'user', updatedEntries: 1 },
+      });
+
+      for (let index = 0; index < 10; index += 1) {
+        await recordUserAutoMemoryMutation(
+          new Date('2026-08-28T00:00:00.000Z'),
+        );
+      }
+      vi.mocked(runManagedUserAutoMemoryDream).mockRejectedValueOnce(
+        new Error('user dream failed'),
+      );
+      const failed = await manager.scheduleUserDream({
+        projectRoot,
+        config,
+        now: new Date('2026-08-29T00:00:00.000Z'),
+      });
+      await failed.promise;
+      expect(manager.getTask(failed.taskId!)).toMatchObject({
+        status: 'failed',
+        error: 'user dream failed',
+      });
+
+      await expect(
+        manager.scheduleUserDream({
+          projectRoot,
+          config,
+          now: new Date('2026-08-29T00:30:00.000Z'),
+        }),
+      ).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'failure_backoff',
+      });
+    });
+
+    it('keeps User Dream completed when completion metadata cannot persist', async () => {
+      const now = new Date('2026-08-27T00:00:00.000Z');
+      for (let index = 0; index < 10; index += 1) {
+        await recordUserAutoMemoryMutation(now);
+      }
+      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValueOnce({
+        touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+      });
+      vi.spyOn(userDream, 'completeUserAutoMemoryDream').mockRejectedValueOnce(
+        new Error('metadata unavailable'),
+      );
+      const manager = new MemoryManager();
+
+      const result = await manager.scheduleUserDream({
+        projectRoot,
+        config: makeMockConfig({
+          getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+        }),
+        now,
+      });
+      await result.promise;
+
+      expect(manager.getTask(result.taskId!)).toMatchObject({
+        status: 'completed',
+        metadata: { metadataWriteError: 'metadata unavailable' },
+      });
+    });
+  });
+
+  describe('search memory turn state', () => {
+    it('allows rereads after compaction guards are reset', () => {
+      const mgr = new MemoryManager();
+      const signature = '{"mode":"fetch","refs":["project:a.md"]}';
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:a.md');
+
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(false);
+
+      mgr.resetExhaustedBodyRefsForCurrentTurn();
+
+      expect(mgr.getExhaustedBodyRefsForCurrentTurn()).toEqual(new Set());
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+    });
+
+    it('tracks resident body versions independently of read history', () => {
+      const mgr = new MemoryManager();
+      const versions = mgr.getBodyPresentVersionsInHistory();
+      const coverage = mgr.getBodyCoverageInHistory();
+      versions.set('project:one.md', 1);
+      versions.set('project:two.md', 2);
+      coverage.set('project:partial.md', {
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
+
+      mgr.markMemoryBodiesEvictedFromHistory([
+        { memoryRef: 'project:one.md', mtimeMs: 1 },
+        { memoryRef: 'project:two.md', mtimeMs: 1 },
+      ]);
+      expect([...versions]).toEqual([['project:two.md', 2]]);
+
+      mgr.markAllMemoryBodiesEvictedFromHistory();
+      expect(versions.size).toBe(0);
+
+      mgr.restoreMemoryBodiesPresentInHistory([
+        { memoryRef: 'project:restored.md', mtimeMs: 3 },
+      ]);
+      expect([...versions]).toEqual([['project:restored.md', 3]]);
+      expect(coverage.size).toBe(0);
+
+      // Eviction must also release the turn-scoped guards that asserted the
+      // evicted state, or a same-turn re-read is refused as a duplicate or
+      // budget-exhausted while the body is no longer in history.
+      const signature = '{"mode":"fetch","refs":["project:one.md"]}';
+      versions.set('project:one.md', 1);
+      versions.set('project:two.md', 2);
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:one.md');
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:two.md');
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(false);
+
+      mgr.markAllMemoryBodiesEvictedFromHistory();
+      expect(mgr.getExhaustedBodyRefsForCurrentTurn()).toEqual(new Set());
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+
+      // A targeted eviction drops the exhausted claim only for refs whose
+      // resident version actually left history; the rest stay guarded.
+      versions.set('project:one.md', 1);
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:one.md');
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:two.md');
+      mgr.markMemoryBodiesEvictedFromHistory([
+        { memoryRef: 'project:one.md', mtimeMs: 1 },
+      ]);
+      expect(mgr.getExhaustedBodyRefsForCurrentTurn()).toEqual(
+        new Set(['project:two.md']),
+      );
+    });
+
+    it('preserves partial body coverage when history only grows', () => {
+      const mgr = new MemoryManager();
+      const coverage = mgr.getBodyCoverageInHistory();
+      coverage.set('project:partial.md', {
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
+
+      mgr.reconcileMemoryBodiesPresentInHistory([]);
+
+      expect(mgr.getBodyPresentVersionsInHistory().size).toBe(0);
+      expect(coverage.get('project:partial.md')).toEqual({
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
+    });
+  });
+
   describe('globalMemoryManager', () => {
     it('is a MemoryManager instance', () => {
       expect(globalMemoryManager).toBeInstanceOf(MemoryManager);
@@ -175,6 +1001,32 @@ describe('MemoryManager', () => {
       await mgr.drain();
       const tasks = mgr.listTasksByType('extract', projectRoot);
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
+    });
+
+    it('records a user mutation when extraction touches user memory', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: ['user'],
+        touchedUserScope: true,
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const recordUserMutation = vi
+        .spyOn(mgr, 'recordUserMutation')
+        .mockResolvedValue();
+      const config = makeMockConfig();
+
+      await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        config,
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(recordUserMutation).toHaveBeenCalledWith(
+        projectRoot,
+        config,
+        expect.any(Date),
+      );
     });
 
     it('records a session mismatch as skipped', async () => {
@@ -296,6 +1148,78 @@ describe('MemoryManager', () => {
       expect(result.skippedReason).toBeUndefined();
       expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
     });
+
+    it.each(['native', 'bridge-object', 'bridge-json'])(
+      'records a user mutation when %s history writes User Memory',
+      async (mode) => {
+        const mgr = new MemoryManager();
+        const recordUserMutation = vi
+          .spyOn(mgr, 'recordUserMutation')
+          .mockResolvedValue();
+        const config = makeMockConfig();
+        const now = new Date('2026-08-27T00:00:00.000Z');
+
+        const writeArgs = {
+          file_path: path.join(
+            getUserAutoMemoryRoot(),
+            'user',
+            'preference.md',
+          ),
+        };
+        const name = mode === 'native' ? 'write_file' : ToolNames.TOOL_CALL;
+        const args =
+          mode === 'native'
+            ? writeArgs
+            : {
+                name: 'write_file',
+                arguments:
+                  mode === 'bridge-json'
+                    ? JSON.stringify(writeArgs)
+                    : writeArgs,
+              };
+
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          config,
+          now,
+          history: [
+            { role: 'user', parts: [{ text: 'Remember this preference.' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'write-user-memory',
+                    name,
+                    args,
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'write-user-memory',
+                    name,
+                    response: { output: 'updated' },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(recordUserMutation).toHaveBeenCalledWith(
+          projectRoot,
+          config,
+          now,
+        );
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (
@@ -930,7 +1854,12 @@ describe('MemoryManager', () => {
       );
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
         dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: undefined,
       });
     });
@@ -939,6 +1868,192 @@ describe('MemoryManager', () => {
       delete process.env['QWEN_CODE_MEMORY_LOCAL'];
       clearAutoMemoryRootCache();
       await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('runs a manual dream through the managed path and releases the lock', async () => {
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: ['project'],
+        createdEntries: 1,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: 'Managed auto-memory dream (agent): consolidated',
+      });
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(result.systemMessage).toContain('consolidated');
+      expect(runManagedAutoMemoryDream).toHaveBeenCalledWith(
+        projectRoot,
+        expect.any(Date),
+        config,
+        undefined,
+        { trigger: 'manual', recordMetadata: true, sessionId: 'sess-1' },
+      );
+      // The consolidation lock is released after the run.
+      await expect(
+        fs.stat(getAutoMemoryConsolidationLockPath(projectRoot)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('skips a manual dream while another dream holds the lock', async () => {
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      await fs.writeFile(
+        getAutoMemoryConsolidationLockPath(projectRoot),
+        String(process.pid),
+      );
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(result.systemMessage).toContain('already running');
+      expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+
+    it('sweeps a stale lock orphaned by a crashed process before a manual dream', async () => {
+      // acquireDreamLock creates with 'wx', so it fails on ANY existing
+      // lock — including one a crashed CLI left behind. The scheduled path
+      // sweeps by holder liveness; the manual path must do the same or the
+      // orphan blocks /dream for the whole session.
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      await fs.writeFile(lockPath, String(process.pid));
+      const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      await fs.utimes(lockPath, stale, stale);
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(runManagedAutoMemoryDream).toHaveBeenCalled();
+      expect(result.systemMessage ?? '').not.toContain('already running');
+      // The swept-then-released lock is gone after the run.
+      await expect(fs.stat(lockPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('returns the dream result when the lock release fails, and lets the next scheduleDream recover', async () => {
+      // A failed release (Windows EPERM/EBUSY, ENOENT race) used to replace
+      // the successful result with the release error AND leave the lock on
+      // disk owned by our own live PID — dreamLockExists() then reports
+      // 'locked' until the staleness window expires. The release is guarded
+      // and flagged instead, so the next scheduleDream force-cleans it.
+      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const mgr = new MemoryManager(async () => ['sess-9']);
+      const config = makeMockConfig();
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(async () => {
+        // Replace the acquired lock file with a directory: fs.rm without
+        // recursive then fails with ERR_FS_EISDIR on every platform.
+        await fs.rm(lockPath, { force: true });
+        await fs.mkdir(lockPath);
+        return {
+          touchedTopics: ['project'],
+          createdEntries: 1,
+          updatedEntries: 0,
+          deletedEntries: 0,
+          dedupedEntries: 0,
+          splitEntries: 0,
+          keywordBackfilled: 0,
+          systemMessage: 'Managed auto-memory dream (agent): consolidated',
+        };
+      });
+
+      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      expect(result.systemMessage).toContain('consolidated');
+      // The release failed: the lock path is still occupied.
+      await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+      // Restore the leaked-lock shape (fresh mtime, our own live PID): the
+      // staleness sweep cannot clear it, only the release-failed flag can.
+      await fs.rmdir(lockPath);
+      await fs.writeFile(lockPath, String(process.pid));
+
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      });
+      const scheduled = await mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'sess-2',
+        config,
+        now: new Date('2026-04-02T10:00:00.000Z'),
+        minHoursBetweenDreams: 0,
+        minSessionsBetweenDreams: 1,
+      });
+
+      expect(scheduled).not.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'locked',
+      });
+      if (scheduled.status === 'scheduled') {
+        await scheduled.promise;
+      }
+    });
+
+    it('recovers the leaked lock on the next manual dream when the release failed', async () => {
+      // The release-failure flag is what makes a leaked lock (our own live
+      // PID, fresh mtime) clearable at all, but right after a manual run the
+      // scheduled path that consults it is unreachable: the same_session /
+      // min_hours gates return first. runManualDream must force-clean the
+      // leaked lock itself or every later /dream falsely reports 'already
+      // running' until the staleness window expires.
+      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const mgr = new MemoryManager(async () => ['sess-9']);
+      const config = makeMockConfig();
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(async () => {
+        // Make the release fail: swap the lock file for a directory so the
+        // rm without `recursive` fails on every platform.
+        await fs.rm(lockPath, { force: true });
+        await fs.mkdir(lockPath);
+        return {
+          touchedTopics: ['project'],
+          createdEntries: 1,
+          updatedEntries: 0,
+          deletedEntries: 0,
+          dedupedEntries: 0,
+          splitEntries: 0,
+          keywordBackfilled: 0,
+          systemMessage: 'Managed auto-memory dream (agent): consolidated',
+        };
+      });
+
+      const first = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      expect(first.systemMessage).toContain('consolidated');
+      await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+      // Restore the leaked-lock shape: fresh mtime, our own live PID, so
+      // neither staleness nor liveness can clear it.
+      await fs.rmdir(lockPath);
+      await fs.writeFile(lockPath, String(process.pid));
+
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: ['project'],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: 'Managed auto-memory dream (agent): consolidated',
+      });
+
+      const second = await mgr.runManualDream(projectRoot, config, 'sess-1');
+
+      expect(runManagedAutoMemoryDream).toHaveBeenCalledTimes(2);
+      expect(second.systemMessage ?? '').not.toContain('already running');
+      await expect(fs.stat(lockPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
 
     it('skips when dream is disabled in config', async () => {
@@ -1066,7 +2181,12 @@ describe('MemoryManager', () => {
     it('schedules when all conditions are met, releases lock, and records metadata', async () => {
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 1,
         dedupedEntries: 1,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: 'Dream complete.',
       });
 
@@ -1084,7 +2204,15 @@ describe('MemoryManager', () => {
       expect(result.status).toBe('scheduled');
       const finalRecord = await result.promise;
       expect(finalRecord?.status).toBe('completed');
-      expect(finalRecord?.metadata?.['touchedTopics']).toEqual(['user']);
+      expect(finalRecord?.metadata).toMatchObject({
+        touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 1,
+        dedupedEntries: 1,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+      });
 
       // Lock must be released
       await expect(
@@ -1210,7 +2338,12 @@ describe('MemoryManager', () => {
           });
           return {
             touchedTopics: [],
+            createdEntries: 0,
+            updatedEntries: 0,
+            deletedEntries: 0,
             dedupedEntries: 0,
+            splitEntries: 0,
+            keywordBackfilled: 0,
             systemMessage: undefined,
           };
         },
@@ -1277,7 +2410,12 @@ describe('MemoryManager', () => {
           });
           return {
             touchedTopics: ['user', 'project'],
+            createdEntries: 0,
+            updatedEntries: 2,
+            deletedEntries: 0,
             dedupedEntries: 0,
+            splitEntries: 0,
+            keywordBackfilled: 0,
             systemMessage: 'Managed auto-memory dream completed.',
           };
         },
@@ -1330,7 +2468,12 @@ describe('MemoryManager', () => {
       // metadata the user just saw via memory_saved toast).
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
         dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: undefined,
       });
       const mgr = new MemoryManager(async () => [

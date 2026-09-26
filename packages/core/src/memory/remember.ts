@@ -405,6 +405,11 @@ export async function runManagedRememberByAgent(params: {
     );
   }
 
+  if (touchedScopes.includes('user')) {
+    await params.config
+      .getMemoryManager()
+      .recordUserMutation(params.projectRoot, params.config);
+  }
   await rebuildWrittenScopes();
 
   return {

@@ -17,6 +17,7 @@ import type {
   MemoryRecallDeliveryPhase,
   MemoryRecallDeliveryPoint,
   MemoryRecallDiscardReason,
+  MemoryRecallStrategy,
 } from './types.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 
@@ -1236,6 +1237,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
+    scope?: 'project' | 'user';
     status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
@@ -1245,11 +1247,13 @@ export function recordMemoryDreamMetrics(
   memoryDreamCounter?.add(1, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
   memoryDreamDurationHistogram?.record(durationMs, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
 }
@@ -1257,7 +1261,7 @@ export function recordMemoryDreamMetrics(
 export function recordMemoryRecallMetrics(
   config: Config,
   durationMs: number,
-  attrs: { strategy: 'none' | 'heuristic' | 'model'; docs_selected: number },
+  attrs: { strategy: MemoryRecallStrategy; docs_selected: number },
 ): void {
   if (!isMetricsInitialized) return;
   const common = baseMetricDefinition.getCommonAttributes(config);
