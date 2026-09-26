@@ -12,6 +12,31 @@ import {
   createChildAbortController,
 } from './abortController.js';
 
+/** Runs `body` under fake timers, restoring real timers even if it throws. */
+function withFakeTimers(body: () => void) {
+  vi.useFakeTimers();
+  try {
+    body();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+// `aborted` reads false on the first (fast-path `find`) access and true after,
+// driving the per-iteration check inside the for-loop instead.
+function abortedAfterFirstRead(signal: AbortSignal): AbortSignal {
+  let accessCount = 0;
+  return new Proxy(signal, {
+    get(target, prop, recv) {
+      if (prop === 'aborted') {
+        accessCount++;
+        return accessCount > 1;
+      }
+      return Reflect.get(target, prop, recv);
+    },
+  }) as AbortSignal;
+}
+
 describe('createAbortController', () => {
   it('sets a default max-listener cap of 50 on the signal', () => {
     const controller = createAbortController();
@@ -134,25 +159,19 @@ describe('combineAbortSignals', () => {
   });
 
   it('fires the timeout when no signal aborts first', async () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTimers(() => {
       const { signal } = combineAbortSignals([], { timeoutMs: 50 });
       vi.advanceTimersByTime(50);
       expect(signal.aborted).toBe(true);
       expect((signal.reason as DOMException).name).toBe('TimeoutError');
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('auto-cleans input-signal listeners when the timeout fires', async () => {
-    // Timeout-driven aborts must run the same auto-cleanup as source-driven
-    // aborts — otherwise long-lived input signals (e.g. a session-lived
-    // AbortSignal) accumulate dead listeners across many short-lived
-    // combinedSignal calls. Verifies cleanup is wired to the COMBINED
-    // controller abort path, not just to source-signal events.
-    vi.useFakeTimers();
-    try {
+    // Timeout aborts need the same auto-cleanup as source aborts, or long-lived
+    // inputs (e.g. a session AbortSignal) accumulate dead listeners across many
+    // short-lived calls: cleanup is wired to the COMBINED controller's abort.
+    withFakeTimers(() => {
       const source = createAbortController();
       const before = getEventListeners(source.signal, 'abort').length;
       const { signal } = combineAbortSignals([source.signal], {
@@ -163,9 +182,7 @@ describe('combineAbortSignals', () => {
       expect(signal.aborted).toBe(true);
       expect((signal.reason as DOMException).name).toBe('TimeoutError');
       expect(getEventListeners(source.signal, 'abort').length).toBe(before);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('cleanup removes listeners from inputs', () => {
@@ -185,22 +202,18 @@ describe('combineAbortSignals', () => {
   });
 
   it('manual cleanup() cancels a pending timeout so it never fires', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTimers(() => {
       const { signal, cleanup } = combineAbortSignals([], { timeoutMs: 50 });
       cleanup();
       vi.advanceTimersByTime(100);
-      // Without the clearTimeout in cleanups[], the timer would still fire
-      // and abort the (already-cleaned) signal with TimeoutError.
+      // Without the clearTimeout in cleanups[], the timer would still abort
+      // the (already-cleaned) signal with TimeoutError.
       expect(signal.aborted).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('treats timeoutMs <= 0 as "no timeout"', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTimers(() => {
       const zero = combineAbortSignals([], { timeoutMs: 0 });
       const negative = combineAbortSignals([], { timeoutMs: -1 });
       vi.advanceTimersByTime(1_000_000);
@@ -208,72 +221,41 @@ describe('combineAbortSignals', () => {
       expect(negative.signal.aborted).toBe(false);
       zero.cleanup();
       negative.cleanup();
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('aborts and stops registering listeners once an input is found aborted mid-iteration', () => {
     const a = createAbortController();
     const b = createAbortController();
     const c = createAbortController();
-    // Simulate a signal whose `aborted` getter returns false during the initial
-    // `find` scan and true on subsequent accesses, exercising the per-iteration
-    // defensive check inside the for-loop (not the fast path).
-    let accessCount = 0;
-    const proxied = new Proxy(b.signal, {
-      get(target, prop, recv) {
-        if (prop === 'aborted') {
-          accessCount++;
-          return accessCount > 1; // false on first access, true thereafter
-        }
-        return Reflect.get(target, prop, recv);
-      },
-    }) as AbortSignal;
+    const proxied = abortedAfterFirstRead(b.signal);
     const { signal } = combineAbortSignals([a.signal, proxied, c.signal]);
-    // Per-iteration check fires when the loop reaches proxied (2nd `aborted`
-    // access) and short-circuits → controller aborts, loop breaks before c.
+    // The loop's 2nd `aborted` read on proxied aborts and breaks before c.
     expect(signal.aborted).toBe(true);
-    // a was iterated before the break and DID get a listener — cleanup must
-    // run synchronously (since adding to an already-aborted signal is a no-op),
-    // otherwise the listener leaks on the long-lived input.
+    // a DID get a listener before the break; cleanup must run synchronously
+    // (adding to an aborted signal is a no-op) or it leaks on the input.
     expect(getEventListeners(a.signal, 'abort').length).toBe(0);
     // c never had a listener attached (we broke out of the loop before it).
     expect(getEventListeners(c.signal, 'abort').length).toBe(0);
   });
 
   it('does not schedule a timeout when the per-iteration check aborts the controller mid-loop', () => {
-    // Drives the `!controller.signal.aborted` guard inside the timeout
-    // block (not the pre-loop fast path): the Proxy reports `aborted=false`
-    // on the initial scan and `aborted=true` once the loop re-checks it.
-    // Spy on setTimeout so we can distinguish "guard skipped scheduling"
-    // from "scheduled then immediately cleared by synchronous cleanup" —
-    // the latter would be observationally indistinguishable via timer
-    // advancement alone since cleanup() runs synchronously and clears the
-    // timer it just scheduled.
+    // Drives the `!controller.signal.aborted` guard in the timeout block (not
+    // the pre-loop fast path). The setTimeout spy tells "guard skipped
+    // scheduling" from "scheduled then cleared by synchronous cleanup", which
+    // advancing timers alone cannot distinguish.
     vi.useFakeTimers();
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     try {
       const a = createAbortController();
-      const b = createAbortController();
-      let accessCount = 0;
-      const proxied = new Proxy(b.signal, {
-        get(target, prop, recv) {
-          if (prop === 'aborted') {
-            accessCount++;
-            return accessCount > 1;
-          }
-          return Reflect.get(target, prop, recv);
-        },
-      }) as AbortSignal;
+      const proxied = abortedAfterFirstRead(createAbortController().signal);
       const { signal } = combineAbortSignals([a.signal, proxied], {
         timeoutMs: 50,
       });
       expect(signal.aborted).toBe(true);
       // The guard must prevent setTimeout from being called at all.
       expect(setTimeoutSpy).not.toHaveBeenCalled();
-      // Belt-and-suspenders: even if a timer somehow snuck through,
-      // advancing past it must not change the abort reason.
+      // Belt-and-suspenders: a timer that snuck through must not change the reason.
       const reasonAfterAbort = signal.reason;
       vi.advanceTimersByTime(100);
       expect(signal.reason).toBe(reasonAfterAbort);
@@ -297,12 +279,9 @@ describe('combineAbortSignals', () => {
 
 describe('lifetime contract', () => {
   it('parent abort propagates to a signal whose controller the caller has dropped', () => {
-    // Real-world pattern: caller pipes child.signal into an async API and
-    // does not hold the controller object itself. The parent listener
-    // closure keeps the controller alive long enough for parent abort to
-    // reach the signal — verified WITHOUT --expose-gc because we don't
-    // depend on GC behavior at all, only on the strong reference inside
-    // the listener closure.
+    // Real-world pattern: the caller pipes child.signal into an async API and
+    // drops the controller. The parent listener closure's strong reference
+    // keeps it alive, so no --expose-gc is needed: GC behaviour is irrelevant.
     const parent = createAbortController();
     let signal: AbortSignal;
     (() => {

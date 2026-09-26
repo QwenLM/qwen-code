@@ -15,6 +15,7 @@ import {
 
 const ORIGINAL = 'a'.repeat(64);
 const DEGRADED = 'b'.repeat(64);
+const OTHER = 'c'.repeat(64);
 
 const ENTRY = {
   degradedSha256: DEGRADED,
@@ -24,25 +25,21 @@ const ENTRY = {
   mimeType: 'image/jpeg',
 };
 
+/** Fingerprint of an omni_downsample_image invocation with `args`. */
+const downsampleFp = (args: Record<string, unknown>) =>
+  computePolicyFingerprint('omni_downsample_image', args);
+
 describe('computePolicyFingerprint', () => {
   it('is stable across key order and identical inputs', () => {
-    const a = computePolicyFingerprint('omni_downsample_image', {
-      maxDimension: 1568,
-      quality: 75,
-    });
-    const b = computePolicyFingerprint('omni_downsample_image', {
-      quality: 75,
-      maxDimension: 1568,
-    });
+    const a = downsampleFp({ maxDimension: 1568, quality: 75 });
+    const b = downsampleFp({ quality: 75, maxDimension: 1568 });
     expect(a).toBe(b);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('ignores the per-invocation io params (inputPath/outputDir)', () => {
-    const bare = computePolicyFingerprint('omni_downsample_image', {
-      quality: 75,
-    });
-    const withIo = computePolicyFingerprint('omni_downsample_image', {
+    const bare = downsampleFp({ quality: 75 });
+    const withIo = downsampleFp({
       quality: 75,
       inputPath: '/tmp/a/in.png',
       outputDir: '/tmp/staging/deadbeef',
@@ -81,10 +78,10 @@ describe('computePolicyFingerprint', () => {
 describe('OmniDegradationCache', () => {
   let root: string;
   let cache: OmniDegradationCache;
-  const fp = computePolicyFingerprint('omni_downsample_image', {
-    maxDimension: 1568,
-    quality: 75,
-  });
+  const fp = downsampleFp({ maxDimension: 1568, quality: 75 });
+  const cacheFile = () => path.join(root, 'policy-cache.json');
+  const readCacheFile = async () =>
+    JSON.parse(await fs.readFile(cacheFile(), 'utf8'));
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-degcache-'));
@@ -108,28 +105,21 @@ describe('OmniDegradationCache', () => {
 
   it('writes to policy-cache.json under the omni root', async () => {
     await cache.put(ORIGINAL, fp, ENTRY);
-    const raw = JSON.parse(
-      await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
-    );
+    const raw = await readCacheFile();
     expect(raw.version).toBe(1);
     expect(Object.keys(raw.entries)).toEqual([`${ORIGINAL}|${fp}`]);
   });
 
   it('misses on a different fingerprint or original hash', async () => {
     await cache.put(ORIGINAL, fp, ENTRY);
-    const otherFp = computePolicyFingerprint('omni_downsample_image', {
-      maxDimension: 800,
-    });
+    const otherFp = downsampleFp({ maxDimension: 800 });
     await expect(cache.get(ORIGINAL, otherFp)).resolves.toBeNull();
-    await expect(cache.get('c'.repeat(64), fp)).resolves.toBeNull();
+    await expect(cache.get(OTHER, fp)).resolves.toBeNull();
   });
 
   it('re-put for the same key replaces the entry', async () => {
     await cache.put(ORIGINAL, fp, ENTRY);
-    await cache.put(ORIGINAL, fp, {
-      ...ENTRY,
-      degradedSha256: 'd'.repeat(64),
-    });
+    await cache.put(ORIGINAL, fp, { ...ENTRY, degradedSha256: 'd'.repeat(64) });
     await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject({
       degradedSha256: 'd'.repeat(64),
     });
@@ -142,31 +132,27 @@ describe('OmniDegradationCache', () => {
       role: 'thumbnail',
     });
     // And an entry without a role stays role-less.
-    const fp2 = computePolicyFingerprint('omni_downsample_image', {
-      quality: 51,
-    });
+    const fp2 = downsampleFp({ quality: 51 });
     await cache.put(ORIGINAL, fp2, ENTRY);
     const hit = await cache.get(ORIGINAL, fp2);
     expect(hit!.role).toBeUndefined();
   });
 
   it('removeByOriginalSha256 drops every policy result for the source', async () => {
-    const fp2 = computePolicyFingerprint('omni_downsample_image', {
-      quality: 50,
-    });
+    const fp2 = downsampleFp({ quality: 50 });
     await cache.put(ORIGINAL, fp, ENTRY);
     await cache.put(ORIGINAL, fp2, ENTRY);
-    await cache.put('c'.repeat(64), fp, ENTRY);
+    await cache.put(OTHER, fp, ENTRY);
 
     await cache.removeByOriginalSha256(ORIGINAL);
     await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
     await expect(cache.get(ORIGINAL, fp2)).resolves.toBeNull();
-    await expect(cache.get('c'.repeat(64), fp)).resolves.not.toBeNull();
+    await expect(cache.get(OTHER, fp)).resolves.not.toBeNull();
   });
 
   it('removeByDegradedSha256 drops every entry pointing at the derivative', async () => {
     await cache.put(ORIGINAL, fp, ENTRY);
-    await cache.put('c'.repeat(64), fp, ENTRY);
+    await cache.put(OTHER, fp, ENTRY);
     await cache.put('e'.repeat(64), fp, {
       ...ENTRY,
       degradedSha256: 'f'.repeat(64),
@@ -174,13 +160,12 @@ describe('OmniDegradationCache', () => {
 
     await cache.removeByDegradedSha256(DEGRADED);
     await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
-    await expect(cache.get('c'.repeat(64), fp)).resolves.toBeNull();
+    await expect(cache.get(OTHER, fp)).resolves.toBeNull();
     await expect(cache.get('e'.repeat(64), fp)).resolves.not.toBeNull();
   });
 
   it('backs up a corrupt cache file and starts fresh (never fatal)', async () => {
-    const filePath = path.join(root, 'policy-cache.json');
-    await fs.writeFile(filePath, '{corrupt');
+    await fs.writeFile(cacheFile(), '{corrupt');
     await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
     const names = await fs.readdir(root);
     expect(names.some((n) => n.startsWith('policy-cache.json.corrupt-'))).toBe(
@@ -196,7 +181,7 @@ describe('OmniDegradationCache', () => {
     const names = await fs.readdir(root);
     expect(names.filter((n) => n.endsWith('.tmp'))).toEqual([]);
     if (process.platform !== 'win32') {
-      const stat = await fs.stat(path.join(root, 'policy-cache.json'));
+      const stat = await fs.stat(cacheFile());
       expect(stat.mode & 0o777).toBe(0o600);
     }
   });
@@ -207,23 +192,24 @@ describe('OmniDegradationCache', () => {
         cache.put(ORIGINAL, computePolicyFingerprint('t', { i }), ENTRY),
       ),
     );
-    const raw = JSON.parse(
-      await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
-    );
+    const raw = await readCacheFile();
     expect(Object.keys(raw.entries)).toHaveLength(8);
   });
 
   describe('poisoned cache file (workspace-controlled input is shape-validated)', () => {
-    /** Plant one raw entry as a hostile repo could ship it. */
-    async function plantEntry(entry: Record<string, unknown>): Promise<void> {
-      await fs.writeFile(
-        path.join(root, 'policy-cache.json'),
+    /** Plant raw entries (`value` under the test key) as a hostile repo
+     * could ship them. */
+    const plantEntries = (
+      value: unknown,
+      others: Record<string, unknown> = {},
+    ) =>
+      fs.writeFile(
+        cacheFile(),
         JSON.stringify({
           version: 1,
-          entries: { [`${ORIGINAL}|${fp}`]: entry },
+          entries: { [`${ORIGINAL}|${fp}`]: value, ...others },
         }),
       );
-    }
 
     it.each([
       [
@@ -255,19 +241,16 @@ describe('OmniDegradationCache', () => {
     ])(
       'drops a malformed entry instead of serving it: %s',
       async (_label, entry) => {
-        await plantEntry(entry as Record<string, unknown>);
+        await plantEntries(entry);
         await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
         // Self-heal: the malformed entry is deleted, so the next transcode's
         // put() rebuilds it from verified data.
-        const raw = JSON.parse(
-          await fs.readFile(path.join(root, 'policy-cache.json'), 'utf8'),
-        );
-        expect(raw.entries).toEqual({});
+        expect((await readCacheFile()).entries).toEqual({});
       },
     );
 
     it('still serves a planted entry when every field is well-formed', async () => {
-      await plantEntry({ ...ENTRY, createdAt: new Date().toISOString() });
+      await plantEntries({ ...ENTRY, createdAt: new Date().toISOString() });
       await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject(ENTRY);
     });
 
@@ -283,13 +266,7 @@ describe('OmniDegradationCache', () => {
         // a crafted value like `null` must not surface as TypeErrors from
         // field accessors — including scans like removeByDegradedSha256
         // that touch EVERY entry, not just the requested key.
-        await fs.writeFile(
-          path.join(root, 'policy-cache.json'),
-          JSON.stringify({
-            version: 1,
-            entries: { [`${ORIGINAL}|${fp}`]: value, other: ENTRY },
-          }),
-        );
+        await plantEntries(value, { other: ENTRY });
         await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
         await expect(
           cache.removeByDegradedSha256(ENTRY.degradedSha256),

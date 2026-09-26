@@ -30,19 +30,38 @@ function scrubbedInitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// Sets `vars` in process.env; the returned function restores each one's
+// previous value, deleting it if it had none.
+function setEnv(vars: Record<string, string>): () => void {
+  const saved = Object.keys(vars).map((name): [string, string | undefined] => [
+    name,
+    process.env[name],
+  ]);
+  Object.assign(process.env, vars);
+  return () => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
+
+function withEnv(vars: Record<string, string>, fn: () => void) {
+  const restore = setEnv(vars);
+  try {
+    fn();
+  } finally {
+    restore();
+  }
+}
+
 describe('isGitIgnored', () => {
   let dir: string;
   let outside: string;
-  let originalConfigNosystem: string | undefined;
-  let originalConfigGlobal: string | undefined;
-  let originalXdgConfigHome: string | undefined;
-  let originalHome: string | undefined;
+  let restoreEnv: () => void;
+  const made: string[] = [];
 
   beforeEach(() => {
-    originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
-    originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
-    originalXdgConfigHome = process.env['XDG_CONFIG_HOME'];
-    originalHome = process.env['HOME'];
     dir = join(
       tmpdir(),
       `git-ignore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -57,10 +76,12 @@ describe('isGitIgnored', () => {
     // the probe scrubs GIT_CONFIG_GLOBAL, so the empty-gitconfig pin never
     // reaches it, and git's default global config resolves under $HOME.
     writeFileSync(join(dir, 'empty-gitconfig'), '');
-    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-    process.env['GIT_CONFIG_GLOBAL'] = join(dir, 'empty-gitconfig');
-    process.env['XDG_CONFIG_HOME'] = join(dir, 'xdg');
-    process.env['HOME'] = dir;
+    restoreEnv = setEnv({
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: join(dir, 'empty-gitconfig'),
+      XDG_CONFIG_HOME: join(dir, 'xdg'),
+      HOME: dir,
+    });
     execFileSync('git', ['init', '-q'], { cwd: dir, env: scrubbedInitEnv() });
     // A genuinely repo-less location: a sibling temp dir the repo walk
     // cannot reach. (A subdirectory of the repo would let git walk up and
@@ -69,20 +90,51 @@ describe('isGitIgnored', () => {
   });
 
   afterEach(() => {
-    if (originalConfigNosystem === undefined)
-      delete process.env['GIT_CONFIG_NOSYSTEM'];
-    else process.env['GIT_CONFIG_NOSYSTEM'] = originalConfigNosystem;
-    if (originalConfigGlobal === undefined)
-      delete process.env['GIT_CONFIG_GLOBAL'];
-    else process.env['GIT_CONFIG_GLOBAL'] = originalConfigGlobal;
-    if (originalXdgConfigHome === undefined)
-      delete process.env['XDG_CONFIG_HOME'];
-    else process.env['XDG_CONFIG_HOME'] = originalXdgConfigHome;
-    if (originalHome === undefined) delete process.env['HOME'];
-    else process.env['HOME'] = originalHome;
+    restoreEnv();
     rmSync(dir, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+    for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
   });
+
+  // A fresh repository in its own temp dir, removed after the test.
+  function initForeignRepo(prefix = 'git-ignore-foreign-'): string {
+    const foreign = mkdtempSync(join(tmpdir(), prefix));
+    made.push(foreign);
+    execFileSync('git', ['init', '-q'], {
+      cwd: foreign,
+      env: scrubbedInitEnv(),
+    });
+    return foreign;
+  }
+
+  // A foreign repo whose gitdir's info/exclude ignores .qwen/.
+  function foreignGitDirExcludingQwen(prefix?: string): string {
+    const foreign = initForeignRepo(prefix);
+    mkdirSync(join(foreign, '.git', 'info'), { recursive: true });
+    writeFileSync(join(foreign, '.git', 'info', 'exclude'), '.qwen/\n');
+    return join(foreign, '.git');
+  }
+
+  // Runs `fn` with a blocking `git` shim first on PATH.
+  function withWedgedGit(fn: () => void) {
+    const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
+    writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
+      mode: 0o755,
+    });
+    const savedPath = process.env['PATH'];
+    try {
+      withEnv({ PATH: `${shimDir}${delimiter}${savedPath ?? ''}` }, fn);
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  }
+
+  // Asserts dir's verdict for .qwen/audits/x.md while `vars` are set.
+  function expectVerdictUnder(vars: Record<string, string>, ignored: boolean) {
+    withEnv(vars, () => {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(ignored);
+    });
+  }
 
   it('answers git’s own verdict for a representative file path', () => {
     expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
@@ -114,29 +166,15 @@ describe('isGitIgnored', () => {
   // fixtures: both mutants shipped 9/9 green).
 
   it('answers for the -C worktree even when GIT_WORK_TREE points elsewhere', () => {
-    const foreign = mkdtempSync(join(tmpdir(), 'git-ignore-foreign-'));
-    execFileSync('git', ['init', '-q'], {
-      cwd: foreign,
-      env: scrubbedInitEnv(),
-    });
+    const foreign = initForeignRepo();
     writeFileSync(join(foreign, '.gitignore'), '.qwen/\n');
-    const saved = process.env['GIT_WORK_TREE'];
-    const savedGitDir = process.env['GIT_DIR'];
     // GIT_WORK_TREE needs a paired GIT_DIR to be legal; point both at the
-    // foreign repo.
-    process.env['GIT_WORK_TREE'] = foreign;
-    process.env['GIT_DIR'] = join(foreign, '.git');
-    try {
-      // dir itself has no ignore rules: the foreign tree's .qwen/ rule
-      // must not answer for it.
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_WORK_TREE'];
-      else process.env['GIT_WORK_TREE'] = saved;
-      if (savedGitDir === undefined) delete process.env['GIT_DIR'];
-      else process.env['GIT_DIR'] = savedGitDir;
-      rmSync(foreign, { recursive: true, force: true });
-    }
+    // foreign repo. dir itself has no ignore rules: the foreign tree's
+    // .qwen/ rule must not answer for it.
+    expectVerdictUnder(
+      { GIT_WORK_TREE: foreign, GIT_DIR: join(foreign, '.git') },
+      false,
+    );
   });
 
   it('answers for the -C worktree even when GIT_DIR points elsewhere', () => {
@@ -144,22 +182,7 @@ describe('isGitIgnored', () => {
     // worktree's .gitignore — the rule must sit in the foreign gitdir's
     // info/exclude (the GIT_COMMON_DIR arm's shape) or the arm passes with
     // or without its scrub line.
-    const foreign = mkdtempSync(join(tmpdir(), 'git-ignore-foreign-'));
-    execFileSync('git', ['init', '-q'], {
-      cwd: foreign,
-      env: scrubbedInitEnv(),
-    });
-    mkdirSync(join(foreign, '.git', 'info'), { recursive: true });
-    writeFileSync(join(foreign, '.git', 'info', 'exclude'), '.qwen/\n');
-    const saved = process.env['GIT_DIR'];
-    process.env['GIT_DIR'] = join(foreign, '.git');
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_DIR'];
-      else process.env['GIT_DIR'] = saved;
-      rmSync(foreign, { recursive: true, force: true });
-    }
+    expectVerdictUnder({ GIT_DIR: foreignGitDirExcludingQwen() }, false);
   });
 
   it('answers for the -C worktree even when GIT_INDEX_FILE points elsewhere', () => {
@@ -170,26 +193,17 @@ describe('isGitIgnored', () => {
     // ignored; deleting the scrub lets the foreign index report it as
     // tracked and flips the verdict. (A foreign gitdir — not an index file
     // — fataled check-ignore either way, so that shape could not pin.)
-    const foreign = mkdtempSync(join(tmpdir(), 'git-ignore-foreign-'));
-    execFileSync('git', ['init', '-q'], {
-      cwd: foreign,
-      env: scrubbedInitEnv(),
-    });
+    const foreign = initForeignRepo();
     mkdirSync(join(foreign, '.qwen', 'audits'), { recursive: true });
     writeFileSync(join(foreign, '.qwen', 'audits', 'x.md'), 'tracked\n');
     execFileSync('git', ['-C', foreign, 'add', '.qwen/audits/x.md'], {
       env: scrubbedInitEnv(),
     });
     writeFileSync(join(dir, '.gitignore'), '.qwen/\n');
-    const saved = process.env['GIT_INDEX_FILE'];
-    process.env['GIT_INDEX_FILE'] = join(foreign, '.git', 'index');
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_INDEX_FILE'];
-      else process.env['GIT_INDEX_FILE'] = saved;
-      rmSync(foreign, { recursive: true, force: true });
-    }
+    expectVerdictUnder(
+      { GIT_INDEX_FILE: join(foreign, '.git', 'index') },
+      true,
+    );
   });
 
   it('answers for the -C worktree even when GIT_OBJECT_DIRECTORY points elsewhere', () => {
@@ -200,36 +214,16 @@ describe('isGitIgnored', () => {
     // value is a path that does not exist; dir's own rule keeps the
     // expected verdict true.
     writeFileSync(join(dir, '.gitignore'), '.qwen/\n');
-    const saved = process.env['GIT_OBJECT_DIRECTORY'];
-    process.env['GIT_OBJECT_DIRECTORY'] = join(dir, 'no-such-object-store');
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_OBJECT_DIRECTORY'];
-      else process.env['GIT_OBJECT_DIRECTORY'] = saved;
-    }
+    const objects = join(dir, 'no-such-object-store');
+    expectVerdictUnder({ GIT_OBJECT_DIRECTORY: objects }, true);
   });
 
   it('answers for the -C worktree even when GIT_COMMON_DIR points elsewhere', () => {
     // GIT_COMMON_DIR selects where check-ignore resolves info/exclude and
     // config, so the foreign rule must sit in the foreign COMMON DIR's
     // info/exclude (a worktree .gitignore would not reach through it).
-    const foreign = mkdtempSync(join(tmpdir(), 'git-ignore-common-'));
-    execFileSync('git', ['init', '-q'], {
-      cwd: foreign,
-      env: scrubbedInitEnv(),
-    });
-    mkdirSync(join(foreign, '.git', 'info'), { recursive: true });
-    writeFileSync(join(foreign, '.git', 'info', 'exclude'), '.qwen/\n');
-    const saved = process.env['GIT_COMMON_DIR'];
-    process.env['GIT_COMMON_DIR'] = join(foreign, '.git');
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_COMMON_DIR'];
-      else process.env['GIT_COMMON_DIR'] = saved;
-      rmSync(foreign, { recursive: true, force: true });
-    }
+    const commonDir = foreignGitDirExcludingQwen('git-ignore-common-');
+    expectVerdictUnder({ GIT_COMMON_DIR: commonDir }, false);
   });
 
   it('answers for the -C worktree even when GIT_CONFIG_COUNT injects config', () => {
@@ -238,22 +232,14 @@ describe('isGitIgnored', () => {
     // answers for the -C worktree (measured: the verdict flips to true).
     const excludes = join(outside, 'foreign-excludes');
     writeFileSync(excludes, '.qwen/\n');
-    const savedCount = process.env['GIT_CONFIG_COUNT'];
-    const savedKey = process.env['GIT_CONFIG_KEY_0'];
-    const savedValue = process.env['GIT_CONFIG_VALUE_0'];
-    process.env['GIT_CONFIG_COUNT'] = '1';
-    process.env['GIT_CONFIG_KEY_0'] = 'core.excludesFile';
-    process.env['GIT_CONFIG_VALUE_0'] = excludes;
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (savedCount === undefined) delete process.env['GIT_CONFIG_COUNT'];
-      else process.env['GIT_CONFIG_COUNT'] = savedCount;
-      if (savedKey === undefined) delete process.env['GIT_CONFIG_KEY_0'];
-      else process.env['GIT_CONFIG_KEY_0'] = savedKey;
-      if (savedValue === undefined) delete process.env['GIT_CONFIG_VALUE_0'];
-      else process.env['GIT_CONFIG_VALUE_0'] = savedValue;
-    }
+    expectVerdictUnder(
+      {
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'core.excludesFile',
+        GIT_CONFIG_VALUE_0: excludes,
+      },
+      false,
+    );
   });
 
   it('answers for the -C worktree even when GIT_CONFIG_PARAMETERS injects config', () => {
@@ -264,16 +250,8 @@ describe('isGitIgnored', () => {
     // keep the fixture parseable on Windows, as in the redirect arm.
     const excludes = join(outside, 'foreign-excludes');
     writeFileSync(excludes, '.qwen/\n');
-    const saved = process.env['GIT_CONFIG_PARAMETERS'];
-    process.env['GIT_CONFIG_PARAMETERS'] = `'core.excludesfile'='${excludes
-      .split('\\')
-      .join('/')}'`;
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env['GIT_CONFIG_PARAMETERS'];
-      else process.env['GIT_CONFIG_PARAMETERS'] = saved;
-    }
+    const parameters = `'core.excludesfile'='${excludes.split('\\').join('/')}'`;
+    expectVerdictUnder({ GIT_CONFIG_PARAMETERS: parameters }, false);
   });
 
   it('answers for the -C worktree even when the config files redirect elsewhere', () => {
@@ -293,18 +271,10 @@ describe('isGitIgnored', () => {
       foreignConfig,
       `[core]\n\texcludesFile = ${excludes.split('\\').join('/')}\n`,
     );
-    const savedGlobal = process.env['GIT_CONFIG_GLOBAL'];
-    const savedSystem = process.env['GIT_CONFIG_SYSTEM'];
-    process.env['GIT_CONFIG_GLOBAL'] = foreignConfig;
-    process.env['GIT_CONFIG_SYSTEM'] = foreignConfig;
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
-    } finally {
-      if (savedGlobal === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
-      else process.env['GIT_CONFIG_GLOBAL'] = savedGlobal;
-      if (savedSystem === undefined) delete process.env['GIT_CONFIG_SYSTEM'];
-      else process.env['GIT_CONFIG_SYSTEM'] = savedSystem;
-    }
+    expectVerdictUnder(
+      { GIT_CONFIG_GLOBAL: foreignConfig, GIT_CONFIG_SYSTEM: foreignConfig },
+      false,
+    );
   });
 
   // The pathspec-magic family is the same fatal-128 → catch →
@@ -319,14 +289,7 @@ describe('isGitIgnored', () => {
     'GIT_ICASE_PATHSPECS',
   ])('answers for the -C worktree even when %s is set', (variable) => {
     writeFileSync(join(dir, '.gitignore'), '.qwen/\n');
-    const saved = process.env[variable];
-    process.env[variable] = '1';
-    try {
-      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env[variable];
-      else process.env[variable] = saved;
-    }
+    expectVerdictUnder({ [variable]: '1' }, true);
   });
 
   it('answers for a dash-leading path thanks to the -- separator', () => {
@@ -362,13 +325,7 @@ describe('isGitIgnored', () => {
       // This pins the caller-supplied timeoutMs wiring; the default
       // deadline has its own arm below. The blocking shim stands in for a
       // wedged check-ignore on a worktree the caller does not control.
-      const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
-      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
-        mode: 0o755,
-      });
-      const savedPath = process.env['PATH'];
-      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
-      try {
+      withWedgedGit(() => {
         // A 500 ms kill and a 5 s kill both yield false; only the elapsed
         // time distinguishes the caller deadline from the 5 s default.
         const start = Date.now();
@@ -378,11 +335,7 @@ describe('isGitIgnored', () => {
         // skips it), so the wiring would ship green unpinned.
         expect(Date.now() - start).toBeGreaterThanOrEqual(400);
         expectWithinLatencyBudget(Date.now() - start, 2500);
-      } finally {
-        if (savedPath === undefined) delete process.env['PATH'];
-        else process.env['PATH'] = savedPath;
-        rmSync(shimDir, { recursive: true, force: true });
-      }
+      });
     },
   );
 
@@ -392,23 +345,13 @@ describe('isGitIgnored', () => {
       // Same blocking shim, no explicit deadline: every no-arg caller
       // (e.g. team-memory-git-status.ts) rides GIT_TIMEOUT_MS, and no
       // other arm pins its value.
-      const shimDir = mkdtempSync(join(tmpdir(), 'git-ignore-shim-'));
-      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexec sleep 30\n', {
-        mode: 0o755,
-      });
-      const savedPath = process.env['PATH'];
-      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
-      try {
+      withWedgedGit(() => {
         const start = Date.now();
         expect(isGitIgnored(dir, 'anything.md')).toBe(false);
         const elapsed = Date.now() - start;
         expect(elapsed).toBeGreaterThanOrEqual(4000);
         expectWithinLatencyBudget(elapsed, 8000);
-      } finally {
-        if (savedPath === undefined) delete process.env['PATH'];
-        else process.env['PATH'] = savedPath;
-        rmSync(shimDir, { recursive: true, force: true });
-      }
+      });
     },
     15000,
   );

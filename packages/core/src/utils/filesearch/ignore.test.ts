@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Ignore, loadIgnoreRules } from './ignore.js';
+import type { LoadIgnoreRulesOptions } from './ignore.js';
 import {
   createTmpDir,
   cleanupTmpDir,
@@ -104,207 +105,148 @@ describe('loadIgnoreRules', () => {
     }
   });
 
+  // Options for tmpDir: ignore-file flags off, ignoreDirs [], unless overridden.
+  const optionsFor = (opts: Partial<LoadIgnoreRulesOptions> = {}) => ({
+    projectRoot: tmpDir,
+    useGitignore: false,
+    useQwenignore: false,
+    ignoreDirs: [],
+    ...opts,
+  });
+
+  async function load(
+    files: Record<string, string>,
+    opts: Partial<LoadIgnoreRulesOptions> = {},
+  ) {
+    tmpDir = await createTmpDir(files);
+    return loadIgnoreRules(optionsFor(opts));
+  }
+
+  const loadFileFilter = async (
+    files: Record<string, string>,
+    opts: Partial<LoadIgnoreRulesOptions>,
+  ) => (await load(files, opts)).getFileFilter();
+
+  // Makes fs.readFileSync throw `error` for paths ending in `suffix`.
+  function failReadOf(suffix: string, error: Error) {
+    const originalReadFileSync = fs.readFileSync;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      filePath: fs.PathOrFileDescriptor,
+      options?: BufferEncoding | null,
+    ) => {
+      if (String(filePath).endsWith(suffix)) {
+        throw error;
+      }
+      return originalReadFileSync(filePath, options);
+    }) as typeof fs.readFileSync);
+  }
+
   it('should load rules from .gitignore', async () => {
-    tmpDir = await createTmpDir({
-      '.gitignore': '*.log',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.gitignore': '*.log' },
+      { useGitignore: true },
+    );
     expect(fileFilter('test.log')).toBe(true);
     expect(fileFilter('test.txt')).toBe(false);
   });
 
   it('should load rules from .qwenignore', async () => {
-    tmpDir = await createTmpDir({
-      '.qwenignore': '*.log',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.qwenignore': '*.log' },
+      { useQwenignore: true },
+    );
     expect(fileFilter('test.log')).toBe(true);
     expect(fileFilter('test.txt')).toBe(false);
   });
 
   it('should load rules from .agentignore and .aiignore with qwenignore enabled', async () => {
-    tmpDir = await createTmpDir({
-      '.agentignore': 'agent-secret.txt',
-      '.aiignore': 'ai-secret.txt',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.agentignore': 'agent-secret.txt', '.aiignore': 'ai-secret.txt' },
+      { useQwenignore: true },
+    );
     expect(fileFilter('agent-secret.txt')).toBe(true);
     expect(fileFilter('ai-secret.txt')).toBe(true);
     expect(fileFilter('visible.txt')).toBe(false);
   });
 
   it('should apply .agentignore directory patterns to directory filtering', async () => {
-    tmpDir = await createTmpDir({
-      '.agentignore': 'build/',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
+    const ignore = await load(
+      { '.agentignore': 'build/' },
+      { useQwenignore: true },
+    );
     const dirFilter = ignore.getDirectoryFilter();
     expect(dirFilter('build/')).toBe(true);
     expect(dirFilter('src/')).toBe(false);
   });
 
   it('should not let custom ignore negations unignore .qwenignore matches', async () => {
-    tmpDir = await createTmpDir({
-      '.qwenignore': 'secrets/**',
-      '.agentignore': '!secrets/**',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.qwenignore': 'secrets/**', '.agentignore': '!secrets/**' },
+      { useQwenignore: true },
+    );
     expect(fileFilter('secrets/token.txt')).toBe(true);
   });
 
   it('should keep negations scoped to the same ignore file', async () => {
-    tmpDir = await createTmpDir({
-      '.qwenignore': 'secrets/**\n!secrets/public.txt',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.qwenignore': 'secrets/**\n!secrets/public.txt' },
+      { useQwenignore: true },
+    );
     expect(fileFilter('secrets/token.txt')).toBe(true);
     expect(fileFilter('secrets/public.txt')).toBe(false);
   });
 
   it('should load rules from configured custom ignore files with qwenignore enabled', async () => {
-    tmpDir = await createTmpDir({
-      '.cursorignore': 'cursor-secret.txt',
-      '.agentignore': 'agent-secret.txt',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      customIgnoreFiles: ['.cursorignore'],
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      {
+        '.cursorignore': 'cursor-secret.txt',
+        '.agentignore': 'agent-secret.txt',
+      },
+      { useQwenignore: true, customIgnoreFiles: ['.cursorignore'] },
+    );
     expect(fileFilter('cursor-secret.txt')).toBe(true);
     expect(fileFilter('agent-secret.txt')).toBe(false);
     expect(fileFilter('visible.txt')).toBe(false);
   });
 
   it('should combine rules from .gitignore and .qwenignore', async () => {
-    tmpDir = await createTmpDir({
-      '.gitignore': '*.log',
-      '.qwenignore': '*.txt',
-    });
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
+    const fileFilter = await loadFileFilter(
+      { '.gitignore': '*.log', '.qwenignore': '*.txt' },
+      { useGitignore: true, useQwenignore: true },
+    );
     expect(fileFilter('test.log')).toBe(true);
     expect(fileFilter('test.txt')).toBe(true);
     expect(fileFilter('test.md')).toBe(false);
   });
 
   it('should add ignoreDirs', async () => {
-    tmpDir = await createTmpDir({});
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: false,
-      ignoreDirs: ['logs/'],
-    });
-    const dirFilter = ignore.getDirectoryFilter();
+    const dirFilter = (
+      await load({}, { ignoreDirs: ['logs/'] })
+    ).getDirectoryFilter();
     expect(dirFilter('logs/')).toBe(true);
     expect(dirFilter('src/')).toBe(false);
   });
 
   it('should handle missing ignore files gracefully', async () => {
-    tmpDir = await createTmpDir({});
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-    const fileFilter = ignore.getFileFilter();
-    expect(fileFilter('anyfile.txt')).toBe(false);
+    const ignore = await load({}, { useGitignore: true, useQwenignore: true });
+    expect(ignore.getFileFilter()('anyfile.txt')).toBe(false);
   });
 
   it('should handle ignore files that cannot be read gracefully', async () => {
-    tmpDir = await createTmpDir({
-      '.qwenignore': '*.log',
-    });
-    const originalReadFileSync = fs.readFileSync;
-    vi.spyOn(fs, 'readFileSync').mockImplementation(((
-      filePath: fs.PathOrFileDescriptor,
-      options?: BufferEncoding | null,
-    ) => {
-      if (String(filePath).endsWith('.qwenignore')) {
-        throw new Error('ignore file disappeared');
-      }
-      return originalReadFileSync(filePath, options);
-    }) as typeof fs.readFileSync);
-
+    tmpDir = await createTmpDir({ '.qwenignore': '*.log' });
+    failReadOf('.qwenignore', new Error('ignore file disappeared'));
     expect(() =>
-      loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: true,
-        ignoreDirs: [],
-      }),
+      loadIgnoreRules(optionsFor({ useQwenignore: true })),
     ).not.toThrow();
   });
 
   it('should warn when an existing ignore file cannot be read', async () => {
-    tmpDir = await createTmpDir({
-      '.agentignore': '*.log',
-    });
-    const originalReadFileSync = fs.readFileSync;
-    vi.spyOn(fs, 'readFileSync').mockImplementation(((
-      filePath: fs.PathOrFileDescriptor,
-      options?: BufferEncoding | null,
-    ) => {
-      if (String(filePath).endsWith('.agentignore')) {
-        const error = new Error('permission denied') as NodeJS.ErrnoException;
-        error.code = 'EACCES';
-        throw error;
-      }
-      return originalReadFileSync(filePath, options);
-    }) as typeof fs.readFileSync);
-
+    tmpDir = await createTmpDir({ '.agentignore': '*.log' });
+    const error = new Error('permission denied') as NodeJS.ErrnoException;
+    error.code = 'EACCES';
+    failReadOf('.agentignore', error);
     expect(() =>
-      loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: true,
-        ignoreDirs: [],
-      }),
+      loadIgnoreRules(optionsFor({ useQwenignore: true })),
     ).not.toThrow();
     expect(mockDebugLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Failed to read'),
@@ -312,14 +254,6 @@ describe('loadIgnoreRules', () => {
   });
 
   it('should always add .git to the ignore list', async () => {
-    tmpDir = await createTmpDir({});
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-    const dirFilter = ignore.getDirectoryFilter();
-    expect(dirFilter('.git/')).toBe(true);
+    expect((await load({})).getDirectoryFilter()('.git/')).toBe(true);
   });
 });

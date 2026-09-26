@@ -17,6 +17,19 @@ import {
   sniffBoundableImageMime,
 } from './image-view.js';
 
+const solid = (width: number, height: number, background: string) =>
+  sharp({ create: { width, height, channels: 3, background } });
+
+/** Asserts the shared long-edge and 28px-patch budget. */
+function expectWithinBudget(view: {
+  outputWidth: number;
+  outputHeight: number;
+}) {
+  const { outputWidth: w, outputHeight: h } = view;
+  expect(Math.max(w, h)).toBeLessThanOrEqual(1568);
+  expect(Math.ceil(w / 28) * Math.ceil(h / 28)).toBeLessThanOrEqual(1568);
+}
+
 describe('image views', () => {
   let root: string;
   const signal = new AbortController().signal;
@@ -31,16 +44,7 @@ describe('image views', () => {
 
   it('keeps a small overview at its oriented source size', async () => {
     const filePath = path.join(root, 'small.png');
-    await sharp({
-      create: {
-        width: 20,
-        height: 10,
-        channels: 3,
-        background: '#306090',
-      },
-    })
-      .png()
-      .toFile(filePath);
+    await solid(20, 10, '#306090').png().toFile(filePath);
 
     const view = await renderImageOverview(filePath, signal);
     const metadata = await sharp(view.bytes).metadata();
@@ -59,40 +63,17 @@ describe('image views', () => {
 
   it('bounds a large overview by the shared edge and patch budget', async () => {
     const filePath = path.join(root, 'large.png');
-    await sharp({
-      create: {
-        width: 4000,
-        height: 2000,
-        channels: 3,
-        background: '#804020',
-      },
-    })
-      .png()
-      .toFile(filePath);
+    await solid(4000, 2000, '#804020').png().toFile(filePath);
 
     const view = await renderImageOverview(filePath, signal);
 
-    expect(Math.max(view.outputWidth, view.outputHeight)).toBeLessThanOrEqual(
-      1568,
-    );
-    expect(
-      Math.ceil(view.outputWidth / 28) * Math.ceil(view.outputHeight / 28),
-    ).toBeLessThanOrEqual(1568);
+    expectWithinBudget(view);
     expect(view.bytes.length).toBeLessThanOrEqual(9 * 1024 * 1024);
   });
 
   it('may magnify a normalized crop while preserving its source dimensions', async () => {
     const filePath = path.join(root, 'crop.png');
-    await sharp({
-      create: {
-        width: 400,
-        height: 400,
-        channels: 3,
-        background: '#306090',
-      },
-    })
-      .png()
-      .toFile(filePath);
+    await solid(400, 400, '#306090').png().toFile(filePath);
 
     const view = await renderNormalizedImageCrop(
       filePath,
@@ -115,11 +96,7 @@ describe('image views', () => {
   });
 
   it('leaves an in-budget image buffer untouched', async () => {
-    const bytes = await sharp({
-      create: { width: 200, height: 100, channels: 3, background: '#306090' },
-    })
-      .png()
-      .toBuffer();
+    const bytes = await solid(200, 100, '#306090').png().toBuffer();
 
     await expect(boundImageBuffer(bytes, 'image/png', signal)).resolves.toBe(
       null,
@@ -127,31 +104,18 @@ describe('image views', () => {
   });
 
   it('bounds an oversized image buffer to the shared budget', async () => {
-    const bytes = await sharp({
-      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
-    })
-      .png()
-      .toBuffer();
+    const bytes = await solid(3840, 2160, '#804020').png().toBuffer();
 
     const view = await boundImageBuffer(bytes, 'image/png', signal);
 
     expect(view).not.toBe(null);
     expect(view!.mimeType).toBe('image/jpeg');
-    expect(Math.max(view!.outputWidth, view!.outputHeight)).toBeLessThanOrEqual(
-      1568,
-    );
-    expect(
-      Math.ceil(view!.outputWidth / 28) * Math.ceil(view!.outputHeight / 28),
-    ).toBeLessThanOrEqual(1568);
+    expectWithinBudget(view!);
     expect(view!.bytes.length).toBeLessThan(bytes.length);
   });
 
   it('bounds a buffer with the geometry read_file applies', async () => {
-    const bytes = await sharp({
-      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
-    })
-      .png()
-      .toBuffer();
+    const bytes = await solid(3840, 2160, '#804020').png().toBuffer();
     const filePath = path.join(root, 'overview.png');
     await fs.writeFile(filePath, bytes);
 
@@ -169,11 +133,7 @@ describe('image views', () => {
   });
 
   it('reports unsupported_image for a format the renderer cannot bound', async () => {
-    const bytes = await sharp({
-      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
-    })
-      .gif()
-      .toBuffer();
+    const bytes = await solid(3840, 2160, '#804020').gif().toBuffer();
 
     await expect(
       boundImageBuffer(bytes, 'image/gif', signal),
@@ -249,14 +209,7 @@ describe('image views with EXIF orientation', () => {
   // image to 60x100. The view must be sized and cropped in oriented space.
   async function writeRotatedJpeg(name: string): Promise<string> {
     const filePath = path.join(root, name);
-    await sharp({
-      create: {
-        width: 100,
-        height: 60,
-        channels: 3,
-        background: '#306090',
-      },
-    })
+    await solid(100, 60, '#306090')
       .jpeg()
       .withMetadata({ orientation: 6 })
       .toFile(filePath);

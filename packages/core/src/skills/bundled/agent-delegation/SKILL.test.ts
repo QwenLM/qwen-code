@@ -36,14 +36,13 @@ function skillProse(): string {
 
 /**
  * The frontmatter `description` and `when_to_use` are per-request surfaces
- * as well, and separate ones from the body: the session-start prelude renders
- * bundled entries verbatim into the `<available_skills>` block
- * (`environmentContext.ts` keeps them whole while trimming towards
- * `MAX_SKILL_LISTING_CHARS`), and `renderAvailableSkillsBlock` appends
- * `when_to_use` inside `<description>`. So a kept rule widened into either
- * field — the natural lever, since it is what lets the model recall the
- * skill — would be charged on every request, and the body-only negative half
- * below would never see it.
+ * separate from the body: the session-start prelude renders bundled entries
+ * verbatim into `<available_skills>` (`environmentContext.ts` keeps them whole
+ * while trimming towards `MAX_SKILL_LISTING_CHARS`), and
+ * `renderAvailableSkillsBlock` appends `when_to_use` inside `<description>`.
+ * A rule widened into either field — the natural lever, since it is what lets
+ * the model recall the skill — is charged on every request, and the body-only
+ * `skillProse()` checks would never see it.
  */
 function skillFrontmatter(): string {
   const skill = loadSkill();
@@ -52,18 +51,15 @@ function skillFrontmatter(): string {
 }
 
 /**
- * The Agent tool's description in a session that can load skills — the shape
- * almost every session sends, and the one the moved guidance must be gone
- * from. `skills: false` models a session with no route to any skill, where the
- * reference travels inside the description instead. `skillDeferred: true`
- * models a `tools.eager` allowlist withholding the Skill tool, reachable only
- * through the tool_search + tool_call bridge. `bundledDisabled: true`
- * models a user who turned off the whole bundled level, and
- * `skillDisabledByName: true` one who named this reference in
- * `skills.disabled`; in either the description carries neither.
- * `toolMode: ToolMode.CodeModeOnly` models a session where both bridge tools
- * are hidden, so a deferred Skill tool is reached through the `exec` binding
- * instead.
+ * The Agent tool's description; by default for a session that can load skills,
+ * the shape almost every session sends and the one the moved guidance must be
+ * gone from. `skills: false`: no route to any skill, so the reference travels
+ * inside the description. `skillDeferred`: a `tools.eager` allowlist withholds
+ * the Skill tool, reachable only through the tool_search + tool_call bridge.
+ * `bundledDisabled` / `skillDisabledByName`: the user turned off the bundled
+ * level / named this reference in `skills.disabled`; the description then
+ * carries neither. `toolMode: ToolMode.CodeModeOnly`: both bridge tools are
+ * hidden, so a deferred Skill tool is reached through the `exec` binding.
  */
 async function agentDescription({
   skills = true,
@@ -77,10 +73,9 @@ async function agentDescription({
   skillDisabledByName?: boolean;
   skillDeferred?: boolean;
   /**
-   * Always declared on the stub rather than left absent: an omitted
-   * `getToolMode` yields `undefined`, which the route resolver treats exactly
-   * like `Direct`, so a stub without the method cannot tell the two apart and
-   * the CodeModeOnly guard would be untested on this path.
+   * Always declared on the stub: an omitted `getToolMode` yields `undefined`,
+   * which the route resolver treats exactly like `Direct`, so the CodeModeOnly
+   * guard would be untested on this path.
    */
   toolMode?: ToolMode;
 } = {}): Promise<string> {
@@ -100,12 +95,11 @@ async function agentDescription({
     ...(bundledDisabled
       ? { getDisabledSkillLevels: () => new Set(['bundled']) }
       : {}),
-    // The other opt-out lever, `skills.disabled` naming this reference. It
-    // decides on the name it is handed, as the real `Config.isSkillEnabled`
-    // does, and the disabled name is spelled out as the literal a user writes
-    // in `settings.json` rather than read from the exported constant — so a
-    // drift in the name the production code probes turns the by-name case red
-    // instead of quietly leaving the reference in every request.
+    // The other opt-out lever, `skills.disabled` naming this reference. Like
+    // the real `Config.isSkillEnabled` it decides on the name it is handed,
+    // spelled as the literal a user writes in `settings.json` rather than the
+    // exported constant, so a drift in the name production probes turns the
+    // by-name case red instead of quietly leaving the reference in.
     ...(skillDisabledByName
       ? {
           isSkillEnabled: (skill: { name: string; level?: string }) =>
@@ -136,26 +130,47 @@ async function agentDescription({
   return collapse(tool.description);
 }
 
+const POINTER = `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`;
+
+/**
+ * An opt-out must remove the text, not move it: no pointer, no inline preamble
+ * or body, and no `## Writing the prompt` heading left over nothing. What must
+ * survive is asserted too: a resident block gated on the delegation surface
+ * would vanish for a user who opted out while every negative check stayed
+ * green.
+ */
+async function expectOptedOut(
+  options: Parameters<typeof agentDescription>[0],
+): Promise<void> {
+  const description = await agentDescription(options);
+
+  expect(description).not.toContain(POINTER);
+  expect(description).not.toContain('Skills cannot be loaded in this session');
+  expect(description).not.toContain('Never delegate understanding');
+  expect(description).not.toContain('## Writing the prompt');
+  expect(description).toContain("Don't race");
+  expect(description).toContain('## When to fork');
+}
+
 describe('bundled agent-delegation skill', () => {
   it('is the delegation-prompt reference, and says what it does not carry', () => {
     const skill = loadSkill();
 
     expect(skill.name).toBe(AGENT_DELEGATION_SKILL_NAME);
     expect(skill.description).toContain('Load before writing a delegation');
-    // The reference is loadable on the model's own initiative, so it has to
-    // say where the rules it does not repeat live. A model that read only
-    // this must not conclude it has the whole contract.
+    // Loadable on the model's own initiative, so it must say where the rules
+    // it does not repeat live: a model that read only this must not conclude
+    // it has the whole contract.
     expect(skill.description).toContain("the Agent tool's own description");
     expect(skillProse()).toContain(
       "stay in the Agent tool's description — this reference does not repeat them",
     );
   });
 
-  // Guidance that left the tool description for this skill. Each anchor is
-  // asserted in BOTH directions, in one table: present in the skill, and
-  // absent from the description a session that can load skills sends. Either
-  // half alone would let the guidance vanish, or be pasted back, with every
-  // test green.
+  // Guidance that left the tool description for this skill, asserted in BOTH
+  // directions: present in the skill, absent from the description a session
+  // that can load skills sends. Either half alone would let the guidance
+  // vanish, or be pasted back, with every test green.
   describe.each([
     ['Brief the agent like a smart colleague'],
     ["Explain what you're trying to accomplish and why"],
@@ -184,28 +199,23 @@ describe('bundled agent-delegation skill', () => {
       expect(await agentDescription()).not.toContain(anchor);
     });
     // The move only saves what the listing does not charge again: a bundled
-    // entry is kept whole by `trimSkillEntriesTowardsBudget`, so a moved rule
-    // widened into the frontmatter would be paid for on every request with
-    // the skill never loaded, and `skillProse()` above — body-only — would
-    // not see it.
+    // entry is kept whole by `trimSkillEntriesTowardsBudget` (see
+    // skillFrontmatter), and the body-only `skillProse()` would not see it.
     it('is not in the skill frontmatter either', () => {
       expect(skillFrontmatter()).not.toContain(anchor);
     });
   });
 
   /**
-   * The other half of the split, asserted the same way round: what a model
-   * must have without loading anything. These decide whether to delegate at
-   * all, shape the call itself, or keep a background agent safe — a session
-   * that never loads the skill still has to get them right, so they stay in
-   * the description and stay out of the reference, in its body and in the
-   * frontmatter that the session-start listing charges for on every request.
+   * The other half of the split: what a model must have without loading
+   * anything. These decide whether to delegate at all, shape the call, or keep
+   * a background agent safe, so they stay in the description and out of the
+   * reference — its body and the frontmatter charged on every request.
    */
   describe.each([
-    // The block that decides against delegating, and the first item §2 of the
-    // design doc lists as deliberately kept. A general compression pass is the
-    // live pressure — one was reverted under review in #12142 — and nothing
-    // else in the repo asserts this text.
+    // Decides against delegating; the first item §2 of the design doc keeps.
+    // General compression passes are the live pressure (one was reverted under
+    // review in #12142), and nothing else in the repo asserts this text.
     ['When NOT to use the Agent tool'],
     ["Don't peek"],
     ["Don't race"],
@@ -223,10 +233,9 @@ describe('bundled agent-delegation skill', () => {
     it('is not in the skill', () => {
       expect(skillProse()).not.toContain(anchor);
     });
-    // Not folded into `skillProse()` above: widening that helper would let the
-    // moved-out table's positive half match frontmatter text too, and a rule
-    // duplicated into the listing is charged every turn whether or not the
-    // skill is ever loaded.
+    // Not folded into `skillProse()`: that would let the moved-out table's
+    // positive half match frontmatter text, and a rule duplicated into the
+    // listing is charged every turn whether or not the skill is loaded.
     it('is not in the skill frontmatter either', () => {
       expect(skillFrontmatter()).not.toContain(anchor);
     });
@@ -235,52 +244,43 @@ describe('bundled agent-delegation skill', () => {
   it('is named by the description that replaced it', async () => {
     const description = await agentDescription();
 
-    expect(description).toContain(
-      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-    );
+    expect(description).toContain(POINTER);
     // The pointer has to say what is in there, or the model cannot tell
     // whether this turn needs it.
     expect(description).toContain('what to put in the prompt');
-    // The heading the moved section used to own. `agent.test.ts` asserted it
-    // before the split and no other test carries it, so without this assertion
-    // the pointer could lose the heading that separates it from the fork
-    // guidance above it and every test would stay green.
+    // The moved section's heading, which separates the pointer from the fork
+    // guidance above it; `agent.test.ts` asserted it before the split and no
+    // other test does now.
     expect(description).toContain('## Writing the prompt');
   });
 
   /**
-   * A `tools.eager` allowlist that withholds the Skill tool leaves it
-   * registered behind the tool_search + tool_call bridge, and the pointer has
-   * to say so — otherwise the model tries the Skill tool by name and gets
-   * EXECUTION_DENIED. The Workflow side pins the same sentence in
-   * workflow-description.test.ts. Mutation check: returning POINTER for the
-   * 'pointer-via-tool-search' surface, or passing the bare tool name instead
-   * of ToolDisplayNames.SKILL, turns this red.
+   * A `tools.eager` allowlist withholding the Skill tool leaves it behind the
+   * tool_search + tool_call bridge, and the pointer must say so, or the model
+   * calls the Skill tool by name and gets EXECUTION_DENIED. The Workflow side
+   * pins the same sentence in workflow-description.test.ts. Mutation check:
+   * returning POINTER for the 'pointer-via-tool-search' surface, or the bare
+   * tool name instead of ToolDisplayNames.SKILL, turns this red.
    */
   it('names the tool_search + tool_call bridge when the Skill tool is deferred', async () => {
     const description = await agentDescription({ skillDeferred: true });
 
-    expect(description).toContain(
-      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-    );
+    expect(description).toContain(POINTER);
     expect(description).toContain(
       toolSearchBridgeSentence(ToolDisplayNames.SKILL),
     );
   });
 
   /**
-   * The same deferral under `ToolMode.CodeModeOnly`, where both bridge tools
-   * are hidden (`code-mode.ts` `HIDDEN_TOOLS`) and the deferred Skill tool is
-   * reached through the `exec` binding. The guard that keeps the bridge
-   * sentence out of the route exists for this tool above all: `AgentTool`
-   * freezes its surface in the constructor, so a dead instruction here is
-   * wrong for every remaining turn of the session, while the Workflow
-   * description re-asks per turn. `workflow-authoring-skill.test.ts` pins the
-   * guard on the Workflow route; this pins it on the Agent route.
-   * Mutation check: dropping
+   * The same deferral under `ToolMode.CodeModeOnly`: both bridge tools are
+   * hidden (`code-mode.ts` `HIDDEN_TOOLS`) and the Skill tool is reached via
+   * the `exec` binding. The guard keeping the bridge sentence out matters most
+   * here: `AgentTool` freezes its surface in the constructor, so a dead
+   * instruction is wrong for the rest of the session, while the Workflow
+   * description re-asks per turn (`workflow-authoring-skill.test.ts` pins the
+   * guard there). Mutation check: dropping
    * `config.getToolMode?.() !== ToolMode.CodeModeOnly &&` from
-   * `resolveBundledReferenceRoute` turns this red, exactly as it turns the
-   * Workflow row red.
+   * `resolveBundledReferenceRoute` turns this red, as it does the Workflow row.
    */
   it('points straight at the skill when CodeModeOnly hides the bridge', async () => {
     const description = await agentDescription({
@@ -288,20 +288,17 @@ describe('bundled agent-delegation skill', () => {
       toolMode: ToolMode.CodeModeOnly,
     });
 
-    expect(description).toContain(
-      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-    );
+    expect(description).toContain(POINTER);
     expect(description).not.toContain(
       toolSearchBridgeSentence(ToolDisplayNames.SKILL),
     );
   });
 
   /**
-   * A dispatch must not try to override the subagent it names. #12142's review
-   * threads carry a real one that asked a read-only, single-file subagent to
-   * search the whole repository. The rule sits in this reference rather than in
-   * the description because it is prompt-writing craft: a session that never
-   * loads it still cannot widen a subagent's tools, it only wastes the call.
+   * A dispatch must not try to override the subagent it names (#12142's review
+   * threads carry one asking a read-only, single-file subagent to search the
+   * whole repository). It is prompt-writing craft, so it sits here: a session
+   * that never loads it cannot widen a subagent's tools, only waste the call.
    */
   it("says a custom subagent's definition outranks the prompt", async () => {
     const anchor = "custom subagent's own definition outranks";
@@ -312,109 +309,62 @@ describe('bundled agent-delegation skill', () => {
 
   /**
    * A session with no route to any skill gets the reference itself: a pointer
-   * there would send the model at something it cannot load. The body is
-   * asserted through one moved anchor, so this fails if the inline shape ever
-   * silently drops to a pointer.
+   * would send the model at something it cannot load. One moved anchor checks
+   * the body, so this fails if the inline shape silently drops to a pointer.
    */
   it('travels in the description when no skill can be loaded', async () => {
     const description = await agentDescription({ skills: false });
 
     expect(description).toContain('Skills cannot be loaded in this session');
-    // The clause that reconciles this preamble with the same request's
-    // <available_skills> prelude, which lists this skill by name: without it
-    // the description denies a skill the listing just offered, and the model
-    // spends a call finding out. Dropping it from INLINE_NOTE turns this red.
+    // Reconciles this preamble with the same request's <available_skills>
+    // prelude, which lists this skill by name: without it the description
+    // denies a skill the listing just offered, and the model spends a call
+    // finding out. Dropping it from INLINE_NOTE turns this red.
     expect(description).toContain('even one named in a skill listing');
     expect(description).toContain('Never delegate understanding');
-    expect(description).not.toContain(
-      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-    );
+    expect(description).not.toContain(POINTER);
   });
 
   /**
-   * The user opt-out is the one route that must not be satisfied by inlining
-   * instead: `skills.disabled` naming this reference, or the whole `bundled`
-   * level turned off, has to remove the text rather than move it to a seat
-   * that costs more per turn. Asserted with the Skill tool both present and
-   * absent, because the opt-out outranks the lack of a route — that ordering
-   * is the invariant, not an implementation detail of `bundled-reference.ts`.
-   *
-   * The heading check is what keeps the shape clean: with the section empty,
-   * the description must not be left carrying `## Writing the prompt` over
-   * nothing, nor the inline preamble.
+   * The user opt-out is the one route that must not be satisfied by inlining:
+   * `skills.disabled` naming this reference, or the whole `bundled` level
+   * turned off, has to remove the text rather than move it to a seat that
+   * costs more per turn. Asserted with the Skill tool both present and absent,
+   * because the opt-out outranks the lack of a route — that ordering is the
+   * invariant, not an implementation detail of `bundled-reference.ts`.
    */
   it.each([
     ['a Skill tool is registered', true],
     ['no route to any skill exists', false],
-  ])(
-    'carries nothing when the user turned it off and %s',
-    async (_, skills) => {
-      const description = await agentDescription({
-        skills,
-        bundledDisabled: true,
-      });
-
-      expect(description).not.toContain(
-        `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-      );
-      expect(description).not.toContain(
-        'Skills cannot be loaded in this session',
-      );
-      expect(description).not.toContain('Never delegate understanding');
-      expect(description).not.toContain('## Writing the prompt');
-      // What must survive the opt-out, not only what it removes: a resident
-      // block gated on the delegation surface would vanish for a user who
-      // opted out while every negative assertion above stayed green.
-      expect(description).toContain("Don't race");
-      expect(description).toContain('## When to fork');
-    },
+  ])('carries nothing when the user turned it off and %s', (_, skills) =>
+    expectOptedOut({ skills, bundledDisabled: true }),
   );
 
   /**
-   * The other opt-out lever. Turning off the whole `bundled` level reaches
-   * `getDisabledSkillLevels`; naming this reference in `skills.disabled`
-   * reaches `isSkillEnabled`, which is a separate branch of
-   * `resolveBundledReferenceRoute` and the one a user is far likelier to set.
-   * Without this row the by-name branch had no coverage here at all, and a
-   * drift in the name the production code probes would leave the reference in
-   * every request while the user's opt-out silently stopped working. Mirrors
-   * the by-name rows in `workflow-authoring-skill.test.ts`.
+   * The other opt-out lever, and the one a user is far likelier to set:
+   * naming this reference in `skills.disabled` reaches `isSkillEnabled`, a
+   * separate branch of `resolveBundledReferenceRoute` from the bundled level's
+   * `getDisabledSkillLevels`. Without these rows the by-name branch had no
+   * coverage here, positive or negative, and a drift in the name production
+   * probes would leave the reference in every request while the opt-out
+   * silently stopped working. Mirrors the by-name rows in
+   * `workflow-authoring-skill.test.ts`.
    */
   it.each([
     ['a Skill tool is registered', true],
     ['no route to any skill exists', false],
-  ])('carries nothing when disabled by name and %s', async (_, skills) => {
-    const description = await agentDescription({
-      skills,
-      skillDisabledByName: true,
-    });
-
-    expect(description).not.toContain(
-      `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
-    );
-    expect(description).not.toContain(
-      'Skills cannot be loaded in this session',
-    );
-    expect(description).not.toContain('Never delegate understanding');
-    expect(description).not.toContain('## Writing the prompt');
-    // The surviving-anchor half as well. This is the lever a user is likelier
-    // to set, and it carried no positive assertion at all.
-    expect(description).toContain("Don't race");
-    expect(description).toContain('## When to fork');
-  });
+  ])('carries nothing when disabled by name and %s', (_, skills) =>
+    expectOptedOut({ skills, skillDisabledByName: true }),
+  );
 
   /**
-   * One sentence left the description without arriving here, and this pins it
-   * as a deliberate dedup rather than a loss. Base `agent.ts` also carried
-   * "After launching an agent, do not fabricate or predict what it found
-   * before it returns…"; the resident **Don't race** bullet already states the
-   * same rule more strongly and stays in every shape, so keeping both would
-   * have charged every request for the same instruction twice.
-   *
-   * Asserted in every shape, one per route and per opt-out lever, because the
-   * surviving rule is the one that has to hold in each: were it ever gated
-   * behind the reference, a session that never loads the skill would lose the
-   * rule entirely.
+   * One sentence left the description without arriving here, pinned as a
+   * deliberate dedup rather than a loss: base `agent.ts` also carried "After
+   * launching an agent, do not fabricate or predict what it found before it
+   * returns…", which the resident **Don't race** bullet states more strongly
+   * in every shape, so keeping both charged every request twice. Asserted per
+   * route and per opt-out lever: were the surviving rule ever gated behind the
+   * reference, a session that never loads the skill would lose it entirely.
    */
   it("keeps Don't race and drops the sentence it already covers", async () => {
     const dropped = 'do not fabricate or predict what it found';

@@ -19,16 +19,15 @@ describe('TextTokenizer', () => {
     tokenizer = new TextTokenizer();
   });
 
+  const count = (text: string) => tokenizer.calculateTokens(text);
+  const batch = (texts: string[]) => tokenizer.calculateTokensBatch(texts);
+
   describe('constructor', () => {
+    // Exact duplicate 'should create tokenizer with custom encoding (for
+    // backward compatibility)' removed; the encoding name is accepted but unused.
     it('should create tokenizer with default encoding', () => {
       tokenizer = new TextTokenizer();
       expect(tokenizer).toBeInstanceOf(TextTokenizer);
-    });
-
-    it('should create tokenizer with custom encoding (for backward compatibility)', () => {
-      tokenizer = new TextTokenizer();
-      expect(tokenizer).toBeInstanceOf(TextTokenizer);
-      // Note: encoding name is accepted but not used
     });
   });
 
@@ -43,136 +42,75 @@ describe('TextTokenizer', () => {
       }
     });
 
-    it('should return 0 for empty text', async () => {
-      const result = await tokenizer.calculateTokens('');
-      expect(result).toBe(0);
-    });
-
     it('should return 0 for null/undefined text', async () => {
-      const result1 = await tokenizer.calculateTokens(
-        null as unknown as string,
-      );
-      const result2 = await tokenizer.calculateTokens(
-        undefined as unknown as string,
-      );
-      expect(result1).toBe(0);
-      expect(result2).toBe(0);
+      expect(await count(null as unknown as string)).toBe(0);
+      expect(await count(undefined as unknown as string)).toBe(0);
     });
 
-    it('should calculate tokens using character-based estimation for ASCII text', async () => {
-      const testText = 'Hello, world!'; // 13 ASCII chars
-      const result = await tokenizer.calculateTokens(testText);
-      // 13 / 4 = 3.25 -> ceil = 4
-      expect(result).toBe(4);
-    });
-
-    it('should calculate tokens for code (ASCII)', async () => {
-      const code = 'function test() { return 42; }'; // 30 ASCII chars
-      const result = await tokenizer.calculateTokens(code);
-      // 30 / 4 = 7.5 -> ceil = 8
-      expect(result).toBe(8);
-    });
-
-    it('should calculate tokens for non-ASCII text (CJK)', async () => {
-      const unicodeText = '你好世界'; // 4 non-ASCII chars
-      const result = await tokenizer.calculateTokens(unicodeText);
-      // 4 * 1.1 = 4.4 -> ceil = 5
-      expect(result).toBe(5);
-    });
-
-    it('should calculate tokens for mixed ASCII and non-ASCII text', async () => {
-      const mixedText = 'Hello 世界'; // 6 ASCII + 2 non-ASCII
-      const result = await tokenizer.calculateTokens(mixedText);
-      // (6 / 4) + (2 * 1.1) = 1.5 + 2.2 = 3.7 -> ceil = 4
-      expect(result).toBe(4);
-    });
-
-    it('should calculate tokens for emoji', async () => {
-      const emojiText = '🌍'; // 2 UTF-16 code units (non-ASCII)
-      const result = await tokenizer.calculateTokens(emojiText);
-      // 2 * 1.1 = 2.2 -> ceil = 3
-      expect(result).toBe(3);
-    });
-
-    it('should handle very long text', async () => {
-      const longText = 'a'.repeat(10000); // 10000 ASCII chars
-      const result = await tokenizer.calculateTokens(longText);
-      // 10000 / 4 = 2500 -> ceil = 2500
-      expect(result).toBe(2500);
-    });
-
-    it('should handle text with only whitespace', async () => {
-      const whitespaceText = '   \n\t  '; // 7 ASCII chars
-      const result = await tokenizer.calculateTokens(whitespaceText);
-      // 7 / 4 = 1.75 -> ceil = 2
-      expect(result).toBe(2);
-    });
-
-    it('should handle special characters and symbols', async () => {
-      const specialText = '!@#$%^&*()_+-=[]{}|;:,.<>?'; // 26 ASCII chars
-      const result = await tokenizer.calculateTokens(specialText);
-      // 26 / 4 = 6.5 -> ceil = 7
-      expect(result).toBe(7);
-    });
-
-    it('should handle very short text', async () => {
-      const result = await tokenizer.calculateTokens('a');
-      // 1 / 4 = 0.25 -> ceil = 1
-      expect(result).toBe(1);
+    // Expected = ceil(ASCII chars / 4 + non-ASCII UTF-16 units * 1.1).
+    it.each<[string, string, number]>([
+      ['should return 0 for empty text', '', 0],
+      [
+        'should calculate tokens using character-based estimation for ASCII text',
+        'Hello, world!', // 13 ASCII: 3.25 -> 4
+        4,
+      ],
+      [
+        'should calculate tokens for code (ASCII)',
+        'function test() { return 42; }', // 30 ASCII: 7.5 -> 8
+        8,
+      ],
+      ['should calculate tokens for non-ASCII text (CJK)', '你好世界', 5], // 4.4
+      [
+        'should calculate tokens for mixed ASCII and non-ASCII text',
+        'Hello 世界', // 6 ASCII + 2 non-ASCII: 1.5 + 2.2 = 3.7 -> 4
+        4,
+      ],
+      ['should calculate tokens for emoji', '🌍', 3], // 2 UTF-16 units: 2.2
+      ['should handle very long text', 'a'.repeat(10000), 2500],
+      ['should handle text with only whitespace', '   \n\t  ', 2], // 7: 1.75
+      [
+        'should handle special characters and symbols',
+        '!@#$%^&*()_+-=[]{}|;:,.<>?', // 26 ASCII: 6.5 -> 7
+        7,
+      ],
+      ['should handle very short text', 'a', 1],
+    ])('%s', async (_title, text, expected) => {
+      expect(await count(text)).toBe(expected);
     });
   });
 
   describe('calculateTokensBatch', () => {
     it('should process multiple texts and return token counts', async () => {
-      const texts = ['Hello', 'world', 'test'];
-      const result = await tokenizer.calculateTokensBatch(texts);
-      // 'Hello' = 5 / 4 = 1.25 -> ceil = 2
-      // 'world' = 5 / 4 = 1.25 -> ceil = 2
-      // 'test' = 4 / 4 = 1 -> ceil = 1
-      expect(result).toEqual([2, 2, 1]);
+      // 'Hello', 'world' = 5 / 4 -> 2; 'test' = 4 / 4 -> 1
+      expect(await batch(['Hello', 'world', 'test'])).toEqual([2, 2, 1]);
     });
 
     it('should handle empty array', async () => {
-      const result = await tokenizer.calculateTokensBatch([]);
-      expect(result).toEqual([]);
+      expect(await batch([])).toEqual([]);
     });
 
     it('should handle array with empty strings', async () => {
-      const texts = ['', 'hello', ''];
-      const result = await tokenizer.calculateTokensBatch(texts);
-      // '' = 0
-      // 'hello' = 5 / 4 = 1.25 -> ceil = 2
-      // '' = 0
-      expect(result).toEqual([0, 2, 0]);
+      expect(await batch(['', 'hello', ''])).toEqual([0, 2, 0]);
     });
 
     it('should handle mixed ASCII and non-ASCII texts', async () => {
-      const texts = ['Hello', '世界', 'Hello 世界'];
-      const result = await tokenizer.calculateTokensBatch(texts);
-      // 'Hello' = 5 / 4 = 1.25 -> ceil = 2
-      // '世界' = 2 * 1.1 = 2.2 -> ceil = 3
-      // 'Hello 世界' = (6/4) + (2*1.1) = 1.5 + 2.2 = 3.7 -> ceil = 4
-      expect(result).toEqual([2, 3, 4]);
+      // '世界' = 2 * 1.1 = 2.2 -> 3; 'Hello 世界' = 1.5 + 2.2 = 3.7 -> 4
+      expect(await batch(['Hello', '世界', 'Hello 世界'])).toEqual([2, 3, 4]);
     });
 
     it('should handle null and undefined values in batch', async () => {
       const texts = [null, 'hello', undefined, 'world'] as unknown as string[];
-      const result = await tokenizer.calculateTokensBatch(texts);
-      // null = 0
-      // 'hello' = 5 / 4 = 1.25 -> ceil = 2
-      // undefined = 0
-      // 'world' = 5 / 4 = 1.25 -> ceil = 2
-      expect(result).toEqual([0, 2, 0, 2]);
+      expect(await batch(texts)).toEqual([0, 2, 0, 2]);
     });
 
     it('should process large batches efficiently', async () => {
       const texts = Array.from({ length: 1000 }, (_, i) => `text${i}`);
       const result = await tokenizer.calculateTokensBatch(texts);
       expect(result).toHaveLength(1000);
-      // Verify results are reasonable
-      result.forEach((count) => {
-        expect(count).toBeGreaterThan(0);
-        expect(count).toBeLessThan(10); // 'textNNN' should be less than 10 tokens
+      result.forEach((n) => {
+        expect(n).toBeGreaterThan(0);
+        expect(n).toBeLessThan(10); // 'textNNN' should be less than 10 tokens
       });
     });
   });
@@ -218,62 +156,24 @@ describe('TextTokenizer', () => {
   });
 
   describe('edge cases', () => {
-    it('should handle text with only newlines', async () => {
-      const text = '\n\n\n'; // 3 ASCII chars
-      const result = await tokenizer.calculateTokens(text);
-      // 3 / 4 = 0.75 -> ceil = 1
-      expect(result).toBe(1);
-    });
-
-    it('should handle text with tabs', async () => {
-      const text = '\t\t\t\t'; // 4 ASCII chars
-      const result = await tokenizer.calculateTokens(text);
-      // 4 / 4 = 1 -> ceil = 1
-      expect(result).toBe(1);
-    });
-
-    it('should handle surrogate pairs correctly', async () => {
-      // Character outside BMP (Basic Multilingual Plane)
-      const text = '𝕳𝖊𝖑𝖑𝖔'; // Mathematical bold letters (2 UTF-16 units each)
-      const result = await tokenizer.calculateTokens(text);
-      // Each character is 2 UTF-16 units, all non-ASCII
-      // Total: 10 non-ASCII units
-      // 10 * 1.1 = 11 -> ceil = 11
-      expect(result).toBe(11);
-    });
-
-    it('should handle combining characters', async () => {
-      // e + combining acute accent
-      const text = 'e\u0301'; // 2 chars: 'e' (ASCII) + combining acute (non-ASCII)
-      const result = await tokenizer.calculateTokens(text);
-      // ASCII: 1 / 4 = 0.25
-      // Non-ASCII: 1 * 1.1 = 1.1
-      // Total: 0.25 + 1.1 = 1.35 -> ceil = 2
-      expect(result).toBe(2);
-    });
-
-    it('should handle accented characters', async () => {
-      const text = 'café'; // 'caf' = 3 ASCII, 'é' = 1 non-ASCII
-      const result = await tokenizer.calculateTokens(text);
-      // ASCII: 3 / 4 = 0.75
-      // Non-ASCII: 1 * 1.1 = 1.1
-      // Total: 0.75 + 1.1 = 1.85 -> ceil = 2
-      expect(result).toBe(2);
+    it.each<[string, string, number]>([
+      ['should handle text with only newlines', '\n\n\n', 1], // 3 ASCII: 0.75
+      ['should handle text with tabs', '\t\t\t\t', 1], // 4 ASCII: 1
+      // Mathematical bold letters outside the BMP: 10 non-ASCII units -> 11
+      ['should handle surrogate pairs correctly', '𝕳𝖊𝖑𝖑𝖔', 11],
+      // 'e' + combining acute (non-ASCII): 0.25 + 1.1 = 1.35 -> 2
+      ['should handle combining characters', 'e\u0301', 2],
+      // 'caf' ASCII + 'é' non-ASCII: 0.75 + 1.1 = 1.85 -> 2
+      ['should handle accented characters', 'café', 2],
+    ])('%s', async (_title, text, expected) => {
+      expect(await count(text)).toBe(expected);
     });
 
     it('should handle various unicode scripts', async () => {
-      const cyrillic = 'Привет'; // 6 non-ASCII chars
-      const arabic = 'مرحبا'; // 5 non-ASCII chars
-      const japanese = 'こんにちは'; // 5 non-ASCII chars
-
-      const result1 = await tokenizer.calculateTokens(cyrillic);
-      const result2 = await tokenizer.calculateTokens(arabic);
-      const result3 = await tokenizer.calculateTokens(japanese);
-
       // All should use 1.1 tokens per char
-      expect(result1).toBe(7); // 6 * 1.1 = 6.6 -> ceil = 7
-      expect(result2).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
-      expect(result3).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
+      expect(await count('Привет')).toBe(7); // 6 * 1.1 = 6.6 -> ceil = 7
+      expect(await count('مرحبا')).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
+      expect(await count('こんにちは')).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
     });
   });
 
@@ -310,9 +210,7 @@ describe('TextTokenizer', () => {
 
   describe('large inputs', () => {
     it('should handle very long text', async () => {
-      const longText = 'a'.repeat(200000); // 200k characters
-      const result = await tokenizer.calculateTokens(longText);
-      expect(result).toBe(50000); // 200000 / 4
+      expect(await count('a'.repeat(200000))).toBe(50000); // 200000 / 4
     });
 
     it('should handle large batches', async () => {

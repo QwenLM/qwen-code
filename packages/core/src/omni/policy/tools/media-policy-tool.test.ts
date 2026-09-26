@@ -38,6 +38,12 @@ describe('formatBytesShort', () => {
 });
 
 describe('resolvePolicyToolTimeoutMs', () => {
+  const settingsWith = (entry: unknown) => ({
+    getOmniPolicyToolsSettings: () => ({
+      omni_downscale_video: entry as never,
+    }),
+  });
+
   it('defaults to 600s when unset', () => {
     expect(resolvePolicyToolTimeoutMs({}, 'omni_downscale_video')).toBe(
       DEFAULT_POLICY_TOOL_TIMEOUT_MS,
@@ -46,11 +52,7 @@ describe('resolvePolicyToolTimeoutMs', () => {
   });
 
   it('reads policyTools.<tool>.runtime.timeoutMs', () => {
-    const config = {
-      getOmniPolicyToolsSettings: () => ({
-        omni_downscale_video: { runtime: { timeoutMs: 120_000 } },
-      }),
-    };
+    const config = settingsWith({ runtime: { timeoutMs: 120_000 } });
     expect(resolvePolicyToolTimeoutMs(config, 'omni_downscale_video')).toBe(
       120_000,
     );
@@ -63,11 +65,7 @@ describe('resolvePolicyToolTimeoutMs', () => {
     ['non-positive timeout', { runtime: { timeoutMs: 0 } }],
     ['non-finite timeout', { runtime: { timeoutMs: Infinity } }],
   ])('falls back to the default on %s', (_label, entry) => {
-    const config = {
-      getOmniPolicyToolsSettings: () => ({
-        omni_downscale_video: entry as never,
-      }),
-    };
+    const config = settingsWith(entry);
     expect(resolvePolicyToolTimeoutMs(config, 'omni_downscale_video')).toBe(
       DEFAULT_POLICY_TOOL_TIMEOUT_MS,
     );
@@ -124,9 +122,9 @@ describe('validateMediaPolicyIoParams', () => {
   });
 
   it('asks for inputPath or resourceId when neither was supplied', () => {
-    // Schema-level `required` deliberately omits inputPath (the gated
-    // model surface passes resourceId, resolved before validation) — so
-    // the neither-provided case must fail HERE with an actionable hint.
+    // Schema-level `required` omits inputPath on purpose (the gated model
+    // surface passes resourceId, resolved before validation), so the
+    // neither-provided case must fail HERE with an actionable hint.
     expect(
       validateMediaPolicyIoParams({
         outputDir: '/b/staging',
@@ -137,18 +135,15 @@ describe('validateMediaPolicyIoParams', () => {
 
 describe('policyOutputFileName', () => {
   it('keeps two spans of one source from colliding', () => {
-    const a = policyOutputFileName({
-      inputPath: '/films/robot-dreams.mkv',
-      operation: 'clip',
-      variant: '90s+75s',
-      extension: '.mp4',
-    });
-    const b = policyOutputFileName({
-      inputPath: '/films/robot-dreams.mkv',
-      operation: 'clip',
-      variant: '2458s+75s',
-      extension: '.mp4',
-    });
+    const clip = (variant: string) =>
+      policyOutputFileName({
+        inputPath: '/films/robot-dreams.mkv',
+        operation: 'clip',
+        variant,
+        extension: '.mp4',
+      });
+    const a = clip('90s+75s');
+    const b = clip('2458s+75s');
     expect(a).toBe('robot-dreams-clip-90s+75s.mp4');
     expect(b).toBe('robot-dreams-clip-2458s+75s.mp4');
     expect(a).not.toBe(b);
@@ -250,9 +245,8 @@ describe('assertMediaPolicyIo', () => {
     await expect(assertMediaPolicyIo({ inputPath, outputDir })).rejects.toThrow(
       /output directory not found/,
     );
-    // The schema tells the model the directory must already exist and is
-    // not created automatically; enforce that contract — the rejection must
-    // leave nothing behind.
+    // The schema says the directory must already exist and is not created
+    // automatically; enforce it: the rejection must leave nothing behind.
     await expect(fs.access(outputDir)).rejects.toThrow();
   });
 
@@ -271,10 +265,9 @@ describe('assertMediaPolicyIo', () => {
 
 describe('MEDIA_POLICY_IO_SCHEMA_PROPERTIES', () => {
   it('documents that outputDir must already exist and is not auto-created', () => {
-    // Model-facing schema text: the tool rejects (never creates) a
-    // nonexistent outputDir (see assertMediaPolicyIo). Pin the wording so a
-    // future edit cannot silently tell the model a different contract than
-    // the tool honors.
+    // Model-facing text: the tool rejects (never creates) a nonexistent
+    // outputDir (assertMediaPolicyIo). Pin the wording so an edit cannot
+    // silently tell the model a different contract than the tool honors.
     const description = MEDIA_POLICY_IO_SCHEMA_PROPERTIES.outputDir.description;
     expect(description).toMatch(/existing directory/);
     expect(description).toMatch(/not created automatically/);
@@ -297,6 +290,21 @@ describe('BaseMediaPolicyTool validation', () => {
     }
   }
 
+  /** A fresh copy each call, so the schema test compares against an object
+   * the tool never saw. */
+  const nativeSchema = () => ({
+    type: 'object',
+    properties: {
+      inputPath: { type: 'string' },
+      outputDir: { type: 'string' },
+      level: { type: 'number', minimum: 1 },
+    },
+    required: ['inputPath', 'outputDir'],
+    additionalProperties: false,
+  });
+  const io = () => ({ inputPath: '/a/in.png', outputDir: '/b/staging' });
+  const validParams = () => ({ ...io(), level: 3 });
+
   class TestPolicyTool extends BaseMediaPolicyTool<TestParams> {
     constructor(view: MediaPolicyToolConfigView = {}) {
       super(
@@ -304,16 +312,7 @@ describe('BaseMediaPolicyTool validation', () => {
         'TestPolicyTool',
         'test',
         Kind.Other,
-        {
-          type: 'object',
-          properties: {
-            inputPath: { type: 'string' },
-            outputDir: { type: 'string' },
-            level: { type: 'number', minimum: 1 },
-          },
-          required: ['inputPath', 'outputDir'],
-          additionalProperties: false,
-        },
+        nativeSchema(),
         view,
       );
     }
@@ -337,22 +336,12 @@ describe('BaseMediaPolicyTool validation', () => {
   const tool = new TestPolicyTool();
 
   it('validates against the NATIVE parameter schema', () => {
-    expect(
-      tool.validateToolParams({
-        inputPath: '/a/in.png',
-        outputDir: '/b/staging',
-        level: 3,
-      }),
-    ).toBeNull();
+    expect(tool.validateToolParams(validParams())).toBeNull();
   });
 
   it('rejects schema violations (unknown property, missing required)', () => {
     expect(
-      tool.validateToolParams({
-        inputPath: '/a/in.png',
-        outputDir: '/b/staging',
-        extra: true,
-      } as never),
+      tool.validateToolParams({ ...io(), extra: true } as never),
     ).not.toBeNull();
     expect(
       tool.validateToolParams({ inputPath: '/a/in.png' } as never),
@@ -376,16 +365,7 @@ describe('BaseMediaPolicyTool validation', () => {
       expect(tool.schema).toEqual({
         name: 'test_policy_tool',
         description: 'test',
-        parametersJsonSchema: {
-          type: 'object',
-          properties: {
-            inputPath: { type: 'string' },
-            outputDir: { type: 'string' },
-            level: { type: 'number', minimum: 1 },
-          },
-          required: ['inputPath', 'outputDir'],
-          additionalProperties: false,
-        },
+        parametersJsonSchema: nativeSchema(),
       });
     });
 
@@ -415,13 +395,7 @@ describe('BaseMediaPolicyTool validation', () => {
       });
       // …but the harness-injected io arguments the projection hides must
       // remain valid: validation runs on the NATIVE schema (§9.4).
-      expect(
-        configured.validateToolParams({
-          inputPath: '/a/in.png',
-          outputDir: '/b/staging',
-          level: 3,
-        }),
-      ).toBeNull();
+      expect(configured.validateToolParams(validParams())).toBeNull();
     });
   });
 });

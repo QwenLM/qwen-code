@@ -47,15 +47,13 @@ describe('isRateLimitError — detection paths', () => {
 
   it('should detect rate-limit from StructuredError.status', () => {
     const error: StructuredError = { message: 'Rate limited', status: 429 };
-    const info = isRateLimitError(error);
-    expect(info).toBe(true);
+    expect(isRateLimitError(error)).toBe(true);
   });
 
   it('should detect rate-limit from HttpError.status', () => {
     const error: HttpError = new Error('Too Many Requests');
     error.status = 429;
-    const info = isRateLimitError(error);
-    expect(info).toBe(true);
+    expect(isRateLimitError(error)).toBe(true);
   });
 
   it('should return null for non-rate-limit codes', () => {
@@ -216,8 +214,7 @@ describe('isRateLimitError — return shape', () => {
   it('should treat HTTP 503 as rate-limit', () => {
     const error: HttpError = new Error('Service Unavailable');
     error.status = 503;
-    const info = isRateLimitError(error);
-    expect(info).toBe(true);
+    expect(isRateLimitError(error)).toBe(true);
   });
 
   it('should return null for non-rate-limit errors', () => {
@@ -225,10 +222,8 @@ describe('isRateLimitError — return shape', () => {
   });
 
   it('should fall through JSON-in-message non-numeric code when Error has .status', () => {
-    // Some middleware wraps errors into plain Error instances with the
-    // provider error serialised into .message AND augments .status. The
-    // JSON-in-message parse must not short-circuit with null when the
-    // embedded code is non-numeric — the .status on the Error should win.
+    // Middleware may put the provider error in .message AND set .status; a
+    // non-numeric embedded code must not short-circuit: .status wins.
     const error: HttpError = new Error(
       '{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}}',
     );
@@ -237,9 +232,8 @@ describe('isRateLimitError — return shape', () => {
   });
 
   it('should fall through ApiError with non-numeric code when .status is set', () => {
-    // DashScope/OpenAI-SDK shape: RateLimitError with .status=429 but
-    // .error.code is a non-numeric string. Must still be recognised as a
-    // rate limit via the .status fallback.
+    // DashScope/OpenAI-SDK RateLimitError: .status=429 with a non-numeric
+    // .error.code must still be recognised via the .status fallback.
     const error = Object.assign(new Error('429 Allocated quota exceeded'), {
       status: 429,
       error: {
@@ -251,10 +245,9 @@ describe('isRateLimitError — return shape', () => {
   });
 
   it('should detect DashScope SSE-embedded 429 (Throttling.AllocationQuota)', () => {
-    // Reproduces the production error seen from DashScope when the stream
-    // opens with HTTP 200 and the throttling is surfaced mid-stream as an
-    // SSE `event:error` frame. The OpenAI SDK preserves the raw SSE payload
-    // in error.message, with no numeric `.status` on the error object.
+    // Production DashScope error: the stream opens with HTTP 200, throttling
+    // arrives mid-stream as an SSE `event:error` frame, and the OpenAI SDK
+    // keeps the raw payload in error.message with no numeric `.status`.
     const error = new Error(
       'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"70acdc21-a546-489a-b5d6-650df970a4ef","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded, please increase your quota limit."}',
     );
@@ -330,9 +323,8 @@ describe('rate-limit retry diagnostics', () => {
 
     expect(getRateLimitErrorDetails(error)).toEqual({
       providerCode: 'invalid_request_error',
-      // The same value again on its own field: `providerCode` is the collapsed
-      // `code ?? type`, so a body carrying both would otherwise hide the type
-      // from the classifier's permanence guard.
+      // Repeated on its own field: `providerCode` is the collapsed
+      // `code ?? type`, which would hide the type from the permanence guard.
       providerType: 'invalid_request_error',
       providerMessage,
       transport: 'unknown',
@@ -352,247 +344,104 @@ describe('rate-limit retry diagnostics', () => {
     });
   });
 
+  const delayMs = (attempt: number, error?: unknown) =>
+    getRateLimitRetryDelayMs(attempt, {
+      initialDelayMs: 60_000,
+      maxDelayMs: 300_000,
+      error,
+    });
+  const throttled = (fields: object) =>
+    Object.assign(new Error('Too many requests'), { status: 429, ...fields });
+
   it('should increase retry delay by attempt and cap at the maximum', () => {
-    expect(
-      getRateLimitRetryDelayMs(0, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-      }),
-    ).toBe(60_000);
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-      }),
-    ).toBe(60_000);
-    expect(
-      getRateLimitRetryDelayMs(2, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-      }),
-    ).toBe(120_000);
-    expect(
-      getRateLimitRetryDelayMs(10, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-      }),
-    ).toBe(300_000);
+    expect(delayMs(0)).toBe(60_000);
+    expect(delayMs(1)).toBe(60_000);
+    expect(delayMs(2)).toBe(120_000);
+    expect(delayMs(10)).toBe(300_000);
   });
 
-  it('should use Retry-After as a minimum delay when it is longer than exponential backoff', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'retry-after': '180' },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(180_000);
-  });
-
-  it('should keep exponential backoff when Retry-After is shorter', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'retry-after': '30' },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(2, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(120_000);
-  });
-
-  it('should cap long Retry-After values at the maximum delay', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'retry-after': '600' },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(300_000);
-  });
-
-  it('should read Retry-After from response headers', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      response: {
-        headers: { 'retry-after': '180' },
+  it.each<[string, number, object, number]>([
+    [
+      'should use Retry-After as a minimum delay when it is longer than exponential backoff',
+      1,
+      { headers: { 'retry-after': '180' } },
+      180_000,
+    ],
+    [
+      'should keep exponential backoff when Retry-After is shorter',
+      2,
+      { headers: { 'retry-after': '30' } },
+      120_000,
+    ],
+    [
+      'should cap long Retry-After values at the maximum delay',
+      1,
+      { headers: { 'retry-after': '600' } },
+      300_000,
+    ],
+    [
+      'should read Retry-After from response headers',
+      1,
+      { response: { headers: { 'retry-after': '180' } } },
+      180_000,
+    ],
+    [
+      'should read Retry-After from Headers-like objects',
+      1,
+      {
+        headers: {
+          get: (name: string) => (name === 'retry-after' ? '180' : null),
+        },
       },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(180_000);
+      180_000,
+    ],
+    [
+      'should read Retry-After headers case-insensitively',
+      1,
+      { headers: { 'Retry-After': '180' } },
+      180_000,
+    ],
+  ])('%s', (_title, attempt, fields, expected) => {
+    expect(delayMs(attempt, throttled(fields))).toBe(expected);
   });
 
-  it('should read Retry-After from Headers-like objects', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: {
-        get: (name: string) => (name === 'retry-after' ? '180' : null),
-      },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(180_000);
-  });
-
-  it('should read Retry-After headers case-insensitively', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'Retry-After': '180' },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(180_000);
-  });
-
-  it('should read HTTP-date Retry-After values', () => {
+  it.each([
+    [
+      'should read HTTP-date Retry-After values',
+      '2026-01-01T00:00:00.000Z',
+      'Thu, 01 Jan 2026 00:03:00 GMT',
+      180_000,
+    ],
+    [
+      'should ignore past HTTP-date Retry-After values',
+      '2026-01-01T00:03:00.000Z',
+      'Thu, 01 Jan 2026 00:00:00 GMT',
+      60_000,
+    ],
+  ])('%s', (_title, now, retryAfter, expected) => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
-
+    vi.setSystemTime(new Date(now));
     try {
-      const error = Object.assign(new Error('Too many requests'), {
-        status: 429,
-        headers: { 'retry-after': 'Thu, 01 Jan 2026 00:03:00 GMT' },
-      });
-
-      expect(
-        getRateLimitRetryDelayMs(1, {
-          initialDelayMs: 60_000,
-          maxDelayMs: 300_000,
-          error,
-        }),
-      ).toBe(180_000);
+      const error = throttled({ headers: { 'retry-after': retryAfter } });
+      expect(delayMs(1, error)).toBe(expected);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('should ignore past HTTP-date Retry-After values', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-01-01T00:03:00.000Z'));
-
-    try {
-      const error = Object.assign(new Error('Too many requests'), {
-        status: 429,
-        headers: { 'retry-after': 'Thu, 01 Jan 2026 00:00:00 GMT' },
-      });
-
-      expect(
-        getRateLimitRetryDelayMs(1, {
-          initialDelayMs: 60_000,
-          maxDelayMs: 300_000,
-          error,
-        }),
-      ).toBe(60_000);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('should ignore malformed Retry-After values', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'retry-after': 'not a retry-after value' },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(60_000);
-  });
-
-  it('should ignore null direct headers', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: null,
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(60_000);
-  });
-
-  it('should ignore undefined direct headers', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: undefined,
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(60_000);
-  });
-
-  it('should ignore null response headers', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      response: {
-        headers: null,
-      },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(60_000);
-  });
-
-  it('should ignore undefined response headers', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      response: {
-        headers: undefined,
-      },
-    });
-
-    expect(
-      getRateLimitRetryDelayMs(1, {
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(60_000);
+  it.each<[string, object]>([
+    [
+      'should ignore malformed Retry-After values',
+      { headers: { 'retry-after': 'not a retry-after value' } },
+    ],
+    ['should ignore null direct headers', { headers: null }],
+    ['should ignore undefined direct headers', { headers: undefined }],
+    ['should ignore null response headers', { response: { headers: null } }],
+    [
+      'should ignore undefined response headers',
+      { response: { headers: undefined } },
+    ],
+  ])('%s', (_title, fields) => {
+    expect(delayMs(1, throttled(fields))).toBe(60_000);
   });
 });

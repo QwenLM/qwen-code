@@ -10,7 +10,11 @@ import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import type { Config } from '../config/config.js';
-import { runSideQuery } from './sideQuery.js';
+import {
+  runSideQuery,
+  type SideQueryJsonOptions,
+  type SideQueryTextOptions,
+} from './sideQuery.js';
 
 describe('runSideQuery', () => {
   let mockBaseLlmClient: BaseLlmClient;
@@ -31,7 +35,35 @@ describe('runSideQuery', () => {
     } as unknown as Config;
   });
 
+  // Points getOutputLanguageFilePath at a temp file holding `text` during `fn`.
+  async function withOutputLanguage(text: string, fn: () => Promise<void>) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      await writeFile(outputLanguagePath, text);
+      vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
+        outputLanguagePath,
+      );
+      await fn();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
   describe('JSON mode (schema present)', () => {
+    // A { ok: boolean } query for prompt 'q'; `extra` adds or overrides fields.
+    const runOk = (extra: Partial<SideQueryJsonOptions<{ ok: boolean }>>) =>
+      runSideQuery<{ ok: boolean }>(mockConfig, {
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        schema: {
+          type: 'object',
+          properties: { ok: { type: 'boolean' } },
+          required: ['ok'],
+        },
+        abortSignal: abortController.signal,
+        ...extra,
+      });
+
     it('routes through BaseLlmClient.generateJson with default policy', async () => {
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
         decision: 'user',
@@ -65,16 +97,7 @@ describe('runSideQuery', () => {
       vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model');
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        schema: {
-          type: 'object',
-          properties: { ok: { type: 'boolean' } },
-          required: ['ok'],
-        },
-        abortSignal: abortController.signal,
-      });
+      await runOk({ purpose: 'p' });
 
       expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'fast-model' }),
@@ -85,17 +108,7 @@ describe('runSideQuery', () => {
       vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model');
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        schema: {
-          type: 'object',
-          properties: { ok: { type: 'boolean' } },
-          required: ['ok'],
-        },
-        abortSignal: abortController.signal,
-        model: 'override-model',
-      });
+      await runOk({ purpose: 'p', model: 'override-model' });
 
       expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'override-model' }),
@@ -105,15 +118,8 @@ describe('runSideQuery', () => {
     it('explicit thinkingConfig overrides the helper default', async () => {
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, {
+      await runOk({
         purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        schema: {
-          type: 'object',
-          properties: { ok: { type: 'boolean' } },
-          required: ['ok'],
-        },
-        abortSignal: abortController.signal,
         config: { thinkingConfig: { includeThoughts: true } },
       });
 
@@ -129,16 +135,7 @@ describe('runSideQuery', () => {
     it('preserves caller-supplied promptId when provided', async () => {
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, {
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        schema: {
-          type: 'object',
-          properties: { ok: { type: 'boolean' } },
-          required: ['ok'],
-        },
-        abortSignal: abortController.signal,
-        promptId: 'legacy-id',
-      });
+      await runOk({ promptId: 'legacy-id' });
 
       expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
         expect.objectContaining({ promptId: 'legacy-id' }),
@@ -146,13 +143,7 @@ describe('runSideQuery', () => {
     });
 
     it('adds the configured output language to JSON side queries', async () => {
-      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
-      try {
-        const outputLanguagePath = path.join(dir, 'output-language.md');
-        await writeFile(outputLanguagePath, '请始终用中文回答用户可见文本。');
-        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
-          outputLanguagePath,
-        );
+      await withOutputLanguage('请始终用中文回答用户可见文本。', async () => {
         vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
           title: '测试标题',
         });
@@ -175,19 +166,11 @@ describe('runSideQuery', () => {
         expect(callArg.systemInstruction).toContain(
           '请始终用中文回答用户可见文本。',
         );
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
+      });
     });
 
     it('skips output language when skipOutputLanguagePreference is true', async () => {
-      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
-      try {
-        const outputLanguagePath = path.join(dir, 'output-language.md');
-        await writeFile(outputLanguagePath, '请始终用中文回答用户可见文本。');
-        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
-          outputLanguagePath,
-        );
+      await withOutputLanguage('请始终用中文回答用户可见文本。', async () => {
         vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({
           title: '测试标题',
         });
@@ -208,9 +191,7 @@ describe('runSideQuery', () => {
         const callArg = vi.mocked(mockBaseLlmClient.generateJson).mock
           .calls[0][0];
         expect(callArg.systemInstruction).toBe('Classify this request.');
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
+      });
     });
 
     it('throws when the response does not satisfy the schema', async () => {
@@ -258,26 +239,13 @@ describe('runSideQuery', () => {
 
     it('forwards maxAttempts when provided, omits it otherwise', async () => {
       vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue({ ok: true });
-      const baseOptions = {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        schema: {
-          type: 'object',
-          properties: { ok: { type: 'boolean' } },
-          required: ['ok'],
-        },
-        abortSignal: abortController.signal,
-      };
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, {
-        ...baseOptions,
-        maxAttempts: 1,
-      });
+      await runOk({ purpose: 'p', maxAttempts: 1 });
       expect(mockBaseLlmClient.generateJson).toHaveBeenLastCalledWith(
         expect.objectContaining({ maxAttempts: 1 }),
       );
 
-      await runSideQuery<{ ok: boolean }>(mockConfig, baseOptions);
+      await runOk({ purpose: 'p' });
       const lastCall = vi
         .mocked(mockBaseLlmClient.generateJson)
         .mock.calls.at(-1)?.[0];
@@ -289,21 +257,20 @@ describe('runSideQuery', () => {
       const apiError = new Error('upstream 503');
       vi.mocked(mockBaseLlmClient.generateJson).mockRejectedValue(apiError);
 
-      await expect(
-        runSideQuery<{ ok: boolean }>(mockConfig, {
-          contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-          schema: {
-            type: 'object',
-            properties: { ok: { type: 'boolean' } },
-            required: ['ok'],
-          },
-          abortSignal: abortController.signal,
-        }),
-      ).rejects.toBe(apiError);
+      await expect(runOk({})).rejects.toBe(apiError);
     });
   });
 
   describe('text mode (no schema)', () => {
+    // A text query for prompt 'q'; `extra` adds or overrides fields.
+    const runText = (extra: Partial<SideQueryTextOptions> = {}) =>
+      runSideQuery(mockConfig, {
+        purpose: 'p',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        abortSignal: abortController.signal,
+        ...extra,
+      });
+
     function mockTextResult(text: string, withUsage = true) {
       vi.mocked(mockBaseLlmClient.generateText).mockResolvedValue({
         text,
@@ -363,11 +330,7 @@ describe('runSideQuery', () => {
     it('omits stream from the generateText call when not set (backward-compat)', async () => {
       mockTextResult('ok');
 
-      await runSideQuery(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-      });
+      await runText();
 
       const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
         .calls[0][0];
@@ -378,11 +341,7 @@ describe('runSideQuery', () => {
       vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model');
       mockTextResult('ok');
 
-      await runSideQuery(mockConfig, {
-        purpose: 'recap',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-      });
+      await runText({ purpose: 'recap' });
 
       expect(mockBaseLlmClient.generateText).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'fast-model' }),
@@ -392,11 +351,7 @@ describe('runSideQuery', () => {
     it('exposes usageMetadata even when undefined', async () => {
       mockTextResult('no usage', false);
 
-      const result = await runSideQuery(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-      });
+      const result = await runText();
 
       expect(result.usage).toBeUndefined();
     });
@@ -408,26 +363,14 @@ describe('runSideQuery', () => {
         text.length < 20 ? 'too short' : null,
       );
 
-      await expect(
-        runSideQuery(mockConfig, {
-          purpose: 'p',
-          contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-          abortSignal: abortController.signal,
-          validate,
-        }),
-      ).rejects.toThrow('too short');
+      await expect(runText({ validate })).rejects.toThrow('too short');
       expect(validate).toHaveBeenCalledWith('too short');
     });
 
     it('explicit thinkingConfig.includeThoughts:true overrides default', async () => {
       mockTextResult('reasoning enabled');
 
-      await runSideQuery(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-        config: { thinkingConfig: { includeThoughts: true } },
-      });
+      await runText({ config: { thinkingConfig: { includeThoughts: true } } });
 
       expect(mockBaseLlmClient.generateText).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -441,12 +384,7 @@ describe('runSideQuery', () => {
     it('passes systemInstruction through unchanged (no main-prompt fallback)', async () => {
       mockTextResult('ok');
 
-      await runSideQuery(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-        systemInstruction: 'custom side query prompt',
-      });
+      await runText({ systemInstruction: 'custom side query prompt' });
 
       expect(mockBaseLlmClient.generateText).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -456,13 +394,7 @@ describe('runSideQuery', () => {
     });
 
     it('adds the configured output language to text side queries', async () => {
-      const dir = await mkdtemp(path.join(tmpdir(), 'qwen-side-query-'));
-      try {
-        const outputLanguagePath = path.join(dir, 'output-language.md');
-        await writeFile(outputLanguagePath, 'Respond in Spanish.');
-        vi.mocked(mockConfig.getOutputLanguageFilePath).mockReturnValue(
-          outputLanguagePath,
-        );
+      await withOutputLanguage('Respond in Spanish.', async () => {
         mockTextResult('ok');
 
         await runSideQuery(mockConfig, {
@@ -478,19 +410,13 @@ describe('runSideQuery', () => {
           'Summarize the tool batch.',
         );
         expect(callArg.systemInstruction).toContain('Respond in Spanish.');
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
+      });
     });
 
     it('omits systemInstruction when caller does not provide one', async () => {
       mockTextResult('ok');
 
-      await runSideQuery(mockConfig, {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-      });
+      await runText();
 
       const callArg = vi.mocked(mockBaseLlmClient.generateText).mock
         .calls[0][0];
@@ -499,18 +425,13 @@ describe('runSideQuery', () => {
 
     it('forwards maxAttempts when provided, omits it otherwise', async () => {
       mockTextResult('ok');
-      const baseOptions = {
-        purpose: 'p',
-        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-        abortSignal: abortController.signal,
-      };
 
-      await runSideQuery(mockConfig, { ...baseOptions, maxAttempts: 1 });
+      await runText({ maxAttempts: 1 });
       expect(mockBaseLlmClient.generateText).toHaveBeenLastCalledWith(
         expect.objectContaining({ maxAttempts: 1 }),
       );
 
-      await runSideQuery(mockConfig, baseOptions);
+      await runText();
       const lastCall = vi
         .mocked(mockBaseLlmClient.generateText)
         .mock.calls.at(-1)?.[0];
@@ -522,13 +443,7 @@ describe('runSideQuery', () => {
       const apiError = new Error('upstream 503');
       vi.mocked(mockBaseLlmClient.generateText).mockRejectedValue(apiError);
 
-      await expect(
-        runSideQuery(mockConfig, {
-          purpose: 'p',
-          contents: [{ role: 'user', parts: [{ text: 'q' }] }],
-          abortSignal: abortController.signal,
-        }),
-      ).rejects.toBe(apiError);
+      await expect(runText()).rejects.toBe(apiError);
     });
   });
 });

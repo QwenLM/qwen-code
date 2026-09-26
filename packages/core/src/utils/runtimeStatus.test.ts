@@ -13,6 +13,7 @@ import {
   clearRuntimeStatus,
   readRuntimeStatus,
   writeRuntimeStatus,
+  type WriteRuntimeStatusFields,
 } from './runtimeStatus.js';
 
 const fsMocks = vi.hoisted(() => ({
@@ -37,6 +38,12 @@ afterEach(async () => {
 });
 
 const targetPath = () => path.join(tmpDir, 'runtime.json');
+const writeStatus = (fields: Partial<WriteRuntimeStatusFields> = {}) =>
+  writeRuntimeStatus(targetPath(), {
+    sessionId: 'abc',
+    workDir: '/w',
+    ...fields,
+  });
 
 describe('writeRuntimeStatus', () => {
   it('writes the expected fields', async () => {
@@ -60,21 +67,14 @@ describe('writeRuntimeStatus', () => {
   });
 
   it('defaults pid to process.pid and qwen_version to null', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-    });
+    await writeStatus();
     const data = JSON.parse(await readFile(targetPath(), 'utf-8'));
     expect(data.pid).toBe(process.pid);
     expect(data.qwen_version).toBeNull();
   });
 
   it('leaves no .tmp leftovers on success', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 1,
-    });
+    await writeStatus({ pid: 1 });
     const entries = await readdir(tmpDir);
     expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([]);
   });
@@ -87,19 +87,11 @@ describe('writeRuntimeStatus', () => {
   });
 
   it('atomically overwrites the previous PID on resume', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 1000,
-    });
+    await writeStatus({ pid: 1000 });
     const first = await readRuntimeStatus(targetPath());
     expect(first?.pid).toBe(1000);
 
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 2000,
-    });
+    await writeStatus({ pid: 2000 });
     const second = await readRuntimeStatus(targetPath());
     expect(second?.pid).toBe(2000);
   });
@@ -165,109 +157,59 @@ describe('readRuntimeStatus', () => {
     expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 
-  it('returns null on malformed JSON', async () => {
-    await writeFile(targetPath(), 'not-json', 'utf-8');
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
+  // A valid on-disk record, serialised, with the given fields overridden.
+  const record = (overrides: Record<string, unknown>) =>
+    JSON.stringify({
+      schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+      pid: 1,
+      session_id: 'abc',
+      work_dir: '/w',
+      hostname: 'h',
+      started_at: 0,
+      qwen_version: null,
+      ...overrides,
+    });
 
-  it('returns null on an unknown schema version', async () => {
-    await writeFile(
-      targetPath(),
-      JSON.stringify({
+  it.each<[string, string | Buffer]>([
+    ['returns null on malformed JSON', 'not-json'],
+    [
+      'returns null on an unknown schema version',
+      record({
         schema_version: RUNTIME_STATUS_SCHEMA_VERSION + 99,
-        pid: 1,
         session_id: 'x',
-        work_dir: '/w',
-        hostname: 'h',
-        started_at: 0,
-        qwen_version: null,
       }),
-      'utf-8',
-    );
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
-
-  it('returns null when session_id has the wrong type', async () => {
-    await writeFile(
-      targetPath(),
-      JSON.stringify({
-        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: 1,
-        session_id: null,
-        work_dir: '/w',
-        hostname: 'h',
-        started_at: 0,
-        qwen_version: null,
-      }),
-      'utf-8',
-    );
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
-
-  it('returns null when pid is a string', async () => {
-    await writeFile(
-      targetPath(),
-      JSON.stringify({
-        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: '1234',
-        session_id: 'abc',
-        work_dir: '/w',
-        hostname: 'h',
-        started_at: 0,
-        qwen_version: null,
-      }),
-      'utf-8',
-    );
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
-
-  it('returns null when work_dir is an array', async () => {
-    await writeFile(
-      targetPath(),
-      JSON.stringify({
-        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-        pid: 1,
-        session_id: 'abc',
-        work_dir: ['/', 'w'],
-        hostname: 'h',
-        started_at: 0,
-        qwen_version: null,
-      }),
-      'utf-8',
-    );
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
-
-  it('returns null on an array root payload', async () => {
-    await writeFile(targetPath(), JSON.stringify([1, 2, 3]), 'utf-8');
-    expect(await readRuntimeStatus(targetPath())).toBeNull();
-  });
-
-  it('returns null on invalid UTF-8 bytes', async () => {
+    ],
+    [
+      'returns null when session_id has the wrong type',
+      record({ session_id: null }),
+    ],
+    ['returns null when pid is a string', record({ pid: '1234' })],
+    [
+      'returns null when work_dir is an array',
+      record({ work_dir: ['/', 'w'] }),
+    ],
+    ['returns null on an array root payload', JSON.stringify([1, 2, 3])],
     // Truncated multi-byte sequence
-    await writeFile(targetPath(), Buffer.from([0xff, 0xfe, 0x20, 0x67]));
+    [
+      'returns null on invalid UTF-8 bytes',
+      Buffer.from([0xff, 0xfe, 0x20, 0x67]),
+    ],
+  ])('%s', async (_title, content) => {
+    await writeFile(targetPath(), content, 'utf-8');
     expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 });
 
 describe('clearRuntimeStatus', () => {
   it('removes an existing file', async () => {
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 1,
-    });
+    await writeStatus({ pid: 1 });
     await clearRuntimeStatus(targetPath());
     expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 
   it('is idempotent on a missing file', async () => {
     await clearRuntimeStatus(targetPath());
-    await writeRuntimeStatus(targetPath(), {
-      sessionId: 'abc',
-      workDir: '/w',
-      pid: 1,
-    });
+    await writeStatus({ pid: 1 });
     await clearRuntimeStatus(targetPath());
     await clearRuntimeStatus(targetPath());
   });
@@ -278,9 +220,9 @@ describe('clearRuntimeStatus', () => {
 });
 
 describe('same-PID session swap', () => {
-  // Models the /clear, /reset, /new and /resume flow: same PID transitions
-  // from session A to session B. The old sidecar must be removed before the
-  // new one is written so external observers can't double-claim the PID.
+  // Models /clear, /reset, /new and /resume: the same PID moves from session
+  // A to B; the old sidecar must go before the new one is written so external
+  // observers can't double-claim the PID.
   it('clears the old sidecar before writing the new one', async () => {
     const oldPath = path.join(tmpDir, 'session-a.runtime.json');
     const newPath = path.join(tmpDir, 'session-b.runtime.json');

@@ -40,6 +40,39 @@ vi.mock('../telemetry/trace-context.js', () => ({
   getTraceContext: vi.fn().mockReturnValue(null),
 }));
 
+const appendFile = vi.mocked(fs.appendFile);
+const symlink = vi.mocked(fs.symlink);
+const readlink = vi.mocked(fs.readlink);
+type Level = 'debug' | 'info' | 'warn' | 'error';
+
+/** Logs once through a fresh untagged logger, then drains timers. */
+const logOnce = (level: Level, ...args: unknown[]) => {
+  createDebugLogger()[level](...args);
+  return vi.runAllTimersAsync();
+};
+
+/** Logs `message` at info (inside `sessionId`'s context if given), then drains timers. */
+const infoAndFlush = (
+  logger: ReturnType<typeof createDebugLogger>,
+  message: string,
+  sessionId?: string,
+) => {
+  if (sessionId) sessionIdContext.run(sessionId, () => logger.info(message));
+  else logger.info(message);
+  return vi.runAllTimersAsync();
+};
+
+/** The text of the `index`-th appended log line. */
+const lineAt = (index: number) => appendFile.mock.calls[index]?.[1];
+
+/** Asserts some appended line contains `text`. */
+const expectLineContaining = (text: string) =>
+  expect(appendFile).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.stringContaining(text),
+    'utf8',
+  );
+
 describe('debugLogger', () => {
   const mockSession: DebugLogSession = {
     getSessionId: () => 'test-session-123',
@@ -58,8 +91,8 @@ describe('debugLogger', () => {
     await vi.runAllTimersAsync();
     resetDebugLoggingState();
     vi.clearAllMocks();
-    vi.mocked(fs.readlink).mockImplementation(async () => {
-      const target = vi.mocked(fs.symlink).mock.calls.at(-1)?.[0];
+    readlink.mockImplementation(async () => {
+      const target = symlink.mock.calls.at(-1)?.[0];
       if (typeof target !== 'string') {
         throw new Error('symlink target unavailable');
       }
@@ -109,10 +142,7 @@ describe('debugLogger', () => {
     });
 
     it('writes debug log without trace context when telemetry context is unset', async () => {
-      const logger = createDebugLogger();
-      logger.debug('Hello world');
-
-      await vi.runAllTimersAsync();
+      await logOnce('debug', 'Hello world');
 
       expect(fs.mkdir).toHaveBeenCalledWith(Storage.getGlobalDebugDir(), {
         recursive: true,
@@ -127,10 +157,7 @@ describe('debugLogger', () => {
     it('does not write debug log by default when QWEN_DEBUG_LOG_FILE is unset', async () => {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
 
-      const logger = createDebugLogger();
-      logger.info('default log');
-
-      await vi.runAllTimersAsync();
+      await logOnce('info', 'default log');
 
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
@@ -140,18 +167,14 @@ describe('debugLogger', () => {
       async (value) => {
         process.env['QWEN_DEBUG_LOG_FILE'] = value;
 
-        const logger = createDebugLogger();
-        logger.info('disabled log');
-
-        await vi.runAllTimersAsync();
+        await logOnce('info', 'disabled log');
 
         expect(fs.appendFile).not.toHaveBeenCalled();
       },
     );
 
     it('writes log with tag when provided', async () => {
-      const logger = createDebugLogger('STARTUP');
-      logger.info('Server started');
+      createDebugLogger('STARTUP').info('Server started');
 
       await vi.runAllTimersAsync();
 
@@ -172,11 +195,10 @@ describe('debugLogger', () => {
 
       await vi.runAllTimersAsync();
 
-      const calls = vi.mocked(fs.appendFile).mock.calls;
-      expect(calls[0]?.[1]).toContain('[DEBUG]');
-      expect(calls[1]?.[1]).toContain('[INFO]');
-      expect(calls[2]?.[1]).toContain('[WARN]');
-      expect(calls[3]?.[1]).toContain('[ERROR]');
+      expect(lineAt(0)).toContain('[DEBUG]');
+      expect(lineAt(1)).toContain('[INFO]');
+      expect(lineAt(2)).toContain('[WARN]');
+      expect(lineAt(3)).toContain('[ERROR]');
     });
 
     it('uses trace context when getTraceContext returns a context', async () => {
@@ -186,27 +208,17 @@ describe('debugLogger', () => {
         traceFlags: 1,
       });
 
-      const logger = createDebugLogger();
-      logger.debug('with real span');
+      await logOnce('debug', 'with real span');
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.appendFile).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining(
-          '[trace_id=realtraceidddddddddddddddddddddd span_id=realspanid111111]',
-        ),
-        'utf8',
+      expectLineContaining(
+        '[trace_id=realtraceidddddddddddddddddddddd span_id=realspanid111111]',
       );
     });
 
     it('omits trace context when getTraceContext returns null', async () => {
       vi.mocked(getTraceContext).mockReturnValue(null);
 
-      const logger = createDebugLogger();
-      logger.debug('no trace context');
-
-      await vi.runAllTimersAsync();
+      await logOnce('debug', 'no trace context');
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
@@ -222,11 +234,9 @@ describe('debugLogger', () => {
 
       await vi.runAllTimersAsync();
 
-      const calls = vi.mocked(fs.appendFile).mock.calls;
-      expect(calls).toHaveLength(2);
-
-      expect(calls[0]?.[1]).not.toContain('span_id=');
-      expect(calls[1]?.[1]).not.toContain('span_id=');
+      expect(appendFile.mock.calls).toHaveLength(2);
+      expect(lineAt(0)).not.toContain('span_id=');
+      expect(lineAt(1)).not.toContain('span_id=');
     });
 
     it('uses the session root span context for fallback trace context', async () => {
@@ -236,17 +246,10 @@ describe('debugLogger', () => {
         traceFlags: 1,
       });
 
-      const logger = createDebugLogger();
-      logger.debug('session root fallback');
+      await logOnce('debug', 'session root fallback');
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.appendFile).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining(
-          '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
-        ),
-        'utf8',
+      expectLineContaining(
+        '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
       );
     });
 
@@ -272,39 +275,23 @@ describe('debugLogger', () => {
     });
 
     it('formats multiple arguments', async () => {
-      const logger = createDebugLogger();
-      logger.debug('Count:', 42, 'items');
+      await logOnce('debug', 'Count:', 42, 'items');
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.appendFile).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining('Count: 42 items'),
-        'utf8',
-      );
+      expectLineContaining('Count: 42 items');
     });
 
     it('formats Error objects with stack trace', async () => {
-      const logger = createDebugLogger();
-      const error = new Error('Something went wrong');
-      logger.error('Failed:', error);
+      await logOnce('error', 'Failed:', new Error('Something went wrong'));
 
-      await vi.runAllTimersAsync();
-
-      const call = vi.mocked(fs.appendFile).mock.calls[0];
-      expect(call?.[1]).toContain('Failed:');
-      expect(call?.[1]).toContain('Error: Something went wrong');
+      expect(lineAt(0)).toContain('Failed:');
+      expect(lineAt(0)).toContain('Error: Something went wrong');
     });
 
     it('formats objects using util.inspect', async () => {
-      const logger = createDebugLogger();
-      logger.debug('Data:', { foo: 'bar', count: 123 });
+      await logOnce('debug', 'Data:', { foo: 'bar', count: 123 });
 
-      await vi.runAllTimersAsync();
-
-      const call = vi.mocked(fs.appendFile).mock.calls[0];
-      expect(call?.[1]).toContain('foo');
-      expect(call?.[1]).toContain('bar');
+      expect(lineAt(0)).toContain('foo');
+      expect(lineAt(0)).toContain('bar');
     });
 
     it('prefers sessionIdContext over the global debug session', async () => {
@@ -312,13 +299,11 @@ describe('debugLogger', () => {
       // overwrote the process-wide debug session, but this code is running
       // inside session-A's async context.
       setDebugLogSession({ getSessionId: () => 'session-B' });
-      const logger = createDebugLogger('DAEMON');
-
-      sessionIdContext.run('session-A', () => {
-        logger.info('message from A');
-      });
-
-      await vi.runAllTimersAsync();
+      await infoAndFlush(
+        createDebugLogger('DAEMON'),
+        'message from A',
+        'session-A',
+      );
 
       expect(fs.appendFile).toHaveBeenCalledWith(
         Storage.getDebugLogPath('session-A'),
@@ -376,29 +361,21 @@ describe('debugLogger', () => {
       resetDebugLoggingState();
       vi.mocked(fs.mkdir).mockRejectedValueOnce(new Error('Permission denied'));
 
-      const logger = createDebugLogger();
-      logger.debug('test');
-
-      await vi.runAllTimersAsync();
+      await logOnce('debug', 'test');
 
       expect(isDebugLoggingDegraded()).toBe(true);
     });
 
     it('returns true when appendFile fails', async () => {
-      vi.mocked(fs.appendFile).mockRejectedValueOnce(new Error('Disk full'));
+      appendFile.mockRejectedValueOnce(new Error('Disk full'));
 
-      const logger = createDebugLogger();
-      logger.debug('test');
-
-      await vi.runAllTimersAsync();
+      await logOnce('debug', 'test');
 
       expect(isDebugLoggingDegraded()).toBe(true);
     });
 
     it('stays true after failure even if subsequent writes succeed', async () => {
-      vi.mocked(fs.appendFile).mockRejectedValueOnce(
-        new Error('Temporary error'),
-      );
+      appendFile.mockRejectedValueOnce(new Error('Temporary error'));
 
       const logger = createDebugLogger();
       logger.debug('first write fails');
@@ -406,7 +383,7 @@ describe('debugLogger', () => {
 
       expect(isDebugLoggingDegraded()).toBe(true);
 
-      vi.mocked(fs.appendFile).mockResolvedValue(undefined);
+      appendFile.mockResolvedValue(undefined);
       logger.debug('second write succeeds');
       await vi.runAllTimersAsync();
 
@@ -416,236 +393,188 @@ describe('debugLogger', () => {
 
   describe('latest debug log symlink', () => {
     const expectedLatestPath = path.join(Storage.getGlobalDebugDir(), 'latest');
-    const uuidSession: DebugLogSession = {
-      getSessionId: () => '92ec0176-d354-4147-848b-5cd2d80609c4',
+    const uuid = '92ec0176-d354-4147-848b-5cd2d80609c4';
+    const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const uuidSession: DebugLogSession = { getSessionId: () => uuid };
+
+    /** Resets logger state, sets `session` and drains its alias update. */
+    const activate = (session: DebugLogSession | null = uuidSession) => {
+      resetDebugLoggingState();
+      setDebugLogSession(session);
+      return vi.runAllTimersAsync();
+    };
+    /** Restores the alias mocks' factory defaults for later tests. */
+    const restoreAliasMocks = () => {
+      symlink.mockResolvedValue(undefined);
+      readlink.mockResolvedValue('');
     };
 
     it('creates a symlink to the current session log file', async () => {
-      resetDebugLoggingState();
-      setDebugLogSession(uuidSession);
-
-      await vi.runAllTimersAsync();
+      await activate();
 
       expect(fs.unlink).toHaveBeenCalledWith(expectedLatestPath);
-      expect(fs.symlink).toHaveBeenCalledWith(
-        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
-        expectedLatestPath,
-      );
+      expect(symlink).toHaveBeenCalledWith(`${uuid}.txt`, expectedLatestPath);
     });
 
     it('does not create latest symlink when QWEN_DEBUG_LOG_FILE is unset', async () => {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
       vi.clearAllMocks();
-      resetDebugLoggingState();
-      setDebugLogSession(uuidSession);
+      await activate();
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(symlink).not.toHaveBeenCalled();
     });
 
     it('does not point latest at non-session debug logs', async () => {
-      resetDebugLoggingState();
-      setDebugLogSession({ getSessionId: () => 'log-to-span-sink-test' });
+      await activate({ getSessionId: () => 'log-to-span-sink-test' });
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(symlink).not.toHaveBeenCalled();
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
     it('does not create symlink when session is cleared', async () => {
       vi.clearAllMocks();
-      resetDebugLoggingState();
-      setDebugLogSession(null);
+      await activate(null);
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(symlink).not.toHaveBeenCalled();
     });
 
     it('does not fall back to copy when symlink fails', async () => {
-      resetDebugLoggingState();
-      vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
-      vi.mocked(fs.readlink).mockRejectedValueOnce(new Error('ENOENT'));
+      symlink.mockRejectedValueOnce(new Error('EPERM'));
+      readlink.mockRejectedValueOnce(new Error('ENOENT'));
 
-      setDebugLogSession(uuidSession);
-
-      await vi.runAllTimersAsync();
+      await activate();
 
       expect(fs.copyFile).not.toHaveBeenCalled();
     });
 
     it('retries the latest alias after a failed update', async () => {
-      resetDebugLoggingState();
-      vi.mocked(fs.symlink)
+      symlink
         .mockRejectedValueOnce(new Error('EPERM'))
         .mockResolvedValue(undefined);
-      vi.mocked(fs.readlink)
+      readlink
         .mockRejectedValueOnce(new Error('ENOENT'))
-        .mockResolvedValue('92ec0176-d354-4147-848b-5cd2d80609c4.txt');
+        .mockResolvedValue(`${uuid}.txt`);
 
-      setDebugLogSession(uuidSession);
-      await vi.runAllTimersAsync();
-      expect(fs.symlink).toHaveBeenCalledOnce();
+      await activate();
+      expect(symlink).toHaveBeenCalledOnce();
 
-      createDebugLogger().info('retry alias update');
-      await vi.runAllTimersAsync();
+      await infoAndFlush(createDebugLogger(), 'retry alias update');
 
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
-      expect(fs.symlink).toHaveBeenLastCalledWith(
-        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
+      expect(symlink).toHaveBeenCalledTimes(2);
+      expect(symlink).toHaveBeenLastCalledWith(
+        `${uuid}.txt`,
         expectedLatestPath,
       );
 
       // A successful (re)try must leave the dedup marker in place: another
       // write for the same session may not re-run the alias update.
-      createDebugLogger().info('same session again');
-      await vi.runAllTimersAsync();
+      await infoAndFlush(createDebugLogger(), 'same session again');
 
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(symlink).toHaveBeenCalledTimes(2);
     });
 
     it('resets the failure streak on a successful alias update', async () => {
-      resetDebugLoggingState();
-      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink)
+      symlink.mockResolvedValue(undefined);
+      readlink
         // A's first attempt fails, its retry verifies successfully.
         .mockRejectedValueOnce(new Error('ENOENT'))
-        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        .mockResolvedValueOnce(`${uuid}.txt`)
         // B's first attempt "succeeds" at the fs level but points at the
         // wrong target — the mismatch branch must count as a failure.
-        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        .mockResolvedValueOnce(`${uuid}.txt`)
         .mockRejectedValue(new Error('ENOENT'));
 
-      setDebugLogSession(uuidSession);
-      await vi.runAllTimersAsync();
+      await activate();
 
       const logger = createDebugLogger();
-      logger.info('A retries');
-      await vi.runAllTimersAsync();
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      await infoAndFlush(logger, 'A retries');
+      expect(symlink).toHaveBeenCalledTimes(2);
 
       // A's success reset the streak, so B's two failures land at streak 1
       // and 2 — below the cap — and B still gets a third attempt. Without
       // the reset, A's initial failure would push B's second failure to the
       // cap and the marker would go sticky one failure early.
-      sessionIdContext.run(otherSession, () => {
-        logger.info('B first failure');
-      });
-      await vi.runAllTimersAsync();
-      sessionIdContext.run(otherSession, () => {
-        logger.info('B second failure');
-      });
-      await vi.runAllTimersAsync();
-      sessionIdContext.run(otherSession, () => {
-        logger.info('B third attempt');
-      });
-      await vi.runAllTimersAsync();
+      await infoAndFlush(logger, 'B first failure', otherSession);
+      await infoAndFlush(logger, 'B second failure', otherSession);
+      await infoAndFlush(logger, 'B third attempt', otherSession);
 
-      expect(fs.symlink).toHaveBeenCalledTimes(5);
+      expect(symlink).toHaveBeenCalledTimes(5);
 
-      // Restore the factory defaults for later tests.
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink).mockResolvedValue('');
+      restoreAliasMocks();
     });
 
     it('stops retrying the alias after consecutive persistent failures', async () => {
-      resetDebugLoggingState();
-      vi.mocked(fs.symlink).mockRejectedValue(new Error('EPERM'));
-      vi.mocked(fs.readlink).mockRejectedValue(new Error('ENOENT'));
+      symlink.mockRejectedValue(new Error('EPERM'));
+      readlink.mockRejectedValue(new Error('ENOENT'));
 
-      setDebugLogSession(uuidSession);
-      await vi.runAllTimersAsync();
+      await activate();
 
       const logger = createDebugLogger();
       for (let i = 0; i < 5; i += 1) {
-        logger.info(`doomed alias attempt ${i}`);
-        await vi.runAllTimersAsync();
+        await infoAndFlush(logger, `doomed alias attempt ${i}`);
       }
 
       // Attempts 1-3 retry; at the streak cap the marker stays sticky, so
       // the remaining writes must not re-run the doomed unlink/symlink.
-      expect(fs.symlink).toHaveBeenCalledTimes(3);
+      expect(symlink).toHaveBeenCalledTimes(3);
 
-      // Restore the factory defaults for later tests.
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink).mockResolvedValue('');
+      restoreAliasMocks();
     });
 
     it('recovers from the streak cap when a later alias update succeeds', async () => {
       // The cap must behave like a circuit breaker, not a latch: a capped
       // streak still attempts on a session CHANGE (different dedup key), and
       // one success re-opens retries for subsequent transient failures.
-      resetDebugLoggingState();
-      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink)
+      symlink.mockResolvedValue(undefined);
+      readlink
         // A's three failures reach the cap.
         .mockRejectedValueOnce(new Error('ENOENT'))
         .mockRejectedValueOnce(new Error('ENOENT'))
         .mockRejectedValueOnce(new Error('ENOENT'))
         // B's attempt succeeds and resets the streak.
-        .mockResolvedValueOnce('6ba7b810-9dad-11d1-80b4-00c04fd430c8.txt')
+        .mockResolvedValueOnce(`${otherSession}.txt`)
         // A's post-recovery failure must retry again.
         .mockRejectedValue(new Error('ENOENT'));
 
-      setDebugLogSession(uuidSession);
-      await vi.runAllTimersAsync();
+      await activate();
       const logger = createDebugLogger();
-      logger.info('A failure 2');
-      await vi.runAllTimersAsync();
-      logger.info('A failure 3');
-      await vi.runAllTimersAsync();
-      logger.info('A at cap — sticky');
-      await vi.runAllTimersAsync();
-      expect(fs.symlink).toHaveBeenCalledTimes(3);
+      await infoAndFlush(logger, 'A failure 2');
+      await infoAndFlush(logger, 'A failure 3');
+      await infoAndFlush(logger, 'A at cap — sticky');
+      expect(symlink).toHaveBeenCalledTimes(3);
 
       // Session change: the capped streak must not block B's attempt.
-      sessionIdContext.run(otherSession, () => {
-        logger.info('B succeeds');
-      });
-      await vi.runAllTimersAsync();
-      expect(fs.symlink).toHaveBeenCalledTimes(4);
+      await infoAndFlush(logger, 'B succeeds', otherSession);
+      expect(symlink).toHaveBeenCalledTimes(4);
 
       // B's success re-opened the breaker: A's next failure retries again.
-      logger.info('A fails after recovery');
-      await vi.runAllTimersAsync();
-      logger.info('A retries');
-      await vi.runAllTimersAsync();
-      expect(fs.symlink).toHaveBeenCalledTimes(6);
+      await infoAndFlush(logger, 'A fails after recovery');
+      await infoAndFlush(logger, 'A retries');
+      expect(symlink).toHaveBeenCalledTimes(6);
 
-      // Restore the factory defaults for later tests.
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink).mockResolvedValue('');
+      restoreAliasMocks();
     });
 
     it('does not let a stale failed update clear a newer session marker', async () => {
       resetDebugLoggingState();
       vi.clearAllMocks();
 
-      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
       const deferreds: Array<{
         resolve: () => void;
         reject: (err: Error) => void;
       }> = [];
-      vi.mocked(fs.symlink).mockImplementation(
+      symlink.mockImplementation(
         () =>
           new Promise<void>((resolve, reject) => {
             deferreds.push({ resolve: () => resolve(), reject });
           }),
       );
       vi.mocked(fs.unlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink).mockResolvedValue(`${otherSession}.txt`);
+      readlink.mockResolvedValue(`${otherSession}.txt`);
 
       const logger = createDebugLogger();
-      sessionIdContext.run('92ec0176-d354-4147-848b-5cd2d80609c4', () => {
-        logger.info('message from A');
-      });
-      sessionIdContext.run(otherSession, () => {
-        logger.info('message from B');
-      });
+      sessionIdContext.run(uuid, () => logger.info('message from A'));
+      sessionIdContext.run(otherSession, () => logger.info('message from B'));
       await vi.runAllTimersAsync();
 
       // A's update fails only after B's was scheduled (B owns the marker).
@@ -654,49 +583,38 @@ describe('debugLogger', () => {
       deferreds[1]!.resolve();
       await vi.runAllTimersAsync();
 
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(symlink).toHaveBeenCalledTimes(2);
 
       // B's marker must have survived A's stale failure: another write from
       // B may not re-run the alias update.
-      sessionIdContext.run(otherSession, () => {
-        logger.info('B again');
-      });
-      await vi.runAllTimersAsync();
+      await infoAndFlush(logger, 'B again', otherSession);
 
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(symlink).toHaveBeenCalledTimes(2);
 
-      // Restore the factory defaults for later tests.
-      vi.mocked(fs.symlink).mockResolvedValue(undefined);
-      vi.mocked(fs.readlink).mockResolvedValue('');
+      restoreAliasMocks();
     });
 
     it('does not create symlink when debug logging is disabled', async () => {
       process.env['QWEN_DEBUG_LOG_FILE'] = '0';
       vi.clearAllMocks();
-      resetDebugLoggingState();
-      setDebugLogSession(uuidSession);
+      await activate();
 
-      await vi.runAllTimersAsync();
-
-      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(symlink).not.toHaveBeenCalled();
     });
 
     it('updates latest alias when the active session changes mid-process', async () => {
       resetDebugLoggingState();
       setDebugLogSession(uuidSession);
-      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
       vi.clearAllMocks();
-      const logger = createDebugLogger();
+      await infoAndFlush(
+        createDebugLogger(),
+        'message from other session',
+        otherSession,
+      );
 
-      sessionIdContext.run(otherSession, () => {
-        logger.info('message from other session');
-      });
-
-      await vi.runAllTimersAsync();
-
-      expect(fs.symlink).toHaveBeenCalledWith(
-        '6ba7b810-9dad-11d1-80b4-00c04fd430c8.txt',
+      expect(symlink).toHaveBeenCalledWith(
+        `${otherSession}.txt`,
         expectedLatestPath,
       );
     });
@@ -708,7 +626,7 @@ describe('debugLogger', () => {
       // Each symlink call returns a deferred promise so we can control when
       // the serialized update finishes and observe the next one waiting.
       const deferreds: Array<{ resolve: () => void }> = [];
-      vi.mocked(fs.symlink).mockImplementation(
+      symlink.mockImplementation(
         () =>
           new Promise<void>((resolve) => {
             deferreds.push({ resolve });
@@ -720,18 +638,14 @@ describe('debugLogger', () => {
       const sessionB = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
       const logger = createDebugLogger();
 
-      sessionIdContext.run(sessionA, () => {
-        logger.info('message from A');
-      });
-      sessionIdContext.run(sessionB, () => {
-        logger.info('message from B');
-      });
+      sessionIdContext.run(sessionA, () => logger.info('message from A'));
+      sessionIdContext.run(sessionB, () => logger.info('message from B'));
 
       // Let the first serialized alias update reach fs.symlink.
       await vi.runAllTimersAsync();
 
-      expect(fs.symlink).toHaveBeenCalledOnce();
-      expect(fs.symlink).toHaveBeenLastCalledWith(
+      expect(symlink).toHaveBeenCalledOnce();
+      expect(symlink).toHaveBeenLastCalledWith(
         `${sessionA}.txt`,
         expectedLatestPath,
       );
@@ -740,8 +654,8 @@ describe('debugLogger', () => {
       deferreds[0]!.resolve();
       await vi.runAllTimersAsync();
 
-      expect(fs.symlink).toHaveBeenCalledTimes(2);
-      expect(fs.symlink).toHaveBeenLastCalledWith(
+      expect(symlink).toHaveBeenCalledTimes(2);
+      expect(symlink).toHaveBeenLastCalledWith(
         `${sessionB}.txt`,
         expectedLatestPath,
       );
@@ -750,11 +664,9 @@ describe('debugLogger', () => {
 
   describe('resetDebugLoggingState', () => {
     it('resets the degraded state', async () => {
-      vi.mocked(fs.appendFile).mockRejectedValueOnce(new Error('Disk full'));
+      appendFile.mockRejectedValueOnce(new Error('Disk full'));
 
-      const logger = createDebugLogger();
-      logger.debug('test');
-      await vi.runAllTimersAsync();
+      await logOnce('debug', 'test');
 
       expect(isDebugLoggingDegraded()).toBe(true);
 

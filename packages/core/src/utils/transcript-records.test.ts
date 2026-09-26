@@ -29,6 +29,40 @@ function record(
   };
 }
 
+/** A message-less system record; `systemPayload` is left out when not given. */
+function systemRecord(
+  uuid: string,
+  parentUuid: string | null,
+  subtype: string,
+  systemPayload?: Record<string, unknown>,
+): Record<string, unknown> {
+  return record(uuid, parentUuid, {
+    type: 'system',
+    subtype,
+    message: undefined,
+    ...(systemPayload === undefined ? {} : { systemPayload }),
+  });
+}
+
+type Prepared = ReturnType<typeof prepareTranscriptRecords>;
+
+const uuidsOf = (prepared: Prepared) =>
+  prepared.records.map((item) => item.uuid);
+
+/** Asserts no unknown-subtype diagnostic (for `recordId`, when given). */
+function expectNoUnknownSubtype(prepared: Prepared, recordId?: string) {
+  expect(prepared.diagnostics).not.toContainEqual(
+    expect.objectContaining({
+      code: 'unknown_record_or_part',
+      ...(recordId === undefined ? {} : { recordId }),
+      path: 'subtype',
+    }),
+  );
+}
+
+const errorWithCode = (code: TranscriptRecordPreparationError['code']) =>
+  expect.objectContaining<Partial<TranscriptRecordPreparationError>>({ code });
+
 describe('prepareTranscriptRecords', () => {
   it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
     'keeps user content readable without a valid daemonPromptId (%j)',
@@ -83,10 +117,7 @@ describe('prepareTranscriptRecords', () => {
       }),
     ]);
 
-    expect(prepared.records.map((item) => item.uuid)).toEqual([
-      'root',
-      'active',
-    ]);
+    expect(uuidsOf(prepared)).toEqual(['root', 'active']);
     expect(prepared.records[1]?.message?.parts).toEqual([
       { text: 'first' },
       { text: 'second' },
@@ -104,10 +135,7 @@ describe('prepareTranscriptRecords', () => {
       }),
     ]);
 
-    expect(prepared.records.map((item) => item.uuid)).toEqual([
-      'root',
-      'reply',
-    ]);
+    expect(uuidsOf(prepared)).toEqual(['root', 'reply']);
   });
 
   it('stops at a missing parent and reports a history gap', () => {
@@ -116,10 +144,7 @@ describe('prepareTranscriptRecords', () => {
       record('leaf', 'orphan'),
     ]);
 
-    expect(prepared.records.map((item) => item.uuid)).toEqual([
-      'orphan',
-      'leaf',
-    ]);
+    expect(uuidsOf(prepared)).toEqual(['orphan', 'leaf']);
     expect(prepared.gaps).toEqual([
       { childUuid: 'orphan', missingParentUuid: 'missing' },
     ]);
@@ -178,17 +203,12 @@ describe('prepareTranscriptRecords', () => {
 
   it('accepts background completion metadata without degrading restored history', () => {
     const prepared = prepareTranscriptRecords([
-      record('completion', null, {
-        type: 'system',
-        subtype: 'background_task_completed',
-        message: undefined,
-        systemPayload: {
-          displayText: 'Task finished',
-          backgroundTask: {
-            taskId: 'agent-1',
-            kind: 'agent',
-            status: 'completed',
-          },
+      systemRecord('completion', null, 'background_task_completed', {
+        displayText: 'Task finished',
+        backgroundTask: {
+          taskId: 'agent-1',
+          kind: 'agent',
+          status: 'completed',
         },
       }),
       record('root', 'completion'),
@@ -198,14 +218,9 @@ describe('prepareTranscriptRecords', () => {
 
   it('accepts Omni recall metadata without marking history incomplete', () => {
     const prepared = prepareTranscriptRecords([
-      record('recall', null, {
-        type: 'system',
-        subtype: 'omni_recall',
-        message: undefined,
-        systemPayload: {
-          resourceIds: ['media-1'],
-          selectedEntryIds: ['entry-1'],
-        },
+      systemRecord('recall', null, 'omni_recall', {
+        resourceIds: ['media-1'],
+        selectedEntryIds: ['entry-1'],
       }),
       record('root', 'recall'),
     ]);
@@ -214,62 +229,32 @@ describe('prepareTranscriptRecords', () => {
 
   it('accepts session source metadata as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
-      record('source', null, {
-        type: 'system',
-        subtype: 'session_source',
-        message: undefined,
-        systemPayload: { sourceType: 'web', sourceId: 'demo' },
+      systemRecord('source', null, 'session_source', {
+        sourceType: 'web',
+        sourceId: 'demo',
       }),
       record('root', 'source'),
     ]);
-
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        recordId: 'source',
-        path: 'subtype',
-      }),
-    );
+    expectNoUnknownSubtype(prepared, 'source');
   });
 
   it('accepts session model metadata as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
-      record('model', null, {
-        type: 'system',
-        subtype: 'session_model',
-        message: undefined,
-        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      systemRecord('model', null, 'session_model', {
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
       }),
       record('root', 'model'),
     ]);
-
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        recordId: 'model',
-        path: 'subtype',
-      }),
-    );
+    expectNoUnknownSubtype(prepared, 'model');
   });
 
   it('accepts the workflow agent retry marker as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),
-      record('retry', 'root', {
-        type: 'system',
-        subtype: 'agent_retry',
-        message: undefined,
-        systemPayload: { attempt: 2 },
-      }),
+      systemRecord('retry', 'root', 'agent_retry', { attempt: 2 }),
     ]);
-
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        recordId: 'retry',
-        path: 'subtype',
-      }),
-    );
+    expectNoUnknownSubtype(prepared, 'retry');
   });
 
   it('accepts Realtime dialogue as a known record subtype', () => {
@@ -286,44 +271,21 @@ describe('prepareTranscriptRecords', () => {
 
   it('accepts Goal state and runtime records as known subtypes', () => {
     const prepared = prepareTranscriptRecords([
-      record('goal-state', null, {
-        type: 'system',
-        subtype: 'goal_state',
-        message: undefined,
-      }),
-      record('goal-runtime', 'goal-state', {
-        subtype: 'goal_runtime',
-      }),
+      systemRecord('goal-state', null, 'goal_state'),
+      record('goal-runtime', 'goal-state', { subtype: 'goal_runtime' }),
     ]);
-
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        path: 'subtype',
-      }),
-    );
+    expectNoUnknownSubtype(prepared);
   });
 
   it('accepts branch_checkpoint as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
-      record('checkpoint', null, {
-        type: 'system',
-        subtype: 'branch_checkpoint',
-        message: undefined,
-        systemPayload: {
-          assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
-          checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
-        },
+      systemRecord('checkpoint', null, 'branch_checkpoint', {
+        assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+        checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
       }),
       record('root', 'checkpoint'),
     ]);
-
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        path: 'subtype',
-      }),
-    );
+    expectNoUnknownSubtype(prepared);
   });
 
   it.each([
@@ -331,25 +293,13 @@ describe('prepareTranscriptRecords', () => {
     'managed_session_event_v1',
     'managed_session_commit_v1',
   ])('keeps %s out of ordinary conversation projection', (subtype) => {
-    const managedRecord = record('managed', 'root', {
-      type: 'system',
-      subtype,
-      message: undefined,
-      systemPayload: { managedSession: {} },
-    });
     const prepared = prepareTranscriptRecords([
       record('root', null),
-      managedRecord,
+      systemRecord('managed', 'root', subtype, { managedSession: {} }),
     ]);
 
-    expect(prepared.records.map((item) => item.uuid)).toEqual(['root']);
-    expect(prepared.diagnostics).not.toContainEqual(
-      expect.objectContaining({
-        code: 'unknown_record_or_part',
-        recordId: 'managed',
-        path: 'subtype',
-      }),
-    );
+    expect(uuidsOf(prepared)).toEqual(['root']);
+    expectNoUnknownSubtype(prepared, 'managed');
     expect(isTranscriptConversationRecord({ type: 'system', subtype })).toBe(
       false,
     );
@@ -361,11 +311,7 @@ describe('prepareTranscriptRecords', () => {
         record('a', null),
         record('b', 'a', { sessionId: 'session-2' }),
       ]),
-    ).toThrowError(
-      expect.objectContaining<Partial<TranscriptRecordPreparationError>>({
-        code: 'mixed_session_ids',
-      }),
-    );
+    ).toThrowError(errorWithCode('mixed_session_ids'));
 
     expect(() =>
       prepareTranscriptRecords(
@@ -377,104 +323,76 @@ describe('prepareTranscriptRecords', () => {
         ],
         { leafUuid: 'artifact' },
       ),
-    ).toThrowError(
-      expect.objectContaining<Partial<TranscriptRecordPreparationError>>({
-        code: 'leaf_not_found',
-      }),
-    );
+    ).toThrowError(errorWithCode('leaf_not_found'));
   });
 });
 
 describe('projectUserTranscriptForDisplay', () => {
+  /** Projects a user record; `systemPayload` is left out when not given. */
+  const project = (parts: unknown[], systemPayload?: unknown) =>
+    projectUserTranscriptForDisplay({
+      message: { parts },
+      ...(systemPayload === undefined ? {} : { systemPayload }),
+    });
+  const imagePart = () => ({
+    inlineData: { mimeType: 'image/png', data: 'data' },
+  });
+  const hookTag = () => ({ text: wrapUserPromptSubmitContext('hook context') });
+
   it('uses display metadata even when the display text is empty', () => {
-    const imagePart = {
-      inlineData: { mimeType: 'image/png', data: 'data' },
-    };
     expect(
-      projectUserTranscriptForDisplay({
-        message: {
-          parts: [
-            imagePart,
-            { text: wrapUserPromptSubmitContext('hook context') },
-          ],
-        },
-        systemPayload: { displayText: '', hookContext: 'hook context' },
+      project([imagePart(), hookTag()], {
+        displayText: '',
+        hookContext: 'hook context',
       }),
-    ).toEqual({ displayText: '', parts: [imagePart] });
+    ).toEqual({ displayText: '', parts: [imagePart()] });
   });
 
   it('uses released single-field display metadata when the final tag proves provenance', () => {
-    const imagePart = {
-      inlineData: { mimeType: 'image/png', data: 'data' },
-    };
     expect(
-      projectUserTranscriptForDisplay({
-        message: {
-          parts: [
-            imagePart,
-            { text: 'expanded model prompt' },
-            { text: wrapUserPromptSubmitContext('hook context') },
-          ],
-        },
-        systemPayload: { displayText: 'raw @file prompt' },
+      project([imagePart(), { text: 'expanded model prompt' }, hookTag()], {
+        displayText: 'raw @file prompt',
       }),
-    ).toEqual({ displayText: 'raw @file prompt', parts: [imagePart] });
+    ).toEqual({ displayText: 'raw @file prompt', parts: [imagePart()] });
   });
 
   it('does not treat notification display labels as user prompt metadata', () => {
     const modelPart = { text: 'notification model text' };
     expect(
-      projectUserTranscriptForDisplay({
-        message: { parts: [modelPart] },
-        systemPayload: { displayText: 'Background agent completed' },
-      }),
+      project([modelPart], { displayText: 'Background agent completed' }),
     ).toEqual({ displayText: undefined, parts: [modelPart] });
   });
 
   it('removes only a complete final tag-only context part', () => {
     const userPart = { text: 'user text' };
-    expect(
-      projectUserTranscriptForDisplay({
-        message: {
-          parts: [
-            userPart,
-            { text: wrapUserPromptSubmitContext('hook context') },
-          ],
-        },
-      }),
-    ).toEqual({ displayText: undefined, parts: [userPart] });
+    expect(project([userPart, hookTag()])).toEqual({
+      displayText: undefined,
+      parts: [userPart],
+    });
   });
 
   it('treats non-object system payloads as absent metadata', () => {
     const userPart = { text: 'user text' };
-    const taggedPart = {
-      text: wrapUserPromptSubmitContext('hook context'),
-    };
-
-    expect(
-      projectUserTranscriptForDisplay({
-        message: { parts: [userPart, taggedPart] },
-        systemPayload: null,
-      }),
-    ).toEqual({ displayText: undefined, parts: [userPart] });
+    expect(project([userPart, hookTag()], null)).toEqual({
+      displayText: undefined,
+      parts: [userPart],
+    });
   });
 
   it('preserves legacy bare context and user-authored tag-like text', () => {
     const legacyParts = [{ text: 'user text' }, { text: 'bare hook context' }];
-    expect(
-      projectUserTranscriptForDisplay({
-        message: { parts: legacyParts },
-      }),
-    ).toEqual({ displayText: undefined, parts: legacyParts });
+    expect(project(legacyParts)).toEqual({
+      displayText: undefined,
+      parts: legacyParts,
+    });
 
     const userAuthoredTag = {
       text: wrapUserPromptSubmitContext('user-authored text'),
     };
-    expect(
-      projectUserTranscriptForDisplay({
-        message: { parts: [userAuthoredTag] },
-      }),
-    ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
+    expect(project([userAuthoredTag])).toEqual({
+      displayText: undefined,
+      parts: [userAuthoredTag],
+    });
   });
 
   it('does not trust bare displayText without a final context tag', () => {
@@ -482,9 +400,8 @@ describe('projectUserTranscriptForDisplay', () => {
       text: '<qwen:user-prompt-submit-context>user-authored text</qwen:user-prompt-submit-context>',
     };
     expect(
-      projectUserTranscriptForDisplay({
-        message: { parts: [{ text: 'user text' }, taggedPart] },
-        systemPayload: { displayText: 'notification label' },
+      project([{ text: 'user text' }, taggedPart], {
+        displayText: 'notification label',
       }),
     ).toEqual({
       displayText: undefined,

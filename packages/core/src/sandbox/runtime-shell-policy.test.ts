@@ -24,18 +24,24 @@ import {
 const executeBwrap = vi.hoisted(() => vi.fn());
 vi.mock('./bwrap-execution.js', () => ({ executeBwrap }));
 
+const LEGACY_ENV = [
+  'SANDBOX',
+  'QWEN_SANDBOX',
+  'QWEN_SANDBOX_NET',
+  'QWEN_SANDBOX_PROXY_COMMAND',
+];
+
+type ShellSandbox = NonNullable<ConfigParameters['shellExecutionSandbox']>;
+
+const linkDir = (target: string, alias: string) =>
+  symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+
 describe('runtime shell policy admission', () => {
   let root: string;
   let params: ConfigParameters;
   beforeEach(() => {
     vi.clearAllMocks();
-    for (const name of [
-      'SANDBOX',
-      'QWEN_SANDBOX',
-      'QWEN_SANDBOX_NET',
-      'QWEN_SANDBOX_PROXY_COMMAND',
-    ])
-      vi.stubEnv(name, undefined);
+    for (const name of LEGACY_ENV) vi.stubEnv(name, undefined);
     root = realpathSync(
       mkdtempSync(path.join(os.tmpdir(), 'qwen-policy-test-')),
     );
@@ -74,6 +80,13 @@ describe('runtime shell policy admission', () => {
       path.join(root, 'runtime'),
       path.join(root, 'config'),
     );
+  /** Overrides fields of the configured shell sandbox policy. */
+  const setSandbox = (overrides: Partial<ShellSandbox>) => {
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      ...overrides,
+    };
+  };
 
   it('snapshots the canonical policy and both host state roots', () => {
     const workspaceAlias = path.join(root, 'workspace-alias');
@@ -84,24 +97,15 @@ describe('runtime shell policy admission', () => {
       [path.join(root, 'installation'), installationAlias],
       [path.join(root, 'state'), stateAlias],
     ])
-      symlinkSync(
-        target,
-        alias,
-        process.platform === 'win32' ? 'junction' : 'dir',
-      );
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox!,
+      linkDir(target, alias);
+    setSandbox({
       workspace: workspaceAlias,
       installation: installationAlias,
       state: stateAlias,
       bwrapPath: path.join(root, 'installation', 'bwrap'),
-    };
+    });
     const policy = admit(params, root)!;
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox!,
-      workspace: path.join(root, 'outside'),
-      network: 'open',
-    };
+    setSandbox({ workspace: path.join(root, 'outside'), network: 'open' });
     expect(policy.workspace).toBe(path.join(root, 'workspace'));
     expect(policy.installation).toBe(path.join(root, 'installation'));
     expect(policy.state).toBe(path.join(root, 'state'));
@@ -112,19 +116,15 @@ describe('runtime shell policy admission', () => {
   });
 
   it('canonicalizes workspace-local masks and rejects masks outside it', () => {
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox!,
+    setSandbox({
       maskedPaths: [path.join(root, 'workspace', '.qwen', 'review-leases')],
-    };
+    });
     const policy = admit(params, root)!;
     expect(policy.maskedPaths).toEqual([
       path.join(root, 'workspace', '.qwen', 'review-leases'),
     ]);
     expect(Object.isFrozen(policy.maskedPaths)).toBe(true);
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox,
-      maskedPaths: [path.join(root, 'outside')],
-    };
+    setSandbox({ maskedPaths: [path.join(root, 'outside')] });
     expect(() => admit(params, root)).toThrow('inside the workspace');
   });
 
@@ -147,12 +147,7 @@ describe('runtime shell policy admission', () => {
     ).toThrow('tools.executionSandbox');
   });
 
-  it.each([
-    'SANDBOX',
-    'QWEN_SANDBOX',
-    'QWEN_SANDBOX_NET',
-    'QWEN_SANDBOX_PROXY_COMMAND',
-  ])('rejects legacy %s environment', (name) => {
+  it.each(LEGACY_ENV)('rejects legacy %s environment', (name) => {
     vi.stubEnv(name, 'bwrap');
     expect(() => admit(params, root)).toThrow('legacy sandbox environment');
   });
@@ -184,11 +179,7 @@ describe('runtime shell policy admission', () => {
   });
 
   it('rejects cwd symlinks into another workspace', () => {
-    symlinkSync(
-      path.join(root, 'outside'),
-      path.join(root, 'workspace', 'link'),
-      process.platform === 'win32' ? 'junction' : 'dir',
-    );
+    linkDir(path.join(root, 'outside'), path.join(root, 'workspace', 'link'));
     const policy = admit(params, root)!;
     expect(() =>
       assertShellSandboxCwd(policy, path.join(root, 'workspace', 'link')),
@@ -202,31 +193,23 @@ describe('runtime shell policy admission', () => {
     'rejects workspace overlap with %s',
     (name) => {
       params.targetDir = path.join(root, name);
-      params.shellExecutionSandbox = {
-        ...params.shellExecutionSandbox!,
-        workspace: params.targetDir,
-      };
+      setSandbox({ workspace: params.targetDir });
       expect(() => admit(params, root)).toThrow('overlaps protected');
     },
   );
 
   it('rejects workspace ancestors and descendants of protected roots', () => {
-    params.targetDir = root;
-    params.cwd = root;
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox!,
-      workspace: root,
+    const useWorkspace = (dir: string) => {
+      params.targetDir = dir;
+      params.cwd = dir;
+      setSandbox({ workspace: dir });
     };
+    useWorkspace(root);
     expect(() => admit(params, root)).toThrow('overlaps protected');
 
     const nested = path.join(root, 'runtime', 'nested');
     mkdirSync(nested);
-    params.targetDir = nested;
-    params.cwd = nested;
-    params.shellExecutionSandbox = {
-      ...params.shellExecutionSandbox,
-      workspace: nested,
-    };
+    useWorkspace(nested);
     expect(() => admit(params, root)).toThrow('overlaps protected');
   });
 
@@ -268,11 +251,11 @@ describe('runtime shell policy admission', () => {
       'process',
       Object.create(process, { platform: { value: 'linux' } }),
     );
-    executeBwrap.mockResolvedValue({
-      result: Promise.resolve({
-        sandboxStatus: { state: 'confirmed', exitCode: 0 },
-      }),
-    });
+    const settleProbeWith = (sandboxStatus: object) =>
+      executeBwrap.mockResolvedValue({
+        result: Promise.resolve({ sandboxStatus }),
+      });
+    settleProbeWith({ state: 'confirmed', exitCode: 0 });
     await probeShellSandbox(admit(params, root)!);
     expect(executeBwrap).toHaveBeenCalledWith(
       expect.anything(),
@@ -285,9 +268,7 @@ describe('runtime shell policy admission', () => {
       expect.any(Function),
       expect.any(AbortSignal),
     );
-    executeBwrap.mockResolvedValue({
-      result: Promise.resolve({ sandboxStatus: { state: 'unconfirmed' } }),
-    });
+    settleProbeWith({ state: 'unconfirmed' });
     await expect(probeShellSandbox(admit(params, root)!)).rejects.toThrow(
       'capability probe failed',
     );
