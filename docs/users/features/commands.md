@@ -763,7 +763,7 @@ qwen sessions list --json | jq .
 
 Experimental. Runs a prompt as a background session and returns once the worker has started, printing the session id.
 
-The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it, and says whether it is `working` or has stopped to ask you something. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents` and can be addressed with `send_message` (see [Messaging Another Running Session](#6-messaging-another-running-session)).
+The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it as a `managed` row. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents` and can be addressed with `send_message` (see [Messaging Another Running Session](#6-messaging-another-running-session)).
 
 ```bash
 qwen --bg "find out why the release job is flaky"
@@ -771,7 +771,7 @@ qwen --bg "find out why the release job is flaky"
 # See it with: qwen sessions ps
 ```
 
-What it does not do yet: there is no way to attach to a background session, read its transcript, answer its question from the CLI, or stop it. Those land with the Agent View roster.
+What it does not do yet: `sessions ps` reports the row's directory, not what the session is doing, and there is no way to attach to a background session, read its transcript, answer its question from the CLI, or stop it. Those land with the Agent View roster.
 
 #### `qwen sessions ps`
 
@@ -842,12 +842,6 @@ qwen sessions ps
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
-
-# Which background sessions are waiting on me?
-# Note: `jq -r` renders the raw recorded value in your terminal (see the
-# raw-data note above); a session name is session-generated text, so pipe
-# through a sanitizer if it is untrusted.
-qwen sessions ps --json | jq -r 'select(.taskState == "waiting") | .name'
 ```
 
 ## 6. Messaging Another Running Session

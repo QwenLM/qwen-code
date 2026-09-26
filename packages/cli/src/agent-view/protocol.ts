@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
-
 export const AGENT_VIEW_PROTOCOL_VERSION = 1;
 
 export type AgentViewOwnership =
@@ -256,25 +254,3 @@ export type AgentViewWorkerAnswerOutcome =
   | 'modify_with_editor'
   | 'restore_previous'
   | 'cancel';
-
-/**
- * The directory name a session id is filed under.
- *
- * This lives with the on-disk shapes rather than with the store because
- * it *is* one: it defines the identity two readers must agree on. The
- * store files a session under this name and reports it back as the
- * session's id, while the live-session registry keeps the raw spelling
- * the worker registered with — adoption deliberately keeps both, because
- * the native session store is case-sensitive. Anything that joins the two
- * sources has to canonicalize through this one function, or a mixed-case
- * session is two sessions to whichever half is comparing raw strings.
- */
-export function sanitizeSessionId(sessionId: string): string {
-  const safe = path
-    .basename(sessionId.replace(/\\/g, '/'))
-    .toLowerCase()
-    .replace(/^\.+/g, '_')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_');
-  return safe || '_';
-}
