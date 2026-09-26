@@ -1645,6 +1645,12 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
+      - name: 'Hosted portable process smoke'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
+        run: |-
+          npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
+
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
@@ -1819,6 +1825,12 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+
+      - name: 'Hosted portable process smoke'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
+        run: |-
+          npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
