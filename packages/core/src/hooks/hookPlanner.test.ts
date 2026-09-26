@@ -417,22 +417,6 @@ describe('HookPlanner', () => {
       });
     });
 
-    it('should match all notification types when matcher is empty', () => {
-      expectMatch(Notification, '', {
-        notificationType: 'any_notification_type',
-      });
-    });
-
-    it('should match all notification types when no matcher provided', () => {
-      expectMatch(Notification, undefined, {
-        notificationType: 'any_notification_type',
-      });
-    });
-
-    it('should match all notification types when no context provided', () => {
-      expectMatch(Notification, 'permission_prompt');
-    });
-
     it('should match agent type with exact string for SubagentStart', () => {
       expectMatch(SubagentStart, 'code-reviewer', {
         agentType: 'code-reviewer',
@@ -453,16 +437,6 @@ describe('HookPlanner', () => {
 
     it('should match agent type with wildcard for SubagentStart', () => {
       expectMatch(SubagentStart, '*', { agentType: 'any-agent' });
-    });
-
-    it('should match all agent types when no context for SubagentStart', () => {
-      expectMatch(SubagentStart, 'code-reviewer');
-    });
-
-    it('should match all agent types when no matcher for SubagentStart', () => {
-      expectMatch(SubagentStart, undefined, {
-        agentType: 'any-agent',
-      });
     });
 
     it('should match agent type with exact string for SubagentStop', () => {
@@ -511,12 +485,6 @@ describe('HookPlanner', () => {
     it('should not match error type with different string for StopFailure', () => {
       expectNoMatch(StopFailure, 'rate_limit', {
         error: 'authentication_failed',
-      });
-    });
-
-    it('should match all error types when no matcher for StopFailure', () => {
-      expectMatch(StopFailure, undefined, {
-        error: 'server_error',
       });
     });
 
@@ -578,10 +546,6 @@ describe('HookPlanner', () => {
 
     it('should not match trigger with different string for PostCompact', () => {
       expectNoMatch(PostCompact, 'manual', { trigger: 'auto' });
-    });
-
-    it('should match all triggers when no matcher for PostCompact', () => {
-      expectMatch(PostCompact, undefined, { trigger: 'auto' });
     });
 
     it('should match all triggers when matcher is wildcard for PostCompact', () => {

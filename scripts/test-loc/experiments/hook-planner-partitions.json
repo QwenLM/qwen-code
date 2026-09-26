@@ -1,0 +1,66 @@
+{
+  "baselineCommit": "10a29740ae",
+  "hypothesis": "Remove repeated event-specific instances of three shared early-return input partitions while retaining event dispatch, exact/regex/alias, and negative matching coverage. Measure with historical alias faults and full-module/static/all-operator mutation, including hook-matcher.ts dependency.",
+  "mappings": [],
+  "removed": [
+    {
+      "before": "HookPlanner matchesContext should match all notification types when matcher is empty",
+      "reason": "Subsumed by HookPlanner matchesContext should match empty string as wildcard: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all notification types when no matcher provided",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no matcher: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all notification types when no context provided",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no context: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all agent types when no context for SubagentStart",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no context: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all agent types when no matcher for SubagentStart",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no matcher: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all error types when no matcher for StopFailure",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no matcher: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    },
+    {
+      "before": "HookPlanner matchesContext should match all triggers when no matcher for PostCompact",
+      "reason": "Subsumed by HookPlanner matchesContext should match all when no matcher: the shared guard returns before event-specific dispatch. Exact, wildcard, and rejection cases still exercise this event's target selection. This deliberately drops repeated event labels for the same missing-input partition."
+    }
+  ],
+  "validation": {
+    "status": "retained-with-recorded-limits",
+    "historicalFaults": {
+      "detectedBefore": 2,
+      "detectedAfter": 2,
+      "eligible": 2,
+      "frozenExclusions": 1,
+      "lost": 0
+    },
+    "unitBuildTypecheckFormatLint": "passed on the exact test file bytes recorded by the gates",
+    "evidence": "../evidence/round5/manifest.json",
+    "mutation": {
+      "directModuleMutants": 113,
+      "directModuleStrictOk": true,
+      "dependencyModule": "hook-matcher.ts",
+      "dependencyMutants": 181,
+      "dependencyUnchangedTimeouts": 4,
+      "dependencyStrictOk": false,
+      "lostKills": 0
+    },
+    "coverage": {
+      "strictOk": true,
+      "coveredLines": 202,
+      "scope": ["hookPlanner.ts", "hook-matcher.ts"]
+    },
+    "limits": [
+      "Four paired hook-matcher Timeout outcomes remain inconclusive.",
+      "The three shared early-return partitions are retained once; event-specific missing-input labels were deliberately removed.",
+      "The complete permissions/rule-parser static alias table is outside this mutation sample; alias cases and the historical alias fault remain covered."
+    ]
+  }
+}
