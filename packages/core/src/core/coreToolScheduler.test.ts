@@ -9005,6 +9005,45 @@ describe('CoreToolScheduler', () => {
       );
     });
 
+    it('prioritizes a registered prefix of an unknown tool name', () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => [
+          'edit',
+          'write_file',
+          'read_file',
+          'exit_plan_mode',
+        ],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      for (const [unknownName, expected] of [
+        ['edit_file_path', 'edit'],
+        ['edit_file', 'edit'],
+        ['read_file_path', 'read_file'],
+        ['write_file_path', 'write_file'],
+      ]) {
+        // @ts-expect-error accessing private method
+        expect(scheduler.getToolSuggestion(unknownName, 1)).toBe(
+          ` Did you mean "${expected}"?`,
+        );
+      }
+    });
+
     it('should use Levenshtein suggestions for excluded tools (getToolSuggestion only handles non-excluded)', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
