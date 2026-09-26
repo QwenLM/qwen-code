@@ -4260,6 +4260,7 @@ class QwenAgent implements Agent {
           {
             ...this.argv,
             sessionId: 'workspace-mcp-discovery',
+            experimentalLsp: false,
             resume: undefined,
             continue: false,
             chatRecording: false,
