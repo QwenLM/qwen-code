@@ -181,6 +181,7 @@ describe('Session review-worktree lease sweep', () => {
         setSnapshotPersistedCallback: vi.fn(),
         setApprovalRequestCallback: vi.fn(),
       }),
+      getSkillManager: vi.fn().mockReturnValue(null),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
