@@ -85,7 +85,7 @@ Attestation v3 就是 envelope 的检查。它把请求与 boot 文档比较，�
 
 新调用还在 gate 中时到达的 `status` 或 `cancel` 会回答 `unknown`，就像调用尚未到达时一样；除非 gate 拒绝，该调用随后照常运行。同样，关闭 worker 会中止正在运行的调用，但不会中止还在 gate 中的调用。
 
-每次调用都以其 Session 的身份运行。它的 shell 看到的 `QWEN_CODE_SESSION_ID`，是由 Runtime 实例 ID 和 Runtime Session ID 的哈希派生出的键（Runtime Session ID 可能包含在文件名中不安全的字符）；`QWEN_CODE_PROJECT_DIR` 是该 Session 实际目录对应的项目目录。core 由路径推导出这个目录，所以名字只在标点上不同的两个目录会共用同一个。在 boot v1 下两者保持原值：Runtime 实例 ID，以及 `workspaceCwd` 对应的项目目录。
+每次调用都以其 Session 的身份运行。它的 shell 看到的 `QWEN_CODE_SESSION_ID`，是由 Runtime 实例 ID 和 Runtime Session ID 的哈希派生出的键（Runtime Session ID 可能包含在文件名中不安全的字符）；`QWEN_CODE_PROJECT_DIR` 是该 Session 实际目录对应的项目目录。core 由路径推导出这个目录：先把路径转成小写（仅在 Windows 上），再把 ASCII 字母和数字以外的每个 UTF-16 码元都替换成 `-`，所以基本多文种平面以外的字符（如 emoji）会变成 `--`。两个目录的路径经过这样处理后相同，就会共用同一个。在 boot v1 下两者保持原值：Runtime 实例 ID，以及 `workspaceCwd` 对应的项目目录。
 
 目录在调用进入日志时就已固定。Shell 工具会用它的 workspace 检查 `directory` 参数，而现在这个 workspace 就是实际目录，所以 `directory` 位于其外的调用会以错误结算，不会运行。这是工具自己在调用开始时做的检查，与工具输入中的任何路径一样，它不是边界（见[安全](#安全)）：命令仍然可以切换目录。
 
@@ -95,7 +95,7 @@ gate 与工具启动不是原子的。两者之间被替换的目录，要到下
 
 ### 保留规则
 
-与工具日志一样，Runtime 在其整个生命周期内保留自己的安装记录。不做任何淘汰，所以第 5 步始终保护着存活的 Session，以其他值复用的 `operationId` 也总会被拒绝。Broker 回收 Runtime 时就限定了这个生命周期。每条记录只包含有上限的字段，至多几 KB。工具配置不会保留：每次调用各自构造，而且在其 Session 的上下文中构造，所以 core 不会为调试日志保留它；对于能被 JSON 文本完整描述的参数 schema，core 只编译一次，因此重复构造不会增加编译出的校验器。每个 Session 还在其键下保留三条小记录，与其安装记录一样保留到 Runtime 结束：它的项目目录，以及 core 记录的它的模型和模型标识。要更早释放一个 Session 的记录，需要一个表示该 Session 已结束的信号。Broker 的 `release` 会话动词就是这个信号，但它目前还没有 worker 路由。
+与工具日志一样，Runtime 在其整个生命周期内保留自己的安装记录。不做任何淘汰，所以第 5 步始终保护着存活的 Session，以其他值复用的 `operationId` 也总会被拒绝。Broker 回收 Runtime 时就限定了这个生命周期。每条记录只包含有上限的字段，至多几 KB。工具配置不会保留：每次调用各自构造，而且在其 Session 的上下文中构造，所以 core 不会为调试日志保留它；对于能被 JSON 文本完整描述、且首次编译即成功的参数 schema，core 只编译一次，因此重复构造不会增加编译出的校验器。每个 Session 还在其键下保留三条小记录，与其安装记录一样保留到 Runtime 结束：它的项目目录，以及 core 记录的它的模型和模型标识。要更早释放一个 Session 的记录，需要一个表示该 Session 已结束的信号。Broker 的 `release` 会话动词就是这个信号，但它目前还没有 worker 路由。
 
 ### 错误
 
@@ -135,7 +135,7 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 - `packages/cli/src/serve/managed-runtime-attestation-worker.ts`：按 boot 版本分派、各版本的路由，以及 ready v2。
 - `packages/cli/src/serve/managed-runtime-tool-executor.ts`：工具来自一个在每个新调用进入日志之前询问的解析器。boot v1 在启动时构造一次；boot v2 为每次调用构造。每次调用以其会话的身份运行，该会话的项目目录已为其 shell 注册。
 - `packages/cli/src/serve/managed-runtime-tool-routes.ts` 和 `managed-runtime-attestation-contract.ts`：目录不可用时的 409、按 boot 版本参数化的路由 gate，以及所有自有路由共用的一个 JSON 请求体解析器。
-- `packages/core/src/utils/schemaValidator.ts`：能被 JSON 文本完整描述且能编译的参数 schema，在每个校验器上只编译一次，以该文本为键；其他 schema 照 Ajv 一贯的方式编译。
+- `packages/core/src/utils/schemaValidator.ts`：能被 JSON 文本完整描述、且首次编译即成功的参数 schema，在每个校验器上只编译一次，以该文本为键；因此带 `$id` 的 schema 被重新构造成新对象后，首次使用时就会被校验，而以前 Ajv 会把这次编译当作 `$id` 重复而拒绝，并跳过校验。其他 schema 照 Ajv 一贯的方式编译，结果也不变；但如果它编译失败且带有 `$id`，日志给出的原因可能是该 `$id` 重复，而不是原来的错误。
 - 假 worker 及其 Java 测试、它与 `LocalProcessRuntimeProvisionerTest` 共用的一个辅助方法，以及 attestation worker、tool worker、envelope 和 schema 校验器的测试。
 - `packages/cli/src/serve/managed-workspace-binding.ts`：仅修改其头部注释。
 - 本文的中英文两版；envelope 文档中的状态、错误、待决问题和后续工作；W0a 文档的状态和关于接线的那句话；以及 Tool v2 契约文档的 worker 一节和错误类别中指向本文的说明。
@@ -162,8 +162,10 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 - **Boot v1：** workspace 仍在启动时确定；shell 仍看到 Runtime 的会话和项目目录；字节不是合法 UTF-8 的文档仍会被读取；现有的 tool worker 测试原样通过。
 - **Boot v2 编码：** 字节不是合法 UTF-8 的文档会被拒绝。
 - **Core：**
-  - 相同的参数 schema 只编译一次，同一个 schema 对象不会被序列化第二次；
-  - JSON 文本不能完整描述的 schema，或编译失败的 schema，行为与以前相同；
+  - 相同的参数 schema 只编译一次；同一个 schema 对象从不会被序列化第二次，即使 JSON 文本不能完整描述它，或者它编译失败；
+  - JSON 文本不能完整描述的 schema，由对象本身编译，而不是由它的文本编译；
+  - 这样的 schema，以及编译失败的 schema（即使带有 `$id`），得到的结果与以前相同；
+  - 编译失败的 schema，无论被重新构造多少次，都只由它的文本编译一次；每个重新构造的对象与以前一样，在第二次使用时编译；
   - 调用方修改自己的 schema 对象，不会改变其他 schema 的校验器；
   - 重新构造的带 `$id` 的 schema 会被校验。
 - **进程级：** 隐藏的 CLI 命令能以 boot v2 启动并应答 attestation v3，遇到被拒绝的文档时在 ready 行之前退出。

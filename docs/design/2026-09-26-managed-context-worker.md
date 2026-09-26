@@ -85,7 +85,7 @@ The request's shape and the tool name are checked before the gate, as today. A r
 
 A `status` or `cancel` that arrives while a new call is still at the gate answers `unknown`, as it would for a call that has not arrived yet, and the call then runs unless the gate refuses it. Closing the worker likewise aborts the calls that are running, but not one still at the gate.
 
-Each call runs as its Session. Its shells see `QWEN_CODE_SESSION_ID` set to a key derived from the Runtime instance ID and a hash of the Runtime Session ID, which may hold characters that are not safe in a file name, and `QWEN_CODE_PROJECT_DIR` set to the project directory of the Session's effective directory. Core derives that directory from the path, so two directories whose names differ only in punctuation share one. Under boot v1 both keep their values: the Runtime instance ID, and the project directory of `workspaceCwd`.
+Each call runs as its Session. Its shells see `QWEN_CODE_SESSION_ID` set to a key derived from the Runtime instance ID and a hash of the Runtime Session ID, which may hold characters that are not safe in a file name, and `QWEN_CODE_PROJECT_DIR` set to the project directory of the Session's effective directory. Core derives that directory from the path: it first lowercases the path on Windows, then replaces each UTF-16 code unit other than an ASCII letter or digit with `-`, so a character outside the Basic Multilingual Plane, such as an emoji, becomes `--`. Two directories whose paths match after that share one. Under boot v1 both keep their values: the Runtime instance ID, and the project directory of `workspaceCwd`.
 
 The directory is fixed when the call is journaled. The Shell tool checks a `directory` parameter against its workspace, which is now the effective directory, so a call whose `directory` lies outside it settles as an error without running. That check is the tool's own, made when the call starts, and like any path in tool input it is not a boundary (see [Security](#security)): a command can still change directory.
 
@@ -95,7 +95,7 @@ Under boot v1 there is no gate, and every call runs in `workspaceCwd`, as before
 
 ### Retention
 
-A Runtime keeps its installations for its lifetime, as it keeps its tool journal. Nothing is evicted, so step 5 keeps protecting a live Session, and an `operationId` reused with other values is always refused. The Broker bounds that lifetime when it reclaims the Runtime. Each entry holds only bounded fields, a few kilobytes at most. Tool configurations are not kept: each call builds its own, in its Session's context so that core does not keep it for its debug log, and core compiles each parameter schema that JSON text describes exactly only once, so rebuilding adds no compiled validators. Each Session also keeps three small entries under its key for the Runtime's lifetime, as its installation is kept: its project directory, and core's record of its model and model identity. Releasing a Session's entries earlier needs a signal that the Session has ended. The Broker's `release` session verb is that signal, and it has no worker route yet.
+A Runtime keeps its installations for its lifetime, as it keeps its tool journal. Nothing is evicted, so step 5 keeps protecting a live Session, and an `operationId` reused with other values is always refused. The Broker bounds that lifetime when it reclaims the Runtime. Each entry holds only bounded fields, a few kilobytes at most. Tool configurations are not kept: each call builds its own, in its Session's context so that core does not keep it for its debug log, and core compiles only once each parameter schema that JSON text describes exactly and that compiles the first time, so rebuilding adds no compiled validators. Each Session also keeps three small entries under its key for the Runtime's lifetime, as its installation is kept: its project directory, and core's record of its model and model identity. Releasing a Session's entries earlier needs a signal that the Session has ended. The Broker's `release` session verb is that signal, and it has no worker route yet.
 
 ### Errors
 
@@ -135,7 +135,7 @@ The envelope left four questions to W0c. The worker answers them as follows:
 - `packages/cli/src/serve/managed-runtime-attestation-worker.ts`: boot dispatch, the routes of each version, and ready v2.
 - `packages/cli/src/serve/managed-runtime-tool-executor.ts`: the tools come from a resolver asked before each new call is journaled. Boot v1 builds them once at startup; boot v2 builds them for each call. Each call runs as its session, whose project directory is registered for its shells.
 - `packages/cli/src/serve/managed-runtime-tool-routes.ts` and `managed-runtime-attestation-contract.ts`: the 409 for an unavailable directory, a route gate parameterized by boot version, and one JSON body parser for every owned route.
-- `packages/core/src/utils/schemaValidator.ts`: a parameter schema that JSON text describes exactly and that compiles is compiled once per validator, keyed by that text; any other schema is compiled as Ajv always compiled it.
+- `packages/core/src/utils/schemaValidator.ts`: a parameter schema that JSON text describes exactly and that compiles the first time is compiled once per validator, keyed by that text, so a rebuilt schema object with an `$id` is now validated on its first use, where Ajv used to refuse that compile as a duplicate `$id` and skip validation. Any other schema is compiled as Ajv always compiled it and gives the same results, though when it fails to compile and carries an `$id`, the log can give that `$id` as a duplicate instead of the original error.
 - The fake worker, its Java test, a helper it shares with `LocalProcessRuntimeProvisionerTest`, and the tests of the attestation worker, the tool worker, the envelope and the schema validator.
 - `packages/cli/src/serve/managed-workspace-binding.ts`: its header comment only.
 - This document in both languages; the status, errors, open questions and follow-up work of the envelope document; the status and the wiring line of the W0a document; and pointers here from the worker section and the error classes of the Tool v2 contract document.
@@ -162,8 +162,10 @@ The envelope left four questions to W0c. The worker answers them as follows:
 - **Boot v1:** the workspace is still taken at startup, the shells still see the Runtime's session and project directory, a document is still read when its bytes are not UTF-8, and the existing tool-worker tests pass unchanged.
 - **Boot v2 encoding:** a document whose bytes are not UTF-8 is refused.
 - **Core:**
-  - equal parameter schemas compile once, and a schema object is not serialized a second time;
-  - a schema that JSON text does not describe exactly, or that fails to compile, behaves as it did before;
+  - equal parameter schemas compile once, and a schema object is never serialized a second time, even one that JSON text does not describe exactly or that fails to compile;
+  - a schema that JSON text does not describe exactly is compiled from the object, not from its text;
+  - such a schema, and one that fails to compile, even with an `$id`, gives the results it gave before;
+  - a schema that fails to compile is compiled from its text only once, however often it is rebuilt, and each rebuilt object is compiled on its second use, as before;
   - a caller that mutates its own schema object changes no other schema's validator;
   - a rebuilt schema with an `$id` is validated.
 - **Process level:** the hidden CLI command starts with boot v2 and answers attestation v3. It exits before the ready line on refused documents.
