@@ -2396,6 +2396,49 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
         });
       }
     });
+
+    it('does not widen a narrowed sub-agent scope with the session additional roots', async () => {
+      // Multi-root: the session carries additionalRoots whose [0] is the
+      // primary checkout. A sub-agent isolated to its own worktree must NOT
+      // gain access to that checkout, or to a sibling worktree under it,
+      // just because they are opened roots — narrowing must win over
+      // widening. Without the narrowing guard this is the reachable defect.
+      const isolatedSessionId = `daemon-guard-${process.pid}-mr`;
+      const owned = GitWorktreeService.getWorktreesDir(isolatedSessionId);
+      const agentWorktree = path.join(owned, 'agent-a');
+      await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
+      const sibling = path.join(effectiveCwd, '.qwen', 'worktrees', 'agent-b');
+      await mkdir(sibling, { recursive: true });
+
+      const guard = createDaemonToolGuard();
+      const inWorktree = (command: string): ExternalToolGuardPrepareRequest =>
+        ({
+          ...request(command),
+          sessionId: isolatedSessionId,
+          invocationCwd: agentWorktree,
+          additionalRoots: [effectiveCwd],
+        }) as ExternalToolGuardPrepareRequest;
+      try {
+        // Its own worktree is still the boundary: work inside it is allowed.
+        await expect(
+          guard(inWorktree('cd src && git commit -m x')),
+        ).resolves.toEqual({ allowed: true });
+        // The primary checkout is an opened root, but the narrowed sub-agent
+        // must not reach back into it.
+        await expect(
+          guard(inWorktree(`git -C ${effectiveCwd} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+        // A sibling worktree under the primary checkout is unreachable too.
+        await expect(
+          guard(inWorktree(`git -C ${sibling} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+      } finally {
+        await rm(GitWorktreeService.getSessionDir(isolatedSessionId), {
+          recursive: true,
+          force: true,
+        });
+      }
+    });
   });
 
   it.each([

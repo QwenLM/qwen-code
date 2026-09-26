@@ -3365,17 +3365,22 @@ async function evaluateBuiltInGuard(
   }
 
   // Extra trusted roots for a multi-root session, canonicalized against the
-  // session's own directory (they are absolute opened-folder paths in
-  // practice; resolving here keeps a relative input well-defined). They stay
-  // trusted even when the effective cwd is narrowed to a sub-agent worktree:
-  // they are the folders the user opened for this session.
+  // session's own directory. They apply only while the effective cwd is the
+  // session's own. When the scope was narrowed to a sub-agent's reported
+  // worktree, the sub-agent must stay contained to that worktree: trusting
+  // the session's other opened roots from inside it would let an isolated
+  // sub-agent reach back into the parent checkout or a sibling worktree —
+  // exactly what worktree isolation exists to prevent. So narrowing wins
+  // over widening here.
   const additionalRoots: string[] = [];
-  for (const raw of request.additionalRoots ?? []) {
-    if (typeof raw !== 'string' || raw.length === 0) continue;
-    const canonical = await realpathNearestExistingAsync(
-      path.resolve(sessionCwd, raw),
-    );
-    if (!additionalRoots.includes(canonical)) additionalRoots.push(canonical);
+  if (canonicalEffectiveCwd === sessionCwd) {
+    for (const raw of request.additionalRoots ?? []) {
+      if (typeof raw !== 'string' || raw.length === 0) continue;
+      const canonical = await realpathNearestExistingAsync(
+        path.resolve(sessionCwd, raw),
+      );
+      if (!additionalRoots.includes(canonical)) additionalRoots.push(canonical);
+    }
   }
 
   // A model-supplied `directory` becomes the containment basis, so it must
