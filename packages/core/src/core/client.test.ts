@@ -109,6 +109,8 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { planCodeModeBindings, ToolMode } from '../tools/code-mode.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -570,6 +572,9 @@ describe('Gemini Client (client.ts)', () => {
     // that depends on a fully-formed Config object, we need to mock the
     // entire implementation of Config for these tests.
     const mockToolRegistry = {
+      getCodeModeBindingPlan: vi
+        .fn()
+        .mockReturnValue({ bindings: [], collisions: [] }),
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
@@ -2681,6 +2686,7 @@ describe('Gemini Client (client.ts)', () => {
   describe('setTools — progressive MCP reminders', () => {
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getCodeModeBindingPlan: ReturnType<typeof vi.fn>;
         getFunctionDeclarations: ReturnType<typeof vi.fn>;
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getMcpServerInstructions: ReturnType<typeof vi.fn>;
@@ -3549,10 +3555,10 @@ describe('Gemini Client (client.ts)', () => {
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
-    it('warns that tools.eager holds tools back with no way to load them', async () => {
+    it('warns that tools.eager keeps schemas hidden when the bridge is incomplete', async () => {
       // Holding them back is correct — revealing would send exactly the
-      // schemas the allowlist withholds — but with no bridge the tools
-      // are unreachable for the session while still listed in `/tools`.
+      // schemas the allowlist withholds — while registered tools still use
+      // normal approval for direct calls by name.
       // #10075 is about silent reshaping of the toolset, so say it.
       const reg = getRegistryMock();
       reg.getTool.mockReturnValue(null); // Both bridge halves absent.
@@ -3584,6 +3590,102 @@ describe('Gemini Client (client.ts)', () => {
         expect.stringContaining('tools.disabled'),
       );
       warnSpy.mockRestore();
+    });
+
+    it('reports normal direct approval when exec is absent in CodeMode', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null);
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'direct calls by name still use normal approval: write_file',
+        ),
+      );
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('remain callable through exec'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('reports only code-mode-callable withheld tools as reachable through exec', async () => {
+      const reg = getRegistryMock();
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'write_file' }),
+            new MockTool({ name: 'send_message' }),
+          ],
+          () => true,
+        ),
+      );
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'send_message', description: 'send' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('remain callable through exec: write_file'),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'direct calls by name still use normal approval: write_file, send_message',
+        ),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not advertise an omitted collision binding as reachable through exec', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'get--data' }),
+            new MockTool({ name: 'get-_data' }),
+          ],
+          () => true,
+        ),
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'get-_data', description: 'omitted target' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await client.setTools();
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'direct calls by name still use normal approval: get-_data',
+          ),
+        );
+        expect(warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('remain callable through exec'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('names the missing bridge half when only tool_call is excluded', async () => {

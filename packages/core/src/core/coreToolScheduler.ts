@@ -228,6 +228,7 @@ import {
   runWithToolCallSource,
   type CodeModeToolResult,
 } from '../code-mode/tool-call-runtime.js';
+import { runWithCodeModeAllowedNames } from '../utils/code-mode-allowed-names.js';
 import { isCodeModeToolCallAllowed, ToolMode } from '../tools/code-mode.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -1398,15 +1399,16 @@ interface CoreToolSchedulerOptions {
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
-   * Whether the model this scheduler serves was DECLARED the Skill tool.
+   * Whether the model this scheduler serves can invoke a skill.
    *
    * The skill-activation reminder must not announce a skill to a model that
    * cannot invoke one, and the registry cannot answer that: `SKILL` is
    * registered unconditionally, including for subagents, while a subagent
    * running an explicit `tools` list may never have it declared — nor is
    * being declared sufficient, since a fork can keep a declaration it is
-   * forbidden to execute. An owner that filters either passes its own
-   * predicate here.
+   * forbidden to execute. In code mode, `exec` may instead expose Skill as a
+   * nested binding without a top-level declaration. An owner that filters
+   * either surface passes its own predicate here.
    *
    * It is NOT the predicate behind the startup `<available_skills>` snapshot,
    * and the two are independent rather than ordered. The snapshot is decided
@@ -5638,26 +5640,30 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
-              ? runWithToolCallRuntime(
-                  {
-                    parentCallId: callId,
-                    allowedToolNames:
-                      scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal, onResult) =>
-                      this.dispatchCodeModeTool(
-                        name,
-                        args,
-                        scheduledCall.request,
-                        nestedSignal,
-                        onResult,
-                      ),
-                  },
-                  execute,
-                )
-              : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
-                : execute();
+            return runWithCodeModeAllowedNames(
+              scheduledCall.request.codeModeAllowedToolNames,
+              () =>
+                scheduledCall.request.name === ToolNames.EXEC
+                  ? runWithToolCallRuntime(
+                      {
+                        parentCallId: callId,
+                        allowedToolNames:
+                          scheduledCall.request.codeModeAllowedToolNames,
+                        dispatch: (name, args, nestedSignal, onResult) =>
+                          this.dispatchCodeModeTool(
+                            name,
+                            args,
+                            scheduledCall.request,
+                            nestedSignal,
+                            onResult,
+                          ),
+                      },
+                      execute,
+                    )
+                  : scheduledCall.request.source === 'code_mode'
+                    ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                    : execute(),
+            );
           }),
         );
       } else {
@@ -5679,26 +5685,30 @@ export class CoreToolScheduler {
                 liveOutputCallback,
                 shellExecutionConfig,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
-              ? runWithToolCallRuntime(
-                  {
-                    parentCallId: callId,
-                    allowedToolNames:
-                      scheduledCall.request.codeModeAllowedToolNames,
-                    dispatch: (name, args, nestedSignal, onResult) =>
-                      this.dispatchCodeModeTool(
-                        name,
-                        args,
-                        scheduledCall.request,
-                        nestedSignal,
-                        onResult,
-                      ),
-                  },
-                  execute,
-                )
-              : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
-                : execute();
+            return runWithCodeModeAllowedNames(
+              scheduledCall.request.codeModeAllowedToolNames,
+              () =>
+                scheduledCall.request.name === ToolNames.EXEC
+                  ? runWithToolCallRuntime(
+                      {
+                        parentCallId: callId,
+                        allowedToolNames:
+                          scheduledCall.request.codeModeAllowedToolNames,
+                        dispatch: (name, args, nestedSignal, onResult) =>
+                          this.dispatchCodeModeTool(
+                            name,
+                            args,
+                            scheduledCall.request,
+                            nestedSignal,
+                            onResult,
+                          ),
+                      },
+                      execute,
+                    )
+                  : scheduledCall.request.source === 'code_mode'
+                    ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                    : execute(),
+            );
           }),
         );
       }
@@ -6114,13 +6124,13 @@ export class CoreToolScheduler {
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {
-            // Gate on whether SkillTool was DECLARED to the model — the
-            // registry cannot answer that. See `hasSkillTool` in
-            // `CoreToolSchedulerOptions` for the mechanism and the reason.
-            const hasSkillTool = this.hasSkillToolOverride
+            // Gate on whether the model can invoke Skill through any declared
+            // surface — the registry cannot answer that. See `hasSkillTool`
+            // in `CoreToolSchedulerOptions` for the mechanism and the reason.
+            const canInvokeSkill = this.hasSkillToolOverride
               ? this.hasSkillToolOverride()
               : !!this.toolRegistry.getTool(ToolNames.SKILL);
-            if (hasSkillTool) {
+            if (canInvokeSkill) {
               // Render the just-activated skills with their description/whenToUse
               // (the full listing is no longer in the tool description, so the
               // model needs enough here to decide whether to invoke them). Source
@@ -6152,7 +6162,7 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `${SKILLS_ACTIVATED_OPENER}. Load a skill by name using the tool interface declared in this session:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );

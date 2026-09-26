@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 import type { MediaPolicyToolDescriptor } from './tools.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { ToolMode } from './code-mode.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -194,7 +195,7 @@ describe('ToolRegistry', () => {
       const baseUrl = 'https://images.example/v1';
       const config = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         experimentalZedIntegration: true,
         modelProvidersConfig: {
           openai: [
@@ -546,7 +547,7 @@ describe('ToolRegistry', () => {
       (enabled) => {
         const config = new Config({
           ...baseConfigParams,
-          codeModeOnly: true,
+          toolMode: ToolMode.CodeModeOnly,
           omniPolicyTools: {
             omni_compress_image: { modelAccess: { enabled } },
           },
@@ -906,6 +907,42 @@ describe('ToolRegistry', () => {
         expect(toolRegistry.isDeferredToolRevealed(toolB.name)).toBe(false);
       });
 
+      it('counts CodeMode declaration decoration toward the budget', () => {
+        const directTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const codeModeTool = new MockTool({
+          name: 'deferred',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        });
+        const directRegistry = new ToolRegistry(new Config(baseConfigParams));
+        const codeModeRegistry = new ToolRegistry(
+          new Config({ ...baseConfigParams, toolMode: 'code_mode' }),
+        );
+        directRegistry.registerTool(directTool);
+        codeModeRegistry.registerTool(new MockTool({ name: 'exec' }));
+        codeModeRegistry.registerTool(codeModeTool);
+        const rawBudget = tokensFor(directTool);
+
+        expect(directRegistry.preloadDeferredToolsWithinBudget(rawBudget)).toBe(
+          1,
+        );
+        expect(
+          codeModeRegistry.preloadDeferredToolsWithinBudget(rawBudget),
+        ).toBe(0);
+      });
+
       it('excludes visible deferred tools from the preload budget', () => {
         const visibleTool = new MockTool({
           name: 'visible',
@@ -993,7 +1030,7 @@ describe('ToolRegistry', () => {
       // is the one the previous test proves IS reported in Direct mode.
       const codeModeConfig = new Config({
         ...baseConfigParams,
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
       });
       const registry = new ToolRegistry(codeModeConfig);
       registry.registerTool(
@@ -1233,6 +1270,28 @@ describe('ToolRegistry', () => {
   // `tool_search` + `tool_call` bridge
   // while their schemas stay out of the eager model request (#9827).
   describe('permission-deferred tools (#10075)', () => {
+    it('keeps deferred direct-control tools out of CodeMode bindings', async () => {
+      const registry = new ToolRegistry(
+        new Config({
+          ...baseConfigParams,
+          toolMode: ToolMode.CodeMode,
+        }),
+      );
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerPermissionDeferredFactory(
+        'send_message',
+        async () => new MockTool({ name: 'send_message' }),
+      );
+      await registry.warmAll();
+
+      expect(registry.isDeferredAndHidden('send_message')).toBe(true);
+      expect(
+        registry
+          .getCodeModeBindingPlan()
+          .bindings.some((binding) => binding.name === 'send_message'),
+      ).toBe(false);
+    });
+
     it('registers the tool but hides it from the eager declarations', async () => {
       toolRegistry.registerTool(new MockTool({ name: 'visible' }));
       toolRegistry.registerPermissionDeferredFactory(

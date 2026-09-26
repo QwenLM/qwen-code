@@ -1877,16 +1877,15 @@ export class LlmClient {
    * revealed here so they land in the declaration list. Tools explicitly
    * demoted by `tools.eager` stay hidden unless the history-reveal pass above
    * already re-exposed one for a resumed session — that schema stays in the
-   * declarations, so it is not counted unreachable below. Skipping this for
+   * declarations, so it is not counted as bridge-hidden below. Skipping this for
    * ordinary deferred tools would leave them both off the declarations AND
    * off the deferred-summary list
    * (since `undefined` is returned in that branch) — a silent disappearance.
    *
-   * Returns `undefined` when the bridge is incomplete (ToolSearch or
-   * ToolCall unregistered): reminders must not advertise tools the model has
-   * no way to invoke on demand. Tools held back by `tools.eager` in that
-   * state are unreachable for the session, which is warned about once per
-   * session.
+   * Returns `undefined` when the ToolSearch + ToolCall bridge is incomplete.
+   * Held-back schemas stay out of top-level declarations, but registered tools use normal
+   * approval when called by name. Hybrid exec also retains its actual nested
+   * bindings. The warning identifies the missing bridge half and those bindings.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1927,6 +1926,18 @@ export class LlmClient {
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
           this.warnedAboutUnreachableEagerTools = true;
+          const hybridCodeMode =
+            this.config.getToolMode?.() === ToolMode.CodeMode;
+          const boundNames = new Set(
+            hybridCodeMode && toolRegistry.getTool(ToolNames.EXEC)
+              ? toolRegistry
+                  .getCodeModeBindingPlan()
+                  .bindings.map((binding) => binding.name)
+              : [],
+          );
+          const nestedReachable = new Set(
+            withheld.filter((name) => boundNames.has(name)),
+          );
           const missingHalves: string[] = [];
           if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
             missingHalves.push(ToolNames.TOOL_SEARCH);
@@ -1938,8 +1949,11 @@ export class LlmClient {
           console.warn(
             `tools.eager is holding back ${withheld.length} tool(s) in a session where the ` +
               `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
-              `so they are not offered to the model and cannot be loaded through the bridge until restart; ` +
+              `so they are absent from top-level declarations and cannot be loaded through the bridge until restart; ` +
               `they remain registered and direct calls by name still use normal approval: ${withheld.join(', ')}. ` +
+              (nestedReachable.size > 0
+                ? `These tools also retain their schemas and remain callable through exec: ${[...nestedReachable].join(', ')}. `
+                : '') +
               `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
               `tool_search/tool_call deny rule, --exclude-tools entry, or tools.disabled entry to keep them loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,

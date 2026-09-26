@@ -40,6 +40,8 @@ import { decodeBufferWithEncodingInfo } from '../services/sync-file-encoding.js'
 import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
+import { ToolMode } from '../tools/code-mode.js';
+import { runWithCodeModeAllowedNames } from './code-mode-allowed-names.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import {
@@ -166,6 +168,7 @@ describe('fileUtils', () => {
       getFunctionDeclarations: () => [
         { name: 'read_file' },
         { name: 'tool_search' },
+        { name: 'tool_call' },
       ],
       getDeferredToolSummary: () => [{ name: 'zoom_image' }],
       getCodeModeBindingPlan: () => ({
@@ -1409,9 +1412,11 @@ describe('fileUtils', () => {
 
     it.each<{
       codeModeOnly: boolean;
+      toolMode?: ToolMode;
       declared: string[];
       deferred: string[];
       bindings: string[];
+      allowedNames?: string[];
       hint: string;
     }>([
       {
@@ -1423,7 +1428,7 @@ describe('fileUtils', () => {
       },
       {
         codeModeOnly: false,
-        declared: ['read_file', 'tool_search'],
+        declared: ['read_file', 'tool_search', 'tool_call'],
         deferred: ['zoom_image'],
         bindings: [],
         hint:
@@ -1451,27 +1456,111 @@ describe('fileUtils', () => {
         bindings: ['zoom_image'],
         hint: ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
       },
+      ...[[], ['tool_search'], ['tool_call'], ['tool_search', 'tool_call']].map(
+        (bridgeTools) => ({
+          codeModeOnly: false,
+          toolMode: ToolMode.CodeMode,
+          declared: ['read_file', 'exec', ...bridgeTools],
+          deferred: ['zoom_image'],
+          bindings: ['zoom_image'],
+          hint:
+            bridgeTools.length === 2
+              ? ' If details are too small, review zoom_image with tool_search and invoke it through tool_call, with coordinates normalized from 0 to 1000.'
+              : ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
+        }),
+      ),
+      ...[[], ['tool_search'], ['tool_call']].map((bridgeTools) => ({
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', ...bridgeTools],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        hint: '',
+      })),
+      {
+        // A declared zoom_image is directly callable: the guidance must not
+        // route it through exec.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'exec', 'zoom_image'],
+        deferred: [],
+        bindings: ['zoom_image'],
+        hint: ' If details are too small, call zoom_image with coordinates normalized from 0 to 1000.',
+      },
+      {
+        // The session plan binds zoom_image, but the calling agent's
+        // narrowed plan does not: the guidance must not advertise it.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'exec'],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        allowedNames: ['read_file'],
+        hint: '',
+      },
+      {
+        // Same narrowing through the bridge route: the session declares
+        // tool_search and tool_call, but the narrowed agent has neither
+        // half, so the guidance must not advertise the bridge.
+        codeModeOnly: false,
+        toolMode: ToolMode.CodeMode,
+        declared: ['read_file', 'tool_search', 'tool_call'],
+        deferred: ['zoom_image'],
+        bindings: ['zoom_image'],
+        allowedNames: ['read_file'],
+        hint: '',
+      },
+      ...[
+        ['read_file', 'exec', 'tool_search', 'tool_call'],
+        ['read_file', 'exec', 'zoom_image'],
+        ['read_file', 'exec'],
+      ].flatMap((declared) =>
+        [[], ['read_file'], ['read_file', 'zoom_image']].map(
+          (allowedNames) => ({
+            codeModeOnly: false,
+            toolMode: ToolMode.CodeMode,
+            declared,
+            deferred: ['zoom_image'],
+            bindings: ['zoom_image'],
+            allowedNames,
+            hint: '',
+          }),
+        ),
+      ),
     ])(
       'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
-      async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
+      async ({
+        codeModeOnly,
+        toolMode,
+        declared,
+        deferred,
+        bindings,
+        allowedNames,
+        hint,
+      }) => {
         await sharp({
           create: { width: 20, height: 10, channels: 3, background: '#306090' },
         })
           .png()
           .toFile(testImageFilePath);
         mockMimeGetType.mockReturnValue('image/png');
-        const result = await processSingleFileContent(testImageFilePath, {
-          ...mockConfig,
-          getCodeModeOnly: () => codeModeOnly,
-          getToolRegistry: () => ({
-            getFunctionDeclarations: () => declared.map((name) => ({ name })),
-            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
-            getCodeModeBindingPlan: () => ({
-              bindings: bindings.map((name) => ({ name })),
-              collisions: [],
+        const result = await runWithCodeModeAllowedNames(allowedNames, () =>
+          processSingleFileContent(testImageFilePath, {
+            ...mockConfig,
+            getCodeModeOnly: () => codeModeOnly,
+            getToolMode: () => toolMode,
+            getToolRegistry: () => ({
+              getFunctionDeclarations: () => declared.map((name) => ({ name })),
+              getDeferredToolSummary: () => deferred.map((name) => ({ name })),
+              getCodeModeBindingPlan: (allowed?: ReadonlySet<string>) => ({
+                bindings: bindings
+                  .filter((name) => !allowed || allowed.has(name))
+                  .map((name) => ({ name })),
+                collisions: [],
+              }),
             }),
-          }),
-        } as unknown as Config);
+          } as unknown as Config),
+        );
         const parts = result.llmContent as Part[];
         expect(parts[0]).toEqual({
           text: `Image overview: 20x10; oriented source: 20x10.${hint}`,

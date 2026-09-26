@@ -1,5 +1,7 @@
 # CodeModeOnly MVP
 
+[English](code-mode-only.md) | [简体中文](code-mode-only.zh-CN.md)
+
 ## Status
 
 Implemented for [#10377](https://github.com/QwenLM/qwen-code/issues/10377).
@@ -7,20 +9,20 @@ The feature is opt-in and defaults off.
 
 ## Goal
 
-Add a `tools.codeModeOnly` setting that replaces the ordinary model-facing
-tool surface with one `exec` JavaScript tool plus the small set of tools that
-must remain direct control-plane calls. `exec` code can call ordinary tools
+Add a `tools.mode: "code_mode_only"` setting that replaces the ordinary
+model-facing tool surface with one `exec` JavaScript tool plus the small set of
+tools that must remain direct control-plane calls. `exec` code can call ordinary tools
 through `tools.<name>(args)` without bypassing Qwen Code's validation,
 permissions, approvals, hooks, telemetry, cancellation, concurrency, or output
 budgets.
 
-Direct mode is a compatibility boundary: when the setting is false, tool
+Direct mode is a compatibility boundary: when `tools.mode` is `direct`, tool
 registration, deferred-tool behavior, provider requests, and execution remain
 unchanged.
 
 ## Non-goals
 
-- Hybrid direct/code exposure.
+- Defining hybrid direct/code exposure; see [Code Mode](code-mode.md).
 - Persistent cells, globals, or values between `exec` calls.
 - Background jobs, `wait`, `yield`, `store`, or `load`.
 - Raw/freeform provider calls.
@@ -32,27 +34,27 @@ unchanged.
 ```json
 {
   "tools": {
-    "codeModeOnly": true
+    "mode": "code_mode_only"
   }
 }
 ```
 
-The setting resolves once to the effective `ToolMode` value `direct` or
-`code_mode_only`. `ToolRegistry` and the execution surfaces consume that mode.
-`exec` is only registered when the setting is enabled, so disabling the setting
-also removes it from diagnostics and registry listings.
+The setting resolves once to the effective `ToolMode` value. `ToolRegistry`
+and the execution surfaces consume that mode. `exec` is only registered when a
+code mode is enabled, so selecting `direct` also removes it from diagnostics
+and registry listings.
 
 ## Exposure policy
 
 The registry remains the source of truth. Exposure is a view over registered
 tools, never a second registry.
 
-| Category                                   | Model top level   | `tools.*` inside `exec` |
-| ------------------------------------------ | ----------------- | ----------------------- |
-| `exec`                                     | CodeModeOnly only | No                      |
-| Direct control                             | Yes               | No                      |
-| Ordinary registered tool                   | No                | Yes                     |
-| Hidden bridge (`tool_search`, `tool_call`) | No                | No                      |
+| Category                                   | Model top level                       | `tools.*` inside `exec` |
+| ------------------------------------------ | ------------------------------------- | ----------------------- |
+| `exec`                                     | CodeMode and CodeModeOnly             | No                      |
+| Direct control                             | Yes                                   | No                      |
+| Ordinary registered tool                   | CodeMode only                         | Yes                     |
+| Hidden bridge (`tool_search`, `tool_call`) | Existing behavior outside strict mode | No                      |
 
 The direct-control allowlist is centralized and deliberately small. It covers
 user interaction (`ask_user_question`), delegation (`agent`), terminal output
@@ -75,7 +77,8 @@ Before each provider tool sync, the `exec` description is generated from the
 current registry. Tools are sorted by canonical name. A name is normalized to
 a JavaScript property by replacing invalid identifier characters and prefixing
 names that begin with a digit. If two canonical names normalize to the same
-property, the lexicographically first name wins and one warning names the
+property, an exact canonical match wins over rewritten names. If neither is an
+exact match, the lexicographically first name wins. The description names the
 omitted collision.
 
 The description defines:
@@ -83,9 +86,11 @@ The description defines:
 - a fresh async JavaScript execution environment;
 - `tools.<normalizedName>(args)` for nested calls;
 - `ALL_TOOLS`, including canonical and JavaScript names;
-- `text(value)`, `image(value)`, `audio(value)`, and `exit()`;
+- `text(value)`, `image(value)`, `audio(value)`, `generatedImage(value)`,
+  `setTimeout(callback, delayMs)`, `clearTimeout(timeoutId)`, and `exit()`;
 - TypeScript-like signatures generated deterministically from JSON Schema;
-- the absence of Node.js, imports, network APIs, timers, and persistent state.
+- the absence of Node.js, `process`, `require`, filesystem, network, imports,
+  `console`, `WebAssembly`, `Atomics`, and persistent state. Pending timers do not keep `exec` alive by themselves.
 
 The nested call returns a JSON-safe object containing the real call id, tool
 name, status, output, and structured content. Failed and cancelled calls reject
@@ -100,8 +105,8 @@ configuration. The parent maps JavaScript names back to canonical registry
 names and dispatches each call.
 
 The guest has no Node globals, `require`, `process`, filesystem, sockets,
-module loader, `console`, timers, `Atomics`, `SharedArrayBuffer`, or
-`WebAssembly`. Dynamic and static imports fail because no module loader is
+module loader, `console`, `Atomics`, `SharedArrayBuffer`, or `WebAssembly`.
+Dynamic and static imports fail because no module loader is
 installed. Runtime memory and stack limits are fixed. QuickJS's interrupt hook
 enforces a guest CPU budget. That budget and the parent's fallback watchdog
 pause while the guest is suspended on registered host tools, whose own
@@ -155,14 +160,13 @@ OpenAI-compatible, and Anthropic adapters all receive the structured `exec`
 declaration without provider-specific prompting.
 
 Filtered subagent declarations apply the same policy. For a read-only teammate
-or a fork with an execution allowlist, `exec` is the audited gateway while the
-exact allowed nested names are carried in its invocation context. The same set
-generates the description and is checked again before Core dispatch, so an
-explicit allowlist can narrow code-mode-callable nested tools without becoming
-prompt-only policy, exposing a hidden bridge, or making `exec` recursive.
-For cache-compatible forks, an inherited `exec` declaration represents its
-ordinary bindings: an omitted `fork_tools` inherits them, while an explicit
-list replaces them with the requested subset.
+or a fork with an execution allowlist, `exec` is the audited gateway and the
+nested names carried in its invocation context are checked again before Core
+dispatch. Explicit ordinary-tool entries narrow that nested set. An inherited
+or explicitly allowed `exec` instead represents all surviving ordinary
+code-mode-callable bindings, while the agent's own `tools` list still narrows
+its direct surface. Hidden bridges remain unavailable and `exec` cannot call
+itself.
 
 ## Failure and rollback
 
@@ -171,9 +175,9 @@ closed before scheduling. Invalid arguments continue to fail in the normal
 execution chain. A sandbox startup, protocol, timeout, memory, or teardown
 failure becomes an `exec` tool error.
 
-Rollback is setting `tools.codeModeOnly` to false. No session migration or
-registry cleanup is required because code mode has no persistent state and the
-ordinary registry was never replaced.
+Rollback is setting `tools.mode` to `direct`. No session migration or registry
+cleanup is required because code mode has no persistent state and the ordinary
+registry was never replaced.
 
 ## Verification
 

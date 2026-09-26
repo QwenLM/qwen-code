@@ -35,6 +35,7 @@ import {
   shouldRequirePDFPageRange,
 } from './pdf.js';
 import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
+import { getCurrentCodeModeAllowedNames } from './code-mode-allowed-names.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
 import {
   extensionForMimeType,
@@ -1661,28 +1662,38 @@ export async function processSingleFileContent(
                 .map((declaration) => declaration.name),
             );
             const zoomDeclared = declaredTools.has('zoom_image');
-            // Reachability, not existence (#12271): advertising a tool the
-            // session cannot call costs the model a turn. Checking
-            // `tool_search` alone is enough even though invoking a deferred
-            // tool also needs `tool_call` — when either bridge tool is
-            // unavailable, deferred tools are declared eagerly, which
-            // `zoomDeclared` already covers.
-            const zoomAvailable = codeModeOnly
+            const hasToolCallBridge =
+              declaredTools.has('tool_search') &&
+              declaredTools.has('tool_call');
+            const useNestedZoom =
+              codeModeOnly ||
+              (config.getToolMode?.() === 'code_mode' &&
+                declaredTools.has('exec') &&
+                !zoomDeclared &&
+                !hasToolCallBridge);
+            const ambientAllowedNames = getCurrentCodeModeAllowedNames();
+            const zoomAvailable = useNestedZoom
               ? registry
-                  ?.getCodeModeBindingPlan()
+                  ?.getCodeModeBindingPlan(
+                    ambientAllowedNames === undefined
+                      ? undefined
+                      : new Set(ambientAllowedNames),
+                  )
                   .bindings.some((binding) => binding.name === 'zoom_image')
               : zoomDeclared ||
-                (declaredTools.has('tool_search') &&
+                (hasToolCallBridge &&
                   registry
                     ?.getDeferredToolSummary()
                     .some((tool) => tool.name === 'zoom_image'));
             let zoomHint = '';
-            if (zoomAvailable) {
-              // CodeModeOnly binds zoom_image into `exec` and hides the bridge,
-              // so neither discovery nor `tool_call` applies there.
-              const toolName = codeModeOnly ? 'tools.zoom_image' : 'zoom_image';
+            // An agent's target allowlist does not identify its declared
+            // direct, bridge, or exec routes. Do not advertise session routes.
+            if (zoomAvailable && ambientAllowedNames === undefined) {
+              const toolName = useNestedZoom
+                ? 'tools.zoom_image'
+                : 'zoom_image';
               zoomHint =
-                codeModeOnly || zoomDeclared
+                useNestedZoom || zoomDeclared
                   ? ` If details are too small, call ${toolName} with coordinates normalized from 0 to 1000.`
                   : ' If details are too small, review zoom_image with tool_search and invoke it through tool_call, with coordinates normalized from 0 to 1000.';
             }

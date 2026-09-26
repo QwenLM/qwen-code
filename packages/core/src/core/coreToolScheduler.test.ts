@@ -20550,6 +20550,7 @@ describe('CoreToolScheduler activation wiring', () => {
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
     availableSkillNames?: string[];
     containerExecution?: boolean;
+    toolMode?: 'direct' | 'code_mode' | 'code_mode_only';
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -20638,6 +20639,7 @@ describe('CoreToolScheduler activation wiring', () => {
       },
       getDisabledSkillNames: () => new Set<string>(),
       getExecutionEnvironment: () => (opts.containerExecution ? {} : undefined),
+      getToolMode: () => opts.toolMode,
       isSkillEnabled: () => true,
       getModelInvocableCommandsProvider: () => null,
       addInlineAnnouncedSkillKeys,
@@ -20713,7 +20715,55 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
-    expect(responseText).toContain('became available via the Skill tool');
+    expect(responseText).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
+    expect(responseText).not.toContain(
+      'pass its name to the top-level Skill tool',
+    );
+    expect(responseText).not.toContain(
+      "await tools.skill({ skill: '<name>' })",
+    );
+  });
+
+  it('defers to declared invocation surfaces in code_mode_only', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        toolMode: 'code_mode_only',
+      });
+
+    // A nested call (source: 'code_mode') is the surface a CodeModeOnly
+    // session actually executes read_file on, so the file read runs and the
+    // activation reminder is produced.
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+          source: 'code_mode',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
+    expect(responseText).not.toContain(
+      'pass its name to the top-level Skill tool',
+    );
+    expect(responseText).not.toContain(
+      "await tools.skill({ skill: '<name>' })",
+    );
   });
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
@@ -20749,7 +20799,9 @@ describe('CoreToolScheduler activation wiring', () => {
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(completed[0].status).toBe('success');
     const responseText = getResponseText(completed[0]);
-    expect(responseText).not.toContain('became available via the Skill tool');
+    expect(responseText).not.toContain(
+      'Load a skill by name using the tool interface declared in this session',
+    );
     expect(responseText).not.toContain('tsx-helper');
     // The half that starves the parent. Moving this call outside the gate
     // while leaving the text inside passes every other assertion here: the
@@ -20789,7 +20841,7 @@ describe('CoreToolScheduler activation wiring', () => {
 
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
     expect(getResponseText(completed[0])).toContain(
-      'became available via the Skill tool',
+      'Load a skill by name using the tool interface declared in this session',
     );
     // …and the announcement IS consumed here, so the parent does not repeat
     // what this agent already showed. The pair is what makes the negative

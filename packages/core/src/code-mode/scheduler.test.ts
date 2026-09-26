@@ -71,7 +71,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
       },
     });
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -119,7 +119,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('returns image() output to the model as inline media', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -170,7 +170,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     'preserves emitted %s and text when exec fails',
     async (kind) => {
       const config = makeFakeConfig({
-        codeModeOnly: true,
+        toolMode: 'code_mode_only',
         targetDir: '/tmp',
         cwd: '/tmp',
       });
@@ -214,7 +214,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('normalizes a nested MCP image for image(result.content[0])', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -279,7 +279,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('passes the Qwen image_gen result to generatedImage()', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       imageModel: 'openai:qwen-image-2.0',
       modelProvidersConfig: {
         openai: [
@@ -362,7 +362,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('awaits a nested tool without self-queue deadlock and reports the real name', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -428,7 +428,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('runs Promise.all reads in one scheduler batch', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -485,7 +485,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('applies nested tool permission denial before execution', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -533,7 +533,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('routes nested permission approval through the visible scheduler', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -618,7 +618,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('runs nested hooks with the real tool name', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -678,7 +678,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('validates nested arguments before execution', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -729,7 +729,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('propagates parent cancellation to a running nested tool', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -788,7 +788,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('rejects an ordinary direct call on the CodeModeOnly surface', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -828,9 +828,50 @@ describe('CodeModeOnly scheduler dispatch', () => {
     );
   });
 
+  it('allows an ordinary direct call on the hybrid CodeMode surface', async () => {
+    const config = makeFakeConfig({
+      toolMode: 'code_mode',
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'read ok',
+      returnDisplay: 'read ok',
+    });
+    registry.registerTool(
+      new MockTool({ name: 'read_probe', kind: Kind.Read, execute }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'hybrid-direct-read',
+        name: 'read_probe',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-hybrid-direct-read',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
+  });
+
   it('enforces a restricted agent allowlist inside exec', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',

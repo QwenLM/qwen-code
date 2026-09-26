@@ -137,6 +137,20 @@ export function getEffectiveValue(
     return value as SettingsValue;
   }
 
+  if (
+    key === 'tools.mode' &&
+    (getNestedValue(mergedSettings as Record<string, unknown>, [
+      'tools',
+      'codeModeOnly',
+    ]) ??
+      getNestedValue(settings as Record<string, unknown>, [
+        'tools',
+        'codeModeOnly',
+      ])) === true
+  ) {
+    return 'code_mode_only';
+  }
+
   // Return default value if no value is set anywhere
   return definition.default;
 }
@@ -165,7 +179,7 @@ export function getAllSettingKeys(): string[] {
 const SETTINGS_DIALOG_ORDER: readonly string[] = [
   // Workflow Control - most impactful setting
   'tools.approvalMode',
-  'tools.codeModeOnly',
+  'tools.mode',
 
   // Localization - users often set this first
   'general.language',
@@ -606,7 +620,12 @@ export function saveModifiedSettings(
 
     const isDefaultValue = value === getDefaultValue(settingKey);
 
-    if (existsInOriginalFile || !isDefaultValue) {
+    // An explicit mode selection must override legacy codeModeOnly too.
+    if (
+      existsInOriginalFile ||
+      !isDefaultValue ||
+      settingKey === 'tools.mode'
+    ) {
       loadedSettings.setValue(scope, settingKey, value);
     }
   });
@@ -633,8 +652,8 @@ export function getDisplayValue(
     // Show the value defined at the current scope if present
     value = getEffectiveValue(key, settings, {});
   } else {
-    // Fall back to the schema default when the key is unset in this scope
-    value = getDefaultValue(key);
+    // Include legacy values while keeping the display scoped to this file.
+    value = getEffectiveValue(key, settings, {});
   }
 
   let valueString = value === undefined ? t('(not set)') : String(value);

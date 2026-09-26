@@ -114,7 +114,11 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
-import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
+import {
+  getToolExposure,
+  isCodeModeEnabled,
+  ToolMode,
+} from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
@@ -226,7 +230,9 @@ export function extractParentToolNames(
  * Build the executable fork surface shared by launch and resume. Deferred
  * tools are absent from the parent's declarations but remain reachable
  * through tool_search/tool_call, so the live registry is part of this
- * surface. A configured positive allowlist remains the outer bound.
+ * surface. A configured positive allowlist remains the outer bound: inherit
+ * concrete bindings without the broad exec grant. The exec wrapper remains
+ * callable in code modes even when absent from the execution allowlist.
  */
 export function buildInheritedForkExecutionToolNames(
   advertisedToolNames: readonly string[],
@@ -239,7 +245,8 @@ export function buildInheritedForkExecutionToolNames(
     (toolName) =>
       !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
       (configuredToolAllowlist === undefined ||
-        configuredToolAllowlist.includes(toolName)),
+        (toolName !== ToolNames.EXEC &&
+          configuredToolAllowlist.includes(toolName))),
   );
 }
 
@@ -657,7 +664,7 @@ export class AgentCore {
         matchesToolPattern(pattern, name),
       ) === true;
 
-    if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
+    if (isCodeModeEnabled(this.runtimeContext.getToolMode?.())) {
       const stringTools =
         this.toolConfig?.tools.filter(
           (tool): tool is string => typeof tool === 'string',
@@ -681,20 +688,33 @@ export class AgentCore {
           (name) =>
             (!configuredNames ||
               configuredNames.has(name) ||
+              name === ToolNames.EXEC ||
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
             !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
-            this.isToolExecutionAllowed(name),
+            this.isToolExecutionAllowed(name, true),
         );
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
         ),
       );
-      const declarations =
-        toolRegistry.getFunctionDeclarationsFiltered(allowedNames);
+      const declarationNames =
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeMode
+          ? allowedNames.filter(
+              (name) =>
+                (!configuredNames ||
+                  name === ToolNames.EXEC ||
+                  configuredNames.has(name)) &&
+                this.isToolExecutionAllowed(name),
+            )
+          : allowedNames;
+      const declarations = toolRegistry.getFunctionDeclarationsFiltered(
+        declarationNames,
+        new Set(this.codeModeAllowedToolNames),
+      );
       declarations.push(
         ...inlineTools.filter(
           (tool) =>
@@ -913,7 +933,7 @@ export class AgentCore {
             // parent's policy frame.
             const runWithToolPolicy = () =>
               runWithAgentConfiguredToolAllowlist(
-                this.getConfiguredToolExecutionAllowlist(),
+                this.getInheritedToolExecutionAllowlist(),
                 () =>
                   runWithAgentDisallowedTools(
                     this.toolConfig?.disallowedTools,
@@ -1653,11 +1673,11 @@ export class AgentCore {
   ): boolean {
     return (
       (declaredToolNames.has(ToolNames.SKILL) ||
-        (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+        (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
           declaredToolNames.has(ToolNames.EXEC) &&
           !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
           this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
-      this.isToolExecutionAllowed(ToolNames.SKILL)
+      this.isToolExecutionAllowed(ToolNames.SKILL, true)
     );
   }
 
@@ -1710,10 +1730,17 @@ export class AgentCore {
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
       allowed.has(ToolNames.EXEC)
     ) {
+      // A configured list that mentions MCP narrows MCP names through the
+      // raw-identity match in isToolExecutionAllowed; expanding them in here
+      // would short-circuit that narrowing via `includes`.
+      const mentionsMcp = [...allowed].some((name) => name.startsWith('mcp__'));
       for (const toolName of this.runtimeContext
         .getToolRegistry()
         .getAllToolNames()) {
-        if (getToolExposure(toolName) === 'code-mode-callable') {
+        if (
+          getToolExposure(toolName) === 'code-mode-callable' &&
+          !(mentionsMcp && toolName.startsWith('mcp__'))
+        ) {
           allowed.add(toolName);
         }
       }
@@ -1721,7 +1748,29 @@ export class AgentCore {
     return [...allowed];
   }
 
-  private isToolExecutionAllowed(toolName: string): boolean {
+  private getInheritedToolExecutionAllowlist(): readonly string[] | undefined {
+    const configured =
+      this.executionAllowedTools ?? this.getConfiguredToolExecutionAllowlist();
+    if (configured === undefined) return undefined;
+    return Array.from(
+      new Set([
+        ...configured,
+        ...this.runtimeContext
+          .getToolRegistry()
+          .getAllToolNames()
+          .filter(
+            (name) =>
+              getToolExposure(name) === 'code-mode-callable' &&
+              this.isToolExecutionAllowed(name, true),
+          ),
+      ]),
+    );
+  }
+
+  private isToolExecutionAllowed(
+    toolName: string,
+    forNestedBinding = false,
+  ): boolean {
     if (this.isToolDisallowedByAgentConfig(toolName)) {
       return false;
     }
@@ -1733,24 +1782,48 @@ export class AgentCore {
       // applies below.
       if (
         toolName === ToolNames.EXEC &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+        isCodeModeEnabled(this.runtimeContext.getToolMode?.())
       ) {
         return true;
       }
       const configuredAllowlist = this.getConfiguredToolExecutionAllowlist();
       return (
         configuredAllowlist === undefined ||
-        configuredAllowlist.includes(toolName)
+        configuredAllowlist.includes(toolName) ||
+        (forNestedBinding &&
+          isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+          configuredAllowlist.includes(ToolNames.EXEC) &&
+          getToolExposure(toolName) === 'code-mode-callable' &&
+          // Once the configured list mentions MCP at all, an MCP name must
+          // pass the raw-identity match instead of the exec carve-out —
+          // the same rule the executionAllowedTools branch applies below.
+          (!toolName.startsWith('mcp__') ||
+            !configuredAllowlist.some((name) => name.startsWith('mcp__')) ||
+            this.matchesMcpAllowlist(
+              toolName,
+              new Set(
+                configuredAllowlist.filter((name) => !name.includes('*')),
+              ),
+              configuredAllowlist.filter((name) => name.includes('*')),
+            )))
       );
     }
     if (
       toolName === ToolNames.EXEC &&
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.())
     ) {
       return true;
     }
     if (
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+      forNestedBinding &&
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+      // An MCP tool name must fall through to the exact-name and pattern
+      // checks below once the allowlist mentions MCP at all: they are the
+      // only place a server-level or exact-tool narrowing can be honored.
+      (!toolName.startsWith('mcp__') ||
+        !this.executionAllowedTools?.some((name) =>
+          name.startsWith('mcp__'),
+        )) &&
       this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
       getToolExposure(toolName) === 'code-mode-callable'
     ) {
@@ -1763,9 +1836,24 @@ export class AgentCore {
       return false;
     }
 
-    // Match MCP patterns against the registry's raw server/tool identity.
-    // Comparing provider-sanitized prefixes can merge distinct server names
-    // such as "repo.bad" and "repo/bad", so it is unsafe for an allowlist.
+    return this.matchesMcpAllowlist(
+      toolName,
+      this.executionAllowedExactTools!,
+      this.executionAllowedMcpPatterns!,
+    );
+  }
+
+  /**
+   * Matches an MCP tool name against allowlist entries using the registry's
+   * raw server/tool identity. Comparing provider-sanitized prefixes can merge
+   * distinct server names such as "repo.bad" and "repo/bad", so it is unsafe
+   * for an allowlist.
+   */
+  private matchesMcpAllowlist(
+    toolName: string,
+    exact: ReadonlySet<string>,
+    patterns: readonly string[],
+  ): boolean {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
@@ -1782,14 +1870,11 @@ export class AgentCore {
     const serverToolName = registeredTool.serverToolName;
     const serverPattern = `mcp__${serverName}`;
     const rawToolName = `${serverPattern}__${serverToolName}`;
-    if (
-      this.executionAllowedExactTools?.has(serverPattern) ||
-      this.executionAllowedExactTools?.has(rawToolName)
-    ) {
+    if (exact.has(serverPattern) || exact.has(rawToolName)) {
       return true;
     }
 
-    return this.executionAllowedMcpPatterns!.some((pattern) => {
+    return patterns.some((pattern) => {
       if (pattern === 'mcp__*') {
         return true;
       }
@@ -1840,7 +1925,7 @@ export class AgentCore {
   }> {
     if (
       this.codeModeAllowedToolNames === undefined &&
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.())
     ) {
       await this.prepareTools();
     }
@@ -2383,12 +2468,16 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
-          ? {
-              codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
-            }
-          : {}),
+        // The narrowed binding set rides on every code-mode agent request:
+        // exec dispatch gates on it, and the scheduler exposes it as the
+        // ambient allowlist so reachability hints resolve against the
+        // surface this agent actually received.
+        ...(this.codeModeAllowedToolNames !== undefined
+          ? { codeModeAllowedToolNames: this.codeModeAllowedToolNames }
+          : toolName === ToolNames.EXEC &&
+              isCodeModeEnabled(this.runtimeContext.getToolMode?.())
+            ? { codeModeAllowedToolNames: [] }
+            : {}),
       };
 
       if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
