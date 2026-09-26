@@ -264,6 +264,57 @@ class HttpRuntimeTransportTest {
                 () -> new RuntimeSession("harness", "s\ud800", "bootstrap", scope));
     }
 
+    @Test
+    void validatesEveryActivationReceiptFieldAndRefusesOlderWorkers() throws Exception {
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
+        RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
+        RuntimeBindingRecord runtime = ready(request, seed, contextLease(seed));
+        RuntimeSessionRecord session = on(runtime, session("session", request));
+        var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", "workspace", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        for (boolean active : new boolean[] {true, false}) {
+            Map<String, Object> receipt = new LinkedHashMap<>();
+            receipt.put("protocolVersion", 1);
+            receipt.put("operation", active ? "activate" : "release");
+            receipt.put("sessionId", "session");
+            receipt.put("contextDigest", binding.getContextDigest());
+            receipt.put("contextConfigRef", binding.getContextConfigRef());
+            receipt.put("profile", WorkspaceExecutionProfile.PROFILE);
+            receipt.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+            receipt.put("runtimeIncarnation", seed.getGatewayIncarnation());
+            receipt.put("epoch", seed.getEpoch());
+            receipt.put("active", active);
+            reply.set(json(200, JsonCodec.encode(receipt)));
+            transport.activateWorkspace(runtime, session, binding, active).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals("/internal/managed-runtime/v3/activation", capturedPath.get());
+            assertEquals(active ? "activate" : "release", JSON.readTree(captured.get()).get("operation").asText());
+            for (String field : receipt.keySet()) {
+                Map<String, Object> invalid = new LinkedHashMap<>(receipt);
+                invalid.put(field, "foreign");
+                reply.set(json(200, JsonCodec.encode(invalid)));
+                assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, active)
+                        .toCompletableFuture().get(2, TimeUnit.SECONDS), field);
+            }
+            receipt.put("extra", true);
+            reply.set(json(200, JsonCodec.encode(receipt)));
+            assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, active)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        reply.set(json(404, "{}".getBytes(StandardCharsets.UTF_8)));
+        assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, true)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        for (RuntimeSessionRecord foreign : List.of(
+                new RuntimeSessionRecord(session.getSession(), "foreign", runtime.getGeneration(),
+                        RuntimeSessionRecord.State.READY, 0, Instant.now()),
+                new RuntimeSessionRecord(session.getSession(), runtime.getBindingId(), runtime.getGeneration() + 1,
+                        RuntimeSessionRecord.State.READY, 0, Instant.now()))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.activateWorkspace(runtime, foreign, binding, true));
+        }
+    }
+
     /** A READY durable binding whose Runtime holds this lease. */
     private static RuntimeBindingRecord ready(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeLease lease) {

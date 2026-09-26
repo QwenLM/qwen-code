@@ -65,6 +65,7 @@ export interface ManagedToolSet {
    */
   readonly sessionId: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
+  readonly isActive?: () => boolean;
 }
 
 /**
@@ -140,7 +141,7 @@ export class ManagedToolExecutor {
     if (joined) {
       return join(joined, reference, toolName, inputJson);
     }
-    if (tools === undefined) {
+    if (tools === undefined || tools.isActive?.() === false) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
       );
@@ -181,6 +182,14 @@ export class ManagedToolExecutor {
     entry.promise = this.run(entry, tool, tools.sessionId);
     await entry.promise;
     return entry.result!;
+  }
+
+  /** Read-only lookup; never creates or advances an invocation. */
+  hasActiveSession(sessionId: string): boolean {
+    return [...this.entries.values()].some(
+      (entry) =>
+        entry.reference.sessionId === sessionId && entry.state !== 'settled',
+    );
   }
 
   /** Read-only lookup; never creates or advances an invocation. */
@@ -282,11 +291,13 @@ export class ManagedToolExecutor {
 export function createManagedToolSet(
   directory: string,
   sessionId: string,
+  workspaceRoot: string = directory,
 ): ManagedToolSet {
   const config = new Config({
     sessionId,
     targetDir: directory,
     cwd: directory,
+    includeDirectories: [workspaceRoot],
     model: 'managed-runtime-worker',
     debugMode: false,
     usageStatisticsEnabled: false,

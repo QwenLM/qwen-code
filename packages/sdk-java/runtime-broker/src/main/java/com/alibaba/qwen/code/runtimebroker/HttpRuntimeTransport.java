@@ -196,6 +196,42 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 });
     }
 
+    /** Activates or closes the installed fixed-profile Session gate. */
+    public CompletionStage<Void> activateWorkspace(RuntimeBindingRecord runtime,
+            RuntimeSessionRecord sessionRecord, ContextBinding binding, boolean active) {
+        RuntimeSession session = sessionRecord.getSession();
+        RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        RuntimeProvisionRequest request = runtime.getRequest();
+        if (seed == null || runtime.getLease() == null
+                || !runtime.getBindingId().equals(sessionRecord.getBindingId())
+                || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
+                || !request.isManagedContext()
+                || !request.getScope().equals(session.getScope())
+                || !session.getHarnessSessionId().equals(request.getIsolationKey())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
+                        session.getScope().getCapabilityDigest())
+                || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
+                        binding.getContextConfigRef())) {
+            throw new IllegalArgumentException("Workspace activation identity is invalid");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("operation", active ? "activate" : "release");
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("contextDigest", binding.getContextDigest());
+        body.put("contextConfigRef", binding.getContextConfigRef());
+        body.put("profile", WorkspaceExecutionProfile.PROFILE);
+        Map<String, Object> expected = new LinkedHashMap<>(body);
+        expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+        expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
+        expected.put("epoch", seed.getEpoch());
+        expected.put("active", active);
+        return post(runtime.getLease(), "/internal/managed-runtime/v3/activation",
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(
+                        ManagedContextProtocol.parse(bytes), expected));
+    }
+
     /**
      * Runs one tool call to settlement. The reference carries the identity
      * four plus {@code toolName} and {@code input}; nothing else may ride

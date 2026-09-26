@@ -30,6 +30,11 @@ import {
   ManagedToolExecutor,
 } from './managed-runtime-tool-executor.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import {
+  WorkspaceActivations,
+  WORKSPACE_ACTIVATION_ROUTE,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -37,6 +42,7 @@ import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.
  */
 export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
+  WORKSPACE_ACTIVATION_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
 
@@ -122,6 +128,9 @@ export function registerManagedContextRoutes(
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
   const mount = new ManagedContextMount(boot.mountRoot);
+  const activations = new WorkspaceActivations();
+  const requiresActivation =
+    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
   app.post(
@@ -153,6 +162,11 @@ export function registerManagedContextRoutes(
   );
 
   const executor = new ManagedToolExecutor(async (reference) => {
+    const isActive = () =>
+      !requiresActivation || activations.isActive(reference.sessionId);
+    if (!isActive()) {
+      return undefined;
+    }
     const binding = installations.installed(reference.sessionId);
     const directory = binding && (await mount.resolve(binding.cwdRelative));
     if (directory === undefined) {
@@ -165,10 +179,18 @@ export function registerManagedContextRoutes(
       boot.runtimeInstanceId,
       reference.sessionId,
     );
-    return sessionIdContext.run(sessionId, () =>
-      createManagedToolSet(directory, sessionId),
-    );
+    return {
+      ...sessionIdContext.run(sessionId, () =>
+        createManagedToolSet(
+          directory,
+          sessionId,
+          requiresActivation ? boot.mountRoot : directory,
+        ),
+      ),
+      isActive,
+    };
   });
+  activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
   return executor;
 }
