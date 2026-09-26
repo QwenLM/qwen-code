@@ -306,14 +306,17 @@ describe('directory sync refusal', () => {
     }
   }
 
-  it('tolerates the win32 refusal and still round trips the bytes', async () => {
-    await withDirectorySyncRefusal('win32', 'EPERM', async ({ store }) => {
-      const content = Buffer.from('bytes that outlive the refusal', 'utf8');
-      const ref = await store.publish('managed-input', content);
-      expect(ref.byteLength).toBe(content.byteLength);
-      expect(await store.read(ref)).toEqual(content);
-    });
-  });
+  it.each(['EACCES', 'EINVAL', 'EPERM'] as const)(
+    'tolerates the win32 %s refusal and still round trips the bytes',
+    async (code) => {
+      await withDirectorySyncRefusal('win32', code, async ({ store }) => {
+        const content = Buffer.from('bytes that outlive the refusal', 'utf8');
+        const ref = await store.publish('managed-input', content);
+        expect(ref.byteLength).toBe(content.byteLength);
+        expect(await store.read(ref)).toEqual(content);
+      });
+    },
+  );
 
   it('rejects a win32 refusal outside the tolerated codes', async () => {
     await withDirectorySyncRefusal(
