@@ -127,6 +127,36 @@ describe('deriveDesktopRelayStatus', () => {
     error: undefined,
   };
 
+  it.each([
+    { blocker: 'workspace-ineligible' as const },
+    { blocker: 'workspace-resolving' as const },
+    { blocker: 'unsupported-daemon' as const },
+    { sessionId: undefined },
+    { daemonUrl: undefined },
+  ])(
+    'keeps revocation available when connecting is blocked: %j',
+    (overrides) => {
+      const status = deriveDesktopRelayStatus({
+        ...base,
+        ...overrides,
+        probe: {
+          kind: 'ready',
+          version: '0.1.6',
+          active: {
+            sessionId: 's1',
+            daemonUrl: base.daemonUrl,
+            phase: 'connected',
+          },
+        },
+      });
+      const handlers = mount(status);
+      expect(button('Connect this computer')).toBeUndefined();
+      expect(button('Disconnect')).toBeDefined();
+      act(() => button('Disconnect')?.click());
+      expect(handlers.onDisconnect).toHaveBeenCalledOnce();
+    },
+  );
+
   it('prefers blockers, then a missing session, then a pending approval', () => {
     expect(
       deriveDesktopRelayStatus({

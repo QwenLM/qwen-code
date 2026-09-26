@@ -140,6 +140,7 @@ export interface DesktopRelayStatus {
   phase: DesktopRelayPhase;
   blocker?: DesktopRelayBlocker;
   message?: string;
+  canDisconnect?: boolean;
 }
 
 const STATUS_KEY: Record<DesktopRelayPhase, CopyKey> = {
@@ -196,22 +197,27 @@ export function deriveDesktopRelayStatus(input: {
   awaitingApproval: boolean;
   error: string | undefined;
 }): DesktopRelayStatus {
+  const active = input.probe?.kind === 'ready' ? input.probe.active : undefined;
+  const live =
+    active !== undefined &&
+    (active.phase === 'connecting' ||
+      active.phase === 'registering' ||
+      active.phase === 'connected');
   if (input.blocker !== undefined) {
-    return { phase: 'unavailable', blocker: input.blocker };
+    return {
+      phase: 'unavailable',
+      blocker: input.blocker,
+      ...(live ? { canDisconnect: true } : {}),
+    };
   }
-  if (!input.sessionId || !input.daemonUrl) return { phase: 'needs-session' };
+  if (!input.sessionId || !input.daemonUrl)
+    return { phase: 'needs-session', ...(live ? { canDisconnect: true } : {}) };
   if (input.awaitingApproval) return { phase: 'awaiting-approval' };
   if (input.probe === undefined) return { phase: 'checking' };
   if (input.probe.kind === 'permission-required') {
     return { phase: 'permission-required' };
   }
   if (input.probe.kind === 'missing') return { phase: 'missing' };
-  const active = input.probe.active;
-  const live =
-    active !== undefined &&
-    (active.phase === 'connecting' ||
-      active.phase === 'registering' ||
-      active.phase === 'connected');
   if (
     active !== undefined &&
     active.sessionId === input.sessionId &&
@@ -252,6 +258,7 @@ export function DesktopRelayPanel({
 }: DesktopRelayPanelProps) {
   const t = useDesktopRelayCopy();
   const { phase } = status;
+  const canDisconnect = status.canDisconnect || CAN_DISCONNECT.includes(phase);
 
   return (
     <div className="flex flex-col gap-3">
@@ -340,7 +347,7 @@ export function DesktopRelayPanel({
         </p>
       ) : null}
 
-      {CAN_CONNECT.includes(phase) || CAN_DISCONNECT.includes(phase) ? (
+      {CAN_CONNECT.includes(phase) || canDisconnect ? (
         <div className="flex gap-2">
           {CAN_CONNECT.includes(phase) ? (
             <Button
@@ -352,7 +359,7 @@ export function DesktopRelayPanel({
               {t('desktopRelay.connect')}
             </Button>
           ) : null}
-          {CAN_DISCONNECT.includes(phase) ? (
+          {canDisconnect ? (
             <Button
               type="button"
               variant="ghost"
@@ -372,6 +379,7 @@ interface DesktopRelayControlProps {
   /** Class for the trigger, supplied by the sidebar so it matches its neighbours. */
   triggerClassName: string;
   workspaces?: readonly DaemonWorkspaceCapability[];
+  showWhenIdle?: boolean;
 }
 
 /**
@@ -381,6 +389,7 @@ interface DesktopRelayControlProps {
 export function DesktopRelayControl({
   triggerClassName,
   workspaces,
+  showWhenIdle = true,
 }: DesktopRelayControlProps) {
   const t = useDesktopRelayCopy();
   const { baseUrl, token, capabilities } = useWorkspace();
@@ -441,9 +450,15 @@ export function DesktopRelayControl({
   // local-network permission prompt. Every probe starts a short process on
   // the computer, so a steady connection is checked rarely.
   const watching =
-    status.phase === 'connecting' || status.phase === 'connected';
+    status.canDisconnect || CAN_DISCONNECT.includes(status.phase);
   const interval =
-    open || status.phase === 'connecting' ? 3_000 : watching ? 30_000 : 0;
+    !showWhenIdle && !watching
+      ? 0
+      : open || status.phase === 'connecting'
+        ? 3_000
+        : watching
+          ? 30_000
+          : 0;
   useEffect(() => {
     if (interval === 0) return;
     void refresh();
@@ -489,6 +504,8 @@ export function DesktopRelayControl({
       // The command stays on screen to copy by hand.
     }
   }, []);
+
+  if (!showWhenIdle && !watching) return null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
