@@ -586,6 +586,134 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it('blocks new prompts when terminal settlement keeps failing', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      if (kind === 'managed-turn-result') {
+        return Promise.reject(new Error('store down'));
+      }
+      return publish.call(this, kind, bytes);
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(
+      transcript.body.events.filter(
+        (event: { type: string }) =>
+          event.type === 'turn_complete' || event.type === 'turn_error',
+      ),
+    ).toEqual([]);
+    const nextPrompt = [{ type: 'text', text: 'next' }];
+    const rejected = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: nextPrompt,
+        promptId: '44444444-4444-4444-8444-444444444444',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('hosted_turn_recovery_required');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('settles a cancelled turn when writing its user record fails once', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    let rejectWrite: ((reason?: unknown) => void) | undefined;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      if (kind === 'managed-message') {
+        return new Promise<Awaited<ReturnType<typeof publish>>>(
+          (_resolve, reject) => {
+            rejectWrite = reject;
+          },
+        );
+      }
+      return publish.call(this, kind, bytes);
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'wait' }];
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(() => expect(rejectWrite).toBeDefined());
+    const cancelled = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(cancelled.status).toBe(204);
+    rejectWrite?.(new Error('transient store failure'));
+    await vi.waitFor(async () => {
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+            data: expect.objectContaining({ stopReason: 'cancelled' }),
+          }),
+        ]),
+      );
+    });
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   it('reports an aborted turn as cancelled to the Java event projector', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
