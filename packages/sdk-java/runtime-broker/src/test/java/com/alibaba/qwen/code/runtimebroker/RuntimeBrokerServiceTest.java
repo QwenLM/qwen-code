@@ -360,15 +360,18 @@ class RuntimeBrokerServiceTest {
             provisions.incrementAndGet();
             return provisioned;
         };
+        // The owner renews every third of its lease. The wait spans more than
+        // two leases, so only renewal keeps the second broker out, while a
+        // renewal may slip by most of a lease on a slow runner.
         RuntimeBrokerService first = durableService("broker-a", provisioner,
                 new FakeTransport(), bindings, sessions, executions,
-                Duration.ofMillis(150), Duration.ofMillis(300));
+                Duration.ofMillis(1000), Duration.ofMillis(300));
         RuntimeBrokerService second = durableService("broker-b", provisioner,
                 new FakeTransport(), bindings, sessions, executions,
-                Duration.ofMillis(150), Duration.ofMillis(300));
+                Duration.ofMillis(1000), Duration.ofMillis(300));
         try {
             CompletionStage<Void> firstWarm = first.warm(HARNESS_SESSION);
-            Thread.sleep(350);
+            Thread.sleep(2500);
             CompletionStage<Void> secondWarm = second.warm(HARNESS_SESSION);
 
             assertEquals(1, provisions.get());
