@@ -14,11 +14,11 @@ import { getSettingDefinition } from '../../config/settingsUtils.js';
 
 // The Web Shell settings page renders the schema's English label/description
 // when `settings.label.<key>` / `settings.description.<key>` are absent from
-// the ZH table in packages/web-shell/client/i18n.tsx. These assertions keep
-// zh-CN coverage complete as the settings schema grows.
+// SETTINGS_MESSAGES_ZH in packages/web-shell/client/settings/messages.ts.
+// These assertions keep zh-CN coverage complete as the settings schema grows.
 
 const I18N_PATH = fileURLToPath(
-  new URL('../../../../web-shell/client/i18n.tsx', import.meta.url),
+  new URL('../../../../web-shell/client/settings/messages.ts', import.meta.url),
 );
 
 // Settings rendered by the Web Shell frontend itself, with no schema entry.
@@ -26,10 +26,12 @@ const FRONTEND_ONLY_KEYS = new Set(['ui.chatWidth']);
 
 function zhTableSource(): string {
   const source = readFileSync(I18N_PATH, 'utf8');
-  const start = source.indexOf('const ZH: Messages = {');
+  const start = source.indexOf('export const SETTINGS_MESSAGES_ZH');
   const end = source.indexOf('\n};', start);
   if (start === -1 || end === -1) {
-    throw new Error('Cannot locate the ZH messages table in i18n.tsx');
+    throw new Error(
+      'Cannot locate SETTINGS_MESSAGES_ZH in settings/messages.ts',
+    );
   }
   return source.slice(start, end);
 }
