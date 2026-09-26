@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -838,6 +839,37 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void acceptsAnEpochBeyondTheIntRange() throws Exception {
+        long epoch = 4_294_967_296L;
+        JsonNode identity = suite.required("identity");
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                identity.required("leaseId").textValue(), epoch,
+                identity.required("token").textValue());
+        reply.set(json(200, successBodyWith("epoch", Long.toString(epoch))));
+
+        RuntimeAttestation proof = transport.attest(
+                lease(server.getAddress().getPort(), epoch),
+                new RuntimeProvisionRequest(scope(), "session-1"), seed)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(epoch, proof.getEpoch());
+    }
+
+    @Test
+    void keepsTheParseFailureAsTheCauseOfAnInvalidAttestation()
+            throws IOException {
+        reply.set(json(200, successBodyWith("epoch", "Set[4]")));
+
+        RuntimeBrokerException failure = awaitFailure();
+
+        assertEquals("managed_runtime_attestation_invalid", failure.getCode());
+        assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+    }
+
+    @Test
     void rejectsAReferenceWithUndeclaredKeys() {
         Map<String, Object> reference = toolReference();
         reference.put("tenantId", "tenant-b");
@@ -1383,13 +1415,17 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeLease lease(int port) {
+        return lease(port, suite.required("identity").required("epoch")
+                .longValue());
+    }
+
+    private RuntimeLease lease(int port, long epoch) {
         JsonNode identity = suite.required("identity");
         return new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
                 URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
-                identity.required("leaseId").textValue(),
-                identity.required("epoch").longValue());
+                identity.required("leaseId").textValue(), epoch);
     }
 
     private RuntimeBrokerException awaitFailure() {

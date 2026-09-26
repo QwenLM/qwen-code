@@ -632,7 +632,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             fields = JsonCodec.parseObject(bytes,
                     "Managed Runtime attestation");
         } catch (RuntimeBrokerException | IllegalArgumentException exception) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+            throw protocol("Managed Runtime attestation response is invalid.",
+                    exception);
         }
         if (!fields.keySet().equals(RESPONSE_FIELDS)) {
             throw protocol("Managed Runtime attestation response is invalid.");
@@ -724,7 +725,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static BigDecimal exactNumber(Object value) {
         // A parsed Double or Float may be rounded and a Short or Byte wrapped,
-        // as with 40000000000000001E-16 or 65540S.
+        // as with 40000000000000001E-16 or 65540S, so an integer written with
+        // a non-zero exponent (40e-1) fails closed. Exact-decimal parsing would
+        // keep it, but fastjson2 2.0.60 then reads 0.020000000000000000000E1
+        // as 2.
         if (value instanceof Integer || value instanceof Long
                 || value instanceof BigInteger || value instanceof BigDecimal) {
             return new BigDecimal(value.toString());
@@ -785,8 +789,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static RuntimeBrokerException protocol(String message) {
-        return error(400, "managed_runtime_attestation_invalid", message,
-                false);
+        return protocol(message, null);
+    }
+
+    private static RuntimeBrokerException protocol(String message,
+            Throwable cause) {
+        return new RuntimeBrokerException(400,
+                "managed_runtime_attestation_invalid", message, false, cause);
     }
 
     private static RuntimeBrokerException conflict(String message) {
