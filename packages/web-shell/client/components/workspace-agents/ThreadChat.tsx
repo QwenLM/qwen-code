@@ -297,15 +297,35 @@ export function ThreadChat({
         latest.set(run.agentId, run);
     }
     // A retried run waits in the queue without a start time, so "is it
-    // working again" is read from the live runs, not from ordering.
-    return [...latest.values()].filter(
-      (run) =>
-        run.status === 'failed' &&
-        thread.status !== 'done' &&
-        thread.status !== 'cancelled' &&
-        !live.some((row) => row.run.agentId === run.agentId),
-    );
-  }, [thread.runs, thread.status, live]);
+    // working again" is read from the live runs, not from ordering. Retry
+    // sends `@name …`, which admission skips for a retired or disabled
+    // agent, and routes by name into a same-named re-added identity — so
+    // resolve the roster entry by id or name and suppress both cases.
+    return [...latest.values()].filter((run) => {
+      if (
+        run.status !== 'failed' ||
+        thread.status === 'done' ||
+        thread.status === 'cancelled'
+      ) {
+        return false;
+      }
+      const rosterEntry = agents.find(
+        (agent) => agent.id === run.agentId || agent.name === run.agentName,
+      );
+      if (
+        !rosterEntry ||
+        !rosterEntry.enabled ||
+        rosterEntry.retiredAt !== undefined
+      ) {
+        return false;
+      }
+      return !live.some(
+        (row) =>
+          row.run.agentId === rosterEntry.id ||
+          row.run.agentName === rosterEntry.name,
+      );
+    });
+  }, [thread.runs, thread.status, live, agents]);
   const messages = useMemo<Message[]>(
     () =>
       [

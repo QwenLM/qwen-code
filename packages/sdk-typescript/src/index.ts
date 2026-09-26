@@ -295,6 +295,7 @@ export {
   type DaemonLogIssue,
   type DaemonLogMode,
   type DaemonStatusReport,
+  type DaemonUpdateStatus,
   type DaemonStatusReportDetail,
   type DaemonStatusReportIssue,
   type DaemonStatusReportLevel,

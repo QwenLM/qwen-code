@@ -1138,7 +1138,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         );
         applyOpenWithAuth(serveOptions);
       }
-      const handle = await runQwenServe(serveOptions);
+      const handle = await runQwenServe(serveOptions, {
+        updateRestartArgv: process.argv.slice(2),
+      });
       const joined = argv['join'] ? parseJoinLink(argv['join']) : undefined;
       const hostTarget = joined
         ? joined

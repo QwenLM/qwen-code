@@ -1883,6 +1883,12 @@ const EN: Messages = {
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
   'sidebar.settings': 'Settings',
+  'update.button': 'Update',
+  'update.restarting': 'Restarting…',
+  'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.failed':
+    'Update could not finish. Check the service connection and retry.',
+
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
@@ -5958,6 +5964,11 @@ const ZH: Messages = {
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
   'sidebar.settings': '设置',
+  'update.button': '更新',
+  'update.restarting': '重启中…',
+  'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.failed': '未能完成更新，请检查服务连接后重试。',
+
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',

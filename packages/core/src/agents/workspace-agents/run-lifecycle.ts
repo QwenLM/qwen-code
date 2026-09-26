@@ -272,12 +272,14 @@ export async function closeRunInTransaction(
   const run = thread.runs.find((entry) => entry.id === context.runId)!;
 
   if (input.request.kind === 'waiting') {
+    // `finishing` is excluded deliberately: it is only ever set alongside a
+    // closeKind, i.e. the run already executed its close tool, and a close
+    // discharges only the waits that exist at that moment. A wait admitted
+    // against a finishing run could never be discharged and would strand.
     const otherLive = thread.runs.some(
       (entry) =>
         entry.id !== run.id &&
-        (entry.status === 'queued' ||
-          entry.status === 'running' ||
-          entry.status === 'finishing'),
+        (entry.status === 'queued' || entry.status === 'running'),
     );
     const { threads } = await transaction.listThreads();
     if (!otherLive && !hasLiveDescendant(threads, thread.id)) {

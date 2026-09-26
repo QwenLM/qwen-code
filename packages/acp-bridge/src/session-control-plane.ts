@@ -129,6 +129,8 @@ import {
   WorkspaceDrainingError,
   WorkspaceRuntimeStopError,
   StandaloneSessionSpawnError,
+  RequestedSessionIdRejectedError,
+  ManagedSessionBranchUnsupportedError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
 import {
@@ -4824,6 +4826,9 @@ export function createSessionControlPlane(
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
                     }
                   : {}),
+                ...(engine !== undefined
+                  ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine }
+                  : {}),
                 [SESSION_INITIALIZATION_DEADLINE_META_KEY]:
                   Date.now() + initTimeoutMs,
               },
@@ -8079,6 +8084,9 @@ export function createSessionControlPlane(
                     req.sourceId,
                     daemonOwnedStandaloneRestore,
                   ),
+                  ...(engine !== undefined
+                    ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine }
+                    : {}),
                   // Decline decisions known before the child RPC: keep the
                   // child's replay finalize-skip aligned with the re-hang.
                   ...(opts.restoreAskUserQuestion === true &&
@@ -8120,6 +8128,9 @@ export function createSessionControlPlane(
                   req.sourceId,
                   daemonOwnedStandaloneRestore,
                 ),
+                ...(engine !== undefined
+                  ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine }
+                  : {}),
                 ...(opts.restoreAskUserQuestion === true &&
                 (req.clientId === undefined ||
                   options.suppressRestorePrompt === true)
@@ -9826,15 +9837,12 @@ export function createSessionControlPlane(
       if (req.sessionId !== undefined) {
         if (executionEngines) {
           if (!isAddressableSessionId(req.sessionId)) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Requested session ID is invalid',
-            );
+            throw new RequestedSessionIdRejectedError('invalid_session_id');
           }
           if (byId.has(req.sessionId)) {
-            throw RequestError.invalidParams(
-              { errorKind: 'session_id_conflict', sessionId: req.sessionId },
-              `Session ${req.sessionId} is already live`,
+            throw new RequestedSessionIdRejectedError(
+              'session_id_conflict',
+              req.sessionId,
             );
           }
         }
@@ -11150,7 +11158,7 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       if (channelInfoForEntry(entry)?.harness.executionEngine === 'managed') {
-        throw new Error('Managed session branching is not supported');
+        throw new ManagedSessionBranchUnsupportedError(sessionId);
       }
       if (isClosingOrAuthorizingClose(entry)) {
         throw new SessionNotFoundError(sessionId, 'The session is closing');

@@ -521,7 +521,17 @@ export async function claimRun(
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const thread = await transaction.readThread(input.threadId);
     const target = thread?.runs.find((run) => run.id === input.runId);
-    if (!thread || !target || target.status !== 'queued') return undefined;
+    // Candidate selection reads the thread list outside this lock, so a
+    // thread can go terminal between selection and here; re-check under the
+    // lock or a queued run would still be promoted on a finished thread.
+    if (
+      !thread ||
+      !target ||
+      target.status !== 'queued' ||
+      isThreadTerminal(thread.status)
+    ) {
+      return undefined;
+    }
 
     const { threads, unreadable } = await transaction.listThreads();
     if (unreadable.length > 0) {

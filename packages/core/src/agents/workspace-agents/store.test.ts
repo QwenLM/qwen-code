@@ -604,6 +604,50 @@ describe('retiring an agent', () => {
     expect(isAgentAddressable(alice)).toBe(false);
   });
 
+  it('cancels queued runs on disable so they cannot wedge their thread', async () => {
+    // A disabled agent can never start a queued run, but `queued` counts as
+    // live for thread status and retirement — a leftover queued run pinned
+    // the thread in `in_progress` and blocked retiring the agent.
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
+    );
+
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
+    ).resolves.toBe('updated');
+
+    const stored = await readThread(PROJECT_ROOT, 'th_root');
+    expect(stored?.runs[0]?.status).toBe('cancelled');
+    expect(stored?.runs[0]?.endedAt).toEqual(expect.any(Number));
+    // With the dead run settled the agent holds no live work, so retiring
+    // it — previously refused — now succeeds.
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
+      'updated',
+    );
+  });
+
+  it('leaves running work alone on disable', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running', endedAt: undefined })] }),
+    );
+
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
+    ).resolves.toBe('updated');
+
+    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
+      'running',
+    );
+    // A mid-turn run still blocks retirement, exactly as before.
+    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
+      'has_live_work',
+    );
+  });
+
   it('reports an unknown id rather than inventing an entry', async () => {
     await seed([ALICE]);
 
