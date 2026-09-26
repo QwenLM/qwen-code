@@ -10,6 +10,8 @@ Web Shell 已通过 `getUserMedia` 采集麦克风音频、转换为 PCM，并�
 
 仅当前已挂载 WebView、配置 daemon origin 发出的纯 `RESOURCE_AUDIO_CAPTURE` 请求可被接受。请求 origin 与顶层页面 origin 均须匹配配置。支持 HTTPS 和明确允许的回环 HTTP origin，不增加 TLS 例外。相机、音视频混合及未知资源直接拒绝，不弹 Android 权限提示。
 
+权限控制器使用与 `OriginPolicy` 相同的严格 `java.net.URI` 解析配置的 origin。Android 8 的 `android.net.Uri` 主机解析会在冒号处分割带括号的 IPv6；若用于回环允许列表，会错误拒绝 `[::1]`。格式错误的 origin 在请求同意前被拒绝。
+
 原生对话框显示连接 origin，让用户明确启用麦克风。即使应用已有 Android 录音权限也需要该操作。确认后，如有必要，通过 Activity Result API 请求 `RECORD_AUDIO`。授予纯音频采集前再次检查当前视图、origin、可见生命周期与系统权限。系统拒绝不影响文本使用。启动应用时不申请权限。
 
 单个待处理请求拥有确认对话框及未返回的系统结果。导航、连接错误、进入后台、切换配置及销毁取消待处理请求。已取消的系统请求继续占有结果槽，直到系统返回；新文档不能接管旧结果。Activity 重建只保存在途标志，不保存 WebView 请求。WebView 取消时隐藏对话框，不再次响应已取消请求。

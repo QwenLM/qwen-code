@@ -1,7 +1,8 @@
 package com.qwen.mobileshell
 
-import android.net.Uri
 import android.webkit.PermissionRequest
+import java.net.URI
+import java.net.URISyntaxException
 
 internal class NativeMicrophonePermission(
     private val hasPermission: () -> Boolean,
@@ -17,7 +18,11 @@ internal class NativeMicrophonePermission(
     fun restoreAwaitingResult(value: Boolean) { awaitingResult = value }
 
     fun begin(web: PermissionRequest, origin: String, isCurrent: () -> Boolean): Boolean {
-        val uri = Uri.parse(origin)
+        // Use the same strict parser as OriginPolicy; legacy Android Uri misparses IPv6 hosts.
+        val uri = try { URI(origin) } catch (_: URISyntaxException) {
+            web.deny()
+            return false
+        }
         val secure = uri.scheme == "https" || (uri.scheme == "http" && uri.host in listOf("localhost", "127.0.0.1", "[::1]", "::1"))
         if (pending != null || awaitingResult || !secure || !isCurrent() ||
             !OriginPolicy.isSameOrigin(origin, web.origin.toString()) ||

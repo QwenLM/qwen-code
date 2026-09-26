@@ -10,6 +10,8 @@ The Web Shell already captures microphone audio with `getUserMedia`, converts it
 
 Only a request for exactly `RESOURCE_AUDIO_CAPTURE` from the current attached WebView and configured daemon origin is eligible. The requesting origin and current top-level origin must both match. HTTPS and explicitly allowed loopback HTTP origins are supported; no TLS exceptions are added. Camera, mixed audio/video and unknown resources are denied without an Android permission prompt.
 
+The permission controller parses the configured origin with the same strict `java.net.URI` parser used by `OriginPolicy`. Android 8's `android.net.Uri` host parsing splits bracketed IPv6 at a colon; using it for the loopback allow-list incorrectly rejects `[::1]`. Malformed origins are denied before requesting consent.
+
 A native dialog names the connection origin and asks the user to enable its microphone. This explicit action is required even if the application already has Android recording permission. After confirmation, the shell requests `RECORD_AUDIO` through the Activity Result API when needed. It checks the current view, origin, visible lifecycle and OS permission again before granting only audio capture. Android denial leaves text usage available. No permission request is launched at app startup.
 
 One pending request owns the consent dialog and any outstanding system result. Navigation, connection failure, backgrounding, switching profiles and destruction cancel the pending request. A cancelled system request retains its result slot until the OS responds; a new document cannot adopt the old result. Recreation persists only that in-flight flag, not the WebView request. WebView cancellation hides the dialog without responding again to its cancelled request.
