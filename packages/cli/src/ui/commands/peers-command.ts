@@ -313,13 +313,24 @@ export const peersCommand: SlashCommand = {
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
       const settings = context.services.settings;
-      if (!isCrossSessionMessagingEnabled(settings?.merged)) {
+      const settingsEnabled = isCrossSessionMessagingEnabled(settings?.merged);
+      // The setting is not the whole gate: `--bare` and `--safe-mode` turn
+      // messaging off for the session whatever it says, and the same
+      // effective answer is what interactive startup binds the inbox on.
+      // Reading settings alone would call a deliberately off session "on,
+      // no inbox" and hand it a bind failure to explain.
+      const effective =
+        settingsEnabled &&
+        (context.services.config?.isCrossSessionMessagingEnabled() ?? true);
+      if (!effective) {
         return {
           type: 'message',
           messageType: 'info',
-          content: describeMessagingOff(
-            settings ? crossSessionMessagingOffScope(settings) : undefined,
-          ),
+          content: settingsEnabled
+            ? 'Cross-session messaging is off: this session runs with --bare or --safe-mode, which turns it off whatever the setting says.'
+            : describeMessagingOff(
+                settings ? crossSessionMessagingOffScope(settings) : undefined,
+              ),
         };
       }
       const failure = getLastPeerInboxFailure();

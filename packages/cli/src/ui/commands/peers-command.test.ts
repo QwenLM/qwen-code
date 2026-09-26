@@ -76,6 +76,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
 }));
 
+import { isCrossSessionMessagingEnabled } from '../../peerMessaging/enabled.js';
 import {
   formatHeldList,
   peersCommand,
@@ -135,11 +136,23 @@ function makeContext(
   peerMessaging: Fake | null,
   crossSessionMessaging?: unknown,
   scopes: Record<string, unknown> = {},
+  runtimePolicyAllows = true,
 ): CommandContext {
   return {
     services: {
       peerMessaging,
       settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
+      config: {
+        // The real config folds the setting into this answer and narrows it
+        // with the session-level suppressions (`--bare`, `--safe-mode`), so
+        // the double composes the same two inputs and a case where the
+        // runtime policy and the setting disagree stays expressible.
+        isCrossSessionMessagingEnabled: () =>
+          runtimePolicyAllows &&
+          isCrossSessionMessagingEnabled({
+            agents: { crossSessionMessaging },
+          }),
+      },
     },
   } as unknown as CommandContext;
 }
@@ -455,6 +468,23 @@ describe('/peers', () => {
     expect(result.content).toContain('failed to register');
     expect(result.content).not.toContain('Cross-session messaging is off');
     expect(result.content).not.toContain('Remove that entry');
+  });
+
+  it('reports effective safe-mode policy as off', async () => {
+    // Settings on, runtime policy off: the session runs with the feature
+    // suppressed (`--bare`, `--safe-mode`), so `/peers` must not report a
+    // bind failure for an inbox that was never asked to bind.
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, false),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('Cross-session messaging is off');
+    expect(result.content).not.toContain('failed to bind');
   });
 
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
