@@ -35,7 +35,7 @@ Context 请求和响应限制为 16 KiB，响应要求 JSON UTF-8 与 no-store�
 
 ## 4. 有界启动与恢复
 
-managed-context 请求必须先持久化 resource handle，再启动进程。已有该 handle 但尚无 attested lease 的 binding 不得自动再次启动。首次失败或结果不确定的尝试进入 `RECOVERY_BLOCKED`；重复 warm 和 Broker 重启不能分配替代 generation。尝试超过期限时，阻塞一旦记录成功，本次调用即返回 409 `runtime_broker_recovery_blocked`；若无法记录，则返回可重试的超时，由下一次调用阻塞 binding。即使在 handle 持久化后、进程启动前崩溃，也阻止自动重试。legacy 启动策略不变。
+managed-context 请求必须先持久化 resource handle，再启动进程。已有该 handle 但尚无 attested lease 的 binding 不得自动再次启动。首次失败或结果不确定的尝试进入 `RECOVERY_BLOCKED`；重复 warm 和 Broker 重启不能分配替代 generation。阻塞一旦记录成功，失败的这次调用就返回 409 `runtime_broker_recovery_blocked`，而不是可重试的错误，超过期限的情形也是如此。若阻塞无法记录，本次调用保留原来的应答；只要 resource handle 已被持久化，下一次调用就会阻塞 binding。即使在 handle 持久化后、进程启动前崩溃，也阻止自动重试。legacy 启动策略不变。
 
 ready 和 attestation 不兼容时关闭准入，provisioner 终止失败子进程。恢复需要原进程不能继续执行的证据以及授权生命周期操作；本切片不新增公开重试接口。已 ready Runtime 的 reconciliation 仅进行观测，并使用保存的 request/seed。
 

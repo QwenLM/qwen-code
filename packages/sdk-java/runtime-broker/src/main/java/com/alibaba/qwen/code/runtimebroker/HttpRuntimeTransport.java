@@ -335,7 +335,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         Map<String, Object> identity = new LinkedHashMap<>();
         for (String field : List.of("sessionId", "promptId", "callId",
                 "argsDigest")) {
-            identity.put(field, referenceString(reference, field));
+            identity.put(field, BrokerValues.requireWellFormed(
+                    referenceString(reference, field), "reference " + field));
         }
         return Map.copyOf(identity);
     }
@@ -347,7 +348,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException(
                     "reference " + field + " is required");
         }
-        return BrokerValues.requireWellFormed(text, "reference " + field);
+        return text;
     }
 
     private static Object referenceInput(Map<String, Object> reference) {

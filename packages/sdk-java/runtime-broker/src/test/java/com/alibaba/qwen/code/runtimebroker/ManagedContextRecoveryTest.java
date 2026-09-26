@@ -204,6 +204,44 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
+    void aRetryableFailedLaunchReportsTheBlock() throws Exception {
+        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        FailingProvisioner provisioner = new FailingProvisioner(false);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            assertBlocked(service);
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findActive(REQUEST).getState());
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
+    void aDeadlineWhoseBlockLosesItsWriteStillAnswersTheTimeout() throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        AtomicInteger blockWrites = new AtomicInteger();
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            if ("compareAndSet".equals(method.getName())
+                                    && ((RuntimeBindingRecord) args[1]).getState()
+                                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                    && blockWrites.getAndIncrement() == 0) {
+                                return null;
+                            }
+                            return invoke(method, delegate, args);
+                        });
+        FailingProvisioner provisioner = new FailingProvisioner(true);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_provision_timeout",
+                    ((RuntimeBrokerException) error.getCause()).getCode());
+            assertBlocked(service);
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
     void theCallThatHitsTheDeadlineReportsTheBlock() throws Exception {
         InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
         FailingProvisioner provisioner = new FailingProvisioner(true);

@@ -944,12 +944,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     try {
                         if (error != null) {
                             Throwable cause = unwrap(error);
+                            boolean retryable = !(cause instanceof RuntimeBrokerException
+                                    brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
-                                if (request.isManagedContext()
-                                        || (cause instanceof RuntimeBrokerException
-                                                brokerFailure
-                                                && !brokerFailure.isRetryable())) {
-                                    blockRecovery(currentClaim);
+                                if (request.isManagedContext() || !retryable) {
+                                    // A retry cannot succeed once the binding
+                                    // is blocked, so say so.
+                                    if (blockRecovery(currentClaim) && retryable) {
+                                        throw conflict(
+                                                "runtime_broker_recovery_blocked",
+                                                "Managed Runtime recovery is blocked.",
+                                                cause);
+                                    }
                                 } else if (currentClaim
                                         .getResourceHandle() == null) {
                                     failBinding(currentClaim);
@@ -2068,8 +2074,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         } catch (IllegalArgumentException exception) {
             // A managed-context provisioner refuses a scope it cannot place,
             // such as one without a storage ID, rather than fall back.
-            throw invalid("runtime_placement_invalid",
-                    "Runtime placement is invalid");
+            throw new RuntimeBrokerException(400, "runtime_placement_invalid",
+                    "Runtime placement is invalid", false, exception);
         }
     }
 

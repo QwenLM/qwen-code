@@ -187,7 +187,15 @@ class HttpRuntimeTransportTest {
                 request.getProvisionerKind(), request.getStorageId());
         RuntimeBindingRecord runtime = ready(request, seed, lease);
         var binding = ManagedContextProtocolTest.binding();
+        RuntimeScope otherRoot = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspaces/other-root", request.getScope().getCapabilityDigest(),
+                "workspace");
         List<Runnable> refused = List.of(
+                // The same Workspace and storage mounted at another root, which
+                // only the placement check can tell apart.
+                () -> transport.installContext(ready(new RuntimeProvisionRequest(otherRoot, null,
+                        request.getProvisionerKind(), request.getStorageId()), seed, lease),
+                        session("session", request), "op", binding),
                 // The Runtime of another Workspace.
                 () -> transport.installContext(ready(new RuntimeProvisionRequest(other, null,
                         request.getProvisionerKind(), request.getStorageId()), seed, lease),
@@ -205,7 +213,8 @@ class HttpRuntimeTransportTest {
                         session("session", request), "op", binding));
         captured.set(null);
         for (Runnable call : refused) {
-            assertThrows(IllegalArgumentException.class, call::run);
+            assertEquals("session must belong to a READY Runtime binding",
+                    assertThrows(IllegalArgumentException.class, call::run).getMessage());
         }
         assertNull(captured.get());
     }
