@@ -291,6 +291,14 @@ export interface BridgeOptions {
       context: BridgeExecutionSelection,
     ): BridgeExecutionEngine | Promise<BridgeExecutionEngine>;
   };
+  /**
+   * How long a quarantined channel of a paired Bridge may drain before its
+   * running turns are cancelled and it is terminated. Measured once from the
+   * start of the quarantine and never extended by activity. Defaults to five
+   * minutes. Validated on every Bridge, but only a Bridge with
+   * `executionEngines` quarantines this way.
+   */
+  quarantineDrainTimeoutMs?: number;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** Daemon-global admission for the process-wide MCP OAuth callback port. */

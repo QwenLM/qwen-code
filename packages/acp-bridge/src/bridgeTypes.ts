@@ -2974,10 +2974,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
   readonly pendingPromptTotal?: number;
 
+  /** Number of live ACP channels (spawned and not dying): one per engine
+   *  that has a child, so up to two on a paired Bridge. Optional — see
+   *  {@link pendingPromptTotal}; absent means at most one. */
+  readonly liveChannelCount?: number;
+
   /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
    *  chart), or undefined before the first successful poll / when no child is
-   *  live. Synchronous cache read for the metrics sampler. Optional — see
-   *  {@link pendingPromptTotal}. */
+   *  live. On a paired Bridge it combines the fresh reading of each live
+   *  child: rss and cpu are summed, the age is the oldest, heap marks keep
+   *  their maxima. Synchronous cache read for the metrics sampler. Optional —
+   *  see {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
     | {
         rssBytes: number;
@@ -2992,9 +2999,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
          *  measured zero and an unmeasured child are different claims, and
          *  only the first may be read as "this child needed no heap". */
         heap?: ChildHeapReport;
+        /** How many children the reading covers. Absent on bridges predating
+         *  the field, which cover exactly one. */
+        children?: number;
+        /** How many of those children contributed to `heap`. Absent on
+         *  bridges predating the field: one when `heap` is present. */
+        heapReported?: number;
       }
     | undefined;
-  /** Poll the live child's resource extMethod and refresh the cache that
+  /** Poll each live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
    *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
   refreshChildResource?(): Promise<void>;
