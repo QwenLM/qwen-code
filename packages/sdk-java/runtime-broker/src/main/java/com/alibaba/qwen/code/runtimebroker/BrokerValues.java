@@ -12,6 +12,7 @@ import java.util.Map;
 
 final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
+    private static final int MAXIMUM_DECIMAL_SCALE = 2048;
 
     private BrokerValues() {
     }
@@ -85,6 +86,12 @@ final class BrokerValues {
         if (value instanceof Number number && !isJsonFinite(number)) {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
+        }
+        if (value instanceof BigDecimal decimal
+                && decimal.scale() > MAXIMUM_DECIMAL_SCALE) {
+            throw new IllegalArgumentException(
+                    "JSON number scale must be at most "
+                            + MAXIMUM_DECIMAL_SCALE);
         }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.
