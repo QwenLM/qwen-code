@@ -360,9 +360,15 @@ describe('qwen serve — capabilities envelope', () => {
     // `scheduled_task_session_reuse` appears only after the managed runtime
     // mounts, so the fast-path bootstrap and runtime envelopes legitimately
     // differ by that tag. Its transition is covered by the serve startup tests.
+    // `workspace_runtime_stop` skews the same way (#12490): stop readiness
+    // depends on the mounted runtime's bridge, which the bootstrap envelope
+    // cannot see, so the tag appears only once the runtime app serves the
+    // envelope.
     expect(
       caps.features.filter(
-        (feature) => feature !== 'scheduled_task_session_reuse',
+        (feature) =>
+          feature !== 'scheduled_task_session_reuse' &&
+          feature !== 'workspace_runtime_stop',
       ),
     ).toEqual([
       'health',
