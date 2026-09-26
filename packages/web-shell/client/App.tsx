@@ -151,6 +151,11 @@ import {
   type ContextUsageControls,
   type RegisterContextUsageControls,
 } from './hooks/useContextUsageControls';
+import {
+  ContextCompressionAnnouncer,
+  ContextCompressionAnnouncementContext,
+  useContextCompressionAnnouncements,
+} from './components/ContextCompressionAnnouncer';
 import { useWorkspaceSessionLiveState } from './session-catalog/workspace-session-live-state';
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
@@ -18781,11 +18786,16 @@ export function App({
     },
     [connection.sessionId, prepareContextCompression],
   );
+  const {
+    announcements: compressionAnnouncements,
+    announce: announceCompression,
+  } = useContextCompressionAnnouncements();
   const primaryContextControls = useContextUsageControls({
     connection,
     actions: sessionActions,
     ownerGuard: sessionOwnerGuard,
     onBeforeCompress: prepareContextCompression,
+    onAnnouncement: announceCompression,
     busy: streamingState !== 'idle' || sessionHasActivePrompt,
     writeBlocked:
       isDisabled ||
@@ -19047,6 +19057,12 @@ export function App({
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* prettier-ignore */}
+          <ContextCompressionAnnouncementContext.Provider value={announceCompression}>
+          <ContextCompressionAnnouncer
+            owners={[primaryContextControls, ...Object.values(paneContextControls)]}
+            announcements={compressionAnnouncements}
+          />
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
@@ -21941,7 +21957,8 @@ export function App({
           </div>
         </div>
         </CompactModeContext.Provider>
-        </WebShellPortalRootContext.Provider>
+          </ContextCompressionAnnouncementContext.Provider>
+          </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
       </I18nProvider>
       </BrandProvider>
