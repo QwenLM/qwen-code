@@ -4916,7 +4916,8 @@ export function createSessionControlPlane(
               },
             );
             telemetry.event('session.new.completed', {
-              'session.id': response.sessionId,
+              'session.id':
+                engine === undefined ? response.sessionId : response?.sessionId,
               'qwen-code.daemon.acp_channel.id': ci.id,
             });
             return response;
@@ -4965,8 +4966,8 @@ export function createSessionControlPlane(
       }
 
       if (engine !== undefined) {
+        const returnedId = newSessionResp?.sessionId;
         try {
-          const returnedId = newSessionResp.sessionId;
           if (
             !isAddressableSessionId(returnedId) ||
             (requestedSessionId !== undefined &&
@@ -4984,7 +4985,7 @@ export function createSessionControlPlane(
         } catch (error) {
           const settlement = cleanupUnregisteredSession(
             ci,
-            newSessionResp.sessionId,
+            returnedId,
             requestedSessionId,
           ).finally(() => {
             abandonedNewSessionSettlements.delete(settlement);

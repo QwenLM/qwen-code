@@ -397,53 +397,112 @@ describe('ACP Bridge execution engines', () => {
     },
   );
 
-  it.each([2, 3])(
-    'retains admission for late success without an ID with capacity %i',
-    async (maxSessions) => {
-      vi.useFakeTimers();
-      const late = deferred<NewSessionResponse>();
-      const released = vi.fn();
-      const managed = engineChannel('managed', {
+  describe.each([
+    {
+      label: 'late success without an ID',
+      result: receipt('managed'),
+      late: true,
+    },
+    { label: 'late null success', result: null, late: true },
+    { label: 'null success', result: null, late: false },
+  ])('$label', ({ result, late }) => {
+    it.each([2, 3])(
+      'retains admission with capacity %i',
+      async (maxSessions) => {
+        vi.useFakeTimers();
+        const response = deferred<NewSessionResponse>();
+        const released = vi.fn();
+        const managed = engineChannel('managed', {
+          newSessionImpl: (_request, agent) =>
+            agent.newSessionCalls.length === 2
+              ? response.promise
+              : {
+                  sessionId: `managed-${agent.newSessionCalls.length}`,
+                  ...receipt('managed'),
+                },
+        });
+        const p = paired(
+          {
+            maxSessions,
+            initializeTimeoutMs: 30,
+            freshSessionAdmission: () => ({ release: released }),
+          },
+          engineChannel('legacy'),
+          managed,
+        );
+        await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(released).toHaveBeenCalledTimes(1);
+        const spawn = Promise.allSettled([
+          p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ]);
+        if (late) {
+          await vi.advanceTimersByTimeAsync(30);
+          expect(await spawn).toMatchObject([
+            { status: 'rejected', reason: { name: 'BridgeTimeoutError' } },
+          ]);
+        }
+        response.resolve(result as unknown as NewSessionResponse);
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(
+          p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).rejects.toMatchObject(
+          maxSessions === 2
+            ? { name: 'SessionLimitExceededError' }
+            : { reason: 'new_session_cleanup_failed' },
+        );
+        if (!late) {
+          expect(await spawn).toMatchObject([
+            {
+              status: 'rejected',
+              reason: {
+                message:
+                  'ACP returned an invalid or already reserved session ID',
+              },
+            },
+          ]);
+        }
+        expect(managed.agent.newSessionCalls).toHaveLength(2);
+        expect(managed.killed).toBe(false);
+        expect(managed.agent.extMethodCalls).toHaveLength(0);
+        await p.bridge.sendPrompt('managed-1', {
+          sessionId: 'managed-1',
+          prompt: [{ type: 'text', text: 'still live' }],
+        });
+        expect(managed.agent.promptCalls).toHaveLength(1);
+        // A rejected third attempt can reserve and release at capacity 3.
+        expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 1 : 2);
+        await p.bridge.closeSession('managed-1');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(managed.killed).toBe(true);
+        expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 2 : 3);
+      },
+    );
+  });
+
+  it.each([false, true])(
+    'preserves single-factory null-response cleanup with a live sibling: %s',
+    async (sibling) => {
+      const legacy = engineChannel('legacy', {
         newSessionImpl: (_request, agent) =>
-          agent.newSessionCalls.length === 2
-            ? late.promise
-            : { sessionId: 'managed-1', ...receipt('managed') },
+          agent.newSessionCalls.length === (sibling ? 2 : 1)
+            ? (null as unknown as NewSessionResponse)
+            : { sessionId: `legacy-${agent.newSessionCalls.length}` },
       });
-      const p = paired(
-        {
-          maxSessions,
-          initializeTimeoutMs: 30,
-          freshSessionAdmission: () => ({ release: released }),
-        },
-        engineChannel('legacy'),
-        managed,
-      );
-      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      expect(released).toHaveBeenCalledTimes(1);
-      const spawn = Promise.allSettled([
-        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
-      ]);
-      await vi.advanceTimersByTimeAsync(30);
-      expect(await spawn).toMatchObject([
-        { status: 'rejected', reason: { name: 'BridgeTimeoutError' } },
-      ]);
-      late.resolve(receipt('managed') as unknown as NewSessionResponse);
-      await vi.advanceTimersByTimeAsync(0);
+      const bridge = makeBridge({
+        channelFactory: async () => legacy.channel,
+        sessionScope: 'thread',
+      });
+      bridges.push(bridge);
+      if (sibling) await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       await expect(
-        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
-      ).rejects.toMatchObject(
-        maxSessions === 2
-          ? { name: 'SessionLimitExceededError' }
-          : { reason: 'new_session_cleanup_failed' },
-      );
-      expect(managed.agent.newSessionCalls).toHaveLength(2);
-      expect(managed.killed).toBe(false);
-      // A rejected third attempt can reserve and release at capacity 3.
-      expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 1 : 2);
-      await p.bridge.closeSession('managed-1');
-      await vi.advanceTimersByTimeAsync(0);
-      expect(managed.killed).toBe(true);
-      expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 2 : 3);
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow();
+      expect(legacy.killed).toBe(!sibling);
+      if (sibling) {
+        await expect(
+          bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).resolves.toMatchObject({ sessionId: 'legacy-3' });
+      }
     },
   );
 
