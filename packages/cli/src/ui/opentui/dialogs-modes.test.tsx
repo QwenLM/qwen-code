@@ -1993,8 +1993,8 @@ describe('OpenTuiSettingsDialog region budget', () => {
     // commit branch reads the name and toggles the row under the cursor. At
     // a zero-row window that is a write the user was never shown. The scope
     // file below holds the key, so a toggle back to the default is still a
-    // real write (a non-default-less stub would make the second toggle a
-    // no-op and the probe blind).
+    // real write (an empty scope stub would make the second toggle a skipped
+    // write and the probe blind).
     const setValue = vi.fn();
     const settings = {
       isTrusted: true,
