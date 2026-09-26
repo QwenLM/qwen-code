@@ -53,9 +53,10 @@ whole result, so do not use `image(result)` either.
 
 ## Bootstrap
 
-If `desktop-node-repl` is connected, skip this section: it already provides
-`node_repl` on the connected computer. Otherwise, if `node_repl` is unavailable,
-run:
+If `desktop-node-repl` is connected, skip the installation commands below: it
+already provides `node_repl` and the SDK on the connected computer. Continue
+with the `computer` initialization below. Otherwise, if `node_repl` is
+unavailable, run:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6

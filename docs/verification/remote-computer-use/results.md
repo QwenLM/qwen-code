@@ -75,13 +75,13 @@
 
 ---
 
-> 执行时间：2026-09-23。执行机器：`vscode-sqlx011163220057.na131`，Linux 5.10 x86_64，4 核 / 15 GB，Node v24.19.0，无图形界面。
+> 执行时间：2026-09-23。执行机器：Linux 5.10 x86_64 开发服务器（主机名已隐去），4 核 / 15 GB，Node v24.19.0，无图形界面。
 > 分支：`docs/remote-computer-use-plan` @ `7c2359015b`。
 > 一句话结论：**这台机器上没有 Mac，A、B.5、C、D 的 macOS 部分无法执行**；能做的部分是"用等价的 socket 激活真跑中继自己的 HTTP 面 + 静态核对取消链路"，B.1–B.4 与 HTTP 边界全部符合预期，另外发现 2 个新问题（§4）。
 
 ## 1. 为什么不是完整的真机验证
 
-- 本机是无 GUI 的 Linux 开发服务器，`~/.ssh/config` 为空，`known_hosts` 里只有一台 `30.220.88.69`，`ssh` 过去是 `Permission denied (publickey,password,keyboard-interactive)`。没有可达的 macOS。
+- 本机是无 GUI 的 Linux 开发服务器，`~/.ssh/config` 为空，`known_hosts` 里只有一台内网主机（地址已隐去），`ssh` 过去是 `Permission denied (publickey,password,keyboard-interactive)`。没有可达的 macOS。
 - 因此这些必须留在 Mac 上：launchd 本身（A 节）、`osascript` 对话框（B.5、C.2）、TCC 授权（C.3）、Chrome/Safari 的本地网络访问（C.1、C.8）、真实会话与模型（C.3–C.7）、SSH `RemoteForward`（D 节）。
 - 按交接文档 §2 的约定，本机不跑 build / typecheck / 测试，所以 `packages/node-repl/dist` 不存在，任何需要拉起 node_repl 子进程的路径（C.3、D）在这里也跑不了。
 
@@ -127,7 +127,7 @@
 
 ⇒ **代码层面这条链是通的**，2026-09-23 的修复方向成立。仍属运行时未验证的两点：Web Shell 的"停止"是否真的 abort 到 `mcp-tool` 这一层的 signal；node_repl 收到 `notifications/cancelled` 后能否中断正在跑的 cell。这两点只能在 Mac + 真实会话上验（C.3 取消）。
 
-补充一条排查手册的精确化建议：`notifications/cancelled` 这个字符串在整个仓库里**只出现在本 PR 的 `mcp-child-relay.ts` 和它的测试里**，daemon 侧源码里搜不到。所以 F.6 让人"在远端 daemon 上打开 MCP 调试日志确认 notifications/cancelled 有没有发出"时，要找的是 `mcp_message` 帧的 `payload.method`，直接在 daemon 日志里 grep 这个关键字很可能什么都搜不到而误判成"daemon 没发"。
+后续修正：daemon 侧 `packages/core/src/tools/sdk-control-client-transport.ts` 也处理 `notifications/cancelled`；不能把源码搜索不到该字符串当作排查前提。检查线上取消链路时，应观察 `mcp_message` 帧的 `payload.method`，并确认日志实际记录了该帧。以上为当时的静态核对；后续真实 GUI 取消验收见 [PR 补充报告](https://github.com/QwenLM/qwen-code/pull/11799#issuecomment-5833265271)，不要把本节当作当前验收结论。
 
 ## 4. 本轮新发现
 
@@ -174,7 +174,7 @@
 
 ## 7. 复现材料
 
-本轮的 harness 都在本机 `/home/admin/jinjing/tmp/rcu-verify/`，没有进仓库（它依赖本机绝对路径和临时 `node_modules`）：
+本轮的 harness 都在本机临时验证目录（个人路径已隐去），没有进仓库（它依赖本机绝对路径和临时 `node_modules`）：
 
 - `inetd.mjs`：launchd inetd 的等价模拟（监听 + 每连接 spawn + stderr 落 agent.log）。
 - `hooks.mjs`：把 `./x.js` 解析到 `./x.ts` 的 resolve hook，配合 `--experimental-transform-types` 免构建跑 TS。

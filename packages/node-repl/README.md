@@ -147,7 +147,7 @@ until something connects, and each connection gets its own short-lived process.
 
   ```bash
   # on the remote machine
-  qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest \
+  qwen mcp add --scope user desktop-node-repl npx -y @qwen-code/node-repl-mcp@latest \
     desktop-relay socket /home/you/.qwen/desktop-relay.sock
   ```
 

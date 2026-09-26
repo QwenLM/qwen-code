@@ -84,7 +84,7 @@ describe('bundled computer-use skill', () => {
     expect(config.allowedTools).toBeUndefined();
     expect(body).toContain('`desktop-node-repl` MCP server');
     expect(body).toContain('mcp__desktop_node_repl__node_repl');
-    expect(body).toContain('skip this section');
+    expect(body).toContain('skip the installation commands below');
     expect(body).toContain('ComputerUse.create()');
     expect(body).toContain('await computer.getPlatform()');
     expect(body).toContain('computer.getApp(');
