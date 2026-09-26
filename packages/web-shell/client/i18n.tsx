@@ -4135,6 +4135,53 @@ const EN: Messages = {
   'settings.label.visionModel': 'Vision Model',
   'settings.description.visionModel':
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
+
+  // --- Additional settings labels & descriptions (previously untranslated) ---
+
+  'settings.label.review.attribution': 'Attribution: review',
+  'settings.label.review.sandbox': 'Sandbox the reviewed code: review',
+  'settings.label.review.effort': 'Default effort: review',
+  'settings.label.review.comment': 'Comment by default: review',
+  'settings.label.review.severityFloor': 'Posting floor: review',
+  'settings.label.review.reverseAuditRounds':
+    'Reverse-audit round ceiling: review',
+  'settings.label.review.approachRounds':
+    'Approach-signal round threshold: review',
+
+  'settings.label.output.showTimestamps': 'Show Timestamps',
+
+  'settings.label.ui.disableWorkflowKeywordTrigger':
+    'Disable Workflow Keyword Trigger',
+  'settings.label.ui.showStatusInTitle': 'Show Status in Title',
+  'settings.label.ui.showResponseTokensPerSecond':
+    'Show Response Tokens Per Second',
+  'settings.label.ui.showToolCallDetails': 'Show Tool Call Details',
+
+  'settings.label.modelFallbacks': 'Model Fallbacks',
+
+  'settings.label.tools.codeModeOnly': 'Code Mode Only (Experimental)',
+  'settings.label.tools.webSearch.enabled': 'Enable WebSearch',
+  'settings.label.tools.webSearch.model': 'Search Model',
+  'settings.label.tools.webSearch.webExtractor': 'Open Result Pages',
+  'settings.label.tools.webSearch.timeoutMs': 'Search Timeout (ms)',
+  'settings.label.tools.webSearch.maxPerSession': 'Max Searches per Session',
+  'settings.label.tools.toolSearch.threshold':
+    'Deferred Tool Preload Threshold (%)',
+  'settings.label.tools.listDirectory.enabled': 'Enable ListDirectory',
+  'settings.label.tools.todoWrite.enabled': 'Enable Todo Write',
+  'settings.label.tools.workflowsEnabled': 'Dynamic Workflows',
+  'settings.label.tools.workflowSizeGuideline': 'Dynamic Workflow Size',
+  'settings.label.tools.workflowNameOnly': 'Named Workflows Only',
+
+  'settings.label.goals.modelProposed': 'Model-Proposed Goals',
+
+  'settings.label.experimental.cron': 'Enable Cron/Loop Tools',
+  'settings.label.experimental.sessionWriterLease':
+    'Enable ACP Session Writer Lease',
+  'settings.label.experimental.agentTeam': 'Enable Agent Team',
+  'settings.label.omni.enabled': 'Enable Omni Media Delivery',
+  'settings.label.experimental.artifact': 'Enable Artifacts',
+
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -8116,6 +8163,127 @@ const ZH: Messages = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
+
+  // --- 补全缺失的设置项中文翻译 ---
+
+  'settings.label.review.attribution': '署名：审查',
+  'settings.description.review.attribution':
+    '在发布到 GitHub 的审查正文和内联评论中附加署名信息（模型名称和 CLI 版本）。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.label.review.sandbox': '沙箱运行审查代码：审查',
+  'settings.description.review.sandbox':
+    '在沙箱环境中运行被审查的代码。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.option.review.sandbox.off': '关闭（直接运行被审查的代码）',
+  'settings.option.review.sandbox.auto': '自动（有可用容器时使用容器）',
+  'settings.option.review.sandbox.required': '必需（绝不不加沙箱地运行）',
+  'settings.label.review.effort': '默认审查力度：审查',
+  'settings.description.review.effort':
+    '当未指定 --effort 且无项目记忆级别时，/review 的默认审查力度。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.option.review.effort.auto': '自动（PR 用 high，本地用 medium）',
+  'settings.option.review.effort.low': '低',
+  'settings.option.review.effort.medium': '中',
+  'settings.option.review.effort.high': '高',
+  'settings.label.review.comment': '默认发布评论：审查',
+  'settings.description.review.comment':
+    '将每次 PR /review 视为传入了 --comment：审查发现会自动发布到拉取请求上。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.label.review.severityFloor': '发布严重度下限：审查',
+  'settings.description.review.severityFloor':
+    '未指定 --severity-floor 时，PR /review 发布的最低严重级别。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.option.review.severityFloor.auto': '自动（第 6 轮起仅 Critical）',
+  'settings.option.review.severityFloor.critical': '仅 Critical（每轮）',
+  'settings.option.review.severityFloor.suggestion': 'Suggestion 与 Critical',
+  'settings.label.review.reverseAuditRounds': '反向审计轮次上限：审查',
+  'settings.description.review.reverseAuditRounds':
+    '降低 /review 的反向审计轮次上限。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.label.review.approachRounds': '方案信号轮次阈值：审查',
+  'settings.description.review.approachRounds':
+    '拉取请求需达到多少轮后，审查可添加一段关于变更方案的建议性段落。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+
+  'settings.label.output.showTimestamps': '显示时间戳',
+  'settings.description.output.showTimestamps':
+    '在每条助手回复前显示 [HH:MM:SS] 时间戳。',
+
+  'settings.label.ui.disableWorkflowKeywordTrigger': '禁用工作流关键词触发',
+  'settings.description.ui.disableWorkflowKeywordTrigger':
+    '启用后，在提示中提及"workflow"一词不再自动引导至工作流工具。仅在启用工作流时生效。',
+  'settings.label.ui.showStatusInTitle': '在标题栏显示状态',
+  'settings.description.ui.showStatusInTitle':
+    '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
+  'settings.label.ui.showResponseTokensPerSecond': '显示响应 Tokens/秒',
+  'settings.description.ui.showResponseTokensPerSecond':
+    '模型流式输出时，在响应 token 计数器旁显示实时的 tokens/秒估算值。',
+  'settings.label.ui.showToolCallDetails': '显示工具调用详情',
+  'settings.description.ui.showToolCallDetails':
+    '内联显示工具参数和结果。禁用后将普通工具调用渲染为单行摘要。',
+
+  'settings.label.modelFallbacks': '模型回退',
+  'settings.description.modelFallbacks':
+    '当主模型遇到容量错误（429/503/529）时，按顺序尝试的回退模型 ID 列表（最多 3 个）。',
+
+  'settings.label.tools.codeModeOnly': '仅代码模式（实验性）',
+  'settings.description.tools.codeModeOnly':
+    '仅通过隔离的 exec JavaScript 工具向模型暴露普通工具。直接控制类工具仍然可用；在 safe 和 bare 模式下此设置会被忽略。',
+  'settings.label.tools.webSearch.enabled': '启用网络搜索',
+  'settings.description.tools.webSearch.enabled':
+    '设为 false 以禁用内置的 web_search 工具。仅在配置了网络搜索后端时生效。',
+  'settings.label.tools.webSearch.model': '搜索模型',
+  'settings.description.tools.webSearch.model': '显式搜索路径的模型选择器。',
+  'settings.label.tools.webSearch.webExtractor': '打开结果页面',
+  'settings.description.tools.webSearch.webExtractor':
+    '允许搜索代理打开并阅读结果页面，以获得更有依据的回答。由 DashScope 单独计费。',
+  'settings.label.tools.webSearch.timeoutMs': '搜索超时（毫秒）',
+  'settings.description.tools.webSearch.timeoutMs':
+    '单次 web_search 调用的总时间预算（毫秒）。超出范围的值会被忽略并回退到默认值。',
+  'settings.label.tools.webSearch.maxPerSession': '每会话最大搜索次数',
+  'settings.description.tools.webSearch.maxPerSession':
+    '单个会话中最大的 web_search 调用次数。超出范围的值会被忽略并回退到默认值。',
+  'settings.label.tools.toolSearch.threshold': '延迟工具预加载阈值（%）',
+  'settings.description.tools.toolSearch.threshold':
+    '以上下文窗口百分比作为会话启动时预加载延迟工具的预算。设为 0 可始终延迟加载。',
+  'settings.label.tools.listDirectory.enabled': '启用目录列表',
+  'settings.description.tools.listDirectory.enabled':
+    '启用内置的 list_directory 工具。',
+  'settings.label.tools.todoWrite.enabled': '启用任务清单写入',
+  'settings.description.tools.todoWrite.enabled':
+    '启用内置的 todo_write 工具及其系统提示词引导。',
+  'settings.label.tools.workflowsEnabled': '动态工作流',
+  'settings.description.tools.workflowsEnabled':
+    '启用工作流工具，允许模型编写并运行脚本以并行编排子智能体。默认关闭；一次运行可调度多个子智能体并消耗相应 token。仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.label.tools.workflowSizeGuideline': '动态工作流规模',
+  'settings.description.tools.workflowSizeGuideline':
+    '模型编写的动态工作流的建议规模指导。',
+  'settings.option.tools.workflowSizeGuideline.small': '小型（5 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.medium':
+    '中型（15 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.large':
+    '大型（50 个以内智能体）',
+  'settings.option.tools.workflowSizeGuideline.unrestricted':
+    '不限制（无指导）',
+  'settings.label.tools.workflowNameOnly': '仅命名工作流',
+  'settings.description.tools.workflowNameOnly':
+    '限制模型只能运行已命名的工作流。工作区范围可设为 true，但不可设为 false。',
+
+  'settings.label.goals.modelProposed': '模型提议目标',
+  'settings.description.goals.modelProposed':
+    '控制 propose_goal 工具，允许模型为你提议一个会话目标供审批。涉及同意权限，仅在用户/系统/系统默认值范围生效；工作区范围的设置会被忽略。',
+  'settings.option.goals.modelProposed.alwaysAsk': '始终询问',
+  'settings.option.goals.modelProposed.disabled': '禁用',
+
+  'settings.label.experimental.cron': '启用 Cron/Loop 工具',
+  'settings.description.experimental.cron':
+    '启用会话内 cron/loop 工具，用于创建周期性提示。',
+  'settings.label.experimental.sessionWriterLease': '启用 ACP 会话写入锁',
+  'settings.description.experimental.sessionWriterLease':
+    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。生效值在进程启动时冻结；所有并发的 ACP/daemon 写入方都必须启用，围栏才会生效；交互式和 headless 写入方不在该协议范围内。',
+  'settings.label.experimental.agentTeam': '启用智能体团队',
+  'settings.description.experimental.agentTeam':
+    '启用智能体团队协作工具（实验性）。',
+  'settings.label.omni.enabled': '启用全模态媒体传输',
+  'settings.description.omni.enabled':
+    '启用全模态媒体管道，处理通过 @ 引用的媒体文件。仅对 DashScope 兼容端点生效。',
+  'settings.label.experimental.artifact': '启用制品',
+  'settings.description.experimental.artifact':
+    '启用制品工具，用于发布交互式 HTML 页面。',
+
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
@@ -8191,6 +8359,14 @@ export function getTranslator(language: WebShellLanguage) {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;
   };
+}
+
+export function hasMessage(language: WebShellLanguage, key: string): boolean {
+  return MESSAGES[language][key] !== undefined;
+}
+
+export function messageKeys(language: WebShellLanguage): string[] {
+  return Object.keys(MESSAGES[language]);
 }
 
 export function I18nProvider({
