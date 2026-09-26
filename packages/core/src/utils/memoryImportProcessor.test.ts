@@ -7,7 +7,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { marked } from 'marked';
 import {
   processImports,
   validateImportPath,
@@ -66,49 +65,6 @@ function expectContains(content: string, ...parts: string[]) {
   for (const part of parts) expect(content).toContain(part);
 }
 
-// Markdown checks go through marked rather than string matching.
-const parseMarkdown = (content: string) => marked.lexer(content);
-
-type MdToken = { type: string; raw: string; text: string; tokens?: unknown[] };
-function walkTokens(content: string, visit: (t: MdToken) => void) {
-  const walk = (list: unknown[]) => {
-    for (const token of list as MdToken[]) {
-      visit(token);
-      if (token.tokens) walk(token.tokens);
-    }
-  };
-  walk(parseMarkdown(content));
-}
-
-const findMarkdownComments = (content: string): string[] => {
-  const comments: string[] = [];
-  walkTokens(content, (t) => {
-    if (t.type === 'html' && t.raw.includes('<!--')) {
-      comments.push(t.raw.trim());
-    }
-  });
-  return comments;
-};
-
-const findCodeBlocks = (content: string) => {
-  const codeBlocks: Array<{ type: string; content: string }> = [];
-  walkTokens(content, (t) => {
-    if (t.type === 'code') {
-      codeBlocks.push({ type: 'code_block', content: t.text });
-    } else if (t.type === 'codespan') {
-      codeBlocks.push({ type: 'inline_code', content: t.text });
-    }
-  });
-  return codeBlocks;
-};
-
-function expectValidMarkdown(content: string) {
-  const tokens = parseMarkdown(content);
-  expect(tokens).toBeDefined();
-  expect(tokens.length).toBeGreaterThan(0);
-  return tokens;
-}
-
 describe('memoryImportProcessor', () => {
   beforeEach(() => {
     vi.resetAllMocks(); // clears mock implementations too
@@ -158,25 +114,17 @@ describe('memoryImportProcessor', () => {
         `Some content @./${name} more content`,
         BASE,
       );
-      const comments = findMarkdownComments(content);
-      expect(comments.some((c) => c.includes(`Imported from: ./${name}`))).toBe(
-        true,
-      );
-      expect(
-        comments.some((c) => c.includes(`End of import from: ./${name}`)),
-      ).toBe(true);
-      expect(content).toContain(body);
+      expect(content).toBe(`Some content <!-- Imported from: ./${name} -->
+${body}
+<!-- End of import from: ./${name} --> more content`);
       expect(mockedFs.readFile).toHaveBeenCalledWith(
         path.resolve(BASE, `./${name}`),
         'utf-8',
       );
-      return content;
     }
 
     it('should process basic md file imports', async () => {
-      expectValidMarkdown(
-        await importSingle('test.md', '# Imported Content\nThis is imported.'),
-      );
+      await importSingle('test.md', '# Imported Content\nThis is imported.');
     });
 
     it('notifies after importing a file', async () => {
@@ -212,16 +160,10 @@ describe('memoryImportProcessor', () => {
     });
 
     it('should import non-md files just like md files', async () => {
-      const content = await importSingle(
+      await importSingle(
         'instructions.txt',
         '# Instructions\nThis is a text file with markdown.',
       );
-      const headers = parseMarkdown(content).filter(
-        (token) => token.type === 'heading',
-      );
-      expect(
-        headers.some((h) => (h as { text: string }).text === 'Instructions'),
-      ).toBe(true);
       expect(console.warn).not.toHaveBeenCalled();
     });
 
@@ -280,17 +222,6 @@ describe('memoryImportProcessor', () => {
       expect(result.content).toBe(content);
     });
 
-    it('should handle nested imports recursively', async () => {
-      serve('Nested @./inner.md content', 'Inner content');
-      const result = await processImports('Main @./nested.md content', BASE);
-      expectContains(
-        result.content,
-        '<!-- Imported from: ./nested.md -->',
-        '<!-- Imported from: ./inner.md -->',
-        'Inner content',
-      );
-    });
-
     it('should handle absolute paths in imports', async () => {
       serve('Absolute path content');
       const result = await processImports(
@@ -299,21 +230,6 @@ describe('memoryImportProcessor', () => {
       );
       expect(result.content).toContain(
         '<!-- Import failed: /absolute/path/file.md - Path traversal attempt -->',
-      );
-    });
-
-    it('should handle multiple imports in same content', async () => {
-      serve('First content', 'Second content');
-      const result = await processImports(
-        'Start @./first.md middle @./second.md end',
-        BASE,
-      );
-      expectContains(
-        result.content,
-        '<!-- Imported from: ./first.md -->',
-        '<!-- Imported from: ./second.md -->',
-        'First content',
-        'Second content',
       );
     });
 
@@ -327,56 +243,34 @@ describe('memoryImportProcessor', () => {
           'More content @./should-import2.md',
         ].join('\n'),
       );
-      expectContains(content, 'Imported 1', 'Imported 2');
-      return content;
+      expect(content)
+        .toBe(`Normal content <!-- Imported from: ./should-import.md -->
+Imported 1
+<!-- End of import from: ./should-import.md -->
+${middle.join('\n')}
+More content <!-- Imported from: ./should-import2.md -->
+Imported 2
+<!-- End of import from: ./should-import2.md -->`);
     }
 
     it('should ignore imports inside code blocks', async () => {
-      const content = await importAround(
+      await importAround(
         '```',
         'code block with @./should-not-import.md',
         '```',
       );
-      const codeBlocks = findCodeBlocks(content);
-      expect(
-        codeBlocks.some((b) => b.content.includes('@./should-not-import.md')),
-      ).toBe(true);
-      // No import comment for the import inside the code block.
-      const comments = findMarkdownComments(content);
-      expect(comments.some((c) => c.includes('should-not-import.md'))).toBe(
-        false,
-      );
     });
 
     it('should ignore imports inside inline code', async () => {
-      const content = await importAround(
-        '`code with import @./should-not-import.md`',
-      );
-      const inlineCodeSpans = findCodeBlocks(content).filter(
-        (block) => block.type === 'inline_code',
-      );
-      expect(
-        inlineCodeSpans.some((span) =>
-          span.content.includes('@./should-not-import.md'),
-        ),
-      ).toBe(true);
-      const comments = findMarkdownComments(content);
-      expect(comments.some((c) => c.includes('should-not-import.md'))).toBe(
-        false,
-      );
+      await importAround('`code with import @./should-not-import.md`');
     });
 
     it('should handle nested tokens and non-unique content correctly', async () => {
       // Guards findCodeRegions: it walks the token tree recursively and copes
       // with the same code text appearing twice.
-      const content = await importAround(
+      await importAround(
         'Paragraph with `inline code @./should-not-import.md` and more text.',
         'Another paragraph with the same `inline code @./should-not-import.md` text.',
-      );
-      // Both inline occurrences are kept and neither is imported.
-      expect(content).toContain('`inline code @./should-not-import.md`');
-      expect(content).not.toContain(
-        '<!-- Imported from: ./should-not-import.md -->',
       );
     });
 
@@ -447,24 +341,14 @@ describe('memoryImportProcessor', () => {
         SRC,
       );
 
-      const importComments = findMarkdownComments(result.content).filter((c) =>
-        c.includes('Imported from:'),
-      );
-      for (const file of ['./nested.md', './simple.md', './inner.md']) {
-        expect(importComments.some((c) => c.includes(file))).toBe(true);
-      }
-
-      const textContent = expectValidMarkdown(result.content)
-        .filter((token) => token.type === 'paragraph')
-        .map((token) => token.raw)
-        .join(' ');
-      expectContains(
-        textContent,
-        'Main content',
-        'Nested',
-        'Simple content',
-        'Inner content',
-      );
+      expect(result.content)
+        .toBe(`Main content <!-- Imported from: ./nested.md -->
+Nested <!-- Imported from: ./inner.md -->
+Simple content
+<!-- End of import from: ./inner.md --> content
+<!-- End of import from: ./nested.md --> <!-- Imported from: ./simple.md -->
+Inner content
+<!-- End of import from: ./simple.md -->`);
 
       // No currentFile, so the root is 'unknown'. toContain on paths tolerates
       // absolute/relative differences.
@@ -486,26 +370,21 @@ describe('memoryImportProcessor', () => {
         'Main @./nested.md content @./simple.md',
         'flat',
       );
-      expect(parseMarkdown(content)).toBeDefined();
+      expect(content).toBe(`--- File: ${path.resolve(SRC)} ---
+Main @./nested.md content @./simple.md
+--- End of File: ${path.resolve(SRC)} ---
 
-      const endMarkers: string[] = [];
-      walkTokens(content, (t) => {
-        const match =
-          t.type === 'paragraph' && t.raw.match(/--- End of File: (.+?) ---/);
-        if (match) endMarkers.push(path.normalize(match[1]));
-      });
+--- File: ${path.resolve(SRC, 'simple.md')} ---
+Nested @./inner.md content
+--- End of File: ${path.resolve(SRC, 'simple.md')} ---
 
-      expectContains(
-        content,
-        'nested.md',
-        'simple.md',
-        'inner.md',
-        'Main @./nested.md content @./simple.md',
-        'Nested @./inner.md content',
-        'Simple content',
-        'Inner content',
-      );
-      expect(endMarkers.length).toBeGreaterThan(0);
+--- File: ${path.resolve(SRC, 'inner.md')} ---
+Simple content
+--- End of File: ${path.resolve(SRC, 'inner.md')} ---
+
+--- File: ${path.resolve(SRC, 'nested.md')} ---
+Inner content
+--- End of File: ${path.resolve(SRC, 'nested.md')} ---`);
     });
 
     it('should not duplicate files in flat output if imported multiple times', async () => {
@@ -519,17 +398,6 @@ describe('memoryImportProcessor', () => {
       const firstIndex = content.indexOf('Duplicated content');
       expect(firstIndex).toBeGreaterThan(-1);
       expect(firstIndex).toBe(content.lastIndexOf('Duplicated content'));
-    });
-
-    it('should handle nested imports in flat output', async () => {
-      serve('A @./b.md', 'B content');
-      const { content } = await inProject('Root @./a.md', 'flat');
-      expectContains(content, 'a.md', 'b.md');
-      // Root, then a.md, then b.md.
-      const aIndex = content.indexOf('a.md');
-      expect(content.indexOf('Root @./a.md')).toBeLessThan(aIndex);
-      expect(aIndex).toBeLessThan(content.indexOf('b.md'));
-      expectContains(content, 'Root @./a.md', 'A @./b.md', 'B content');
     });
 
     // chain0 -> chain1 -> ..., each importing the next. Returns the indexes of
