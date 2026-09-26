@@ -506,27 +506,44 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
 // Check .deferred marker and .new directory for an in-flight swap from a
 // previous Windows update. Called from both acquireLock fast-path and
 // slow-path so that a freshly created lock file cannot bypass the check.
+function pendingSwapError(standaloneDir: string): Error {
+  return new Error(
+    `A previous update left a pending swap at ${standaloneDir}.new. ` +
+      'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
+  );
+}
+
+// A bat swap waits at most ~60s for the CLI and launcher to exit before
+// moving directories, so a .new directory older than this without a
+// .deferred marker cannot belong to a live swap: the bat deletes the marker
+// when it exits, and the parent writes the marker right after spawning it —
+// only a *fresh* marker-less .new can still be in flight.
+const PENDING_SWAP_STALE_MS = 15 * 60 * 1000;
+
 function checkDeferredSwap(standaloneDir: string): void {
   const deferredMarker = `${standaloneDir}.deferred`;
+  let swapProvenDead = false;
   if (fs.existsSync(deferredMarker)) {
+    let marker: string;
     try {
-      const batPid = parseInt(
-        fs.readFileSync(deferredMarker, 'utf-8').trim(),
-        10,
-      );
-      if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
-        throw new Error(
-          'A previous update is still being applied. Please wait a moment and try again.',
-        );
-      }
-    } catch (readErr) {
-      if (
-        readErr instanceof Error &&
-        readErr.message.startsWith('A previous update')
-      ) {
-        throw readErr;
-      }
+      marker = fs.readFileSync(deferredMarker, 'utf-8').trim();
+    } catch {
+      // A marker we cannot read cannot prove the bat is gone (EACCES/EBUSY/
+      // EIO) — fail closed rather than deleting a swap that may be live.
+      throw pendingSwapError(standaloneDir);
     }
+    const batPid = parseInt(marker, 10);
+    if (Number.isNaN(batPid)) {
+      // A torn marker is no liveness proof either.
+      throw pendingSwapError(standaloneDir);
+    }
+    if (isProcessAlive(batPid)) {
+      throw new Error(
+        'A previous update is still being applied. Please wait a moment and try again.',
+      );
+    }
+    // The bat's PID is confirmed dead, so a leftover .new is residue.
+    swapProvenDead = true;
     // Bat script has exited (or crashed) — clean up stale marker
     try {
       fs.unlinkSync(deferredMarker);
@@ -535,11 +552,37 @@ function checkDeferredSwap(standaloneDir: string): void {
     }
   }
 
-  if (fs.existsSync(`${standaloneDir}.new`)) {
-    throw new Error(
-      `A previous update left a pending swap at ${standaloneDir}.new. ` +
-        'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
-    );
+  const pendingDir = `${standaloneDir}.new`;
+  if (fs.existsSync(pendingDir)) {
+    if (!swapProvenDead) {
+      // No marker: normally failed-swap residue (the bat deletes the marker
+      // on exit), but the parent spawns the bat BEFORE writing the marker,
+      // so a marker-less .new could still be mid-swap right now. Only a
+      // provably stale directory is safe to remove.
+      let stale = false;
+      try {
+        stale =
+          Date.now() - fs.statSync(pendingDir).mtimeMs > PENDING_SWAP_STALE_MS;
+      } catch {
+        // unreadable — fail closed below
+      }
+      if (!stale) {
+        throw pendingSwapError(standaloneDir);
+      }
+    }
+    try {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
+    } catch (err) {
+      // Fail closed: continuing would let atomicReplace delete the .old
+      // rollback snapshot before its own retry fails with the same error,
+      // destroying the recovery route. Surface it as a pending-swap error so
+      // acquireLock releases the freshly taken lock on the way out.
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `A previous update left a pending swap at ${pendingDir} that could not be removed (${reason}). ` +
+          'Remove it and .qwen-update.lock, then try again.',
+      );
+    }
   }
 }
 
