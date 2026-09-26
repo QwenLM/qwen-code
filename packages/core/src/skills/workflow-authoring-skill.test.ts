@@ -79,6 +79,7 @@ function stubConfig(options: StubOptions = {}) {
     }),
     getVisibleTools: () => new Set(visibleTools),
     getToolMode: () => toolMode,
+    getCodeModeOnly: () => toolMode === ToolMode.CodeModeOnly,
     isSkillEnabled,
     getDisabledSkillLevels: () => new Set(disabledLevels),
   } as unknown as Config;
@@ -297,6 +298,14 @@ describe('isToolHiddenBehindToolSearch', () => {
       false,
     ],
     ['not deferred', {}, false],
+    [
+      'deferred but CodeModeOnly hides the bridge',
+      {
+        deferred: [ToolNames.WORKFLOW],
+        toolMode: ToolMode.CodeModeOnly,
+      },
+      false,
+    ],
   ])('answers for a tool that is %s', (_case, options: StubOptions, hidden) => {
     expect(
       isToolHiddenBehindToolSearch(
