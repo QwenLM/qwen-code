@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-状态：已作为独立的包实现，尚未接线。更新：2026-09-25。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。对 [W0a 问题](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)的[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)确定了代码位置和启动信封的时机。下文的“参考契约”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)，以及其公开 OpenAPI 中的 [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453)；“参考 schema”指它的 [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql)。三者都取自 #12380 所链接的提交。
+状态：已作为独立的包实现。自 W0c-1 起，worker 通过 `managed-context/1` envelope 使用它的 TypeScript 实现（[Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)）；Broker 尚未使用它。更新：2026-09-26。本文是 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 中 W0 的第一个切片。对 [W0a 问题](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126)的[这条答复](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703)确定了代码位置和启动信封的时机。下文的“参考契约”指该提案的 [Workspace 与 Session cwd 设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.md)，以及其公开 OpenAPI 中的 [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453)；“参考 schema”指它的 [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql)。三者都取自 #12380 所链接的提交。
 
 ## 问题
 
@@ -222,14 +222,11 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 ## 启动信封
 
-启动信封是一个单独的切片（W0a-2）。#12380 要求现在就定下它的形状，叠在 execute 契约（#12630，现已合入）之上；它会在本切片之后单独提交。本切片先固定信封将要携带的内容：ContextBinding 的字段、它们的规范化方式和摘要。W0a-2 随后需要完成以下工作：
+启动信封是一个单独的切片 W0a-2，现在由[托管上下文信封](2026-09-25-managed-context-envelope.zh-CN.md)定义：`managed-context/1` 的协商、boot v2 与 ready v2、attestation v3，以及上下文安装请求及其回执。它与这里最初写下的计划有三点不同：
 
-- 协商 `managed-context/1`。
-- 新增一个 boot 文档版本，携带 ContextBinding 以及计算挂载根和实际 cwd 所需的输入。daemon 式的路径哈希只作为兼容别名保留。
-- 新增一个 attestation 身份版本，让 W0c 复用现有 gate，而不是另造一套 Workspace attestation。
-- 同时修改以下各处：TypeScript 键列表、schema、fixtures、Java 的字段集断言，以及假 worker `fake-attestation-worker.mjs`。这个假 worker 目前不校验封闭键集，所以字段对不上时 Java 测试发现不了。
-
-该切片或 W0c 还必须决定哪些字段进入 Runtime 放置范围。按 Workspace 隔离的 Runtime 由 `cwdRelative` 各不相同的多个 Session 共享。因此 `cwdRelative` 和 `contextRevision` 不能进入 `RuntimeScope` 的放置身份；加入它们会改变 Broker 的 request key 和 scope key，使 Runtime 无法复用。它们应改为按 Session、按调用绑定。
+- boot v2 携带 Workspace 绑定和挂载根目录，但不携带 Session 上下文，因为按 Workspace 隔离的 Runtime 由 `cwdRelative` 各不相同的多个 Session 共享。每个 Session 改为通过安装请求安装自己的 `ContextBinding`，因此 `cwdRelative` 和 `contextRevision` 不会进入 `RuntimeScope`。
+- 完全不携带 daemon 式的路径哈希。需要路径哈希的 worker 从验证过的挂载根目录自行推导。
+- W0a-2 只定义契约。worker、provisioner 和假 worker `fake-attestation-worker.mjs` 在接通协议的 W0c 中修改。
 
 ## 错误
 
@@ -262,7 +259,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
   - 对应测试包中的测试，包括 fixtures 的消费方。
 - `packages/sdk-java/runtime-broker/README.md` 与 `QWEN.md`：新增一节介绍这个包。
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` 与 `.schema.json`（新增）。
-- `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现，暂不接入 worker。
+- `packages/cli/src/serve/managed-workspace-binding.ts` 及其测试（新增）。这是工作目录规则和摘要的 TypeScript 实现。自 W0c-1 起 worker 使用它。
 - 本设计文档的中英文两个版本。
 
 现有的 Broker 类、Broker schema、daemon 的 `WorkspaceRegistry`、worker 的 boot 文档、attestation 契约和所有 CI workflow 都不变。SDK Java workflow 本来就会运行 `runtime-broker` 的测试和 Checkstyle，它的路径过滤也同时覆盖了 `packages/sdk-java/**` 和 `packages/cli/src/serve/**`。
@@ -289,7 +286,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 - 调用方提供的绝对路径、storage ID 或 generation 都无法进入已解析的 Workspace。
 - 替换快照不能删除 Workspace、降低它的 generation，也不能在不提升 generation 的情况下修改它的 storage ID。
 - Java 包只使用 JDK，不依赖其他 Broker 类、Spring、CLI 内部实现或调度器。
-- 文档不声称已实现持久化、接线或能力声明。
+- 文档不声称已实现持久化或能力声明。worker 的接线在之后的 W0c-1 中完成。
 
 ## 待决问题
 
@@ -300,7 +297,7 @@ ContextBinding 有七个必需字段，校验规则与 Registry 记录相同：
 
 | 切片  | 范围                                                                                                                               |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| W0a-2 | 带版本的启动信封与 attestation 身份。                                                                                              |
+| W0a-2 | 带版本的启动信封、attestation v3 与上下文安装，由[托管上下文信封](2026-09-25-managed-context-envelope.zh-CN.md)定义。              |
 | W0b   | Session 绑定与创建回执的原子提交、按原始幂等键恢复，以及明确标记为未绑定的旧 Session。                                             |
 | W0c   | 通过 `HarnessSessionResolver` 按 Session 解析 Broker、存储到挂载点的解析器、worker 的安装与 attestation，以及 Workspace 轮次租约。 |
 | W0d   | WebShell 的 Workspace 选择、相对目录输入，以及默认与空状态。                                                                       |
