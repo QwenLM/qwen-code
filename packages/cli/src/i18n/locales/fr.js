@@ -439,6 +439,12 @@ export default {
   active: 'actif',
   disabled: 'désactivé',
   enabled: 'activé',
+  'disabled (bare mode)': 'désactivé (mode minimal)',
+  'disabled (safe mode)': 'désactivé (mode sécurisé)',
+  'disabled (disableAllHooks)': 'désactivé (disableAllHooks)',
+  'disabled (folder not trusted)': 'désactivé (dossier non approuvé)',
+  'disabled (turned off for this session)':
+    'désactivé (désactivé pour cette session)',
   'View Details': 'Voir les détails',
   'Update failed:': 'Échec de la mise à jour :',
   'Updating {{name}}...': 'Mise à jour de {{name}}...',
@@ -1893,12 +1899,16 @@ export default {
   'Context Usage': 'Utilisation du contexte',
   'No API response yet. Send a message to see actual usage.':
     "Pas encore de réponse API. Envoyez un message pour voir l'utilisation réelle.",
+  'Estimated usage, including the conversation':
+    'Utilisation estimée, conversation comprise',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Pas encore d'utilisation du fournisseur. Ce sont des estimations locales, conversation comprise.",
   'Estimated pre-conversation overhead':
     'Surcharge estimée avant la conversation',
   'Context window': 'Fenêtre de contexte',
   Used: 'Utilisé',
   Free: 'Libre',
-  'Autocompact buffer': 'Tampon de compaction automatique',
+  'Autocompact buffer': 'Réserve de compaction',
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
@@ -1906,6 +1916,9 @@ export default {
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
+  'Startup context': 'Contexte de démarrage',
+  Unattributed: 'Non attribué',
+  'Cached prefix': 'Préfixe en cache',
   'Run /context detail for per-item breakdown.':
     'Exécutez /context detail pour une répartition par élément.',
   'body loaded': 'corps chargé',

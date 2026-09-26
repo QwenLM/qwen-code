@@ -4698,6 +4698,78 @@ describe('LlmChat', async () => {
       });
     });
 
+    it.each(['planning\n\n', ''])(
+      'preserves signed thinking verbatim in history (%j)',
+      async (thinking) => {
+        const stream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: thinking, thought: true },
+                    { thought: true, thoughtSignature: 'signature' },
+                    { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          stream,
+        );
+
+        const response = await chat.sendMessageStream(
+          'm1',
+          { message: 'h1' },
+          'p1',
+        );
+        for await (const _ of response);
+
+        expect(chat.getHistory()[1].parts![0]).toEqual({
+          text: thinking,
+          thought: true,
+          thoughtSignature: 'signature',
+        });
+      },
+    );
+
+    it('drops an unsigned whitespace-only thinking episode', async () => {
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: ' \n ', thought: true },
+                  { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const response = await chat.sendMessageStream(
+        'm1',
+        { message: 'h1' },
+        'p1',
+      );
+      for await (const _ of response);
+
+      expect(chat.getHistory()[1].parts).toEqual([
+        { functionCall: { id: 'call-1', name: 'exec', args: {} } },
+      ]);
+    });
+
     it('should preserve each reasoning episode as its own Part, in order, with its own signature, when tool calls interleave with reasoning', async () => {
       // A turn can legitimately contain multiple distinct reasoning
       // episodes separated by tool calls (Anthropic interleaved thinking,
@@ -5236,7 +5308,7 @@ describe('LlmChat', async () => {
         const expectedParts = [
           ...summaries.map((text, index) => ({
             thought: true,
-            text: text.trim(),
+            text,
             thoughtSignature: signatures[index],
           })),
           toolPart,
@@ -5409,6 +5481,71 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('keeps compressed history and token counts consistent if worker invalidation fails', async () => {
+      chat.setLastPromptTokenCount(1000);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      const newHistory = [{ role: 'user', parts: [{ text: 'summary' }] }];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      expect(
+        (await chat.tryCompress('failed-invalidation', true)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getHistory()).toEqual(newHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('clears the execution environment cache before finishing compression', async () => {
+      let completeInvalidation!: () => void;
+      const invalidateReadCache = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeInvalidation = resolve;
+          }),
+      );
+      mockConfig.getExecutionEnvironment = () =>
+        ({ invalidateReadCache }) as unknown as ReturnType<
+          Config['getExecutionEnvironment']
+        >;
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finished = false;
+      const compression = chat
+        .tryCompress('container-compression', true)
+        .then(() => {
+          finished = true;
+        });
+      await vi.waitFor(() =>
+        expect(invalidateReadCache).toHaveBeenCalledOnce(),
+      );
+      expect(finished).toBe(false);
+      completeInvalidation();
+      await compression;
+      expect(finished).toBe(true);
+    });
+
     function makeStreamResponse(
       text = 'ok',
       usageMetadata?: GenerateContentResponse['usageMetadata'],

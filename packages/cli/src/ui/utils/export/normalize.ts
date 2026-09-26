@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
@@ -114,6 +115,9 @@ function mergeToolCallData(
   if (existing.status === 'pending' || existing.status === 'in_progress') {
     existing.status = incoming.status;
   }
+  if (incoming.rawOutput !== undefined) {
+    existing.rawOutput = incoming.rawOutput;
+  }
   if (!existing.rawInput && incoming.rawInput) {
     existing.rawInput = incoming.rawInput;
   }
@@ -191,6 +195,9 @@ function buildToolCallMessageFromResult(
       title,
       status: toolCallResult?.error ? 'failed' : 'completed',
       rawInput,
+      ...(isShellResultDisplay(toolCallResult?.resultDisplay)
+        ? { rawOutput: toolCallResult.resultDisplay }
+        : {}),
       content,
       locations,
       timestamp: Date.parse(record.timestamp),

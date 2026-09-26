@@ -883,6 +883,11 @@ export default {
   'Clear Authentication': '認証をクリア',
   disabled: '無効',
   enabled: '有効',
+  'disabled (bare mode)': '無効（ベアモード）',
+  'disabled (safe mode)': '無効（セーフモード）',
+  'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
+  'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
   Reconnect: '再接続',
   'View tools': 'ツールを表示',
@@ -1383,6 +1388,9 @@ export default {
     'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated usage, including the conversation': '推定使用量（会話を含む）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'プロバイダーの使用量はまだありません。以下は会話を含むローカル推定値です。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
   'Context window': 'コンテキストウィンドウ',
   tokens: 'トークン',
@@ -1396,6 +1404,9 @@ export default {
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
+  'Startup context': '起動時コンテキスト',
+  Unattributed: '未分類',
+  'Cached prefix': 'プレフィックスキャッシュ',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',

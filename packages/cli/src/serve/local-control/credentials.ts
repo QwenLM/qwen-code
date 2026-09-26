@@ -31,6 +31,7 @@ export interface ListenerScopedCredentials {
  * | ------------- | ---------------- | ---------------------- |
  * | runtime token | accepted         | **rejected**           |
  * | pairing token | **rejected**     | accepted               |
+ * | Web Shell device token | accepted | **rejected**           |
  *
  * Both rejections matter. Rejecting the runtime token on the LAN is the
  * invariant the Rust proxy enforced explicitly. Rejecting the pairing token on
@@ -41,6 +42,7 @@ export class CredentialStore implements ListenerScopedCredentials {
   #runtime: Buffer | undefined;
   /** Pairing id → sha256 of the pairing secret. */
   readonly #pairing = new Map<string, Buffer>();
+  readonly #webShell = new Set<Buffer>();
 
   constructor(runtimeToken?: string) {
     this.#runtime = hashToken(runtimeToken);
@@ -52,6 +54,12 @@ export class CredentialStore implements ListenerScopedCredentials {
 
   revokePairingToken(id: string): boolean {
     return this.#pairing.delete(id);
+  }
+
+  addWebShellToken(token: string): boolean {
+    if (this.#webShell.size >= 128) return false;
+    this.#webShell.add(createHash('sha256').update(token, 'utf8').digest());
+    return true;
   }
 
   /**
@@ -83,7 +91,13 @@ export class CredentialStore implements ListenerScopedCredentials {
       }
       return matched;
     }
-    return this.#runtime !== undefined && equalDigest(candidate, this.#runtime);
+    if (this.#runtime !== undefined && equalDigest(candidate, this.#runtime)) {
+      matched = true;
+    }
+    for (const expected of this.#webShell) {
+      if (equalDigest(candidate, expected)) matched = true;
+    }
+    return matched;
   }
 }
 

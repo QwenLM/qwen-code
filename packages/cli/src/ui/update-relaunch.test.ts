@@ -140,4 +140,35 @@ describe('updateBeforeRelaunch', () => {
       'Update downloaded. It will be applied after you exit this session.',
     );
   });
+
+  it('surfaces the real error when a standalone update throws', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/qwen',
+    });
+    performStandaloneUpdate.mockRejectedValue(
+      new Error(
+        'A previous update left a pending swap at /qwen.new. ' +
+          'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
+      ),
+    );
+
+    await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
+      true,
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('A previous update left a pending swap'),
+    );
+  });
+
+  it('surfaces the real error when the update check throws unexpectedly', async () => {
+    checkForUpdatesDetailed.mockRejectedValue(new Error('registry boom'));
+
+    await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
+      true,
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('registry boom'),
+    );
+  });
 });

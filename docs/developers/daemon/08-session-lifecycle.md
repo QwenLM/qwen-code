@@ -41,8 +41,8 @@ stateDiagram-v2
     Live --> RestoreInProgress: POST /session/:id/load or /resume
     RestoreInProgress --> Live: restoreState cached on entry
     RestoreInProgress --> Live: RestoreInProgressError (coalesce waiters)
-    Live --> Closed: DELETE /session/:id (last client)
-    Live --> Died: ACP child exit / channel.exited fired
+    Live --> Closed: DELETE /session/:id (last client) or confirmed workspace runtime stop
+    Live --> Died: ACP child exit / channel.exited outside a confirmed workspace stop, or daemon shutdown
     Closed --> [*]: session_closed terminal frame
     Died --> [*]: session_died terminal frame
 ```
@@ -130,12 +130,12 @@ A successful update fans `session_metadata_updated` to every subscriber.
 
 ### Termination
 
-| Terminal frame   | Trigger                                                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_closed` | `DELETE /session/:id` (client_close) or programmatic close.                                                                                                   |
-| `session_died`   | `channel.exited` fires for any reason (crash, child kill). Carries `exitCode?` + `signalCode?` when the OS exit path was used.                                |
-| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed. |
-| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                             |
+| Terminal frame   | Trigger                                                                                                                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`.                                                                       |
+| `session_died`   | `channel.exited` outside a confirmed workspace stop (crash or daemon-initiated kill, e.g. unknown-close-outcome recovery), or daemon shutdown (`reason: daemon_shutdown`, published without a channel exit). Carries `exitCode?` + `signalCode?` when the OS exit path was used. |
+| `client_evicted` | Per-subscriber queue overflow on the EventBus (see [`10-event-bus.md`](./10-event-bus.md)). NOT a session-level termination — only this subscriber is closed.                                                                                                                    |
+| `stream_error`   | SubscriberLimitExceededError or other route-level stream failure.                                                                                                                                                                                                                |
 
 Pending permissions are resolved as `{kind:'cancelled', reason:'session_closed'}` via `mediator.forgetSession(sessionId)` at every termination path.
 
@@ -345,7 +345,7 @@ resets that window, including when the channel was already live.
   timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
-- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

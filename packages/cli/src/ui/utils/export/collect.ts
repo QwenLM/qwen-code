@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
   ChatRecord,
@@ -640,6 +641,9 @@ class ExportSessionContext implements SessionContext {
         typeof update.title === 'string' ? update.title : update.title || '',
       status: update.status || 'pending',
       rawInput: update.rawInput as string | object | undefined,
+      ...(isShellResultDisplay(update.rawOutput)
+        ? { rawOutput: update.rawOutput }
+        : {}),
       locations: update.locations,
       timestamp: Date.now(),
     };
@@ -663,12 +667,15 @@ class ExportSessionContext implements SessionContext {
     title?: string | null;
     content?: Array<{ type: string; [key: string]: unknown }> | null;
     kind?: string | null;
+    rawOutput?: unknown;
   }): void {
     const toolCall = this.toolCallMap.get(update.toolCallId);
     if (toolCall) {
       // Update the tool call in place
       if (update.status) toolCall.status = update.status;
       if (update.content) toolCall.content = update.content;
+      if (isShellResultDisplay(update.rawOutput))
+        toolCall.rawOutput = update.rawOutput;
       if (update.title)
         toolCall.title = typeof update.title === 'string' ? update.title : '';
     }
