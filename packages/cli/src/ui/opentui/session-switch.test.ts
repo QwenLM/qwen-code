@@ -156,6 +156,10 @@ function createFakeHost(config: Config): SessionSwitchHost & {
 
 describe('handleResumeSession', () => {
   beforeEach(() => {
+    vi.spyOn(
+      SessionService.prototype,
+      'assertLegacySessionExecution',
+    ).mockImplementation(() => {});
     vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
       emptySession() as never,
     );
@@ -191,6 +195,33 @@ describe('handleResumeSession', () => {
       .calls[0]?.[0] as Array<{ type: string }>;
     // The replay always ends with the done event.
     expect(replay.at(-1)?.type).toBe('done');
+  });
+
+  it('rejects a Managed target before loading or switching sessions', async () => {
+    vi.mocked(
+      SessionService.prototype.assertLegacySessionExecution,
+    ).mockImplementationOnce(() => {
+      throw new Error('belongs to managed');
+    });
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(
+      SessionService.prototype.assertLegacySessionExecution,
+    ).toHaveBeenCalledWith('target-session');
+    expect(SessionService.prototype.loadSession).not.toHaveBeenCalled();
+    expect(calls.startNewSession).toHaveLength(0);
+    expect(host.startNewSession).not.toHaveBeenCalled();
+    expect(host.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('belongs to managed'),
+      }),
+      expect.any(Number),
+    );
+    expect(calls.swapCommit).toBe(1);
   });
 
   it('rolls the core back to the old session when the swap fails', async () => {
