@@ -29,7 +29,7 @@ const syncWorkflow = readFileSync(
   'utf8',
 );
 const tauriConfig = JSON.parse(
-  readFileSync('packages/desktop-shell/src-tauri/tauri.conf.json', 'utf8'),
+  readFileSync('packages/desktop/src-tauri/tauri.conf.json', 'utf8'),
 );
 const hasJq = (() => {
   try {
@@ -474,6 +474,7 @@ describe('Desktop release event', () => {
       getWorkflowJob(releaseWorkflow, 'build'),
       'Install Qwen Code dependencies',
     );
+    expect(install).toContain("shell: 'bash'");
     expect(install).toContain('if [ -f pnpm-lock.yaml ]');
     expect(install).toContain(
       'corepack pnpm install --frozen-lockfile --prefer-offline',

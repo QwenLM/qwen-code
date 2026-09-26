@@ -208,6 +208,19 @@ describe('BridgeClient — Live speak-to-user channel', () => {
       }),
     ).rejects.toMatchObject({ code: -32602 });
   });
+
+  it('reports an ended voice call without claiming that speech was delivered', async () => {
+    const client = makeLiveSpeakClient(
+      vi.fn(async () => false),
+      (sessionId) => sessionId === 'live-session',
+    );
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '任务完成了。',
+      }),
+    ).resolves.toEqual({ accepted: false });
+  });
 });
 
 describe('BridgeClient — background notification turn boundary', () => {

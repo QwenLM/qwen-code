@@ -32,7 +32,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every normal API
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id` document navigations) remain pre-auth unless `--no-web` removes them.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -206,10 +206,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 §10).
 
 ```
-['health', 'capabilities', 'session_create', 'session_id_override', 'session_scope_override',
+['health', 'capabilities', 'session_create', 'session_startup_config', 'session_id_override', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
+ 'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
  'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
@@ -254,6 +254,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 > Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
 
+`session_startup_config` advertises optional `startupConfig: { modelServiceId, reasoningEffort? }` on ordinary and standalone creation. Always preflight this tag: older ordinary-create routes may silently ignore the object. `modelServiceId` is required (1–256 characters); `reasoningEffort` accepts `none`, `default`, `low`, `medium`, `high`, `xhigh`, or `max` when supported by the selected model. Omission applies only the model, without a reasoning setter or implicit `default`. The object cannot be combined with the legacy top-level `modelServiceId` or explicit single scope and implies a new thread. Startup never saves shared defaults; later session behavior is unchanged.
+
+Success includes `modelApplied: true` and `startupConfigApplied: { modelServiceId, reasoningEffort?, effectiveReasoning? }`. The model selector is canonical. Only explicit reasoning requests include the two reasoning fields; effective state is `{ state: 'disabled' }`, `{ state: 'provider-default' }`, or `{ state: 'enabled', effort? }` (toggle-only reasoning has no effort). Invalid structure is `400 invalid_startup_config`; a rejected or unconfirmed selection is `422 startup_config_rejected`. Definite standalone rejection rolls back its owned recording and attempts to discard the empty output directory before returning; a recording rollback whose removal cannot be confirmed and transient startup failures retain `standalone_creation_outcome_unknown`, while a failed directory discard is only logged and the definite rejection is still returned. A success-body confirmation failure in the SDK is a protocol error, not an instruction to adopt a recovered session.
+
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
 `session_id_override` is the negotiation handle for the optional caller-supplied `sessionId` on `POST /session` and ACP `session/new` metadata. Clients must confirm that `caps.features` contains this tag before sending the field because older daemons may silently ignore it.
@@ -266,9 +270,9 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `workspace_runtime` advertises `GET /workspace/runtime/status`, `POST /workspace/runtime/ensure`, and their `/workspaces/:workspace/runtime/...` equivalents. `ensure` accepts no capability selection: it starts or reuses the selected trusted workspace's ACP runtime and returns its lifecycle state and monotonic runtime epoch. The primary routes are owned only by the primary runtime; qualified routes resolve only the selected registered runtime and never fall back. A successful ensure renews the runtime's ten-minute keepalive window. Status is read-only and never starts the child. Concurrent ensures share one physical startup. Startup in progress or failure returns retryable `503 runtime_still_starting` or `503 runtime_initialization_failed`. Capability preparation may continue after the ensure observation budget expires; in that case ensure still returns the live runtime with a non-ready capability state for status polling. The capability is advertised only when all active runtime bridges provide the authoritative lifecycle snapshot; a selected legacy injected bridge returns `501 workspace_runtime_not_supported` instead of a guessed state or epoch.
 
-`workspace_runtime_stop` independently advertises user-confirmed runtime stopping. `GET /workspaces/runtime-stop-options` is a read-only, process-global preview: it includes committed child count, modeled child ceiling, and each visible workspace's sessions, blocked reasons, channel ID, epoch, current stop token and latest receipt. Ordinary loaded sessions may be explicitly stopped; independent ACP clients, enabled schedules, pending scheduler/management/start work, memory tasks, workers, voice and special-purpose runtimes are blocked. `POST /workspaces/:workspace/runtime/stop` uses the strict mutation gate and only the selected trusted runtime. Send `confirmInterruptions: true`, `expectedChannelId`, `expectedRuntimeEpoch`, `expectedStopToken` and the exact `expectedSessionIds` from the preview. Never fall back to the primary runtime.
+`workspace_runtime_stop` independently advertises user-confirmed runtime stopping. `GET /workspaces/runtime-stop-options` is a read-only, process-global preview: it includes committed child count, modeled child ceiling, and each visible workspace's sessions, blocked reasons, channel ID, epoch, current stop token and latest receipt. Ordinary loaded sessions may be explicitly stopped; independent ACP clients, enabled schedules, pending scheduler/management/start work, memory tasks, workers, voice and special-purpose runtimes are blocked. `POST /workspaces/:workspace/runtime/stop` uses the strict mutation gate and only the selected trusted runtime. Send `confirmInterruptions: true`, `expectedChannelId`, `expectedRuntimeEpoch`, `expectedStopToken` and the exact `expectedSessionIds` from the preview. Never fall back to the primary runtime. The preview and every receipt list the runtime's live ACP channels as `channels` (`channelId`, `runtimeEpoch`, optional `executionEngine`); a runtime can have one channel per execution engine, and a stop covers all of them. `channelId` names the first listed channel and `runtimeEpoch` is the newest listed epoch, so a channel started after the preview makes the confirmation stale.
 
-A successful response has `state: "stopped"`, `stopped: true` and `released: true`, after acknowledged session closes and the selected child's process-registry release. Registration, files and saved history remain. Responses include affected, interrupted, closed and remaining session IDs. Stale or blocked confirmation is HTTP 409 (`workspace_runtime_stop_stale` / `workspace_runtime_stop_blocked`); partial close is 409 `workspace_runtime_stop_incomplete`; ongoing teardown or failed teardown without proven release is 503 `workspace_runtime_stop_in_progress` / `workspace_runtime_stop_failed`; unsupported management is 501 `workspace_runtime_stop_not_supported`. An unclean teardown that later proves registry release may return 200 with an error warning; unconfirmed session flush still returns a partial/error result. The total observation/close budget is 60 seconds. If it expires while a session close is still in flight, the response settles with `state: "failed"` and `503 workspace_runtime_stop_failed`; cleanup continues separately. The selected workspace stays isolated and its child remains counted until actual cleanup completion, even though the caller has received a failure. Read-only options can later report `stopped` after acknowledged closes and proven release, or `incomplete` when persistence was unconfirmed; the already returned failure snapshot does not change. If the budget is instead exhausted between session closes, the response settles with `state: "incomplete"` and `409 workspace_runtime_stop_incomplete`: no further close or forced kill is started, the stop's admission guard is released (the surviving child remains counted as usual), and stopping the remaining sessions requires a fresh preview and confirmation. A flush refusal is not bypassed by force-killing the remaining sessions. Root exit or a fall in the global process count alone does not establish release of the selected child. On Windows, where the registry does not track descendant process groups, the root's settled exit is the release evidence, so `released: true` does not prove the process tree is gone there.
+A successful response has `state: "stopped"`, `stopped: true` and `released: true`, after acknowledged session closes and the process-registry release of every listed child. Registration, files and saved history remain. Responses include affected, interrupted, closed and remaining session IDs. Stale or blocked confirmation is HTTP 409 (`workspace_runtime_stop_stale` / `workspace_runtime_stop_blocked`); partial close is 409 `workspace_runtime_stop_incomplete`; ongoing teardown or failed teardown without proven release is 503 `workspace_runtime_stop_in_progress` / `workspace_runtime_stop_failed`; unsupported management is 501 `workspace_runtime_stop_not_supported`. An unclean teardown that later proves registry release may return 200 with an error warning; unconfirmed session flush still returns a partial/error result. The total observation/close budget is 60 seconds. If it expires while a session close is still in flight, the response settles with `state: "failed"` and `503 workspace_runtime_stop_failed`; cleanup continues separately. The selected workspace stays isolated and its child remains counted until actual cleanup completion, even though the caller has received a failure. Read-only options can later report `stopped` after acknowledged closes and proven release, or `incomplete` when persistence was unconfirmed; the already returned failure snapshot does not change. If the budget is instead exhausted between session closes, the response settles with `state: "incomplete"` and `409 workspace_runtime_stop_incomplete`: no further close or forced kill is started, the stop's admission guard is released (the surviving child remains counted as usual), and stopping the remaining sessions requires a fresh preview and confirmation. A flush refusal is not bypassed by force-killing the remaining sessions. Root exit or a fall in the global process count alone does not establish release of the selected child. On Windows, where the registry does not track descendant process groups, the root's settled exit is the release evidence, so `released: true` does not prove the process tree is gone there.
 
 Repeated confirmation of the latest consumed token observes the same operation. A fresh confirmation can retry an incomplete stop, rotating the token; older consumed tokens then become stale. If a response is lost, read options and match the latest receipt by workspace and stop token instead of stopping another target. Receipts may be unavailable after removal, trust changes, or daemon/bridge recreation; absence leaves the result unknown and never authorizes continuation. SDK `runtimeStopOptions()` and `workspaceById(id).stopRuntime(confirmation)` use REST even with an ACP transport and never automatically repeat the POST. Session subscribers receive `session_closed` with `reason: "client_close"` and `cause: "workspace_runtime_stop"`; fatal stop-associated exits additionally mark `persistenceUnconfirmed: true`. Updated Web Shell clients retain the saved selection/transcript and wait for explicit Resume. This is a one-time stop, not persistent suspension; a client that missed the event may compete for capacity again.
 
@@ -290,6 +294,8 @@ Runtime status and ensure responses use this shape:
   }
 }
 ```
+
+When a workspace runtime has more than one execution engine, `runtimeLive` and `runtimeEpoch` describe the channel that serves workspace control (MCP and Skills): while that channel is live, another engine starting or exiting does not change them. `state` reports that channel as `cold`, `starting` or `stopping` while it is not live; `active` and `idle` count work on every engine.
 
 `capabilities.skills.state` is `not_started`, `starting`, `ready`, `stale`, or `error`; failures include `{code, message}` in `capabilities.skills.error`. A Skills catalog is current only when the top-level and capability `runtimeEpoch` values match. `revision` orders Skills preparation within one runtime epoch and must not be compared across epochs.
 
@@ -565,12 +571,16 @@ Validation and authorization failures are synchronous HTTP errors using `{ "erro
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
 
+`daemon_update` advertises the process-global `GET /daemon/update`,
+`POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
+
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 
 <!-- conditional-serve-features:start -->
 
 | Tag                                 | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hosted_harness_private_v1`         | the private Hosted Harness profile is active; only its authenticated session API is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `require_auth`                      | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every normal API route, including `/health` on loopback binds; channel webhook ingress keeps its independent shared-secret authentication, and Web Shell document and asset routes remain pre-auth.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mcp_workspace_pool`                | the shared MCP transport pool is active. Omitted when `QWEN_SERVE_NO_MCP_POOL=1` disables the pool.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `mcp_pool_restart`                  | the shared MCP transport pool is active; restart responses may include pool-aware multi-entry shapes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -616,11 +626,13 @@ operator diagnostic snapshot documented below.
 | `cdp_tunnel_over_ws`                | the daemon exposes the reverse `/cdp` WebSocket tunnel, either by explicit opt-in or because a Chrome extension origin is allowed. This only means the tunnel exists; it does not mean Chrome DevTools MCP tools are registered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `browser_automation_mcp`            | ACP HTTP is enabled, `cdp_tunnel_over_ws` is active, no bearer token blocks `/cdp`, and `QWEN_CDP_MCP_COMMAND` names an external stdio MCP adapter. The main CLI package does not bundle a browser automation adapter; without this tag, Chrome extension side-panel chat may still work, but console/network/screenshot/click tools are not registered by default.                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `voice_transcribe`                  | the Voice WebSocket endpoint is mounted; a configured Voice model is still required for a successful transcription.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `realtime_voice`                    | the macOS WebShell daemon has Live Voice enabled and native Host integration active. `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform (the native Host and `realtime_voice` stay macOS-only). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                   |
+| `realtime_voice`                    | the macOS WebShell daemon has Live Voice enabled and the native Host opted in with `QWEN_SERVE_LIVE_NATIVE_HOST=1` (off by default; see below). `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `realtime_voice_web`                | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform, and the default endpoint (the native Host is macOS-only and opt-in). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.     |
 | `web_terminal`                      | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 <!-- conditional-serve-features:end -->
+
+Live Voice uses the Web Shell endpoint (`realtime_voice_web`, WS `/live/web`) on every platform by default. The native macOS Host is opt-in: only a macOS daemon started with `QWEN_SERVE_LIVE_NATIVE_HOST=1` advertises `realtime_voice`, registers WS `/live/host` and installs the Host when Live is enabled. Without it, `/live/setup` reports `nativeHost: false` with a non-retryable `install` error, and `POST /live/setup/install` and `POST /live/setup/launch` answer `409 live_native_host_unavailable`.
 
 A browser Host answers `host.capture_visual` only while the user is sharing a
 screen with the page, which the page reports in its hello as
@@ -689,6 +701,62 @@ These fields are an observation cache, not a restart lease: even a fresh, fully-
 > ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required on non-loopback binds and when loopback is hardened with `--require-auth`. On an ordinary loopback bind (`127.0.0.0/8`, `localhost`, `::1`, `[::1]`), `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) or hardened loopback, the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the ordinary-loopback exemption.
+
+### `GET /daemon/update`, `POST /daemon/update/prepare`, and `POST /daemon/update/restart`
+
+These authenticated routes manage the daemon's Qwen Code installation,
+independent of the selected workspace. They always use REST, including from SDK
+clients with an ACP session transport. The `daemon_update` capability advertises
+the protocol; availability is determined by the returned state.
+
+GET checks for releases without downloading or activating them. Successful
+checks are cached for 15 minutes and errors for one minute; `?refresh=true`
+requests a fresh check. Concurrent checks share one lookup. The response contains
+`state` (`available`, `up-to-date`, `installing`, `ready`, `restarting`,
+`unavailable`, or `error`), `canInstall`, optional `currentVersion` and
+`latestVersion`, and optional `instructions` and `message`. `currentVersion`
+identifies the running daemon, including after an update is prepared. Unsupported
+installation methods can report `available` with `canInstall: false` and manual
+instructions.
+
+Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
+standalone or managed global npm installation, and operator settings that permit
+`general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
+and development mode report `unavailable`. Only global/system settings apply;
+workspace settings cannot enable installation. The connection must use the
+primary listener and its daemon runtime token, or the explicitly trusted
+loopback deployment without a token. Paired browsers and Local Control connections
+report `unavailable`, because their credentials or listener would not survive
+restart; their update mutations return `403 update_connection_unsupported`.
+
+Both POST routes require the strict mutation gate's daemon operator authority
+and accept no parameters. The server chooses the release, destination, and
+launcher; clients cannot supply a version or command.
+
+- `POST /daemon/update/prepare` starts a background download and returns `202`
+  with `state: "installing"`. It does not change the active installation. Poll GET
+  until the state is `ready`; repeated preparations share the same operation and
+  a prepared update returns `200`. With no automatic update available it returns
+  `409 update_unavailable`.
+- `POST /daemon/update/restart` requires a prepared update, otherwise it returns
+  `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
+  activating the update, gracefully closing the daemon, and replacing the process
+  with the updated launcher. Repeated clicks share one restart. The replacement
+  preserves PID, working directory, CLI options, bound port, and effective daemon
+  token, clears old version pins, and does not reopen a browser. The client polls
+  GET until `currentVersion` changes, then reloads the document at the URL
+  captured when the update was requested. Standalone launcher validation runs before closing
+  services; a failed check leaves the daemon running. Failures after shutdown
+  begins or during process replacement are not guaranteed to recover.
+
+Web Shell automatically checks and prepares available supported updates in the
+background, and displays its version-adjacent update button only when ready.
+Preparation and readiness survive workspace runtime reloads. Ordinary daemon
+shutdown discards the prepared download. Activation failures keep the daemon
+running and report `error`; the next check after the one-minute error cache can
+prepare a new download for retry. Disabling automatic updates removes readiness
+and cleans the download before a restart can begin. Clicking the update button
+explicitly restarts the entire daemon and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
@@ -805,7 +873,8 @@ warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
 `mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`,
-`channel_worker_partial_connect`, and `workspace_status_unavailable`. During
+`channel_worker_partial_connect`, `channel_restore_failed`, and
+`workspace_status_unavailable`. During
 the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
@@ -845,8 +914,38 @@ contributed is dropped, with a log identifying it, when it cannot be resolved,
 so one workspace's stale entry does not strand the others; a name the primary
 workspace listed still fails the restore as a whole, whether or not another
 workspace lists it too.
-`all` remains primary-only: it is ignored, and reported, anywhere else. With no
-explicit or configured selection, channel runtime loading stays lazy.
+`all` remains primary-only: it is ignored, and reported, anywhere else.
+
+A trusted non-primary workspace registered after boot restores its own
+`serve.channels` too, loading the channel runtime and reserving the
+channel-service lease if nothing else has. That restore:
+
+- happens **once per daemon run** — recorded as soon as the workspace asks for
+  anything — so a later removal and re-registration, or a trust
+  re-materialization, does not undo an operator who stopped one of those
+  channels in between;
+- does not happen under an explicit `--channel` selection, which no workspace
+  registered later extends;
+- does not happen after `DELETE /workspace/channel` stopped hosting, until a
+  `PUT /workspace/channel` commits a selection again or the daemon restarts;
+- leaves a committed `all` selection as it is;
+- adds that workspace's names to the committed selection in one change, one
+  late restore at a time. Unlike boot, which drops a name it cannot host and
+  keeps the rest, a name that cannot be attributed leaves that workspace's
+  whole list unrestored, with the error logged and reported as described
+  below.
+
+Registration does not wait on channel control at all. The restore is queued
+on the channel-control lane and the response is written without waiting for
+it, and so is the reconcile a registration or trust change triggers for
+channels the daemon already hosts. A worker that never becomes ready therefore
+delays only the channel work queued behind it, never another registration or a
+trust reconcile. The flip side is that a `201` from `POST /workspaces` does not
+mean that workspace's channels are up, or that an already-hosted channel it
+owns has finished restarting; read `GET /workspace/channel` for that.
+
+Without an explicit selection, a boot-time `serve.channels` restore, or a
+registration like the one above, channel runtime loading stays lazy.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
@@ -859,9 +958,52 @@ skips the automatic restore, with a log identifying `serve.channels`, while
 unrelated settings remain in effect. A failed worker startup allows the daemon
 to continue after cleanup succeeds. Global runtime startup timeouts and
 unconfirmed worker stops follow the existing startup-failure path; the lease
-remains held while worker termination is unconfirmed. Inspect daemon logs for
-skipped or failed restores. Channel management reports persisted startup
-settings and actual runtime state.
+remains held while worker termination is unconfirmed. Channel management
+reports persisted startup settings and actual runtime state.
+
+Some `serve.channels` names the daemon did not bring up are reported rather
+than only logged. Such a name never joins the committed selection, so no
+worker snapshot carries it. Three cases are reported:
+
+- a configured startup selection whose worker failed to start, on the boot
+  path that keeps the daemon serving without its channels;
+- a name the boot ownership resolver dropped while attributing it to a
+  workspace, reported against every workspace that listed it;
+- every name still unhosted after a late registration's restore failed.
+
+They surface in two places:
+
+- `/daemon/status` reports one `channel_restore_failed` warning per workspace,
+  naming each channel with its error. This is the complete surface, and it is
+  present on the bootstrap response as well, which is the only one that exists
+  while boot records are being written. At most 64 channels are named per
+  workspace, each name bounded to 128 characters, with `and <n> more` when the
+  list is longer;
+- that workspace's `GET /workspaces/:workspace/channels` lists the channel with
+  `runtime: { state: "error", lastError }` instead of `stopped`, where
+  `lastError` is the adapter's own startup error when the worker reported one
+  for that channel, otherwise the attempt's error. This surface is built from
+  the workspace's own channel settings scope, so it can only carry a name that
+  scope defines — a name no registered workspace configures, or one whose
+  config lives in another workspace, has no row here and is reported on
+  `/daemon/status` alone.
+
+Everything else that leaves a `serve.channels` name unhosted is diagnosed in
+the daemon log only: a name lost because the whole list was unreadable or
+invalid, a non-primary workspace's list discarded because the primary selected
+`all`, a late restore skipped because the committed selection is `all`, and a
+remote (SSH) workspace's list. Inspect daemon logs for those.
+
+A report lasts until the channel is hosted — by this workspace or by a later
+restore from another one — until its workspace is no longer registered, or
+until an operator acts: `POST` start, stop or restart on the channel,
+`PUT`/`DELETE /workspace/channels/:name`, or a `PUT`/`DELETE
+/workspace/channel` that changes the selection. `PUT
+/workspace/channels/:name/startup` does not clear it: it rewrites
+`serve.channels` without saying anything about the attempt that failed. The
+report is kept in memory: a restarted daemon restores again and reports what
+that attempt did. The error text is credential-redacted and bounded the way
+the daemon log renders it.
 
 After a worker has reached ready, unexpected exits are restarted by the serve
 supervisor within a bounded policy: up to 3 restart attempts in a 5 minute
@@ -2459,7 +2601,7 @@ When `/capabilities.features` contains `standalone_sessions_v1`, the daemon expo
 
 | Route                                            | Request                                                                                                                                                                              | Success                                                                                                                                        |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /standalone/sessions`                      | `{ "sessionId": "<UUID>", "modelServiceId"?: string, "approvalMode"?: ApprovalMode }`                                                                                                | `200` with the standalone session, `context: { "kind": "standalone" }`, and its managed projectless output directory. Creation is prompt-less. |
+| `POST /standalone/sessions`                      | `{ "sessionId": "<UUID>", "modelServiceId"?: string, "startupConfig"?: { "modelServiceId": string, "reasoningEffort"?: ReasoningSelection }, "approvalMode"?: ApprovalMode }`        | `200` with the standalone session, `context: { "kind": "standalone" }`, and its managed projectless output directory. Creation is prompt-less. |
 | `GET /standalone/session-options`                | none; any query field is rejected with 400                                                                                                                                           | `200` with `{ v, initialized, current?, approvalMode?, providers, errors? }`; the internal workspace path and ACP-channel state are omitted    |
 | `GET /standalone/sessions`                       | Query: `cursor?`, `size?` (1-100), `archiveState?` (`active` or `archived`)                                                                                                          | `200 { sessions, nextCursor?, liveMergeFailed?, truncated? }`                                                                                  |
 | `GET /standalone/sessions/:id`                   | none                                                                                                                                                                                 | `202 { sessionId, state: "creating" }` while local creation is in flight, otherwise `200` with the exact summary.                              |
@@ -2472,7 +2614,7 @@ When `/capabilities.features` contains `standalone_sessions_v1`, the daemon expo
 | `POST /standalone/sessions/unarchive`            | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                                                  | `200 { unarchived, alreadyActive, notFound, errors }`                                                                                          |
 | `POST /standalone/sessions/delete`               | `{ "sessionIds": ["<UUID>", ...] }`                                                                                                                                                  | `200 { removed, notFound, errors, fileCleanupPending }`                                                                                        |
 
-When `POST /standalone/sessions` carries `modelServiceId`, the response includes `modelApplied`: `false` means the spawn-time model switch failed (also surfaced via the `model_switch_failed` session event) and the session is running on the agent default model — the create itself still succeeds so the caller can warn, release, or retry explicitly.
+When `POST /standalone/sessions` carries the legacy `modelServiceId`, the response includes `modelApplied`: `false` means the spawn-time model switch failed (also surfaced via the `model_switch_failed` session event) and the session is running on the agent default model — the create itself still succeeds so the caller can warn, release, or retry explicitly.
 
 Bodies must be JSON objects with no unknown fields. IDs are RFC UUID v1-v5 values; the daemon canonicalizes them to lowercase. Batch requests contain 1-100 strings and are validated and de-duplicated before mutation. A batch failure is reported as `{ sessionId, code, message }` and does not roll back successful operations on other IDs. `fileCleanupPending` means transcript deletion committed but journal-authorized sidecar or managed-directory cleanup must be retried by reconciliation; the session is already logically removed.
 
@@ -2481,6 +2623,8 @@ Only explicit standalone transcripts and the documented top-level legacy compati
 Archive, unarchive, repair, rename, and delete share the same per-session lifecycle admission as load/resume and prompts. Delete uses transcript unlink as its durable commit point and a private journal plus atomic managed-directory staging for crash recovery. Recovery restores the directory when the transcript remains intact and completes cleanup when the transcript is gone; any mismatched identity, conflicting path, foreign owner, or ambiguous transcript returns a structured fail-closed error.
 
 ### `POST /session`
+
+The optional `startupConfig` contract is described under [Capabilities](#capabilities). Unlike legacy best-effort model selection, a rejected startup selection fails creation.
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).
 
@@ -2500,6 +2644,7 @@ Request:
 | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cwd`            | no       | Absolute path matching one registered workspace. If omitted, the route falls back to the primary workspace (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch`. When `features` contains `multi_workspace_sessions`, clients may pass any trusted `workspaces[].cwd`; otherwise only the primary workspace is accepted. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                      |
 | `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
+| `startupConfig`  | no       | `{ modelServiceId: string, reasoningEffort?: ReasoningSelection }`; requires `session_startup_config`, creates a new thread and confirms the requested selection without writing shared defaults. Cannot be mixed with top-level `modelServiceId` or explicit single scope.                                                                                                                                                                                                                                                                                                                                              |
 | `sessionId`      | no       | RFC-variant UUID v1-v5 chosen by the caller. The daemon normalizes it to lowercase and always creates a fresh thread session; it never treats this field as an idempotent attach. Confirm that `caps.features` contains `session_id_override` before sending it because older daemons may ignore unknown fields. `null` is equivalent to omission.                                                                                                                                                                                                                                                                       |
 | `sessionScope`   | no       | Per-request override for session sharing. `'single'` (the daemon-wide default) makes a second same-workspace `POST /session` reuse the existing session (`attached: true`); `'thread'` forces a fresh distinct session every call. Omit to inherit the daemon-wide default. Values outside the enum return `400 { code: 'invalid_session_scope' }`. Old daemons (pre-#4175 PR 5) silently ignore the field — pre-flight `caps.features.session_scope_override` before sending. The daemon-wide default is hardcoded to `'single'` in production today; #4175 may add a `--sessionScope` CLI flag in a follow-up.         |
 | `worktree`       | no       | Create a fresh thread session in a user-named Git worktree. The optional `slug` uses the daemon's worktree-name validation. Pre-flight `session_worktree_persistence_v1`; clients must not infer durable isolation from older worktree-shaped responses. Worktree creation is not an attach operation and cannot be combined with branch creation. The route returns success only after relocation, exclusive ownership-marker creation, sidecar persistence, and a final runtime-generation check.                                                                                                                      |
@@ -2764,12 +2909,10 @@ The route reads only `chats/archive/<id>.jsonl` in the selected trusted workspac
 Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.session_resume`; `unstable_session_resume` remains a deprecated compatibility alias for older clients.
 
 Accepts the same `cwd`, `approvalMode`, `sourceType`, and `sourceId` fields
-as `/load`. `historyPageSize` is not parsed here and is silently ignored.
-`liveReplayMode` and `compactedReplayMode` are parsed and validated — invalid
-values return `400 invalid_live_replay_mode` or `400 invalid_compacted_replay_mode`
-— but only the legacy-standalone compatibility restore forwards them; ordinary
-resume drops them. None of these load-only fields is part
-of the published resume request. Same response shape — `state` mirrors ACP's
+as `/load`. The load-only replay fields `historyPageSize`, `liveReplayMode`,
+and `compactedReplayMode` are not parsed, validated, or forwarded here — they
+are silently ignored, matching the published resume request schema. Same
+response shape — `state` mirrors ACP's
 `ResumeSessionResponse`. Same error envelope, including
 `409 restore_in_progress` (which fires when a `session/load` is in flight;
 `session/resume` racing behind another `session/resume` coalesces).
@@ -2885,6 +3028,61 @@ Additional fields may appear on each session when `view=organized`:
 ```
 
 Trusted active lists include live daemon overlay fields such as `clientCount`, `hasActivePrompt`, and `activeWorkState`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `POST /sessions/catalog`
+
+Read independently paginated session catalogs for several registered workspaces in one request. Pre-flight `session_catalog_batch` once; older daemons retain the workspace-qualified session-list and group endpoints. Each batch member has persisted-workspace ownership: authentication and request admission are process-global, while each entry resolves and reads only its owning workspace. It never registers a workspace, creates a session, starts ACP, or falls back to the primary runtime.
+
+```json
+{
+  "workspaces": [
+    { "workspace": "workspace-a", "cursor": "previous-a-cursor" },
+    { "workspace": "/canonical/workspace-b" }
+  ],
+  "options": {
+    "size": 20,
+    "archiveState": "active",
+    "view": "organized",
+    "group": "all"
+  },
+  "includeGroups": true
+}
+```
+
+`workspaces` is an ordered array of 1–20 `{ workspace, cursor? }` entries, or `"all"` to select all public registered workspaces. Selectors resolve as exact ids before canonical absolute paths. `all` excludes internal Conversations and removed entries, includes temporarily unavailable entries, and fails if more than 20 entries would be selected; callers must then split explicit selections. An empty public registry returns an empty result. Explicit internal selectors return an entry error without booting the internal runtime.
+
+Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with legacy numeric list cursors. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
+
+```json
+{
+  "workspaces": [
+    {
+      "workspace": "workspace-a",
+      "workspaceId": "workspace-a",
+      "cwd": "/canonical/workspace-a",
+      "sessions": [],
+      "groups": {
+        "groups": [],
+        "colorOptions": ["red", "orange", "yellow", "green", "blue", "purple"]
+      }
+    },
+    {
+      "workspace": "/canonical/workspace-b",
+      "error": {
+        "code": "workspace_not_found",
+        "message": "Workspace is not registered with this daemon.",
+        "status": 404
+      }
+    }
+  ]
+}
+```
+
+The result preserves selection order and the original selector as `workspace`. Successful entries include canonical `cwd`, `workspaceId`, and the existing page fields (`sessions`, optional `nextCursor`, `truncated`, and `liveMergeFailed`). Every returned session's `workspaceCwd` is normalized to its enclosing entry's canonical `cwd`. When requested, `groups` contains the complete group catalog; group identities are scoped to their enclosing workspace. Group reads retain the existing normalization and warn-and-empty fallback for malformed or unreadable organization stores. Failed entries contain `error: { code, message, status }` and resolved identity when available, without a successful empty `sessions` list. Valid batches return HTTP 200 even when some entries fail. Malformed request envelopes return HTTP 400 before storage reads.
+
+Unknown, internal, and removed workspaces produce `404 workspace_not_found`; unavailable or changed runtime generations produce `503 workspace_runtime_unavailable`; an untrusted primary produces `403 untrusted_workspace`. Untrusted secondaries keep the existing persisted-only catalog policy without live bridge reads, repair writes, or debug-session logging. Thrown cursor and group failures retain their existing codes; other thrown read failures become `500 session_catalog_failed`. Trusted active entries can merge existing live bridge state; archived entries remain storage-only.
+
+The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 

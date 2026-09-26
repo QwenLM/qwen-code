@@ -112,6 +112,7 @@ function makeApp(
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
 function makeQualifiedApp(
   overrides: {
+    ssh?: boolean;
     invokeWorkspaceCommand?: (
       method: string,
       params: Record<string, unknown>,
@@ -135,6 +136,11 @@ function makeQualifiedApp(
               runtime: {
                 trusted: true,
                 workspaceCwd: '/workspace',
+                routeFileSystemFactory: overrides.ssh
+                  ? {
+                      sshWorkspace: { host: 'host', directory: '/srv/project' },
+                    }
+                  : {},
                 bridge: {
                   invokeWorkspaceCommand,
                   publishWorkspaceEvent,
@@ -583,6 +589,35 @@ describe('POST /workspace/settings', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('rejects a root-level workspace-restricted key at workspace scope', async () => {
+    // `advisorModel` is served to the Web Shell, whose model panel persists to
+    // the scope of the active settings tab, so it reaches this route; its
+    // Workspace value is stripped on merge, since the root list has no section
+    // to flatten into WORKSPACE_RESTRICTED_SETTING_KEYS.
+    const { app, persistSetting } = makeApp();
+
+    const workspace = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(user.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
   });
 
   it('still accepts the same key at user scope', async () => {
@@ -1074,5 +1109,31 @@ describe('web-shell settings alias drift', () => {
     expect(aliased.length).toBe(new Set(aliased).size);
     expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
     expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
+  });
+  it('persists SSH workflow defaults without pushing disabled workflow controls to live sessions', async () => {
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+    } = makeQualifiedApp({
+      ssh: true,
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('unsupported_operation')),
+    });
+    const response = await request(app)
+      .post('/workspaces/primary/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      });
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledOnce();
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings_changed' }),
+    );
   });
 });

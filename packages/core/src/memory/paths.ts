@@ -170,6 +170,33 @@ export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
     : getMemoryBaseDir();
 }
 
+export function getProjectAutoMemoryRoots(
+  projectRoot: string,
+  trustedProject: boolean,
+): string[] {
+  const configuredRoot = getAutoMemoryRoot(projectRoot);
+  const localRoot = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
+  if (path.resolve(configuredRoot) === path.resolve(localRoot)) {
+    return trustedProject ? [configuredRoot] : [];
+  }
+  return trustedProject ? [configuredRoot, localRoot] : [configuredRoot];
+}
+
+export function getMemoryRootTrustedAnchor(root: string): string {
+  const baseDir = path.resolve(getMemoryBaseDir());
+  const resolvedRoot = path.resolve(root);
+  const relativeToBase = path.relative(baseDir, resolvedRoot);
+  if (
+    relativeToBase === '' ||
+    (!relativeToBase.startsWith(`..${path.sep}`) &&
+      relativeToBase !== '..' &&
+      !path.isAbsolute(relativeToBase))
+  ) {
+    return baseDir;
+  }
+  return path.dirname(path.dirname(resolvedRoot));
+}
+
 /**
  * Returns the project-level state directory that holds auxiliary files
  * (meta.json, extract-cursor.json, consolidation.lock) for the given project.

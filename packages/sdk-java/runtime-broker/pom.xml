@@ -5,14 +5,16 @@
     <groupId>com.alibaba</groupId>
     <artifactId>qwen-managed-runtime-broker</artifactId>
     <version>0.1.0-alpha</version>
-    <name>Qwen Managed Runtime Broker State</name>
-    <description>Runtime Broker state and repository contracts for Qwen Managed Agents.</description>
+    <name>Qwen Managed Runtime Broker Core</name>
+    <description>Embeddable Runtime Broker orchestration and state contracts for Qwen Managed Agents.</description>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
+        <fastjson2.version>2.0.60</fastjson2.version>
         <h2.version>2.3.232</h2.version>
+        <jackson.version>2.20.0</jackson.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
         <junit5.version>5.14.1</junit5.version>
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
@@ -34,6 +36,17 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>${fastjson2.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
@@ -60,6 +73,7 @@
                 <version>${maven-surefire-plugin.version}</version>
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
+                    <excludedGroups>fault-gate</excludedGroups>
                 </configuration>
             </plugin>
             <plugin>
@@ -93,6 +107,32 @@
     </build>
 
     <profiles>
+        <profile>
+            <!-- Stage F multi-process fault gates. They need the bundled CLI
+                 (npm run build && npm run bundle at the repository root),
+                 Node.js and POSIX signals, and fail when any is missing. -->
+            <id>fault-gates</id>
+            <properties>
+                <qwen.cli.entry>${project.basedir}/../../../dist/cli.js</qwen.cli.entry>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>${maven-surefire-plugin.version}</version>
+                        <configuration combine.self="override">
+                            <failIfNoTests>true</failIfNoTests>
+                            <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+                            <groups>fault-gate</groups>
+                            <systemPropertyVariables>
+                                <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <profile>
             <id>mysql-integration</id>
             <dependencies>

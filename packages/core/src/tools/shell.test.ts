@@ -10,6 +10,8 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
+  afterAll,
   beforeEach,
   afterEach,
   type Mock,
@@ -66,6 +68,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 }));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
   ShellTool,
   type ShellToolInvocation,
@@ -90,6 +93,7 @@ import {
   type ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
@@ -119,6 +123,7 @@ function getCommandParameterDescription(shellTool: ShellTool): string {
 }
 
 describe('ShellTool', () => {
+  let outputDirectory: string;
   let shellTool: ShellTool;
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
@@ -134,6 +139,17 @@ describe('ShellTool', () => {
     check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
+
+  beforeAll(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os');
+    outputDirectory = await mkdtemp(
+      path.join(realOs.tmpdir(), 'qwen-shell-test-'),
+    );
+  });
+
+  afterAll(async () => {
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -186,7 +202,7 @@ describe('ShellTool', () => {
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectTempDir: vi.fn().mockReturnValue(outputDirectory),
         getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
@@ -9035,6 +9051,37 @@ describe('ShellTool', () => {
         'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
       );
     });
+
+    it.each(['cmd.exe', 'powershell.exe'])(
+      'advertises Bash for SSH when the local shell is %s',
+      async (localShell) => {
+        vi.mocked(os.platform).mockReturnValue('win32');
+        process.env['ComSpec'] = localShell;
+        delete process.env['MSYSTEM'];
+        delete process.env['TERM'];
+        const local = new ShellTool(mockConfig);
+        expect(getCommandParameterDescription(local)).not.toContain('bash -c');
+        const remote = new SshExecutionEnvironment(
+          { host: 'test-host', directory: '/remote' },
+          'C:\\ssh-anchor',
+        );
+        mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue(remote);
+        try {
+          const tool = new ShellTool(mockConfig);
+          expect(tool.description).toContain('The active shell is Bash.');
+          expect(tool.schema.description).toContain('`bash -c <command>`');
+          expect(tool.description).not.toContain(
+            'The active shell is PowerShell.',
+          );
+          expect(tool.description).not.toContain('cmd.exe');
+          expect(getCommandParameterDescription(tool)).toBe(
+            'Exact bash command to execute as `bash -c <command>`',
+          );
+        } finally {
+          await remote.dispose();
+        }
+      },
+    );
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');

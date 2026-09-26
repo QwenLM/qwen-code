@@ -22,6 +22,8 @@ import {
   type LiveAppshotReadiness,
   type LiveDaemonMessage,
   type LiveHostAction,
+  type LiveScreenFeedMessage,
+  type LiveScreenFeedPhase,
   type LiveHostHello,
   type LiveHostKind,
   type LiveHostShortcutResult,
@@ -74,6 +76,7 @@ function writeLiveHostDiagnostic(
 }
 
 interface LiveCall {
+  screenFeedId?: string;
   epoch: number;
   callId: string;
   mode: 'resume' | 'new';
@@ -97,6 +100,7 @@ interface HostLease {
 }
 
 export interface LiveCallHandlers {
+  onScreenFeed?: (message: LiveScreenFeedMessage) => void;
   beforeStart?: () => Promise<void>;
   onHostReady?: () => void | Promise<void>;
   onStart?: (call: {
@@ -162,12 +166,8 @@ export class LiveUnavailableError extends Error {
 export class LiveBrowserHostUnsupportedError extends Error {
   readonly code = 'live_browser_host_unsupported' as const;
 
-  constructor(readonly feature: 'screen' | 'camera') {
-    super(
-      feature === 'camera'
-        ? 'Camera capture is unavailable in browser Live sessions.'
-        : 'This browser cannot share a screen with Live Voice.',
-    );
+  constructor(readonly feature: 'screen') {
+    super('This browser cannot share a screen with Live Voice.');
     this.name = 'LiveBrowserHostUnsupportedError';
   }
 }
@@ -431,6 +431,26 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
     return undefined;
   }
   if (!isObject(value)) return undefined;
+  if (
+    value['type'] === 'host.screen_feed_start' ||
+    value['type'] === 'host.screen_feed_stop' ||
+    value['type'] === 'host.screen_feed_frame'
+  ) {
+    const epoch = value['epoch'];
+    const feedId = value['feedId'];
+    if (!isNonNegativeSafeInteger(epoch) || !isBoundedString(feedId))
+      return undefined;
+    const base = { epoch, feedId: feedId as string };
+    if (value['type'] === 'host.screen_feed_stop') {
+      return { type: value['type'], ...base };
+    }
+    if (value['type'] === 'host.screen_feed_start') {
+      return { type: value['type'], ...base };
+    }
+    return isBoundedVisualImage(value['image'])
+      ? { type: value['type'], ...base, image: value['image'] }
+      : undefined;
+  }
   if (value['type'] === 'host.hello') return parseHello(value);
   if (value['type'] === 'host.action') return parseAction(value);
   if (value['type'] === 'host.visual_capture_result') {
@@ -494,7 +514,10 @@ function permissionRequirement(
   return 'missing';
 }
 
-function projectStatusForHost(status: LiveStatus): LiveHostStatus {
+function projectStatusForHost(
+  status: LiveStatus,
+  includeCoordinator = false,
+): LiveHostStatus {
   return {
     v: status.v,
     available: status.available,
@@ -503,6 +526,9 @@ function projectStatusForHost(status: LiveStatus): LiveHostStatus {
     ...(status.blocker ? { blocker: status.blocker } : {}),
     ...(status.message ? { message: status.message } : {}),
     ...(status.callId ? { callId: status.callId } : {}),
+    ...(includeCoordinator && status.coordinator
+      ? { coordinator: { ...status.coordinator } }
+      : {}),
     ...(status.inputMuted !== undefined
       ? { inputMuted: status.inputMuted }
       : {}),
@@ -684,6 +710,27 @@ export class LiveHostCoordinator {
     });
   }
 
+  setScreenFeedState(
+    epoch: number,
+    feedId: string,
+    phase: LiveScreenFeedPhase,
+    message?: string,
+  ): boolean {
+    if (
+      this.host?.kind !== 'browser' ||
+      this.call?.epoch !== epoch ||
+      this.call.screenFeedId !== feedId
+    )
+      return false;
+    return this.sendHost({
+      type: 'host.screen_feed_state',
+      epoch,
+      feedId,
+      phase,
+      ...(message ? { message: message.slice(0, 2_000) } : {}),
+    });
+  }
+
   getStatus(): LiveStatus {
     return this.buildStatus(true);
   }
@@ -773,6 +820,7 @@ export class LiveHostCoordinator {
           ? { message: this.lastCallError }
           : {}),
       ...(active ? { callId: active.callId } : {}),
+      ...(active?.coordinator ? { coordinator: active.coordinator } : {}),
       inputMuted: this.inputMuted,
       outputMuted: this.outputMuted,
       ...(active?.transcript ? { transcript: active.transcript } : {}),
@@ -1279,6 +1327,53 @@ export class LiveHostCoordinator {
       }
       return;
     }
+    if (
+      message.type === 'host.screen_feed_start' ||
+      message.type === 'host.screen_feed_stop' ||
+      message.type === 'host.screen_feed_frame'
+    ) {
+      const call = this.call;
+      if (
+        lease.kind !== 'browser' ||
+        !lease.hello.selfChecks.screenShare ||
+        !this.handlers.onScreenFeed
+      ) {
+        this.sendHostError(
+          'invalid_message',
+          'Screen sharing is unavailable on this host.',
+        );
+        return;
+      }
+      if (
+        !call ||
+        call.epoch !== message.epoch ||
+        !['listening', 'thinking', 'speaking'].includes(call.state)
+      ) {
+        this.sendHostError(
+          'stale_epoch',
+          'Screen sharing requires the current active call.',
+        );
+        return;
+      }
+      if (message.type === 'host.screen_feed_start') {
+        // Retransmission must not restart an already admitted feed.
+        if (call.screenFeedId === message.feedId) return;
+        call.screenFeedId = message.feedId;
+      } else if (call.screenFeedId !== message.feedId) {
+        return;
+      }
+      try {
+        this.handlers.onScreenFeed(message);
+      } catch {
+        this.setScreenFeedState(
+          call.epoch,
+          message.feedId,
+          'error',
+          'Screen sharing failed. Stop sharing and share again.',
+        );
+      }
+      return;
+    }
     if (message.type === 'host.visual_capture_result') {
       this.handleVisualCaptureResult(lease, message);
       return;
@@ -1421,11 +1516,14 @@ export class LiveHostCoordinator {
     const status = this.getStatus();
     this.sendHost({
       type: 'host.welcome',
+      ...(lease.kind === 'browser' && this.handlers.onScreenFeed
+        ? { screenFeedV1: true as const }
+        : {}),
       protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
       daemonInstanceNonce: this.daemonInstanceNonce,
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       epoch: this.nextEpoch,
-      status: projectStatusForHost(status),
+      status: projectStatusForHost(status, lease.kind === 'browser'),
     });
     this.sendState(status);
   }
@@ -1681,7 +1779,7 @@ export class LiveHostCoordinator {
     this.sendHost({
       type: 'host.state',
       epoch: this.nextEpoch,
-      status: projectStatusForHost(status),
+      status: projectStatusForHost(status, this.host?.kind === 'browser'),
     });
   }
 

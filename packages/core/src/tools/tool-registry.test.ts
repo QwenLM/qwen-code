@@ -10,7 +10,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
-import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
+import {
+  ToolRegistry,
+  DiscoveredTool,
+  deferredDeclarationFingerprint,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
@@ -248,6 +252,14 @@ describe('ToolRegistry', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
+    });
+
+    it('unregisters an eager tool', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'eager' }));
+
+      toolRegistry.unregisterTool('eager');
+
+      expect(toolRegistry.getTool('eager')).toBeUndefined();
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
@@ -1023,6 +1035,43 @@ describe('ToolRegistry', () => {
 
       toolRegistry.removeMcpToolsByServer('slack');
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
+    });
+
+    it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
+      const declaration = {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+      };
+      const tool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        declaration,
+      );
+      toolRegistry.registerTool(tool);
+      toolRegistry.recordReviewedDeclaration(tool);
+      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
+      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
+
+      toolRegistry.removeMcpToolsByServer('slack');
+
+      // Deliberately NOT pruned. A dropped entry reads as "never reviewed" and
+      // passes a replacement through, while a retained one can only match the
+      // same server, schema name and parameter schema — so it either still
+      // describes the live tool or forces a re-review. No removal route has to
+      // remember to touch this map, which is the point.
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
+
+      // A replacement republishing a changed contract does not match it.
+      const replacement = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        { type: 'object', properties: { channel: { type: 'string' } } },
+      );
+      expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {

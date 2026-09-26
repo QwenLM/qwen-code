@@ -13,6 +13,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { buildAdvisorReminder } from './advisor-policy.js';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
@@ -371,7 +372,12 @@ type MainSessionPromptConfig = Pick<
   // Optional for the same reason: a hand-built prompt config has no session and
   // therefore no declared-tool snapshot, which the builder reads as "everything
   // is declared" (#12032).
-  Partial<Pick<Config, 'isTrustedFolder' | 'getPromptToolSnapshot'>>;
+  Partial<
+    Pick<
+      Config,
+      'isTrustedFolder' | 'getPromptToolSnapshot' | 'getShellExecutionSandbox'
+    >
+  >;
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
@@ -391,7 +397,11 @@ export function getMainSessionBaseSystemPrompt(
         resolveMainSessionOutputStyle(config),
         config.isTodoWriteEnabled(),
         config.getCodeModeOnly(),
-        { declaredTools: config.getPromptToolSnapshot?.() },
+        {
+          declaredTools: config.getPromptToolSnapshot?.(),
+          executionSandboxFilesystem:
+            config.getShellExecutionSandbox?.()?.filesystem,
+        },
       );
 }
 
@@ -507,6 +517,9 @@ export class LlmClient {
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
+    if (this.config.getExecutionEnvironment?.()) {
+      return;
+    }
     try {
       const agents = await this.config.getSubagentManager().listSubagents();
       this.announcedAgentReminderNames = new Set(
@@ -1625,7 +1638,10 @@ export class LlmClient {
   }
 
   private getCachedGitStatus(): string | null {
-    if (this.config.getShellExecutionSandbox?.()) {
+    if (
+      this.config.getExecutionEnvironment?.() ||
+      this.config.getShellExecutionSandbox?.()
+    ) {
       // Even git status can execute repository-configured filters on the host.
       return null;
     }
@@ -4048,6 +4064,14 @@ export class LlmClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+        if (this.config.getAdvisorModel?.()) {
+          const registry = this.config.getToolRegistry();
+          const advisorReminder = buildAdvisorReminder(
+            !!registry.getTool(ToolNames.ADVISOR),
+            registry.getFunctionDeclarations().map((tool) => tool.name),
+          );
+          if (advisorReminder) systemReminders.push(advisorReminder);
+        }
 
         if (
           messageType === SendMessageType.UserQuery &&
