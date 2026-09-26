@@ -1395,6 +1395,10 @@ describe('loggers', () => {
       recordToolCallMetrics: vi.fn(),
       recordToolExecutionMetrics: vi.fn(),
     };
+    const redactedToolCallArgs = {
+      __redacted: 'tool arguments omitted from telemetry',
+    };
+    const redactedFunctionArgs = JSON.stringify(redactedToolCallArgs, null, 2);
 
     beforeEach(() => {
       vi.spyOn(metrics, 'recordToolCallMetrics').mockImplementation(
@@ -1407,6 +1411,60 @@ describe('loggers', () => {
         () => undefined,
       );
       mockLogger.emit.mockReset();
+    });
+
+    it('omits tool args from every telemetry sink', () => {
+      const secret = 'known-sentinel-secret-value';
+      const command =
+        `export BFF_TOKEN='${secret}' && ` +
+        `curl -H 'Authorization: Bearer ${secret}' ` +
+        `https://user:${secret}@example.com`;
+      const redactedArgs = {
+        __redacted: 'tool arguments omitted from telemetry',
+      };
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({ recordUiTelemetryEvent }),
+      } as unknown as Config;
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': '2025-01-01T00:00:00.000Z',
+        function_name: 'run_shell_command',
+        function_args: { command },
+        duration_ms: 25,
+        status: 'success',
+        success: true,
+        prompt_id: 'prompt-secret-redaction',
+        tool_type: 'native',
+      } as ToolCallEvent;
+
+      logToolCall(configWithRecording, event);
+
+      expect
+        .soft(JSON.stringify(mockUiEvent.addEvent.mock.calls[0]))
+        .not.toContain(secret);
+      expect
+        .soft(JSON.stringify(recordUiTelemetryEvent.mock.calls[0]))
+        .not.toContain(secret);
+      expect
+        .soft(JSON.stringify(mockLogger.emit.mock.calls[0]))
+        .not.toContain(secret);
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedArgs }),
+        'test-session-id',
+      );
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedArgs }),
+      );
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedArgs }),
+      );
+      const otelAttributes = mockLogger.emit.mock.calls[0][0].attributes;
+      expect(JSON.parse(otelAttributes['function_args'] as string)).toEqual(
+        redactedArgs,
+      );
+      expect(event.function_args).toEqual({ command });
     });
 
     it('normalizes an unclassified error before every consumer', () => {
@@ -1701,11 +1759,16 @@ describe('loggers', () => {
 
     it('normalizes non-OTel consumers when the SDK is disabled', () => {
       vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({ recordUiTelemetryEvent }),
+      } as unknown as Config;
       const event = {
         'event.name': 'tool_call',
         'event.timestamp': '2025-01-01T00:00:00.000Z',
         function_name: '',
-        function_args: {},
+        function_args: { apiKey: 'secret-value' },
         duration_ms: 10,
         status: 'error',
         success: true,
@@ -1713,10 +1776,13 @@ describe('loggers', () => {
         tool_type: 'native',
       } as ToolCallEvent;
 
-      logToolCall(mockConfig, event);
+      logToolCall(configWithRecording, event);
 
       const normalized = expect.objectContaining({
         function_name: 'unknown_tool',
+        function_args: {
+          __redacted: 'tool arguments omitted from telemetry',
+        },
         status: 'error',
         success: false,
         execution_status: 'unknown',
@@ -1729,9 +1795,11 @@ describe('loggers', () => {
         normalized,
         'test-session-id',
       );
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(normalized);
       expect(mockLogger.emit).not.toHaveBeenCalled();
       expect(mockMetrics.recordToolCallMetrics).not.toHaveBeenCalled();
       expect(mockMetrics.recordToolExecutionMetrics).not.toHaveBeenCalled();
+      expect(event.function_args).toEqual({ apiKey: 'secret-value' });
     });
 
     it('isolates every tool-call telemetry sink failure', () => {
@@ -1849,14 +1917,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'test-function',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'success',
           execution_status: 'success',
@@ -1902,6 +1963,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -1945,14 +2007,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'test-function',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'error',
           execution_status: 'not_started',
@@ -1985,6 +2040,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -2031,14 +2087,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'test-function',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'success',
           execution_status: 'success',
@@ -2068,6 +2117,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -2113,14 +2163,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'test-function',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'success',
           execution_status: 'success',
@@ -2150,6 +2193,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -2194,14 +2238,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'test-function',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'error',
           execution_status: 'error',
@@ -2235,6 +2272,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
         },
@@ -2291,14 +2329,7 @@ describe('loggers', () => {
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           call_id: 'test-call-id',
           function_name: 'mock_mcp_tool',
-          function_args: JSON.stringify(
-            {
-              arg1: 'value1',
-              arg2: 2,
-            },
-            null,
-            2,
-          ),
+          function_args: redactedFunctionArgs,
           duration_ms: 100,
           status: 'success',
           execution_status: 'success',

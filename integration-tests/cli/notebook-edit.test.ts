@@ -7,6 +7,8 @@
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  type CapturedToolCall,
+  capturedToolCallPathMatches,
   TestRig,
   createToolCallErrorMessage,
   printDebugInfo,
@@ -53,9 +55,12 @@ const baseNotebook = (cells: NotebookCell[]): NotebookContent => ({
   nbformat_minor: 5,
 });
 
-const expectReadThenNotebookEdit = (rig: TestRig, result: string) => {
-  const logs = rig.readToolLogs();
-  const foundTools = logs.map((t) => t.toolRequest.name);
+const expectReadThenNotebookEdit = (
+  rig: TestRig,
+  result: string,
+  toolCalls: CapturedToolCall[],
+) => {
+  const foundTools = toolCalls.map((call) => call.name);
   const readIndex = foundTools.findIndex((name) => name === 'read_file');
   const notebookEditIndex = foundTools.findIndex(
     (name) => name === 'notebook_edit',
@@ -76,17 +81,15 @@ const expectReadThenNotebookEdit = (rig: TestRig, result: string) => {
 };
 
 const expectNoSuccessfulRawNotebookWrites = (
-  rig: TestRig,
+  toolCalls: CapturedToolCall[],
   notebookFileName: string,
 ) => {
-  const rawNotebookWrites = rig
-    .readToolLogs()
-    .filter(
-      (log) =>
-        ['edit', 'write_file'].includes(log.toolRequest.name ?? '') &&
-        log.toolRequest.success &&
-        log.toolRequest.args?.includes(notebookFileName),
-    );
+  const rawNotebookWrites = toolCalls.filter(
+    (call) =>
+      ['edit', 'write_file'].includes(call.name) &&
+      call.success &&
+      capturedToolCallPathMatches(call, 'file_path', notebookFileName),
+  );
 
   expect(rawNotebookWrites).toEqual([]);
 };
@@ -142,10 +145,11 @@ print(result)
 
 Do not change any other cell.`;
 
-    const result = await rig.run(prompt);
+    const capture = await rig.runWithToolCapture(prompt);
+    const result = capture.result;
 
-    expectReadThenNotebookEdit(rig, result);
-    expectNoSuccessfulRawNotebookWrites(rig, fileName);
+    expectReadThenNotebookEdit(rig, result, capture.toolCalls);
+    expectNoSuccessfulRawNotebookWrites(capture.toolCalls, fileName);
     validateModelOutput(result, null, 'Notebook replace');
 
     const notebook = readNotebook(rig, fileName);
@@ -207,10 +211,11 @@ ${insertedMarkdown}
 2. Delete the cell whose id is remove-me.
 Do not change the calculate code cell.`;
 
-    const result = await rig.run(prompt);
+    const capture = await rig.runWithToolCapture(prompt);
+    const result = capture.result;
 
-    expectReadThenNotebookEdit(rig, result);
-    expectNoSuccessfulRawNotebookWrites(rig, fileName);
+    expectReadThenNotebookEdit(rig, result, capture.toolCalls);
+    expectNoSuccessfulRawNotebookWrites(capture.toolCalls, fileName);
     validateModelOutput(result, null, 'Notebook insert/delete');
 
     const successfulNotebookEdits = rig
