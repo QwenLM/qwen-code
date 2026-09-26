@@ -457,6 +457,9 @@ export interface RunNonInteractiveOptions {
   controlService?: ControlService;
   sendMessageType?: SendMessageType;
   notificationDisplayText?: string;
+  todoWorkChainId?: string;
+  captureBackgroundTaskNotifications?: boolean;
+  captureBackgroundTaskRegistrations?: boolean;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
@@ -569,6 +572,16 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const formatTerminalStreamError = (error: unknown): string => {
+      const errorText = parseAndFormatApiError(
+        error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${errorText}\n`);
+      }
+      return errorText;
+    };
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
@@ -878,6 +891,9 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
+        if (!ownsAdapter) {
+          throw new Error(exceeded.message);
+        }
         await handleBudgetExceededError(config, exceeded);
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
@@ -895,6 +911,18 @@ export async function runNonInteractive(
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
+    };
+
+    const logSkippedTerminalToolCalls = (
+      requests: ToolCallRequestInfo[],
+    ): void => {
+      if (requests.length === 0) return;
+      const calls = requests
+        .map((request) => `${request.name}(${request.callId})`)
+        .join(', ');
+      debugLogger.warn(
+        `[Headless] Skipping buffered tool calls after terminal API error: ${calls}`,
+      );
     };
 
     interface LocalQueueItem {
@@ -951,6 +979,33 @@ export async function runNonInteractive(
       config.getMonitorRegistry().abortAll();
       flushQueuedNotificationsToSdk(sdkOnlyMonitorQueue);
     };
+    let backgroundTaskTerminalDrain: Promise<void> | undefined;
+    const abortBackgroundTasksAndHoldBackNotifications = async () => {
+      // A caller-owned adapter belongs to a reusable host. Its background
+      // tasks are session-owned and must survive a turn-scoped error or
+      // interrupt; the Session tears them down when the session itself ends.
+      if (!ownsAdapter) return;
+
+      // Several terminal routes converge through the outer catch. Share one
+      // promise so a route that already drained cannot start a second abort
+      // or extend the bounded holdback by another full window.
+      backgroundTaskTerminalDrain ??= (async () => {
+        const registry = config.getBackgroundTaskRegistry();
+        registry.abortAll();
+        // `abortAll()` marks each task `cancelled` synchronously, but the
+        // matching task_notification is emitted later by the task's natural
+        // handler. One-shot terminal paths that call this helper hold back
+        // briefly so stream-json can pair task_started with task_notification.
+        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
+        while (
+          Date.now() < holdbackDeadline &&
+          registry.hasUnfinalizedTasks()
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      })();
+      await backgroundTaskTerminalDrain;
+    };
 
     // EPIPE: don't process.exit here — that bypasses the caller's
     // runExitCleanup → flush() and drops queued JSONL writes. Destroy
@@ -963,6 +1018,13 @@ export async function runNonInteractive(
       if (err.code === 'EPIPE' && !pipeBroken) {
         pipeBroken = true;
         process.stdout.destroy();
+      }
+    };
+    let stderrPipeBroken = false;
+    const stderrErrorHandler = (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE' && !stderrPipeBroken) {
+        stderrPipeBroken = true;
+        process.stderr.destroy();
       }
     };
 
@@ -1092,6 +1154,7 @@ export async function runNonInteractive(
 
     try {
       process.stdout.on('error', stdoutErrorHandler);
+      process.stderr.on('error', stderrErrorHandler);
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
@@ -1538,35 +1601,39 @@ export async function runNonInteractive(
       // Register the callback early so background agents launched during the main
       // tool-call chain can push completions onto the queue.
       const registry = config.getBackgroundTaskRegistry();
-      registry.setNotificationCallback((displayText, modelText, meta) => {
-        localQueue.push({
-          displayText,
-          modelText,
-          sendMessageType: SendMessageType.Notification,
-          todoWorkChainId: meta.todoWorkChainId,
-          sdkNotification: {
-            task_id: meta.agentId,
-            tool_use_id: meta.toolUseId,
-            status: meta.status,
-            usage: meta.stats
-              ? {
-                  total_tokens: meta.stats.totalTokens,
-                  tool_uses: meta.stats.toolUses,
-                  duration_ms: meta.stats.durationMs,
-                }
-              : undefined,
-          },
+      if (options.captureBackgroundTaskNotifications !== false) {
+        registry.setNotificationCallback((displayText, modelText, meta) => {
+          localQueue.push({
+            displayText,
+            modelText,
+            sendMessageType: SendMessageType.Notification,
+            todoWorkChainId: meta.todoWorkChainId,
+            sdkNotification: {
+              task_id: meta.agentId,
+              tool_use_id: meta.toolUseId,
+              status: meta.status,
+              usage: meta.stats
+                ? {
+                    total_tokens: meta.stats.totalTokens,
+                    tool_uses: meta.stats.toolUses,
+                    duration_ms: meta.stats.durationMs,
+                  }
+                : undefined,
+            },
+          });
         });
-      });
+      }
 
-      registry.setRegisterCallback((entry) => {
-        adapter.emitSystemMessage('task_started', {
-          task_id: entry.agentId,
-          tool_use_id: entry.toolUseId,
-          description: entry.description,
-          subagent_type: entry.subagentType,
+      if (options.captureBackgroundTaskRegistrations !== false) {
+        registry.setRegisterCallback((entry) => {
+          adapter.emitSystemMessage('task_started', {
+            task_id: entry.agentId,
+            tool_use_id: entry.toolUseId,
+            description: entry.description,
+            subagent_type: entry.subagentType,
+          });
         });
-      });
+      }
 
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
@@ -1689,21 +1756,7 @@ export async function runNonInteractive(
           'Headless Goal ended with structured output',
           GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
-        registry.abortAll();
-        // `abortAll()` marks each task `cancelled` synchronously, but
-        // the matching `task_notification` is emitted later by the
-        // task's natural handler. Hold back briefly (capped at
-        // STRUCTURED_SHUTDOWN_HOLDBACK_MS) so consumers see every
-        // `task_started` paired with its terminal notification, without
-        // blocking exit on a slow agent that the user has already
-        // declared done.
-        const holdbackDeadline = Date.now() + STRUCTURED_SHUTDOWN_HOLDBACK_MS;
-        while (
-          Date.now() < holdbackDeadline &&
-          registry.hasUnfinalizedTasks()
-        ) {
-          await new Promise((r) => setTimeout(r, 50));
-        }
+        await abortBackgroundTasksAndHoldBackNotifications();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
         const metrics = uiTelemetryService.getMetrics();
@@ -1732,7 +1785,7 @@ export async function runNonInteractive(
         await failClosedActiveGoalTurn(
           'Headless Goal stopped after loop detection',
         );
-        registry.abortAll();
+        await abortBackgroundTasksAndHoldBackNotifications();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
 
@@ -2520,6 +2573,7 @@ export async function runNonInteractive(
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
+        let terminalApiError: string | undefined;
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
@@ -2534,6 +2588,10 @@ export async function runNonInteractive(
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
+              }),
+            ...(isFirstTurn &&
+              options.todoWorkChainId !== undefined && {
+                todoWorkChainId: options.todoWorkChainId,
               }),
             ...(goalTurn
               ? {
@@ -2615,17 +2673,11 @@ export async function runNonInteractive(
             loopDetected = true;
           }
           if (event.type === LlmEventType.Error) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            if (outputFormat === OutputFormat.TEXT) {
-              process.stderr.write(`${errorText}\n`);
-            }
-            // The adapter has already captured the formatted error in JSON
-            // modes, while text mode wrote it above. Mark the throw so the
-            // terminal error result is emitted without formatting it again.
-            throw new AlreadyReportedError(errorText);
+            // Do not throw from inside the async-generator loop. Closing the
+            // iterator early skips provider post-yield bookkeeping. Remember
+            // the failure, drain the stream naturally, then route it through
+            // the terminal failure path below.
+            terminalApiError ??= formatTerminalStreamError(event.value.error);
           }
         }
         captureActiveInteractionOwner();
@@ -2633,6 +2685,17 @@ export async function runNonInteractive(
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
+
+        if (abortController.signal.aborted) {
+          await abortBackgroundTasksAndHoldBackNotifications();
+          flushQueuedNotificationsToSdk(localQueue);
+          finalizeOneShotMonitors();
+          await routeAbort();
+        }
+        if (terminalApiError) {
+          logSkippedTerminalToolCalls(toolCallRequests);
+          throw new AlreadyReportedError(terminalApiError);
+        }
 
         if (loopDetected) {
           return emitLoopDetectedResult();
@@ -2873,6 +2936,7 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
+              let itemTerminalApiError: string | undefined;
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
               const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
@@ -2938,21 +3002,28 @@ export async function runNonInteractive(
                   loopDetected = true;
                 }
                 if (event.type === LlmEventType.Error) {
-                  const errorText = parseAndFormatApiError(
+                  // Match the main loop: drain provider post-yield work before
+                  // surfacing the terminal error.
+                  itemTerminalApiError ??= formatTerminalStreamError(
                     event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
                   );
-                  if (outputFormat === OutputFormat.TEXT) {
-                    process.stderr.write(`${errorText}\n`);
-                  }
-                  // See the matching main-stream branch above.
-                  throw new AlreadyReportedError(errorText);
                 }
               }
               captureActiveInteractionOwner();
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
+
+              if (abortController.signal.aborted) {
+                await abortBackgroundTasksAndHoldBackNotifications();
+                flushQueuedNotificationsToSdk(localQueue);
+                finalizeOneShotMonitors();
+                await routeAbort();
+              }
+              if (itemTerminalApiError) {
+                logSkippedTerminalToolCalls(itemToolCallRequests);
+                throw new AlreadyReportedError(itemTerminalApiError);
+              }
 
               if (loopDetected) {
                 return;
@@ -3024,11 +3095,10 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) return;
                 await drainBatch();
               }
-            })();
-            drainPromise = p;
-            void p.finally(() => {
+            })().finally(() => {
               if (drainPromise === p) drainPromise = null;
             });
+            drainPromise = p;
             return p;
           };
 
@@ -3145,7 +3215,7 @@ export async function runNonInteractive(
           // silently convert a cancellation into a completion.
           while (true) {
             if (abortController.signal.aborted) {
-              registry.abortAll();
+              await abortBackgroundTasksAndHoldBackNotifications();
               // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification
               // paired with every task_started.
@@ -3170,8 +3240,28 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            if (!ownsAdapter) {
+              if (localQueue.length === 0) {
+                // Preserve the final cancellation checkpoint for reusable
+                // sessions without polling the registry-global task set. An
+                // interrupt queued by the just-finished stream gets one event
+                // loop turn to land, but an earlier turn's task cannot hold
+                // this result beyond that checkpoint.
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                if (
+                  !abortController.signal.aborted &&
+                  localQueue.length === 0
+                ) {
+                  break;
+                }
+                continue;
+              }
+            } else if (
+              !registry.hasUnfinalizedTasks() &&
+              localQueue.length === 0
+            ) {
               break;
+            }
             await new Promise((r) => setTimeout(r, 100));
           }
 
@@ -3289,6 +3379,7 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      await abortBackgroundTasksAndHoldBackNotifications();
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
@@ -3357,15 +3448,31 @@ export async function runNonInteractive(
               emitErr instanceof Error ? emitErr.message : String(emitErr)
             }`,
           );
+          if (
+            outputFormat === OutputFormat.STREAM_JSON &&
+            (isAlreadyReportedError || !ownsAdapter || recoverableCancellation)
+          ) {
+            process.stderr.write(`${message}\n`);
+          }
         }
       }
       if (budgetExceeded) {
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
         // see a terminal result envelope before the process dies.
+        if (!ownsAdapter) {
+          throw new AlreadyReportedError(budgetExceeded.message);
+        }
         await handleBudgetExceededError(config, budgetExceeded);
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      // A caller-supplied adapter belongs to a persistent host (for example
+      // the stream-json SDK session). The result above completes this turn;
+      // process-level error handling would run global exit cleanup and tear
+      // down the reusable Config. Let the host observe the rejection instead.
+      if (!ownsAdapter) {
+        throw error;
       }
       await handleError(error, config);
     } finally {
@@ -3400,8 +3507,12 @@ export async function runNonInteractive(
       abortController.signal.removeEventListener('abort', stampBudgetAbort);
 
       const reg = config.getBackgroundTaskRegistry();
-      reg.setNotificationCallback(undefined);
-      reg.setRegisterCallback(undefined);
+      if (options.captureBackgroundTaskNotifications !== false) {
+        reg.setNotificationCallback(undefined);
+      }
+      if (options.captureBackgroundTaskRegistrations !== false) {
+        reg.setRegisterCallback(undefined);
+      }
       const monReg = config.getMonitorRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result
@@ -3419,6 +3530,7 @@ export async function runNonInteractive(
       unsubscribeRecordingFailure?.();
 
       process.stdout.removeListener('error', stdoutErrorHandler);
+      process.stderr.removeListener('error', stderrErrorHandler);
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
