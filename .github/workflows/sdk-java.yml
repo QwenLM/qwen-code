@@ -305,6 +305,13 @@ jobs:
           -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
           -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
           -Dmysql.user=root -Dmysql.password=hosted-fixture verify checkstyle:check
+      - name: 'Run Runtime Broker fault gates'
+        timeout-minutes: 10
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml
+          -Pfault-gates -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" test
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
