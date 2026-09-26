@@ -1032,6 +1032,9 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated base overhead',
+  'contextUsage.estimatedUsage': 'Estimated usage, including the conversation',
+  'contextUsage.usageEstimatedWithConversation':
+    'No provider usage yet. The estimates below include the conversation.',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -5158,6 +5161,9 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '基础开销估算',
+  'contextUsage.estimatedUsage': '估算用量（含对话）',
+  'contextUsage.usageEstimatedWithConversation':
+    '尚未收到 provider 用量。下方估算包含对话。',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',

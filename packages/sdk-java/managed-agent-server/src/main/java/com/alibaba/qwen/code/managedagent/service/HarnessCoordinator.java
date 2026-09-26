@@ -205,6 +205,10 @@ public class HarnessCoordinator {
             AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (session.workspace() != null) {
+            return fail(claimed, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
         if ("CANCELLING".equals(claimed.status())
                 && claimed.harnessEventEpoch() == null
                 && !claimed.submissionAttempted()) {
@@ -533,6 +537,9 @@ public class HarnessCoordinator {
             }
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
+            if (session.workspace() != null) {
+                return;
+            }
             Attachment attachment = harness.createOrLoad(
                     session.tenantId(), session.sessionId(),
                     session.harnessBootId() != null);

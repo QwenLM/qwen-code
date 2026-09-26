@@ -503,6 +503,23 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps a Managed engine rejection to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(-32024, 'belongs to managed', {
+      errorKind: 'session_execution_engine_unavailable',
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: 'session_execution_engine_unavailable',
+      errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
   it('maps an invalid transcript turn anchor to the public 400 contract', () => {
     const { response, status, json } = responseMock();
 

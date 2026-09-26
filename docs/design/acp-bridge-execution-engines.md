@@ -91,6 +91,12 @@ cannot be safely addressed, quarantine the original channel, let other sessions
 drain, and retain admission until physical exit. Never close another session
 merely because a malformed response returned its ID.
 
+Existing sessions on a quarantined channel can continue prompting. Fresh work
+for that engine remains blocked until they drain and the channel exits; there
+is no bounded drain deadline or automatic recycle in this slice. Before
+production enablement, #12380 must define an operational recovery policy that
+accounts for those live sessions and physical admission ownership.
+
 Restore failures after a successful ACP response use the same original-channel
 cleanup discipline. Public timeout is not evidence of physical completion.
 A late success without a session ID remains a success requiring cleanup or quarantine; it is distinct
