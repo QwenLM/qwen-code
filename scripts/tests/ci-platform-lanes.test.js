@@ -662,6 +662,23 @@ describe('GitHub helper tests', () => {
     }
   });
 
+  it('retries the full-profile battery once against pool contention', () => {
+    // #12772: the battery spawns real subprocess loops on the shared ECS
+    // pool, and a push to main has no flaky-rerun patrol — one host hiccup
+    // failed the lane on a CSS-only commit. The unit lane got VITEST_RETRY
+    // for the same fleet condition (#10868); this lane retries inline. The
+    // github_ci_only fast lane stays single-attempt: it runs only on PRs,
+    // which the flaky-rerun patrol already re-runs.
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    const invocations =
+      String(step.run).match(/node --test --test-concurrency=1/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(String(step.run)).toContain('||');
+  });
+
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
     // setup-node and `npm ci` steps are gated on the full profile), so every
