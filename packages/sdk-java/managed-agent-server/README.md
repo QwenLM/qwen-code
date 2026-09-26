@@ -237,7 +237,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32
 export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/absolute/authorized/workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
-export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/managed-runtime-worker.js'
+export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
@@ -254,9 +254,43 @@ to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
 credentials with AES-256-GCM. The local-process adapter can recover the same
 worker after a Java restart on the same host; multi-host scheduling and the
 Kubernetes adapter's real-cluster fault matrix remain production gates. This
-standalone reference resolves every accepted tenant to the one configured
-workspace; a trusted tenant-authorized environment registry is still required
-before using it as a multi-tenant production service.
+standalone reference keeps the one configured directory for legacy unbound
+Sessions. Persisted bound Sessions use the private Workspace execution path
+below.
+
+### Private Workspace tool execution (W0c-3)
+
+The worker entry is the built CLI bundle; the server launches it with
+`managed-runtime-worker`. Configure canonical existing roots using Spring
+configuration (all Brokers sharing the database must use the same mappings):
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      workspace-mounts:
+        - tenant-id: tenant-a
+          storage-id: storage-a
+          root: /absolute/canonical/workspace-a
+```
+
+An empty mapping list rejects bound Session execution. This path requires
+`local-process` provisioning and `session` isolation. The Session must be
+created through W0b with a Registry configuration reference of
+`managed-runtime-tools/1` and policy reference of
+`preapproved-workspace-tools/1`. The original creator must still have read and
+create grants. Other frozen configuration pairs are refused.
+
+The private Broker can acquire, execute Read/Write/Edit/foreground Shell, and
+release these Sessions. One Runtime Session holds each tenant/storage pair
+until the original worker closes its execution gate. Lost or ambiguous
+responses retain the SQL holder; there is no timeout-based takeover. The
+provider is not a filesystem sandbox, and foreground Shell may create detached
+descendants. Use this only with trusted local workloads until physical
+isolation and W0e cleanup are implemented. Public bound Turn/lifecycle gates
+and the full Hosted tool loop remain closed. See the bilingual
+[execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
+for the exact boundary.
 
 Build the container from the repository root:
 
