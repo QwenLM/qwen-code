@@ -16,7 +16,7 @@ Reasoning-effort tiers, reasoning wire fields, pricing, provider detection, and 
 
 ## Resolution and precedence
 
-Explicit model configuration remains above inferred catalog defaults. For inferred facts, client-owned corrections take precedence over the selected catalog; existing regex tables and generic defaults supply missing fields. Modalities are the union of catalog and regex capabilities, preserving existing support. Explicit configured modalities remain authoritative.
+Explicit model configuration remains above inferred catalog defaults. For inferred context windows, client-owned corrections take precedence over the selected catalog; existing regex tables and generic defaults supply missing fields. For output limits, existing regex matches take precedence over the catalog, preserving endpoint-specific request ceilings. The catalog supplies output limits only where the table has no match. Modalities are the union of catalog and regex capabilities, preserving existing support. Explicit configured modalities remain authoritative.
 
 The runtime cache replaces the bundled snapshot only when its ISO `fetchedAt` timestamp is newer. Filesystem modification times do not determine freshness. Refreshing the cache does not rewrite an already resolved session configuration; later resolutions see refreshed data.
 

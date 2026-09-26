@@ -9,6 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
+import {
+  defaultOutputCeiling,
+  hasExplicitOutputLimit,
+  tokenLimit,
+} from '../core/tokenLimits.js';
 import { resolveModelConfig } from './modelConfigResolver.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
@@ -134,6 +139,42 @@ describe('model catalog', () => {
     });
     process.env['QWEN_CODE_MODELS_DEV'] = 'off';
     expect(resolveModelConfig(sources).config.contextWindowSize).toBe(262144);
+  });
+
+  it('preserves existing output limits across the entire bundled snapshot', () => {
+    for (const id of Object.keys(bundled.models)) {
+      process.env['QWEN_CODE_MODELS_DEV'] = 'off';
+      const pinned = hasExplicitOutputLimit(id);
+      const previous = tokenLimit(id, 'output');
+      delete process.env['QWEN_CODE_MODELS_DEV'];
+      if (pinned) {
+        expect({ id, output: tokenLimit(id, 'output') }).toEqual({
+          id,
+          output: previous,
+        });
+      }
+    }
+    expect(defaultOutputCeiling('glm-4.7')).toBe(16_384);
+    expect(tokenLimit('qwen-vl-max', 'output')).toBe(32_768);
+    expect(tokenLimit('claude-sonnet-4-6')).toBe(1_000_000);
+    expect(tokenLimit('claude-sonnet-5')).toBe(1_000_000);
+  });
+
+  it('keeps output pins after refresh while filling unknown model limits', () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://models.dev/api.json',
+      fetchedAt: FAR_FUTURE,
+      models: {
+        'glm-4.7': { output: 131_072 },
+        'qwen-vl-max': { output: 8_192 },
+        'new-model': { context: 200_000, output: 8_000 },
+      },
+    });
+    invalidateModelCatalog();
+    expect(defaultOutputCeiling('glm-4.7')).toBe(16_384);
+    expect(tokenLimit('qwen-vl-max', 'output')).toBe(32_768);
+    expect(tokenLimit('new-model', 'output')).toBe(8_000);
+    expect(hasExplicitOutputLimit('new-model')).toBe(true);
   });
 
   it('requires explicit Qwen PDF support for both bundled and refreshed data', () => {

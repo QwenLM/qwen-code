@@ -333,7 +333,7 @@ function findTokenLimit(
   const norm = normalize(model);
   const catalog = lookupModelCatalog(norm);
   const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
-  if (fromCatalog !== undefined) {
+  if (type === 'input' && fromCatalog !== undefined) {
     return fromCatalog;
   }
   const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
@@ -344,7 +344,7 @@ function findTokenLimit(
     }
   }
 
-  return undefined;
+  return fromCatalog;
 }
 
 /**

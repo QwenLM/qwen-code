@@ -2,7 +2,7 @@
 
 ## Final delivery scope
 
-The catalog supplies inferred context/output limits and input modalities with bundled/offline fallback and background refresh. The [bilingual design](../../design/2026-08-23-models-dev-registry.md) incorporates the useful constraints from the closed design-only PR #9851.
+The catalog supplies inferred context windows and input modalities with bundled/offline fallback and background refresh. Output limits keep existing regex matches first; the catalog fills models without a table match. The [bilingual design](../../design/2026-08-23-models-dev-registry.md) incorporates the useful constraints from the closed design-only PR #9851.
 
 The draft-only `model.customCatalog` was removed after real Config testing exposed late initialization and cross-session global state. Private/offline overrides use existing `modelProviders` or model generation settings. No custom catalog cache is read. Effort metadata and provider-aware catalog lookup remain deferred.
 
@@ -26,6 +26,14 @@ Local executable scripts and raw results are retained under `.qwen/e2e-tests/pr1
 [DashScope's PDF reference](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) supports qwen3.8-max through Chat Completions in Beijing and Singapore, with Base64 `file_data` plus `filename`; it explicitly excludes Responses API PDF delivery. A provider-independent catalog cannot infer this distinction safely. The default therefore leaves PDF disabled while preserving image/video and explicit PDF opt-in.
 
 Live PDF recognition was not run: configured credential variables were absent. Automatic PDF enablement is deferred until endpoint/protocol-scoped resolution and a real recognition test exist. A future test should return a random marker present only inside a one-page PDF; HTTP 200 alone does not prove delivery to the model.
+
+## Review follow-up: output precedence and small windows
+
+Exact-head comparison at `4086a0c` reproduced GLM-4.7's default output increasing from 16,384 to 64,000, and a Qwen-VL-Max request of 16,384 being reduced to 8,192. Preserving existing output-table matches fixes both. Tests now iterate every bundled identifier to verify existing output limits remain unchanged and exercise the same precedence with refreshed data. Context corrections for Sonnet 4.6/5 remain intact. Restoring catalog-first output makes both new tests fail.
+
+The suggested context bounds are not adopted. With an actual 4,096-token math model and a 2,000-token prompt, the reviewed catalog yields an output request of 3,072; the regex-only path yields 32,768 against the same physical window. Neither fits. Likewise, the existing clamp can request 4,000 output tokens for an explicitly configured 8,192-token window and a 5,000-token prompt. This is an existing small-window budgeting limitation, not evidence that replacing accurate metadata with a 128K/256K fallback is safe. Supporting these windows requires separately reviewing compaction and the send path's fixed estimation padding. This PR does not claim to add small-window model support. No arithmetic defect was observed for Qwen-Long's 10M context, so no arbitrary upper bound is added.
+
+The local comparison scripts exercised the real token helpers and default provider; they did not send live generation requests. Raw results and the report are under `.qwen/e2e-tests/pr11959/`. A catalog-on/off golden copy of all metadata would not validate endpoint accuracy; the shipped-data regression test instead protects the output precedence contract directly.
 
 ## Reproducible checks
 
