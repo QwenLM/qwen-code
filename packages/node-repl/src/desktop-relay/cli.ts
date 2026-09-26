@@ -6,7 +6,6 @@
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -36,13 +35,12 @@ Commands:
       Unregister the socket; --purge also deletes the runtime.
   status [--home <dir>]
       Show whether the relay is registered and what it last connected to.
-  socket <path>
-      On the remote machine: bridge stdio to a relay socket forwarded over SSH.
 `;
 
 function flag(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
+  const value = index >= 0 ? args[index + 1] : undefined;
+  return value && !value.startsWith('--') ? value : undefined;
 }
 
 function homeFrom(args: string[]): string {
@@ -94,6 +92,12 @@ function install(args: string[]): number {
   // passes its packed tarball instead.
   const packageSpec =
     flag(args, '--package') ?? `@qwen-code/node-repl-mcp@${packageVersion()}`;
+  if (fs.existsSync(home) && !isRelayHome(home)) {
+    process.stderr.write(
+      `Refusing to install into ${home}: the directory already exists and is not a desktop relay runtime directory.\n`,
+    );
+    return 1;
+  }
   fs.mkdirSync(home, { recursive: true });
   const manifest = path.join(home, 'package.json');
   // A manifest of its own keeps `npm install --prefix` from walking up into
@@ -219,29 +223,12 @@ function status(args: string[]): number {
   return 0;
 }
 
-function pipeSocket(socketPath: string | undefined): Promise<number> {
-  if (!socketPath) {
-    process.stderr.write(USAGE);
-    return Promise.resolve(2);
-  }
-  return new Promise((resolve) => {
-    const socket = net.connect(socketPath);
-    socket.on('connect', () => {
-      process.stdin.pipe(socket);
-      socket.pipe(process.stdout);
-    });
-    socket.on('error', (error) => {
-      process.stderr.write(
-        `Cannot reach the desktop relay at ${socketPath}: ${error.message}. Is the SSH connection that forwards it open?\n`,
-      );
-      resolve(1);
-    });
-    socket.on('close', () => resolve(0));
-  });
-}
-
 export async function runDesktopRelayCommand(args: string[]): Promise<number> {
   const [command, ...rest] = args;
+  if (rest.includes('--home') && flag(rest, '--home') === undefined) {
+    process.stderr.write('--home requires a non-empty directory.\n');
+    return 2;
+  }
   switch (command) {
     case 'install':
       return install(rest);
@@ -249,8 +236,6 @@ export async function runDesktopRelayCommand(args: string[]): Promise<number> {
       return uninstall(rest);
     case 'status':
       return status(rest);
-    case 'socket':
-      return pipeSocket(rest[0]);
     case 'agent':
       // Started by launchd for each accepted connection, not by hand.
       await runAgent(homeFrom(rest));

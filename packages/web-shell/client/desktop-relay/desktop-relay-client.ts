@@ -60,6 +60,14 @@ const REMOTE_PHASES: ReadonlySet<string> = new Set([
   'failed',
 ]);
 
+function daemonEndpoint(daemonUrl: string, path: string): string {
+  const base = new URL(daemonUrl);
+  return new URL(
+    path,
+    `${base.origin}${base.pathname.replace(/\/?$/, '/')}`,
+  ).toString();
+}
+
 async function withTimeout<T>(
   ms: number,
   run: (signal: AbortSignal) => Promise<T>,
@@ -137,12 +145,50 @@ export async function connectDesktopRelay(
   fetchImpl: FetchLike = defaultFetch,
 ): Promise<DesktopRelayConnectResult> {
   try {
+    let relayCredential = request.token;
+    if (request.token) {
+      const credentialResponse = await withTimeout(10_000, (signal) =>
+        fetchImpl(
+          daemonEndpoint(request.daemonUrl, 'desktop-relay/credential'),
+          {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${request.token}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              sessionId: request.sessionId,
+              ...(request.workspace ? { workspace: request.workspace } : {}),
+            }),
+            cache: 'no-store',
+            signal,
+          },
+        ),
+      );
+      const credentialBody = (await credentialResponse
+        .json()
+        .catch(() => ({}))) as Record<string, unknown>;
+      if (
+        !credentialResponse.ok ||
+        typeof credentialBody['credential'] !== 'string'
+      ) {
+        return {
+          ok: false,
+          code: 'credential_failed',
+          ...(typeof credentialBody['error'] === 'string'
+            ? { message: credentialBody['error'] }
+            : {}),
+        };
+      }
+      relayCredential = credentialBody['credential'];
+    }
+
     // The dialog waits up to a minute for an answer.
     const response = await withTimeout(90_000, (signal) =>
       fetchImpl(`${DESKTOP_RELAY_URL}/connect`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify({ ...request, token: relayCredential }),
         cache: 'no-store',
         signal,
       }),

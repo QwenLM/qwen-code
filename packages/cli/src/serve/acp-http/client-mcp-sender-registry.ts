@@ -320,12 +320,42 @@ async function registerSessionScopedClientMcpServer(
   );
   if (events) {
     void (async () => {
+      let current = events;
+      let sessionClosed = false;
       try {
-        for await (const _event of events) {
-          // Consume without forwarding session contents to the tool host.
+        while (!controller.signal.aborted) {
+          let evicted = false;
+          for await (const event of current) {
+            const type =
+              event !== null && typeof event === 'object'
+                ? (event as { type?: unknown }).type
+                : undefined;
+            if (type === 'session_closed') {
+              sessionClosed = true;
+              break;
+            }
+            if (type === 'client_evicted') evicted = true;
+          }
+          if (sessionClosed || controller.signal.aborted) break;
+          if (!evicted) {
+            sessionClosed = true;
+            break;
+          }
+          let replacement: typeof current | undefined;
+          try {
+            replacement = bridge.subscribeEvents?.(sessionId, {
+              signal: controller.signal,
+            });
+          } catch {
+            sessionClosed = true;
+            break;
+          }
+          if (!replacement) break;
+          current = replacement;
         }
       } finally {
         if (
+          sessionClosed &&
           !controller.signal.aborted &&
           registry.deleteSession(
             serverName,

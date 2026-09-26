@@ -7,21 +7,13 @@
 /**
  * What one accepted connection on the relay's loopback port gets.
  *
- * Two kinds of client arrive on the same port, told apart by their first
- * bytes:
- *  - a browser (the Web Shell on this computer) speaking HTTP: `GET /status`,
- *    `POST /connect` (approved in a native dialog, then relayed over the
- *    daemon's reverse tool channel) and `POST /disconnect`;
- *  - an MCP client speaking newline-delimited JSON-RPC, which is what an SSH
- *    `RemoteForward` from a terminal session delivers. Its first `tools/call`
- *    is what asks for approval, so starting a remote session alone never pops
- *    a dialog.
+ * The Web Shell on this computer speaks HTTP: `GET /status`, `POST /connect`
+ * (approved in a native dialog, then relayed over the daemon's reverse tool
+ * channel) and `POST /disconnect`.
  */
 
 import type { Duplex } from 'node:stream';
-import { StringDecoder } from 'node:string_decoder';
 import type { WorkspaceSelector } from './acp-relay.js';
-import { MAX_RAW_REQUEST_BYTES } from './constants.js';
 import {
   formatHttpResponse,
   looksLikeHttp,
@@ -29,13 +21,6 @@ import {
   type HttpRequest,
   type ParseResult,
 } from './http.js';
-import {
-  errorReply,
-  McpChildRelay,
-  type ChildChannel,
-  type JsonRpcId,
-  type JsonRpcMessage,
-} from './mcp-child-relay.js';
 
 export type RelayRecordPhase =
   | 'connecting'
@@ -302,7 +287,21 @@ export async function handleHttpRequest(
     });
     return {
       ...json(202, cors, { ok: true }),
-      after: () => ctx.startRelay(parsed, origin),
+      after: async () => {
+        try {
+          await ctx.startRelay(parsed, origin);
+        } catch (error) {
+          const current = ctx.readRecord();
+          if (current?.pid !== ctx.pid) return;
+          ctx.writeRecord({
+            ...current,
+            pid: null,
+            phase: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+            updatedAt: (ctx.now?.() ?? new Date()).toISOString(),
+          });
+        }
+      },
     };
   }
 
@@ -336,151 +335,22 @@ export async function handleHttpRequest(
   return json(404, cors, { ok: false, code: 'not_found' });
 }
 
-export interface RawMcpDeps {
-  spawnChild(): ChildChannel;
-  askConsent(message: string): Promise<boolean>;
-  notify(message: string): Promise<void>;
-}
-
-export const RAW_CONSENT_MESSAGE = [
-  'A Qwen Code session connected to this computer through an SSH tunnel or another local connection wants to use it.',
-  '',
-  'If you allow it, that session can run code on this computer with your permissions and see and control its screen, until the connection closes.',
-].join('\n');
-
-function isToolsCall(
-  message: unknown,
-): message is JsonRpcMessage & { id: JsonRpcId } {
-  if (message === null || typeof message !== 'object') return false;
-  const { method, id } = message as JsonRpcMessage;
-  return (
-    method === 'tools/call' &&
-    (typeof id === 'string' || typeof id === 'number')
-  );
-}
-
-/** Serves node_repl over a raw JSON-RPC stream until either side closes. */
-export function serveRawMcp(
-  socket: Duplex,
-  initial: Buffer,
-  deps: RawMcpDeps,
-): Promise<void> {
-  return new Promise((resolve) => {
-    const child = deps.spawnChild();
-    const relay = new McpChildRelay(child);
-    const decoder = new StringDecoder('utf8');
-    let consent: Promise<boolean> | undefined;
-    let pendingText = '';
-    let closed = false;
-    // Ids waiting on the consent dialog, and ids cancelled while waiting:
-    // an approved call the client already cancelled must not run.
-    const gatedIds = new Set<JsonRpcId>();
-    const cancelledGatedIds = new Set<JsonRpcId>();
-
-    const write = (reply: JsonRpcMessage) => {
-      if (!closed) socket.write(`${JSON.stringify(reply)}\n`);
-    };
-    const finish = () => {
-      if (closed) return;
-      closed = true;
-      relay.close();
-      socket.destroy();
-      resolve();
-    };
-    const handleLine = async (line: string) => {
-      let message: unknown;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        return;
-      }
-      // Only tools/call runs code; the handshake and discovery need no approval.
-      if (isToolsCall(message)) {
-        consent ??= deps.askConsent(RAW_CONSENT_MESSAGE).then((allowed) => {
-          if (allowed) {
-            void deps.notify('A Qwen Code session is now using this computer.');
-          }
-          return allowed;
-        });
-        gatedIds.add(message.id);
-        const allowed = await consent;
-        gatedIds.delete(message.id);
-        // A cancellation that arrived while the dialog was up retires the
-        // call unanswered, as it would have after being forwarded.
-        if (cancelledGatedIds.delete(message.id)) return;
-        if (!allowed) {
-          write(
-            errorReply(
-              message.id,
-              -32001,
-              'The person at this computer declined remote use of it.',
-            ),
-          );
-          return;
-        }
-      } else if (
-        message !== null &&
-        typeof message === 'object' &&
-        (message as JsonRpcMessage).method === 'notifications/cancelled'
-      ) {
-        const requestId = (
-          (message as JsonRpcMessage).params as
-            | { requestId?: unknown }
-            | undefined
-        )?.requestId;
-        if (
-          (typeof requestId === 'string' || typeof requestId === 'number') &&
-          gatedIds.has(requestId)
-        ) {
-          cancelledGatedIds.add(requestId);
-          return;
-        }
-      }
-      const reply = await relay.handle(message);
-      if (reply !== undefined) write(reply);
-    };
-    const onText = (text: string) => {
-      pendingText += text;
-      let newline = pendingText.indexOf('\n');
-      while (newline >= 0) {
-        const line = pendingText.slice(0, newline).trim();
-        pendingText = pendingText.slice(newline + 1);
-        if (line) void handleLine(line);
-        newline = pendingText.indexOf('\n');
-      }
-      if (pendingText.length > MAX_RAW_REQUEST_BYTES) {
-        // An unterminated stream is not line-delimited JSON-RPC; nothing here
-        // may buffer without a bound before consent has even run.
-        finish();
-      }
-    };
-
-    child.onExit(() => finish());
-    socket.on('error', () => undefined);
-    socket.on('end', finish);
-    socket.on('close', finish);
-    socket.on('data', (chunk: Buffer) => onText(decoder.write(chunk)));
-    onText(decoder.write(initial));
-  });
-}
-
 export interface ConnectionDeps {
   http: AgentContext;
-  raw: RawMcpDeps;
   readTimeoutMs?: number;
 }
 
-/** Serves one accepted connection: sniffs the protocol, then dispatches. */
+/** Serves one accepted HTTP connection. */
 export function serveConnection(
   socket: Duplex,
   deps: ConnectionDeps,
 ): Promise<void> {
   return new Promise((resolve) => {
     let buffer = Buffer.alloc(0);
-    let mode: 'sniffing' | 'http' | 'dispatched' = 'sniffing';
+    let dispatched = false;
     const timer = setTimeout(() => {
-      if (mode === 'dispatched') return;
-      mode = 'dispatched';
+      if (dispatched) return;
+      dispatched = true;
       socket.destroy();
       resolve();
     }, deps.readTimeoutMs ?? 10_000);
@@ -522,39 +392,28 @@ export function serveConnection(
     };
 
     const onData = (chunk: Buffer) => {
-      if (mode === 'dispatched') return;
+      if (dispatched) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (mode === 'sniffing') {
-        const start = buffer.toString('latin1').trimStart();
-        if (start.startsWith('{')) {
-          mode = 'dispatched';
-          clearTimeout(timer);
-          socket.off('data', onData);
-          void serveRawMcp(socket, buffer, deps.raw).then(resolve);
-          return;
-        }
-        if (buffer.length < 8 && !buffer.includes(0x0a)) return;
-        if (!looksLikeHttp(buffer)) {
-          mode = 'dispatched';
-          clearTimeout(timer);
-          socket.destroy();
-          resolve();
-          return;
-        }
-        mode = 'http';
+      if (buffer.length < 8 && !buffer.includes(0x0a)) return;
+      if (!looksLikeHttp(buffer)) {
+        dispatched = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve();
+        return;
       }
       const parsed = parseHttpRequest(buffer);
       if (parsed.kind === 'incomplete') return;
-      mode = 'dispatched';
+      dispatched = true;
       clearTimeout(timer);
       socket.off('data', onData);
-      void dispatchHttp(parsed).then(resolve);
+      void dispatchHttp(parsed).then(resolve, resolve);
     };
 
     socket.on('error', () => undefined);
     socket.on('close', () => {
-      if (mode === 'dispatched') return;
-      mode = 'dispatched';
+      if (dispatched) return;
+      dispatched = true;
       clearTimeout(timer);
       resolve();
     });

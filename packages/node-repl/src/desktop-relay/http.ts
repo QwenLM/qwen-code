@@ -27,7 +27,7 @@ export type ParseResult =
 const MAX_REQUEST_BYTES = 64 * 1024;
 const REQUEST_LINE = /^([A-Z]+) (\S+) HTTP\/1\.[01]$/;
 
-/** Tells an HTTP request line from a raw JSON-RPC stream by its first bytes. */
+/** Rejects non-HTTP input once enough request-line bytes have arrived. */
 export function looksLikeHttp(prefix: Buffer): boolean {
   return /^[A-Z]{3,7} /.test(prefix.subarray(0, 8).toString('latin1'));
 }

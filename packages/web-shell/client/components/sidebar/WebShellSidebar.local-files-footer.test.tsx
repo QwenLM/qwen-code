@@ -294,6 +294,14 @@ describe('desktop relay footer entry', () => {
     renderSidebar();
     expect(desktopRelayTrigger()).toBeNull();
   });
+
+  it('is withheld when the selected daemon is not the page origin', () => {
+    workspace.baseUrl = 'https://remote.example';
+    workspace.capabilities = { features: ['client_mcp_over_ws'] };
+    renderSidebar();
+    expect(desktopRelayTrigger()).toBeNull();
+    expect(probeDesktopRelay).not.toHaveBeenCalled();
+  });
 });
 
 it('withholds browser-local files on a remote daemon for standalone and embedded hosts alike', () => {

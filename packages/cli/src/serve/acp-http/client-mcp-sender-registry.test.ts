@@ -83,6 +83,38 @@ describe('session-scoped client MCP lifetime', () => {
     expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledTimes(1);
   });
 
+  it('re-subscribes after subscriber eviction and waits for session close', async () => {
+    const { registry, bridge, frames, connect, register } = setup();
+    let closeSession: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      closeSession = resolve;
+    });
+    bridge.subscribeEvents
+      .mockImplementationOnce(async function* () {
+        yield { v: 1 as const, type: 'client_evicted', data: {} };
+      })
+      .mockImplementationOnce(async function* () {
+        await closed;
+        yield { v: 1 as const, type: 'session_closed', data: {} };
+      });
+    const connection = connect('desktop');
+
+    expect(await register(connection)).toMatchObject({ kind: 'registered' });
+    await vi.waitFor(() =>
+      expect(bridge.subscribeEvents).toHaveBeenCalledTimes(2),
+    );
+    expect(registry.hasSession('desktop-node-repl', 'session-1')).toBe(true);
+    expect(frames).toEqual([]);
+
+    closeSession?.();
+    await vi.waitFor(() =>
+      expect(registry.hasSession('desktop-node-repl', 'session-1')).toBe(false),
+    );
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'mcp_error', code: 'session_closed' }),
+    ]);
+  });
+
   it.each(['unregister', 'dispose'] as const)(
     'releases the non-voting hold on %s without reporting a session failure',
     async (action) => {

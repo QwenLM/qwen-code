@@ -294,10 +294,5 @@ export async function runAgent(home: string): Promise<void> {
       },
       startRelay: (request) => runRelay(request, home, store),
     },
-    raw: {
-      spawnChild: () => spawnNodeRepl(home),
-      askConsent: (message) => askConsent(message),
-      notify: (message) => notify(message),
-    },
   });
 }

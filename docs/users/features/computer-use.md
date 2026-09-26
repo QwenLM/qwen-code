@@ -106,11 +106,6 @@ starts a short-lived process only when something connects.
   `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`, and the Web Shell must be a secure page
   (https, or `http://localhost` through an SSH tunnel). In a session, choose
   **Use this computer** in the sidebar footer, then **Connect this computer**.
-- **From a terminal over SSH.** Add a `RemoteForward` from a socket on the remote
-  machine to `127.0.0.1:47821`, then register the forwarded socket as the remote
-  `desktop-node-repl` server, keeping any existing `node-repl` configuration. See the
-  [`@qwen-code/node-repl-mcp` README](https://github.com/QwenLM/qwen-code/tree/main/packages/node-repl#desktop-relay)
-  for the exact lines.
 
 A dialog on your computer asks you to allow every connection. An allowed session
 can run code on your computer with your permissions and see and control its

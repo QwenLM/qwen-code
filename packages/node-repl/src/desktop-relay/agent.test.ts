@@ -11,14 +11,10 @@ import {
   handleHttpRequest,
   parseConnectBody,
   serveConnection,
-  serveRawMcp,
   type AgentContext,
-  type RawMcpDeps,
   type RelayRecord,
 } from './agent.js';
-import { MAX_RAW_REQUEST_BYTES } from './constants.js';
 import type { HttpRequest } from './http.js';
-import type { ChildChannel, JsonRpcMessage } from './mcp-child-relay.js';
 
 const ORIGIN = 'https://devbox.example:4170';
 const HOST = '127.0.0.1:47821';
@@ -114,6 +110,26 @@ describe('handleHttpRequest', () => {
       { daemonUrl: `${ORIGIN}/`, sessionId: 'session-1', token: 'secret' },
       ORIGIN,
     );
+  });
+
+  it('records a relay startup failure after returning the accepted response', async () => {
+    const { ctx, record } = context({
+      startRelay: vi.fn(async () => {
+        throw new Error('cannot start relay');
+      }),
+    });
+    const outcome = await handleHttpRequest(
+      req('POST', '/connect', { origin: ORIGIN }, connectBody),
+      ctx,
+    );
+
+    expect(outcome.status).toBe(202);
+    await expect(outcome.after?.()).resolves.toBeUndefined();
+    expect(record()).toMatchObject({
+      pid: null,
+      phase: 'failed',
+      message: 'cannot start relay',
+    });
   });
 
   it('reports a declined request and starts nothing', async () => {
@@ -263,35 +279,6 @@ describe('parseConnectBody / consentMessage', () => {
   });
 });
 
-class FakeChild implements ChildChannel {
-  readonly sent: JsonRpcMessage[] = [];
-  private listener: ((message: unknown) => void) | undefined;
-  private readonly exitListeners: Array<(reason: string) => void> = [];
-  send(message: JsonRpcMessage): void {
-    this.sent.push(message);
-    // Answer requests like node_repl would.
-    if (typeof message.id === 'number') {
-      const id = message.id;
-      queueMicrotask(() =>
-        this.listener?.({
-          jsonrpc: '2.0',
-          id,
-          result: { method: message.method },
-        }),
-      );
-    }
-  }
-  onMessage(listener: (message: unknown) => void): void {
-    this.listener = listener;
-  }
-  onExit(listener: (reason: string) => void): void {
-    this.exitListeners.push(listener);
-  }
-  close(): void {
-    for (const listener of this.exitListeners) listener('closed');
-  }
-}
-
 class MemorySocket extends Duplex {
   readonly written: string[] = [];
   override _read(): void {
@@ -307,138 +294,12 @@ class MemorySocket extends Duplex {
   }
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
-
-describe('serveRawMcp', () => {
-  function raw(allowed: boolean) {
-    const deps: RawMcpDeps = {
-      spawnChild: () => new FakeChild(),
-      askConsent: vi.fn(async () => allowed),
-      notify: vi.fn(async () => undefined),
-    };
-    const socket = new MemorySocket();
-    const done = serveRawMcp(socket, Buffer.alloc(0), deps);
-    const send = (message: unknown) =>
-      socket.push(`${JSON.stringify(message)}\n`);
-    const replies = () =>
-      socket.written
-        .join('')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as JsonRpcMessage);
-    return { deps, socket, done, send, replies };
-  }
-
-  it('serves the handshake without asking and asks on the first tools/call', async () => {
-    const h = raw(true);
-    h.send({ jsonrpc: '2.0', id: 1, method: 'initialize' });
-    h.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-    await settle();
-    expect(h.deps.askConsent).not.toHaveBeenCalled();
-    h.send({ jsonrpc: '2.0', id: 3, method: 'tools/call' });
-    h.send({ jsonrpc: '2.0', id: 4, method: 'tools/call' });
-    await settle();
-    expect(h.deps.askConsent).toHaveBeenCalledTimes(1);
-    expect(h.replies().map((r) => r.id)).toEqual([1, 2, 3, 4]);
-    h.socket.push(null);
-    await h.done;
-  });
-
-  it('answers every tools/call with a refusal once declined', async () => {
-    const h = raw(false);
-    h.send({ jsonrpc: '2.0', id: 3, method: 'tools/call' });
-    await settle();
-    expect(h.replies()).toEqual([
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        error: {
-          code: -32001,
-          message: 'The person at this computer declined remote use of it.',
-        },
-      },
-    ]);
-    h.socket.push(null);
-    await h.done;
-  });
-
-  it('drops a connection that buffers past the request budget without a newline', async () => {
-    const h = raw(true);
-    h.socket.push('{"jsonrpc":"2.0","method":"tools/list","id":');
-    h.socket.push('1'.repeat(MAX_RAW_REQUEST_BYTES));
-    // No consent prompt, no reply: the stream is not line-delimited JSON-RPC.
-    await h.done;
-    expect(h.deps.askConsent).not.toHaveBeenCalled();
-    expect(h.replies()).toEqual([]);
-  });
-
-  it('drops a tools/call cancelled while its approval dialog is open', async () => {
-    const child = new FakeChild();
-    let answerConsent: ((allowed: boolean) => void) | undefined;
-    const deps: RawMcpDeps = {
-      spawnChild: () => child,
-      askConsent: vi.fn(
-        () =>
-          new Promise<boolean>((resolve) => {
-            answerConsent = resolve;
-          }),
-      ),
-      notify: vi.fn(async () => undefined),
-    };
-    const socket = new MemorySocket();
-    const done = serveRawMcp(socket, Buffer.alloc(0), deps);
-    socket.push(
-      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"node_repl","arguments":{"code":"1"}}}\n',
-    );
-    socket.push(
-      '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}\n',
-    );
-    await settle();
-    answerConsent?.(true);
-    await settle();
-    expect(child.sent.filter((m) => m.method === 'tools/call')).toEqual([]);
-    socket.push(null);
-    await done;
-  });
-
-  it('forwards a tools/call approved before any cancellation arrives', async () => {
-    const child = new FakeChild();
-    let answerConsent: ((allowed: boolean) => void) | undefined;
-    const deps: RawMcpDeps = {
-      spawnChild: () => child,
-      askConsent: vi.fn(
-        () =>
-          new Promise<boolean>((resolve) => {
-            answerConsent = resolve;
-          }),
-      ),
-      notify: vi.fn(async () => undefined),
-    };
-    const socket = new MemorySocket();
-    const done = serveRawMcp(socket, Buffer.alloc(0), deps);
-    socket.push(
-      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"node_repl","arguments":{"code":"1"}}}\n',
-    );
-    await settle();
-    answerConsent?.(true);
-    await settle();
-    expect(child.sent.map((m) => m.method)).toEqual(['tools/call']);
-    socket.push(null);
-    await done;
-  });
-});
-
 describe('serveConnection', () => {
   it('answers an HTTP request and closes', async () => {
     const { ctx } = context();
     const socket = new MemorySocket();
     const done = serveConnection(socket, {
       http: ctx,
-      raw: {
-        spawnChild: () => new FakeChild(),
-        askConsent: async () => false,
-        notify: async () => undefined,
-      },
     });
     socket.push(
       `GET /status HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\n\r\n`,

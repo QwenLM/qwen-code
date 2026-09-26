@@ -135,24 +135,6 @@ until something connects, and each connection gets its own short-lived process.
   footer. A native dialog on this computer asks for approval; once allowed, the
   relay starts `node_repl` here and registers it for that one session over the
   daemon's reverse tool channel. Disconnect from the same entry.
-- **Terminal over SSH.** Forward a socket on the remote machine to the relay
-  port, then point the remote Qwen Code at it:
-
-  ```text
-  # ~/.ssh/config on this computer
-  Host devbox
-    RemoteForward /home/you/.qwen/desktop-relay.sock 127.0.0.1:47821
-    StreamLocalBindUnlink yes
-  ```
-
-  ```bash
-  # on the remote machine
-  qwen mcp add --scope user desktop-node-repl npx -y @qwen-code/node-repl-mcp@latest \
-    desktop-relay socket /home/you/.qwen/desktop-relay.sock
-  ```
-
-  The approval dialog appears on the first tool call, not when the remote
-  session starts.
 
 An approved session can run code on this computer with your permissions and see
 and control its screen, exactly as a local `node_repl` can. Every connection is

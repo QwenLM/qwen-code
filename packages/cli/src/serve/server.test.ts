@@ -4309,6 +4309,32 @@ describe('createServeApp', () => {
       },
     );
 
+    it('mints a one-time desktop relay credential without making it a bearer token', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'runtime-secret', clientMcpOverWs: true },
+        undefined,
+        { webShellDir },
+      );
+      const issued = await request(app)
+        .post('/desktop-relay/credential')
+        .set('Host', host)
+        .set('Authorization', 'Bearer runtime-secret')
+        .send({
+          sessionId: 'session-1',
+          workspace: { kind: 'cwd', value: '/work/project' },
+        });
+      expect(issued.status).toBe(200);
+      expect(issued.headers['cache-control']).toBe('no-store');
+      expect(issued.body.credential).toEqual(expect.any(String));
+
+      const bearerReplay = await request(app)
+        .post('/desktop-relay/credential')
+        .set('Host', host)
+        .set('Authorization', `Bearer ${issued.body.credential}`)
+        .send({ sessionId: 'session-1' });
+      expect(bearerReplay.status).toBe(401);
+    });
+
     it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)

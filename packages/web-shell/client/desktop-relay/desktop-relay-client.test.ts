@@ -98,27 +98,65 @@ describe('connectDesktopRelay', () => {
   };
 
   it('posts the request as JSON and reports acceptance', async () => {
-    const fetchImpl = respond(202, { ok: true });
+    const fetchImpl = vi.fn<FetchLike>(async (input) =>
+      input.includes('/desktop-relay/credential')
+        ? new Response(JSON.stringify({ credential: 'scoped' }), {
+            status: 200,
+          })
+        : new Response(JSON.stringify({ ok: true }), { status: 202 }),
+    );
     await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
       ok: true,
     });
-    const init = fetchImpl.mock.calls[0]?.[1];
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe('http://127.0.0.1:47821/connect');
-    expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual(request);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe(
+      'https://devbox:4170/desktop-relay/credential',
+    );
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual({
+      authorization: 'Bearer t',
+      'content-type': 'application/json',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      sessionId: 's1',
+      workspace: { kind: 'cwd', value: '/w' },
+    });
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe('http://127.0.0.1:47821/connect');
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      ...request,
+      token: 'scoped',
+    });
   });
 
   it('passes on the refusal code', async () => {
-    await expect(
-      connectDesktopRelay(request, respond(403, { ok: false, code: 'denied' })),
-    ).resolves.toEqual({ ok: false, code: 'denied' });
+    const fetchImpl = vi.fn<FetchLike>(async (input) =>
+      input.includes('/desktop-relay/credential')
+        ? new Response(JSON.stringify({ credential: 'scoped' }))
+        : new Response(JSON.stringify({ ok: false, code: 'denied' }), {
+            status: 403,
+          }),
+    );
+    await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
+      ok: false,
+      code: 'denied',
+    });
+  });
+
+  it('does not send the daemon token when credential minting fails', async () => {
+    const fetchImpl = respond(401, { error: 'Unauthorized' });
+    await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
+      ok: false,
+      code: 'credential_failed',
+      message: 'Unauthorized',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('reports an unreachable relay', async () => {
     const refused = vi.fn<FetchLike>(async () => {
       throw new TypeError('Failed to fetch');
     });
-    await expect(connectDesktopRelay(request, refused)).resolves.toEqual({
+    await expect(
+      connectDesktopRelay({ ...request, token: undefined }, refused),
+    ).resolves.toEqual({
       ok: false,
       code: 'unreachable',
       message: 'Failed to fetch',

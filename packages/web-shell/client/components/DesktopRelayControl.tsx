@@ -188,6 +188,23 @@ function sameUrl(a: string, b: string): boolean {
   }
 }
 
+function isLiveProbe(probe: DesktopRelayProbe | undefined): boolean {
+  const phase = probe?.kind === 'ready' ? probe.active?.phase : undefined;
+  return (
+    phase === 'connecting' || phase === 'registering' || phase === 'connected'
+  );
+}
+
+export function retainLiveDesktopRelayProbe(
+  previous: DesktopRelayProbe | undefined,
+  next: DesktopRelayProbe,
+): DesktopRelayProbe {
+  if (next.kind !== 'ready' && previous && isLiveProbe(previous)) {
+    return previous;
+  }
+  return next;
+}
+
 /** Maps what the relay reports onto what this session can do next. */
 export function deriveDesktopRelayStatus(input: {
   blocker: DesktopRelayBlocker | undefined;
@@ -442,7 +459,8 @@ export function DesktopRelayControl({
   });
 
   const refresh = useCallback(async () => {
-    setProbe(await probeDesktopRelay());
+    const next = await probeDesktopRelay();
+    setProbe((previous) => retainLiveDesktopRelayProbe(previous, next));
   }, []);
 
   // Probe only when someone looks, or while a connection is live: an
@@ -492,6 +510,7 @@ export function DesktopRelayControl({
   const disconnect = useCallback(async () => {
     setError(undefined);
     await disconnectDesktopRelay();
+    setProbe(undefined);
     await refresh();
   }, [refresh]);
 

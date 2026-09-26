@@ -2302,6 +2302,63 @@ export function createServeApp(
     });
   }
 
+  if (opts.clientMcpOverWs === true) {
+    app.post('/desktop-relay/credential', (req, res) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      const body = req.body as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+      const { sessionId, workspace } = body as Record<string, unknown>;
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        sessionId.length > 4_096
+      ) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+
+      let acpPath = '/acp';
+      if (workspace !== undefined) {
+        if (
+          workspace === null ||
+          typeof workspace !== 'object' ||
+          Array.isArray(workspace)
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        const selector = workspace as Record<string, unknown>;
+        if (
+          (selector['kind'] !== 'id' && selector['kind'] !== 'cwd') ||
+          typeof selector['value'] !== 'string' ||
+          selector['value'].length === 0 ||
+          selector['value'].length > 4_096
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        acpPath = `/workspaces/${encodeURIComponent(selector['value'])}/acp`;
+      }
+
+      const credential = credentials.createDesktopRelayCredential({
+        acpPath,
+        sessionId,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      if (!credential) {
+        res.status(429).json({ error: 'credential_limit' });
+        return;
+      }
+      res.json({ credential });
+    });
+  }
+
   // Mutation-route gate factory. Trusted primary loopback requests have
   // operator authority; strict routes otherwise require verified credentials.
   const mutate = createMutationGate({

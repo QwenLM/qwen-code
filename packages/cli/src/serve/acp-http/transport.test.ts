@@ -11856,6 +11856,8 @@ describe('ACP WebSocket transport security', () => {
   let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
+  let credentialStore: CredentialStore | undefined;
+  let desktopRelayCredential: string | undefined;
 
   beforeEach(() => {
     previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
@@ -11876,6 +11878,7 @@ describe('ACP WebSocket transport security', () => {
       webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      desktopRelaySessionId?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -11884,9 +11887,18 @@ describe('ACP WebSocket transport security', () => {
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
       const credentials =
-        opts.localControlToken || opts.webShellToken
+        opts.localControlToken ||
+        opts.webShellToken ||
+        opts.desktopRelaySessionId
           ? new CredentialStore(opts.token)
           : undefined;
+      credentialStore = credentials;
+      desktopRelayCredential = opts.desktopRelaySessionId
+        ? credentials!.createDesktopRelayCredential({
+            acpPath: '/acp',
+            sessionId: opts.desktopRelaySessionId,
+          })
+        : undefined;
       if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
@@ -11916,6 +11928,7 @@ describe('ACP WebSocket transport security', () => {
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -12052,6 +12065,97 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
+  it('limits a desktop relay credential to one ACP connection, client, server, and session', async () => {
+    await startServer({
+      token: 'runtime-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const credential = desktopRelayCredential!;
+    const ws = await wsConnect({
+      headers: { Authorization: `Bearer ${credential}` },
+    });
+
+    await expect(
+      sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+        },
+      }),
+    ).resolves.toMatchObject({ result: expect.any(Object) });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'other-session',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'other-server',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'not_wired' });
+
+    const replay = await wsConnectRaw('127.0.0.1', undefined, {
+      Authorization: `Bearer ${credential}`,
+    });
+    expect(replay.code).toBe(401);
+
+    const wrongClientCredential = credentialStore!.createDesktopRelayCredential(
+      {
+        acpPath: '/acp',
+        sessionId: 'session-1',
+      },
+    )!;
+    const wrongClient = await wsConnect({
+      headers: { Authorization: `Bearer ${wrongClientCredential}` },
+    });
+    await expect(
+      sendRpc(wrongClient, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { clientInfo: { name: 'other-client', version: '1.0.0' } },
+      }),
+    ).resolves.toMatchObject({ error: { code: -32600 } });
+
+    const frameOnlyCredential = credentialStore!.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+    const frameOnly = await wsConnect({
+      headers: { Authorization: `Bearer ${frameOnlyCredential}` },
+    });
+    await sendRpc(frameOnly, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+      },
+    });
+    const closed = new Promise<number>((resolve) =>
+      frameOnly.once('close', (code) => resolve(code)),
+    );
+    frameOnly.send(
+      JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'session/new' }),
+    );
+    await expect(closed).resolves.toBe(1008);
+    ws.close();
+    wrongClient.close();
+  });
+
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);

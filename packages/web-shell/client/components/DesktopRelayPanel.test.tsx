@@ -14,6 +14,7 @@ import type { WebShellLanguage } from '../i18n';
 import {
   DesktopRelayPanel,
   deriveDesktopRelayStatus,
+  retainLiveDesktopRelayProbe,
   type DesktopRelayStatus,
 } from './DesktopRelayControl';
 
@@ -227,5 +228,32 @@ describe('deriveDesktopRelayStatus', () => {
         probe: { kind: 'permission-required' },
       }),
     ).toEqual({ phase: 'permission-required' });
+  });
+});
+
+describe('retainLiveDesktopRelayProbe', () => {
+  const live = {
+    kind: 'ready' as const,
+    version: '0.1.6',
+    active: {
+      sessionId: 's1',
+      daemonUrl: 'https://devbox:4170/',
+      phase: 'connected' as const,
+    },
+  };
+
+  it.each([
+    { kind: 'missing' as const },
+    { kind: 'permission-required' as const },
+  ])(
+    'keeps a live revocation target across an inconclusive $kind probe',
+    (next) => {
+      expect(retainLiveDesktopRelayProbe(live, next)).toBe(live);
+    },
+  );
+
+  it('accepts a conclusive ready probe that reports no active relay', () => {
+    const idle = { kind: 'ready' as const, version: '0.1.6' };
+    expect(retainLiveDesktopRelayProbe(live, idle)).toBe(idle);
   });
 });

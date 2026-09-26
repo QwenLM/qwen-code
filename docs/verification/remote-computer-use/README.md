@@ -1,7 +1,7 @@
 # 验证：远程会话经 launchd 中继使用本地桌面机（本轮：macOS）
 
-> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）；交接见 `docs/plans/2026-09-14-remote-computer-use-handoff.md`。
-> 状态（2026-09-25）：真实 Linux Serve → 用户原生授权 → Mac 文稿读写与裁剪截图 → 会话切换保持 → 断开撤销的核心流程已通过，见 `results.md`。连续 GUI 输入取消、Safari、跨机 SSH raw MCP 和全新 Mac 首次安装尚未完整验收；本文未被结果明确覆盖的“预期”仍不是实测结论。HTTP + IP 接入引导另见 #12696。
+> 关联：PR #11799；方案见 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md`（§6 列出了本文要回答的未验证项）。
+> 状态（2026-09-26）：真实 Linux Serve → 用户原生授权 → Mac 文稿读写与裁剪截图 → 会话切换保持 → 断开撤销的核心流程已通过，最终候选的受限凭证和失败路径也已完成自动化复核，见 `results.md`。连续 GUI 输入取消、Safari 和全新 Mac 首次安装尚未完整验收；本文未被结果明确覆盖的“预期”仍不是实测结论。HTTP + IP 接入引导另见 #12696。
 > 需要：一台 Mac（Chrome，最好再有 Safari），Node 22；一台能从 Mac 用 SSH 连到的 Linux 开发机。两边都要能构建本 PR。
 > 出了问题先看文末的 **F. 排查手册**。
 
@@ -81,6 +81,9 @@ Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http
 
 1. 新建会话。侧边栏底部点显示器图标（“Use this computer”）。预期状态：Not connected。如果显示 Browser permission required，先核对权限是否明确 denied，再由用户在站点设置中处理。权限为 prompt 不能证明弹窗已出现。如果显示 Relay not detected，记录浏览器控制台的具体错误，尤其检查 CSP 是否阻止固定中继地址；不要直接认定未安装或未授权。另起一个未设 `QWEN_SERVE_CLIENT_MCP_OVER_WS` 的普通 daemon，确认 standalone 默认不显示此入口。
 2. 点 **Connect this computer**。预期：状态变为 Waiting for approval，桌面弹出确认框。点 Allow。预期：状态变为 Connecting…，随后 Connected；系统通知“is now using this computer”。
+
+   安全检查：浏览器应先向当前 daemon 的 `/desktop-relay/credential` 发送完整 bearer，再只把返回的一次性凭证发给 `127.0.0.1:47821`；本机 `/connect` 请求体中不得出现完整 daemon bearer。
+
 3. 在同一会话里输入（保持默认审批模式）：
 
    > 用 computer use 在我的 Mac 上打开“文本编辑”，新建一个不保存的测试文稿，内容写 hello from remote。不要打开已有文稿或访问私人内容。每一步操作之后都重新读取界面状态，确认结果。
@@ -98,26 +101,6 @@ Mac：`ssh -N -L 4170:127.0.0.1:<端口> devbox`，然后在 Chrome 打开 `http
 6. 回到原会话点 **Disconnect**。预期：状态回到 Not connected；再让模型调用 `node_repl` 时得到明确错误；`pgrep -fl desktop-relay` 无输出。
 7. 再连一次后，在开发机上重启 `qwen serve`。预期：中继结束（不重连），面板显示连接已关闭。
 8. 用 Safari 重复第 1–2 步，记录差异。
-
-## D. SSH 终端路径
-
-Mac 的 `~/.ssh/config`：
-
-```text
-Host devbox
-  RemoteForward /home/<you>/.qwen/desktop-relay.sock 127.0.0.1:47821
-  StreamLocalBindUnlink yes
-```
-
-开发机（用本 PR 构建的 node-repl，路径按实际修改）：
-
-```bash
-qwen mcp add --scope user node-repl node /path/to/qwen-code/packages/node-repl/dist/index.js \
-  desktop-relay socket /home/<you>/.qwen/desktop-relay.sock
-qwen
-```
-
-预期：启动 qwen 时 Mac 上**不**弹框；第一次调用 computer use 时弹框。Allow 后跑第 C.3 步的任务。再开一次 qwen，这次点 Deny，预期模型收到 “declined remote use” 的错误。断开 SSH 后，记录 qwen 里的表现。
 
 ## E. 清理
 
@@ -159,18 +142,17 @@ log show --last 5m --predicate 'process == "osascript"' | tail -20  # 确认框/
 
 写进同一目录下的 `results.md`，推到 PR #11799 的分支（追加提交，不要 force-push），再在 PR 里留一条评论。
 
-| 项                                                                 | 结果 |
-| ------------------------------------------------------------------ | ---- |
-| macOS 版本 / 芯片 / 屏幕分辨率；Chrome 与 Safari 版本              |      |
-| A：安装输出；`launchctl print`、`lsof`、`pgrep` 的结果             |      |
-| B：五个请求的结果和耗时；对话框表现；`agent.log` 的报错            |      |
-| C.1–2：各状态是否按预期出现；Chrome 是否弹出本地网络权限提示       |      |
-| C.3：是否 bootstrap；授权记在谁名下；任务结果；三次调用耗时        |      |
-| C.3 取消：点停止后又多出了几个数字；桌面停下来用了多久             |      |
-| C.4：截图结果与分辨率                                              |      |
-| C.5–7：其他会话、断开、daemon 重启时的表现                         |      |
-| C.8：Safari 的差异                                                 |      |
-| D：启动时是否弹框；首次 `tools/call` 的确认；Deny 的错误；断开表现 |      |
+| 项                                                           | 结果 |
+| ------------------------------------------------------------ | ---- |
+| macOS 版本 / 芯片 / 屏幕分辨率；Chrome 与 Safari 版本        |      |
+| A：安装输出；`launchctl print`、`lsof`、`pgrep` 的结果       |      |
+| B：五个请求的结果和耗时；对话框表现；`agent.log` 的报错      |      |
+| C.1–2：各状态是否按预期出现；Chrome 是否弹出本地网络权限提示 |      |
+| C.3：是否 bootstrap；授权记在谁名下；任务结果；三次调用耗时  |      |
+| C.3 取消：点停止后又多出了几个数字；桌面停下来用了多久       |      |
+| C.4：截图结果与分辨率                                        |      |
+| C.5–7：其他会话、断开、daemon 重启时的表现                   |      |
+| C.8：Safari 的差异                                           |      |
 
 ## 本次验证可能推翻的结论
 

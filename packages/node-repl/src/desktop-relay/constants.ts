@@ -9,8 +9,7 @@ import path from 'node:path';
 
 /**
  * Loopback port launchd listens on. The Web Shell dials the same number
- * (`packages/web-shell/client/desktop-relay/desktop-relay-client.ts`), and an
- * SSH `RemoteForward` targets it for terminal sessions.
+ * (`packages/web-shell/client/desktop-relay/desktop-relay-client.ts`).
  */
 export const DESKTOP_RELAY_PORT = 47821;
 
@@ -31,14 +30,6 @@ export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.20.11';
  * `mcp_message` envelope around a reply.
  */
 export const MAX_RELAYED_REPLY_BYTES = 9 * 1024 * 1024;
-
-/**
- * Bound on the unterminated bytes one raw JSON-RPC connection may buffer
- * before a newline arrives; the HTTP sibling bounds a whole request at 64 KiB
- * (`MAX_REQUEST_BYTES` in http.ts). A peer that never sends a newline is not
- * speaking this protocol, so the connection is dropped past this.
- */
-export const MAX_RAW_REQUEST_BYTES = 64 * 1024;
 
 /**
  * Below the daemon's 30 s per-message round-trip limit on the reverse channel

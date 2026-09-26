@@ -55,10 +55,10 @@ describe('parseHttpRequest', () => {
 });
 
 describe('looksLikeHttp', () => {
-  it('tells a request line from a JSON-RPC stream', () => {
+  it('tells an HTTP request line from other input', () => {
     expect(looksLikeHttp(request('OPTIONS /connect HTTP/1.1'))).toBe(true);
     expect(looksLikeHttp(request('GET /status HTTP/1.1'))).toBe(true);
-    expect(looksLikeHttp(request('{"jsonrpc":"2.0"'))).toBe(false);
+    expect(looksLikeHttp(request('not-http'))).toBe(false);
   });
 });
 
