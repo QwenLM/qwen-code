@@ -4272,6 +4272,7 @@ async function runQwenServeImpl(
    * that "was not restored".
    */
   const startupChannelsForWorkspace = (workspaceCwd: string): string[] => {
+    if (opts.profile === 'hosted-harness') return [];
     const restored = resolveStartupChannelSelection({
       // Never the primary workspace, and read from disk rather than from the
       // boot snapshot: this runs long after boot, and the file may have been
@@ -4286,6 +4287,7 @@ async function runQwenServeImpl(
     return restored.selection?.mode === 'names' ? restored.selection.names : [];
   };
   if (
+    opts.profile !== 'hosted-harness' &&
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
       startupChannelWorkspaces.length > 1)
@@ -8214,7 +8216,7 @@ async function runQwenServeImpl(
       // The real long-running daemon keeps scheduled-task sessions resident
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
-      manageScheduledTaskSessions: true,
+      manageScheduledTaskSessions: opts.profile !== 'hosted-harness',
       currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,

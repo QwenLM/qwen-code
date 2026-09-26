@@ -26,7 +26,13 @@ const input = {
   signal: new AbortController().signal,
 };
 
-function config(events: Array<{ type: LlmEventType; value?: unknown }>) {
+function config(
+  events: Array<{
+    type: LlmEventType;
+    value?: unknown;
+    isContinuation?: boolean;
+  }>,
+) {
   const tools = new Set(['run_shell_command']);
   const unregisterTool = vi.fn((name: string) => tools.delete(name));
   const setTools = vi.fn(async () => undefined);
@@ -84,5 +90,43 @@ describe('Hosted Harness model boundary', () => {
       'refused a tool call',
     );
     expect(hooks.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it('discards abandoned output after a fresh retry or model fallback', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'first attempt' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'second attempt' },
+      { type: LlmEventType.ModelFallback },
+      { type: LlmEventType.Content, value: 'final answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+      text: 'final answer',
+    });
+  });
+
+  it('keeps output across a continuation and accepts chat compaction', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'first' },
+      { type: LlmEventType.Retry, isContinuation: true },
+      { type: LlmEventType.ChatCompressed },
+      { type: LlmEventType.Content, value: ' second' },
+      { type: LlmEventType.Finished },
+    ]);
+    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+      text: 'first second',
+    });
+  });
+
+  it('keeps a completed answer when config cleanup fails', async () => {
+    const hooks = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    hooks.shutdown.mockRejectedValueOnce(new Error('cleanup failed'));
+    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+      text: 'answer',
+    });
   });
 });

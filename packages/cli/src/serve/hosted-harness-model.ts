@@ -9,6 +9,7 @@ import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export interface HostedHarnessModelResult {
   text: string;
@@ -105,7 +106,11 @@ export async function runHostedHarnessTextTurn(input: {
     )) {
       if (event.type === LlmEventType.Content) text += event.value;
       else if (event.type === LlmEventType.Finished) finished = true;
-      else if (
+      else if (event.type === LlmEventType.Retry) {
+        if (!event.isContinuation) text = '';
+      } else if (event.type === LlmEventType.ModelFallback) {
+        text = '';
+      } else if (
         event.type === LlmEventType.ToolCallRequest ||
         event.type === LlmEventType.ToolCallConfirmation ||
         event.type === LlmEventType.ToolCallResponse
@@ -116,10 +121,9 @@ export async function runHostedHarnessTextTurn(input: {
       } else if (event.type === LlmEventType.UserCancelled) {
         throw new Error('Hosted Harness turn was cancelled.');
       } else if (
+        event.type !== LlmEventType.ChatCompressed &&
         event.type !== LlmEventType.Thought &&
-        event.type !== LlmEventType.Citation &&
-        event.type !== LlmEventType.Retry &&
-        event.type !== LlmEventType.ModelFallback
+        event.type !== LlmEventType.Citation
       ) {
         throw new Error(
           'Hosted Harness model returned an unsupported continuation.',
@@ -129,9 +133,15 @@ export async function runHostedHarnessTextTurn(input: {
     if (!finished) throw new Error('Hosted Harness model turn did not finish.');
     return { text, model: config.getModel() };
   } finally {
-    await config.shutdown({
-      shutdownTelemetry: false,
-      strictResourceCleanup: true,
-    });
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness model cleanup failed: ${String(cause)}`,
+      );
+    }
   }
 }

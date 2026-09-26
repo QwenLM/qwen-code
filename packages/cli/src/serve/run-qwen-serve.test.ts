@@ -5886,6 +5886,48 @@ describe('runQwenServe telemetry validation', () => {
 });
 
 describe('runQwenServe deployment profiles', () => {
+  it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
+    );
+    fs.mkdirSync(path.join(workspace, '.qwen'));
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    const createApp = vi
+      .spyOn(serverModule, 'createServeApp')
+      .mockImplementation((...args) => originalCreateServeApp(...args));
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
+        false,
+      );
+    } finally {
+      await handle?.close();
+      createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the Hosted Harness bootstrap private until its runtime is ready', async () => {
     const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
       serveOptions: {

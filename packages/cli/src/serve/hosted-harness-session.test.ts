@@ -281,6 +281,68 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('rejects prompts whose durable user record would exceed the store limit', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const prompt = [{ type: 'text', text: 'x'.repeat(65_300) }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const rejected = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(rejected.status).toBe(413);
+    expect(state.model).not.toHaveBeenCalled();
+    const status = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', created.body.clientId as string);
+    expect(status.body.recoveryBlocked).toBe(false);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+  });
+
+  it('ends an event stream when its attachment closes', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const listener = server.listen(0);
+    try {
+      const address = listener.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const stream = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': created.body.clientId as string,
+          },
+          signal: AbortSignal.timeout(3_000),
+        },
+      );
+      expect(stream.status).toBe(200);
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(closed.status).toBe(204);
+      const reader = stream.body!.getReader();
+      let done = false;
+      while (!done) ({ done } = await reader.read());
+      expect(done).toBe(true);
+    } finally {
+      listener.close();
+    }
+  });
+
   it('logs the failure cause while keeping the public turn error generic', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')

@@ -38,6 +38,7 @@ interface HostedSession {
   managed: ManagedSession;
   clientId: string;
   cwd: string;
+  streams: Set<() => void>;
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
@@ -275,6 +276,7 @@ export function registerHostedHarnessSessionRoutes(
         managed,
         clientId: randomUUID(),
         cwd,
+        streams: new Set(),
         admissions: new Map(),
         blocked: false,
       };
@@ -347,9 +349,18 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_hosted_prompt');
     }
+    const text = prompt
+      .map((block) => (block as { text: string }).text)
+      .join('\n');
+    const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    // A parent UUID is the largest possible parentUuid in the durable record.
+    const userRecord = record(session, req.params['id'], 'user', promptId, {
+      daemonPromptId: promptId,
+      message: { role: 'user', parts: [{ text }] },
+    });
     if (
-      Buffer.byteLength(JSON.stringify(prompt)) >
-      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
+      Buffer.byteLength(JSON.stringify(userRecord)) > maxBytes
     )
       return error(res, 413, 'hosted_prompt_too_large');
     const existing = session.admissions.get(promptId);
@@ -369,9 +380,6 @@ export function registerHostedHarnessSessionRoutes(
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
-    const text = prompt
-      .map((block) => (block as { text: string }).text)
-      .join('\n');
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
@@ -495,8 +503,13 @@ export function registerHostedHarnessSessionRoutes(
     res.flushHeaders();
     let cursor = after;
     let busy = false;
+    const stop = (): void => {
+      clearInterval(timer);
+      if (!res.destroyed && !res.writableEnded) res.end();
+    };
+    session.streams.add(stop);
     const pump = async (): Promise<void> => {
-      if (busy || res.destroyed) return;
+      if (busy || res.destroyed || res.writableEnded) return;
       if (cursor >= session.managed.authority.committedSequence) return;
       busy = true;
       try {
@@ -505,27 +518,34 @@ export function registerHostedHarnessSessionRoutes(
           limit: 256,
         })) {
           const envelope = await eventEnvelope(session, event);
+          if (res.destroyed || res.writableEnded) return;
           const writable = res.write(
             `id: ${event.sequence}\nevent: ${envelope.type}\ndata: ${JSON.stringify(envelope)}\n\n`,
           );
           cursor = event.sequence;
           if (!writable) {
-            res.end();
+            stop();
             return;
           }
         }
-      } catch {
-        res.end();
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness event stream failed: ${String(cause)}`,
+        );
+        stop();
       } finally {
         busy = false;
       }
     };
-    void pump();
     const timer = setInterval(() => {
       void pump();
     }, 250);
     timer.unref();
-    res.on('close', () => clearInterval(timer));
+    res.on('close', () => {
+      clearInterval(timer);
+      session.streams.delete(stop);
+    });
+    void pump();
   });
 
   app.get('/session/:id/status', (req, res) => {
@@ -617,6 +637,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     try {
       await session.managed.close();
+      for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
     } catch {

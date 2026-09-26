@@ -5581,6 +5581,22 @@ describe('createServeApp', () => {
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
     });
 
+    it('refuses scheduled task sessions in the Hosted Harness profile', () => {
+      expect(() =>
+        createServeApp(
+          {
+            ...baseOpts,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          undefined,
+          { manageScheduledTaskSessions: true },
+        ),
+      ).toThrow('cannot manage scheduled task sessions');
+    });
+
     it('advertises workspace generation only when the primary bridge supports it', async () => {
       const supportedBridge = fakeBridge();
       supportedBridge.generateWorkspaceContent = async function* () {};

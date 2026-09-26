@@ -822,6 +822,11 @@ export function createServeApp(
   deps: ServeAppDeps = {},
 ): Application {
   validateHostedHarnessProfile(opts);
+  if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
+    throw new Error(
+      '--profile hosted-harness cannot manage scheduled task sessions.',
+    );
+  }
   if (opts.profile === 'hosted-harness') opts = { ...opts, requireAuth: true };
   if (
     (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
