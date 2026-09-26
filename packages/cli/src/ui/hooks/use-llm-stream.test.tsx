@@ -833,6 +833,34 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('shows an info notice when an @-reference is dropped', async () => {
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'hello' }],
+      shouldProceed: true,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    const { result } = renderTestHook([]);
+
+    await act(async () => {
+      await result.current.submitQuery(
+        '@missing.txt hello',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: '@missing.txt hello' },
+      );
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Skipped 1 @-reference: @missing.txt (not found)',
+      },
+      expect.any(Number),
+    );
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -7030,6 +7058,224 @@ describe('useLlmStream', () => {
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
+      expect.any(Number),
+    );
+  });
+
+  it('defers the dropped-reference notice until a steered message is accepted', async () => {
+    const steeredPrompt = 'inspect @missing.txt';
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage: vi.fn(),
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [{ text: steeredPrompt }],
+      shouldProceed: true,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+    });
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+    const noticeText = 'Skipped 1 @-reference: @missing.txt (not found)';
+
+    const { result } = renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer-notice',
+      );
+    });
+
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: 'info', text: noticeText },
+      expect.any(Number),
+    );
+
+    steerInput?.accept();
+
+    const noticeIndex = mockAddItem.mock.calls.findIndex(
+      (call) => (call[0] as { text?: string })?.text === noticeText,
+    );
+    const userIndex = mockAddItem.mock.calls.findIndex(
+      (call) => (call[0] as { text?: string })?.text === steeredPrompt,
+    );
+    expect(noticeIndex).toBeGreaterThan(-1);
+    expect(noticeIndex).toBeLessThan(userIndex);
+  });
+
+  it('shows the dropped-reference notice immediately when the steer is skipped', async () => {
+    const steeredPrompt = 'inspect @missing.txt';
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage: vi.fn(),
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: null,
+      shouldProceed: false,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+      toolDisplays: [
+        {
+          callId: 'client-read-0',
+          name: 'Read File',
+          description: '@missing.txt',
+          status: ToolCallStatus.Error,
+          resultDisplay: 'Failed to read missing.txt',
+          confirmationDetails: undefined,
+        },
+      ],
+    });
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+    const noticeText = 'Skipped 1 @-reference: @missing.txt (not found)';
+
+    const { result } = renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer-skipped',
+      );
+    });
+
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    await act(async () => {
+      await sendOptions.getSteerInput!(new AbortController().signal);
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: 'info', text: noticeText },
+      expect.any(Number),
+    );
+  });
+
+  it('never shows the dropped-reference notice for a steered message that was restored', async () => {
+    const steeredPrompt = 'inspect @missing.txt';
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage: vi.fn(),
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [{ text: steeredPrompt }],
+      shouldProceed: true,
+      droppedReferences: [{ path: 'missing.txt', reason: 'not-found' }],
+    });
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([steeredPrompt])
+      .mockReturnValue([]);
+    const noticeText = 'Skipped 1 @-reference: @missing.txt (not found)';
+
+    const { result } = renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer-restored',
+      );
+    });
+
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+
+    steerInput?.restore();
+
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: 'info', text: noticeText },
       expect.any(Number),
     );
   });

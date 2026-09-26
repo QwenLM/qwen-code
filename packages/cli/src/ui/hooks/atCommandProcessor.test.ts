@@ -11,6 +11,7 @@ import {
   handleAtCommand,
 } from './atCommandProcessor.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import * as core from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
   StandardFileSystemService,
@@ -22,6 +23,7 @@ import * as os from 'node:os';
 import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import * as fsPromises from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 
 describe('extractAtPathCommands', () => {
@@ -2555,5 +2557,304 @@ describe('handleAtCommand', () => {
       expect(result.processedQuery).toBeNull();
       expect(omniMocks.processMediaForOmniDelivery).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('dropped @-references (#8226)', () => {
+  let testRootDir: string;
+  let mockConfig: Config;
+
+  const mockOnDebugMessage: Mock<(message: string) => void> = vi.fn();
+  let abortController: AbortController;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    testRootDir = await fsPromises.realpath(
+      await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-drop-test-')),
+    );
+    abortController = new AbortController();
+    mockConfig = {
+      getTargetDir: () => testRootDir,
+      getProjectRoot: () => testRootDir,
+      isSandboxed: () => false,
+      getFileService: () => new FileDiscoveryService(testRootDir),
+      getFileFilteringRespectGitIgnore: () => true,
+      getFileFilteringRespectQwenIgnore: () => true,
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
+      getFileSystemService: () => new StandardFileSystemService(),
+      getEnableRecursiveFileSearch: vi.fn(() => true),
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: () => true,
+        getDirectories: () => [testRootDir],
+      }),
+      getMcpServers: () => ({}),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({ getPromptsByServer: () => [] }),
+      getResourceRegistry: () => ({ getResourcesByServer: () => [] }),
+      getDebugMode: () => false,
+      getFileExclusions: () => ({
+        getCoreIgnorePatterns: () => COMMON_IGNORE_PATTERNS,
+        getDefaultExcludePatterns: () => [],
+        getGlobExcludes: () => [],
+        buildExcludePatterns: () => [],
+        getReadManyFilesExcludes: () => [],
+      }),
+      getUsageStatisticsEnabled: () => false,
+      getTruncateToolOutputThreshold: () => 2500,
+      getTruncateToolOutputLines: () => 500,
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    abortController.abort();
+    await fsPromises.rm(testRootDir, { recursive: true, force: true });
+  });
+
+  it('reports a reference outside the workspace instead of dropping it silently', async () => {
+    const outsideDir = await fsPromises.realpath(
+      await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-drop-outside-')),
+    );
+    const outsideFile = path.join(outsideDir, 'secret.txt');
+    await fsPromises.writeFile(outsideFile, 'outside content');
+    const isWithinWorkspace = (candidate: string) => {
+      const absoluteCandidate = path.isAbsolute(candidate)
+        ? candidate
+        : path.resolve(testRootDir, candidate);
+      const relative = path.relative(testRootDir, absoluteCandidate);
+      return (
+        relative === '' ||
+        (!relative.startsWith('..') && !path.isAbsolute(relative))
+      );
+    };
+    mockConfig = {
+      ...mockConfig,
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: isWithinWorkspace,
+        getDirectories: () => [testRootDir],
+      }),
+    } as unknown as Config;
+
+    try {
+      const result = await handleAtCommand({
+        query: `@${outsideFile}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 900,
+        signal: abortController.signal,
+      });
+
+      expect(result.droppedReferences).toEqual([
+        { path: outsideFile, reason: 'outside-workspace' },
+      ]);
+      expect(JSON.stringify(result.processedQuery)).not.toContain(
+        'outside content',
+      );
+    } finally {
+      await fsPromises.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports a reference that is only ignored after resolution',
+    async () => {
+      const ignoredDir = path.join(testRootDir, 'ignored-dir');
+      await fsPromises.mkdir(ignoredDir, { recursive: true });
+      await fsPromises.writeFile(
+        path.join(ignoredDir, 'secret.txt'),
+        'secret content',
+      );
+      await fsPromises.writeFile(
+        path.join(testRootDir, '.qwenignore'),
+        'ignored-dir/\n',
+      );
+      await fsPromises.symlink(
+        path.join(ignoredDir, 'secret.txt'),
+        path.join(testRootDir, 'link.txt'),
+      );
+
+      const result = await handleAtCommand({
+        query: '@link.txt',
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 903,
+        signal: abortController.signal,
+      });
+
+      expect(result.droppedReferences).toEqual([
+        { path: 'link.txt', reason: 'ignored' },
+      ]);
+      expect(JSON.stringify(result.processedQuery)).not.toContain(
+        'secret content',
+      );
+    },
+  );
+
+  it('reports a missing reference as not-found', async () => {
+    const result = await handleAtCommand({
+      query: '@does-not-exist.txt',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 901,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences).toEqual([
+      { path: 'does-not-exist.txt', reason: 'not-found' },
+    ]);
+  });
+
+  it('reports an unmatched extension reference', async () => {
+    const result = await handleAtCommand({
+      query: '@ext:nope summarize this',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 904,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences).toEqual([
+      { path: 'ext:nope', reason: 'not-found' },
+    ]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports every spelling of a reference that revalidation dropped',
+    async () => {
+      const dirPath = path.join(testRootDir, 'sub');
+      await fsPromises.mkdir(dirPath, { recursive: true });
+      const fifoPath = path.join(dirPath, 'pipe');
+      // A FIFO passes the resolver's stat and fails revalidation, which needs
+      // a file or a directory to read. Two spellings reach the one path.
+      try {
+        execFileSync('mkfifo', [fifoPath]);
+      } catch {
+        return;
+      }
+
+      const result = await handleAtCommand({
+        query: '@sub/pipe @./sub/pipe',
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 905,
+        signal: abortController.signal,
+      });
+
+      expect(result.droppedReferences).toHaveLength(2);
+      expect(result.droppedReferences).toEqual(
+        expect.arrayContaining([
+          { path: 'sub/pipe', reason: 'identity-changed' },
+          { path: './sub/pipe', reason: 'identity-changed' },
+        ]),
+      );
+    },
+  );
+
+  it('reports what core dropped when a validated read produces nothing', async () => {
+    const filePath = path.join(testRootDir, 'approved.txt');
+    await fsPromises.writeFile(filePath, 'approved content');
+    const realpath = await fsPromises.realpath(filePath);
+    const readManyFiles = vi.spyOn(core, 'readManyFiles').mockResolvedValue({
+      contentParts: [{ text: 'no content' }],
+      files: [],
+      dropped: [
+        {
+          path: 'approved.txt',
+          canonicalPath: realpath,
+          reason: 'identity-changed',
+        },
+      ],
+    });
+
+    try {
+      const result = await handleAtCommand({
+        query: '@approved.txt',
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 906,
+        signal: abortController.signal,
+      });
+
+      expect(result.droppedReferences).toEqual([
+        { path: 'approved.txt', reason: 'identity-changed' },
+      ]);
+      expect(result.filesRead ?? []).not.toContain('approved.txt');
+    } finally {
+      readManyFiles.mockRestore();
+    }
+  });
+
+  it('keeps an @ inside a word out of the reference set', async () => {
+    const result = await handleAtCommand({
+      query: 'mail bob@example.com about the plan',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 907,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences ?? []).toEqual([]);
+    expect(JSON.stringify(result.processedQuery)).toContain('bob@example.com');
+  });
+
+  it('stays quiet for prose tokens that are not file references', async () => {
+    const result = await handleAtCommand({
+      query: 'ping @alice and check @media queries, then read @notes.txt',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 908,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences?.map((drop) => drop.path)).toEqual([
+      'notes.txt',
+    ]);
+  });
+
+  it('does not report a URL that the resolver passes through as text', async () => {
+    const result = await handleAtCommand({
+      query: 'summarize @https://example.com/a.txt please',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 909,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences ?? []).toEqual([]);
+    expect(JSON.stringify(result.processedQuery)).toContain(
+      'https://example.com/a.txt',
+    );
+  });
+
+  it('does not record a dropped session reference as read', async () => {
+    const result = await handleAtCommand({
+      query: '@session:no-such-title summarize',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 910,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences).toEqual([
+      { path: 'session:no-such-title', reason: 'not-found' },
+    ]);
+    expect(result.filesRead ?? []).not.toContain('@session:no-such-title');
+  });
+
+  it('leaves droppedReferences empty when every reference resolves', async () => {
+    const filePath = path.join(testRootDir, 'present.txt');
+    await fsPromises.writeFile(filePath, 'present content');
+
+    const result = await handleAtCommand({
+      query: '@present.txt',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 902,
+      signal: abortController.signal,
+    });
+
+    expect(result.droppedReferences).toEqual([]);
   });
 });
