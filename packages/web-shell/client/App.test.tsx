@@ -668,6 +668,9 @@ const {
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
+      latestLeaveCurrentStandaloneForDelete: null as
+        | ((sessionId: string) => Promise<boolean>)
+        | null,
       openTurnCalls: undefined as
         | ((
             turnId: string,
@@ -1560,6 +1563,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
       onNewSession?: (workspaceCwd?: string) => Promise<boolean> | boolean;
+      onLeaveCurrentStandaloneForDelete?: (
+        sessionId: string,
+      ) => Promise<boolean>;
       onNewWorktreeSession?: (
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
@@ -1582,6 +1588,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       canOpenSessionsOverview?: boolean;
       canOpenSplitView?: boolean;
     }) => {
+      testState.latestLeaveCurrentStandaloneForDelete =
+        props.onLeaveCurrentStandaloneForDelete ?? null;
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
@@ -31335,6 +31343,116 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
     expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
+  it('requires the attached standalone session to detach before sidebar deletion', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    const leave = testState.latestLeaveCurrentStandaloneForDelete;
+    expect(leave).toBeTypeOf('function');
+    expect(await leave?.('another-session')).toBe(false);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+
+    let left = false;
+    await act(async () => {
+      left = (await leave?.('session-1')) ?? false;
+    });
+    expect(left).toBe(true);
+    expect(mockSessionActions.clearSession).toHaveBeenCalledWith({
+      requireDetachSessionId: 'session-1',
+    });
+  });
+
+  it('stops sidebar deletion when the required standalone detach fails', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.clearSession.mockRejectedValueOnce(
+      new Error('detach failed'),
+    );
+    renderApp();
+    await flush();
+
+    let left = true;
+    await act(async () => {
+      left =
+        (await testState.latestLeaveCurrentStandaloneForDelete?.(
+          'session-1',
+        )) ?? true;
+    });
+    expect(left).toBe(false);
+  });
+
+  it('does not leave a standalone chat that became active after its list loaded', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    testState.streamingState = 'responding';
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    let left = true;
+    await act(async () => {
+      left =
+        (await testState.latestLeaveCurrentStandaloneForDelete?.(
+          'session-1',
+        )) ?? true;
+    });
+    expect(left).toBe(false);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
+  });
+
+  it('does not finish a standalone deletion after another session is opened', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    const clear = deferred<void>();
+    mockSessionActions.clearSession.mockReturnValueOnce(clear.promise);
+    const { container } = renderApp();
+    await flush();
+
+    let leaving!: Promise<boolean>;
+    act(() => {
+      leaving = testState.latestLeaveCurrentStandaloneForDelete!('session-1');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledWith({
+        requireDetachSessionId: 'session-1',
+      });
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => clear.resolve());
+
+    expect(await leaving).toBe(false);
   });
 
   it('lands in the no-workspace area after deleting the current standalone session', async () => {

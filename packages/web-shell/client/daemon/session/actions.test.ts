@@ -5845,6 +5845,119 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().sessionContext).toEqual({ kind: 'live' });
   });
 
+  it('waits for the specified session to detach before completing a strict clear', async () => {
+    const session = createMockSession('session-a');
+    const detach = createDeferred<void>();
+    session.detach.mockReturnValueOnce(detach.promise);
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        clientId: session.clientId,
+      },
+      session,
+    });
+
+    let completed = false;
+    const clearing = actions
+      .clearSession({ requireDetachSessionId: session.sessionId })
+      .then(() => {
+        completed = true;
+      });
+    await vi.waitFor(() => expect(session.detach).toHaveBeenCalledOnce());
+    expect(completed).toBe(false);
+
+    detach.resolve();
+    await clearing;
+    expect(completed).toBe(true);
+    expect(getConnection().sessionId).toBeUndefined();
+  });
+
+  it('rejects a strict clear when the target changed or detach failed', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        clientId: session.clientId,
+      },
+      session,
+    });
+
+    await expect(
+      actions.clearSession({ requireDetachSessionId: 'session-b' }),
+    ).rejects.toThrow('Current session changed before detach');
+    expect(session.detach).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe('session-a');
+
+    session.detach.mockRejectedValueOnce(new Error('detach failed'));
+    await expect(
+      actions.clearSession({ requireDetachSessionId: session.sessionId }),
+    ).rejects.toThrow('detach failed');
+  });
+
+  it('rejects a strict clear without a client id instead of accepting a no-op detach', async () => {
+    const session = createMockSession('session-a');
+    Object.assign(session, { clientId: undefined });
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: session.sessionId },
+      session,
+    });
+
+    await expect(
+      actions.clearSession({ requireDetachSessionId: session.sessionId }),
+    ).rejects.toThrow('Current session changed before detach');
+    expect(session.detach).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe(session.sessionId);
+  });
+
+  it('does not detach a replaced session after a strict clear waits for persistence', async () => {
+    const session = createMockSession('session-a');
+    const replacement = createMockSession('session-b');
+    const persisted = createDeferred<{
+      configOptions: ReturnType<typeof reasoningConfigOptions>;
+      persisted: boolean;
+    }>();
+    session.setConfigOption.mockReturnValueOnce(persisted.promise);
+    const manualSessionClearRef = { current: false };
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          clientId: session.clientId,
+          currentModel: 'qwen3.8-max',
+          providers: workspaceProvidersStatus('low'),
+        },
+        session,
+        manualSessionClearRef,
+      });
+
+    const update = actions.setReasoningEffort('medium', { persist: true });
+    const clearing = actions.clearSession({
+      requireDetachSessionId: session.sessionId,
+    });
+    sessionRef.current = replacement as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: replacement.sessionId,
+      clientId: replacement.clientId,
+    });
+    persisted.resolve({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: true,
+    });
+
+    await update;
+    await expect(clearing).rejects.toThrow(
+      'Current session changed before detach',
+    );
+    expect(session.detach).not.toHaveBeenCalled();
+    expect(replacement.detach).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe(replacement.sessionId);
+    expect(manualSessionClearRef.current).toBe(false);
+  });
+
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');
     const replacement = createMockSession('session-b');

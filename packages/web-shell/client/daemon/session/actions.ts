@@ -2373,11 +2373,28 @@ export function createDaemonSessionActions({
       return loadPromise;
     },
 
-    async clearSession(options?: { dropSessionContext?: boolean }) {
+    async clearSession(options?: {
+      dropSessionContext?: boolean;
+      requireDetachSessionId?: string;
+    }) {
       const session = sessionRef.current;
-      manualSessionClearRef.current = true;
+      const requiredSessionId = options?.requireDetachSessionId;
+      if (!requiredSessionId) manualSessionClearRef.current = true;
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
+      }
+      if (requiredSessionId) {
+        const connection = getConnection();
+        if (
+          session?.sessionId !== requiredSessionId ||
+          !session.clientId ||
+          sessionRef.current !== session ||
+          connection.sessionId !== requiredSessionId ||
+          connection.clientId !== session.clientId
+        ) {
+          throw new Error('Current session changed before detach');
+        }
+        manualSessionClearRef.current = true;
       }
       if (sessionRef.current === session) {
         const refreshStandaloneOptions =
@@ -2400,6 +2417,7 @@ export function createDaemonSessionActions({
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');
         } catch (error) {
+          if (requiredSessionId) throw error;
           console.warn('[DaemonSessionActions] detach on clear failed:', error);
         }
       }
