@@ -28,6 +28,23 @@ vi.mock('../utils/load-undici.js', () => ({
   loadUndici: async () => ({ fetch: mockFetch }),
 }));
 
+// Arms rmSync failures for specific paths only; every other call delegates.
+// (The ESM namespace cannot be spied on directly, so this is the seam.)
+const rmSyncFailures = vi.hoisted(() => ({ targets: [] as string[] }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      const target = String(args[0]);
+      if (rmSyncFailures.targets.includes(target)) {
+        throw new Error('EBUSY: resource busy or locked');
+      }
+      return actual.rmSync(...args);
+    },
+  };
+});
+
 describe('standalone-update', () => {
   let tempDir: string;
 
@@ -360,11 +377,15 @@ describe('standalone-update', () => {
       fs.unlinkSync(lockPath);
     });
 
-    it('rejects a stale lock when a Windows deferred swap is pending', async () => {
+    it('self-heals a leftover pending swap behind a stale lock', async () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       const parentDir = path.dirname(standaloneDir);
       fs.mkdirSync(standaloneDir, { recursive: true });
       fs.mkdirSync(`${standaloneDir}.new`);
+      // Age the residue past the staleness bound: a marker-less .new only
+      // heals when no in-flight swap can still own it.
+      const aged = new Date(Date.now() - 16 * 60 * 1000);
+      fs.utimesSync(`${standaloneDir}.new`, aged, aged);
       fs.writeFileSync(
         path.join(standaloneDir, 'manifest.json'),
         JSON.stringify({
@@ -376,12 +397,16 @@ describe('standalone-update', () => {
       const lockPath = path.join(parentDir, '.qwen-update.lock');
       fs.writeFileSync(lockPath, '999999999');
 
-      await expect(
-        performStandaloneUpdate(standaloneDir, '1.0.0'),
-      ).rejects.toThrow('A previous update left a pending swap');
+      // No deferred bat process is alive, so the stale .new residue must not
+      // block the update; it is removed and the run proceeds past the swap
+      // check (it then fails for an unrelated reason: no fetch mock here).
+      const err = await performStandaloneUpdate(standaloneDir, '1.0.0').catch(
+        (e: unknown) => e,
+      );
 
-      expect(fs.existsSync(lockPath)).toBe(true);
-      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain('pending swap');
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
     });
   });
 
@@ -939,15 +964,91 @@ describe('standalone-update', () => {
       expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
     });
 
-    it('cleans an unparseable deferred marker before taking over a dead lock', () => {
+    it('fails closed on an unparseable deferred marker', () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       const lockPath = path.join(tempDir, '.qwen-update.lock');
       fs.writeFileSync(lockPath, '999999999');
       fs.writeFileSync(`${standaloneDir}.deferred`, 'not-a-pid');
 
+      // A torn marker cannot prove the bat is gone — the lock stays and the
+      // marker is left for inspection instead of being swept under a heal.
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'pending swap',
+      );
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+    });
+
+    it('removes a leftover .new directory when the deferred bat process is dead', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
       expect(acquireLock(lockPath, standaloneDir)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
       expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('keeps a fresh marker-less .new that could still be mid-swap', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+
+      // The parent spawns the bat before writing the marker, so a fresh
+      // marker-less .new may belong to a swap in flight right now.
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'pending swap',
+      );
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+    });
+
+    it('removes a stale leftover .new directory when no deferred marker exists', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      const aged = new Date(Date.now() - 16 * 60 * 1000);
+      fs.utimesSync(`${standaloneDir}.new`, aged, aged);
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('fails closed when the stale .new cannot be removed', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      const aged = new Date(Date.now() - 16 * 60 * 1000);
+      fs.utimesSync(`${standaloneDir}.new`, aged, aged);
+      // An unremovable residue (a held file, EPERM on win32) must abort the
+      // update: continuing would let atomicReplace delete the .old rollback
+      // snapshot before its own retry fails with the same error.
+      rmSyncFailures.targets.push(`${standaloneDir}.new`);
+      try {
+        expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+          'could not be removed',
+        );
+        expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+        // The freshly taken lock must be released on the way out.
+        expect(fs.existsSync(lockPath)).toBe(false);
+      } finally {
+        rmSyncFailures.targets.length = 0;
+      }
+    });
+
+    it('keeps a leftover .new directory while the deferred bat process is alive', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, String(process.pid));
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'A previous update is still being applied',
+      );
+      // The in-flight swap must not be disturbed.
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
     });
   });
 

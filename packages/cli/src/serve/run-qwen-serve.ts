@@ -6302,7 +6302,8 @@ async function runQwenServeImpl(
       workspaceSkillsStatusProvider,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
@@ -6808,7 +6809,9 @@ async function runQwenServeImpl(
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
-        isChannelLive: () => secondaryBridge.isChannelLive(),
+        isChannelLive: () =>
+          secondaryBridge.isWorkspaceControlLive?.() ??
+          secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
@@ -7522,7 +7525,8 @@ async function runQwenServeImpl(
           ...(buildOptions?.primary === true
             ? {}
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
-          isChannelLive: () => wsBridge.isChannelLive(),
+          isChannelLive: () =>
+            wsBridge.isWorkspaceControlLive?.() ?? wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,

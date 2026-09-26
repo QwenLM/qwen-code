@@ -409,6 +409,7 @@ export function createChannelStartup({
       throw epochError;
     }
     runtimeEpoch = nextRuntimeEpoch;
+    info.runtimeEpoch = nextRuntimeEpoch;
     info.lastUsedAt = Date.now();
     channelLifecycle.publish(info);
     info.handshakeComplete = true;
