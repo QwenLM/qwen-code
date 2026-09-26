@@ -49,8 +49,7 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
   describe('windowsCodePageToEncoding', () => {
     it('should map common Windows code pages correctly', () => {
-      expect(windowsCodePageToEncoding(437)).toBe('cp437');
-      expect(windowsCodePageToEncoding(850)).toBe('cp850');
+      expect(windowsCodePageToEncoding(866)).toBe('ibm866');
       expect(windowsCodePageToEncoding(65001)).toBe('utf-8');
       expect(windowsCodePageToEncoding(1252)).toBe('windows-1252');
       expect(windowsCodePageToEncoding(932)).toBe('shift_jis');
@@ -59,6 +58,14 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(windowsCodePageToEncoding(950)).toBe('big5');
       expect(windowsCodePageToEncoding(1200)).toBe('utf-16le');
       expect(windowsCodePageToEncoding(1201)).toBe('utf-16be');
+    });
+
+    it('should return null for DOS code pages TextDecoder does not support (437/850/852)', () => {
+      // WHATWG has no cp437/cp850/cp852; returning null lets callers fall
+      // back to chardet/UTF-8 instead of throwing in `new TextDecoder(...)`.
+      expect(windowsCodePageToEncoding(437)).toBe(null);
+      expect(windowsCodePageToEncoding(850)).toBe(null);
+      expect(windowsCodePageToEncoding(852)).toBe(null);
     });
 
     it('should return null for unmapped code pages and warn', () => {
@@ -147,10 +154,10 @@ describe('Shell Command Processor - Encoding Functions', () => {
     });
 
     it('should handle chcp output with extra whitespace', () => {
-      mockedExecSync.mockReturnValue('Active code page:   437   ');
+      mockedExecSync.mockReturnValue('Active code page:   1252   ');
 
       const result = getSystemEncoding();
-      expect(result).toBe('cp437');
+      expect(result).toBe('windows-1252');
     });
 
     it('should return null when chcp command fails', () => {
@@ -430,6 +437,55 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const result3 = getCachedEncodingForBuffer(buffer3);
 
       expect(result3).toBe('utf-32');
+    });
+  });
+
+  describe('detection order (issue #8278)', () => {
+    it('should prefer a non-UTF-8 system code page over chardet for non-UTF-8 bytes (CP-866 regression)', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      // chardet misclassifies CP-866 Cyrillic as windows-1252 (see issue table)
+      mockedChardetDetect.mockReturnValue('windows-1252');
+
+      // "Ощибка" in CP-866 (verified via TextDecoder('ibm866') on Node 24)
+      const buffer = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('ibm866');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('should still use chardet for non-UTF-8 bytes when the system encoding is UTF-8', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 65001'); // UTF-8
+      mockedChardetDetect.mockReturnValue('windows-1251');
+
+      const buffer = Buffer.from([0x80, 0x81, 0x82]); // not valid UTF-8
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('windows-1251');
+      expect(mockedChardetDetect).toHaveBeenCalledWith(buffer);
+    });
+
+    it('should gracefully fall back to UTF-8 (never throw) when chcp=437, which TextDecoder does not support', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 437');
+      mockedChardetDetect.mockReturnValue(null); // even chardet gives up
+
+      const buffer = Buffer.from([0x80, 0x81, 0x82]); // not valid UTF-8
+      const encoding = getCachedEncodingForBuffer(buffer);
+
+      expect(encoding).toBe('utf-8');
+      // Consumers call `new TextDecoder(encoding)` unguarded in places
+      // (decodeBufferedOutput); the returned label must always be valid.
+      expect(() => new TextDecoder(encoding)).not.toThrow();
+    });
+
+    it('should map code page 866 to the WHATWG ibm866 label and decode CP-866 bytes correctly', () => {
+      const label = windowsCodePageToEncoding(866);
+      expect(label).toBe('ibm866');
+      const bytes = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+      expect(new TextDecoder(label!).decode(bytes)).toBe('Ощибка');
     });
   });
 

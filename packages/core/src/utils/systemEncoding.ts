@@ -26,10 +26,16 @@ export function resetEncodingCache(): void {
 /**
  * Detects the encoding of a buffer.
  *
- * Strategy: try UTF-8 first, then chardet, then system encoding.
+ * Strategy: try UTF-8 first, then a non-UTF-8 system encoding, then chardet.
  * UTF-8 is tried first because modern developer tools, PowerShell Core,
  * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
  * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
+ *
+ * For bytes that are not valid UTF-8, a non-UTF-8 system code page is
+ * authoritative for console output and is consulted before chardet:
+ * chardet misclassifies legacy code pages (e.g. CP-866 Cyrillic is
+ * detected as windows-1252 or KOI8-R). When the system encoding is UTF-8
+ * or unknown, chardet statistical detection remains the fallback.
  *
  * This function should be called on the **complete** output buffer
  * (after the command finishes), not on individual streaming chunks,
@@ -42,15 +48,21 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return 'utf-8';
   }
 
-  // Buffer is not valid UTF-8 — try chardet, then system encoding
+  // Buffer is not valid UTF-8 — a non-UTF-8 system code page is
+  // authoritative for console output; consult it before chardet.
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  if (cachedSystemEncoding && cachedSystemEncoding !== 'utf-8') {
+    return cachedSystemEncoding;
+  }
+
+  // UTF-8 locale or unknown system encoding — try chardet
   const detected = detectEncodingFromBuffer(buffer);
   if (detected) {
     return detected;
   }
 
-  if (cachedSystemEncoding === undefined) {
-    cachedSystemEncoding = getSystemEncoding();
-  }
   if (cachedSystemEncoding) {
     return cachedSystemEncoding;
   }
@@ -131,12 +143,21 @@ export function getSystemEncoding(): string | null {
  */
 
 export function windowsCodePageToEncoding(cp: number): string | null {
+  // DOS code pages 437/850/852 have no WHATWG equivalent, so
+  // `new TextDecoder('cp437')` etc. throw RangeError. Return null instead
+  // of an undecodable label: callers then fall back to chardet/UTF-8,
+  // preserving the previous behavior for these code pages. Proper support
+  // would require iconv-lite — tracked separately.
+  if (cp === 437 || cp === 850 || cp === 852) {
+    debugLogger.warn(
+      `Windows code page ${cp} is not supported by TextDecoder; falling back to content detection.`,
+    );
+    return null;
+  }
+
   // Most common mappings; extend as needed
   const map: { [key: number]: string } = {
-    437: 'cp437',
-    850: 'cp850',
-    852: 'cp852',
-    866: 'cp866',
+    866: 'ibm866',
     874: 'windows-874',
     932: 'shift_jis',
     936: 'gbk',
