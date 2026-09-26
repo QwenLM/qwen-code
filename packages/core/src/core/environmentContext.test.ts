@@ -29,6 +29,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSkillListingReminder,
   isSystemReminderContent,
   stripSystemReminderBlocks,
   stripStartupContext,
@@ -42,7 +43,10 @@ import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
-import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import {
+  collectAvailableSkillEntries,
+  SKILLS_ACTIVATED_OPENER,
+} from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 
 vi.mock('../config/config.js');
@@ -1180,5 +1184,76 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"reviewer"');
     expect(result).not.toContain('second line should be omitted');
     expect(result).not.toContain('A'.repeat(500));
+  });
+});
+
+describe('isSkillListingReminder (#12235)', () => {
+  const entry: AvailableSkillEntry = {
+    name: 'report-builder',
+    description: 'Build reports',
+    level: 'project',
+  };
+  const activation = `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n<skill>\n<name>\nreport-builder\n</name>\n</skill>\n</available_skills>`;
+
+  it('accepts every listing reminder core builds', async () => {
+    // collectAvailableSkillEntries is mocked for this file; hand the builder
+    // one entry, then none, as the startup snapshot and its "no skills" form.
+    const collected = (entries: AvailableSkillEntry[]) => ({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set<string>(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    vi.mocked(collectAvailableSkillEntries)
+      .mockResolvedValueOnce(collected([entry]) as never)
+      .mockResolvedValueOnce(collected([]) as never);
+    const config = { getSkillManager: () => ({}) } as unknown as Config;
+
+    for (const text of [
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      buildChangedSkillsReminder([entry], [])!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(true);
+    }
+  });
+
+  it('rejects the scheduler path-activation envelope (#12235)', () => {
+    // coreToolScheduler appends this envelope to the tool result and then folds
+    // the whole result into `functionResponse.response.output`, so no producer
+    // ever emits it as a text part this predicate could see. Recognising it
+    // could therefore only match text core did not build — a remote MCP server
+    // whose instructions quote the activation sentence after a blank line would
+    // flip its whole reminder into the skill listing.
+    for (const text of [
+      `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // The scheduler puts a rules block first when one applies.
+      `${SYSTEM_REMINDER_OPEN}\nProject rules for src/**:\nUse tabs.\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // Server-supplied instructions quoting the sentence, as the real
+      // producer wraps them.
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([['acme', activation]]),
+      )!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
+  });
+
+  it('rejects text that only mentions the listing tag', () => {
+    for (const text of [
+      buildChangedSkillsReminder([], ['gone'])!,
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n</available_skills>',
+          ],
+        ]),
+      )!,
+      'see <available_skills> here',
+      activation,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
   });
 });

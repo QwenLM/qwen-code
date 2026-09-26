@@ -13,6 +13,7 @@ import {
   cleanupManagedNpmUpdate,
   installManagedNpmUpdate,
   prepareManagedNpmUpdate,
+  stageManagedNpmUpdate,
 } from './managed-npm-update.js';
 import { EventEmitter } from 'node:events';
 import type { spawn } from 'node:child_process';
@@ -125,6 +126,72 @@ afterEach(() => {
 });
 
 describe('managed npm update', () => {
+  it('downloads and validates a staged payload without activating it', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const spawnFn = vi.fn(
+      (_command: string, args: readonly string[]): ReturnType<typeof spawn> => {
+        writeInstallation(args[args.indexOf('--prefix') + 1]!, '2.0.0');
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('close', 0));
+        return child as ReturnType<typeof spawn>;
+      },
+    );
+
+    const update = await stageManagedNpmUpdate(
+      '2.0.0',
+      bootstrap,
+      path.join(root, 'updates'),
+      spawnFn as unknown as typeof spawn,
+    );
+
+    expect(fs.existsSync(update.stagingDir)).toBe(true);
+    expect(fs.existsSync(update.versionDir)).toBe(false);
+    expect(fs.existsSync(path.join(update.launcherRoot, 'active.json'))).toBe(
+      false,
+    );
+    expect(fs.readFileSync(bootstrap, 'utf8')).toBe('global launcher');
+    await activateManagedNpmUpdate(update, '2.0.0', bootstrap);
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(update.launcherRoot, 'active.json'), 'utf8'),
+      ),
+    ).toMatchObject({ version: '2.0.0' });
+  });
+
+  it.each([0, 1])(
+    'cleans failed download or validation (exit code %s)',
+    async (exitCode) => {
+      const root = makeTemporaryDirectory();
+      const bootstrap = writeBaseInstallation(root);
+      let stagingDir = '';
+      const spawnFn = vi.fn(
+        (
+          _command: string,
+          args: readonly string[],
+        ): ReturnType<typeof spawn> => {
+          stagingDir = args[args.indexOf('--prefix') + 1]!;
+          writeInstallation(stagingDir, '9.0.0');
+          const child = new EventEmitter();
+          queueMicrotask(() => child.emit('close', exitCode));
+          return child as ReturnType<typeof spawn>;
+        },
+      );
+      await expect(
+        stageManagedNpmUpdate(
+          '2.0.0',
+          bootstrap,
+          path.join(root, 'updates'),
+          spawnFn as unknown as typeof spawn,
+        ),
+      ).rejects.toThrow(
+        exitCode === 0 ? 'did not match' : 'npm install exited',
+      );
+      expect(fs.existsSync(stagingDir)).toBe(false);
+    },
+  );
+
   it('stages an exact version for one launcher', () => {
     const root = makeTemporaryDirectory();
     const update = prepareManagedNpmUpdate(

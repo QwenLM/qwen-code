@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -22,13 +23,14 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 
 /**
- * HTTP client for the private Managed Runtime v2 routes.
+ * HTTP client for private Runtime attestation, context and tool routes.
  *
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
- * by the original call reference. Prepare, acquire, control, and release stay
- * on a later transport slice.
+ * by the original call reference. Status and cancel answers are projected to
+ * the Broker's closed state and result. Acquire, control, and release are
+ * not part of the v2 tool contract and fail closed.
  */
-public final class HttpRuntimeTransport {
+public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
     static final int TOOL_REQUEST_LIMIT_BYTES = 256 * 1024;
     static final int TOOL_RESULT_LIMIT_BYTES = 1024 * 1024;
@@ -92,6 +94,20 @@ public final class HttpRuntimeTransport {
             throw new IllegalArgumentException(
                     "seed must bind the lease");
         }
+        if (request.isManagedContext()) {
+            Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
+            return post(lease, ManagedContextProtocol.ATTEST_PATH,
+                    encodeToolRequest(ManagedContextProtocol.attestationRequest(boot),
+                            BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                    .thenApply(bytes -> {
+                        ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes),
+                                ManagedContextProtocol.attestationResponse(boot));
+                        return new RuntimeAttestation(seed.getProvisionalRuntimeId(),
+                                seed.getGatewayIncarnation(), seed.getLeaseId(),
+                                seed.getEpoch(), request.getScope(),
+                                seed.getProvisionRequestId(), request.getStorageId());
+                    });
+        }
         RuntimeScope scope = request.getScope();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
@@ -138,6 +154,46 @@ public final class HttpRuntimeTransport {
             }
         });
         return returned;
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> installContext(
+            RuntimeBindingRecord runtime, RuntimeSessionRecord sessionRecord,
+            String operationId, ContextBinding binding) {
+        if (runtime == null || sessionRecord == null) {
+            throw new IllegalArgumentException("runtime and session are required");
+        }
+        // The record ties the lease and seed to the placement they serve.
+        RuntimeProvisionRequest request = runtime.getRequest();
+        RuntimeLease lease = runtime.getLease();
+        RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        RuntimeSession session = sessionRecord.getSession();
+        String isolationKey = "session".equals(
+                session.getScope().getIsolationClass())
+                        ? session.getHarnessSessionId() : null;
+        if (runtime.getState() != RuntimeBindingRecord.State.READY
+                || lease == null || seed == null
+                || !runtime.getBindingId().equals(sessionRecord.getBindingId())
+                || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
+                || !request.getScope().equals(session.getScope())
+                || !java.util.Objects.equals(request.getIsolationKey(),
+                        isolationKey)) {
+            throw new IllegalArgumentException(
+                    "session must belong to a READY Runtime binding");
+        }
+        String sessionId = session.getRuntimeSessionId();
+        ManagedContextProtocol.boot(request, seed);
+        Map<String, Object> body = ManagedContextProtocol.installation(request,
+                operationId, sessionId, binding);
+        Map<String, Object> expected = ManagedContextProtocol.receipt(seed,
+                operationId, sessionId, binding);
+        return post(lease, ManagedContextProtocol.CONTEXT_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    Map<String, Object> receipt = ManagedContextProtocol.parse(bytes);
+                    ManagedContextProtocol.verify(receipt, expected);
+                    return receipt;
+                });
     }
 
     /**
@@ -194,7 +250,8 @@ public final class HttpRuntimeTransport {
         body.put("afterSequence", afterSequence);
         byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
         return post(lease, STATUS_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
-                .thenApply(bytes -> parseToolResponse(bytes, "status"));
+                .thenApply(bytes -> projectClosedStatus(
+                        parseToolResponse(bytes, "status"), "status"));
     }
 
     /** Asks the Runtime to cancel one call by its original reference. */
@@ -209,7 +266,62 @@ public final class HttpRuntimeTransport {
         body.put("reference", referenceIdentity(reference));
         byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
         return post(lease, CANCEL_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
-                .thenApply(bytes -> parseToolResponse(bytes, "cancel"));
+                .thenApply(bytes -> projectClosedStatus(
+                        parseToolResponse(bytes, "cancel"), "cancel"));
+    }
+
+    /**
+     * Session verbs are not on the v2 tool contract. Fail closed instead of
+     * inventing a route the worker does not serve.
+     */
+    @Override
+    public CompletionStage<Void> acquire(RuntimeLease lease,
+            RuntimeSession session) {
+        return unsupportedSessionVerb();
+    }
+
+    @Override
+    public CompletionStage<Object> control(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> operation) {
+        return unsupportedSessionVerb();
+    }
+
+    @Override
+    public CompletionStage<Boolean> release(RuntimeLease lease,
+            RuntimeSession session) {
+        return unsupportedSessionVerb();
+    }
+
+    private static <T> CompletionStage<T> unsupportedSessionVerb() {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_session_verb_unsupported",
+                "Runtime transport does not support session verbs.", false));
+    }
+
+    /**
+     * The Broker accepts only {@code state}, plus {@code result} when the
+     * state is {@code settled}. Wire fields such as {@code protocolVersion}
+     * and {@code lastSequence} stay on the HTTP response and are validated
+     * before this projection.
+     */
+    private static Map<String, Object> projectClosedStatus(
+            Map<String, Object> response, String operation) {
+        Object state = response.get("state");
+        if (!(state instanceof String text) || !TOOL_STATES.contains(text)) {
+            throw protocol("Managed Runtime " + operation
+                    + " returned an invalid state.");
+        }
+        boolean settled = "settled".equals(text);
+        if (settled != response.containsKey("result")) {
+            throw protocol("Managed Runtime " + operation
+                    + " result does not match its state.");
+        }
+        Map<String, Object> projected = new LinkedHashMap<>();
+        projected.put("state", text);
+        if (settled) {
+            projected.put("result", response.get("result"));
+        }
+        return Map.copyOf(projected);
     }
 
     private static Map<String, Object> referenceIdentity(
@@ -226,7 +338,8 @@ public final class HttpRuntimeTransport {
         Map<String, Object> identity = new LinkedHashMap<>();
         for (String field : List.of("sessionId", "promptId", "callId",
                 "argsDigest")) {
-            identity.put(field, referenceString(reference, field));
+            identity.put(field, BrokerValues.requireWellFormed(
+                    referenceString(reference, field), "reference " + field));
         }
         return Map.copyOf(identity);
     }
@@ -373,7 +486,7 @@ public final class HttpRuntimeTransport {
             String operation = path.substring(path.lastIndexOf('/') + 1);
             if (response.statusCode() != 200) {
                 RuntimeBrokerException classified =
-                        failure(response.statusCode());
+                        contextFailure(response, responseBody, path);
                 result.completeExceptionally(error(classified.getStatusCode(),
                         classified.getCode(), "Managed Runtime " + operation
                                 + " request failed (HTTP "
@@ -385,13 +498,16 @@ public final class HttpRuntimeTransport {
                 result.completeExceptionally(error(413,
                         "managed_runtime_attestation_too_large",
                         "Managed Runtime " + operation
-                                + " response exceeds 1 MiB.", false));
+                                + " response exceeds "
+                                + (responseLimit == TOOL_RESULT_LIMIT_BYTES
+                                        ? "1 MiB." : "16 KiB."), false));
                 return;
             }
             if (!"no-store".equals(response.headers()
                     .firstValue("Cache-Control").orElse(""))
                     || !jsonContentType(response.headers()
-                            .firstValue("Content-Type").orElse(""))) {
+                            .firstValue("Content-Type").orElse(""))
+                    || response.headers().firstValue("Content-Encoding").isPresent()) {
                 result.completeExceptionally(protocol(
                         "Managed Runtime " + operation
                                 + " response is invalid."));
@@ -418,6 +534,31 @@ public final class HttpRuntimeTransport {
             }
         });
         return returned;
+    }
+
+    private static RuntimeBrokerException contextFailure(
+            HttpResponse<BoundedBody> response, BoundedBody body, String path) {
+        if (response.statusCode() == 409 && !body.overflow()
+                && !path.endsWith("/attest")
+                && "no-store".equals(response.headers()
+                        .firstValue("Cache-Control").orElse(""))
+                && jsonContentType(response.headers()
+                        .firstValue("Content-Type").orElse(""))) {
+            try {
+                Map<String, Object> fields = ManagedContextProtocol.parse(body.bytes());
+                Object code = fields.get("code");
+                if (fields.keySet().equals(Set.of("code", "error"))
+                        && fields.get("error") instanceof String
+                        && ("managed_context_unavailable".equals(code)
+                                || "managed_context_conflict".equals(code))) {
+                    return error(409, (String) code,
+                            "Managed Session context is unavailable or conflicts.", false);
+                }
+            } catch (RuntimeBrokerException ignored) {
+                // An unrecognized error body supplies no Session-scoped evidence.
+            }
+        }
+        return failure(response.statusCode());
     }
 
     private static Throwable unwrap(Throwable error) {

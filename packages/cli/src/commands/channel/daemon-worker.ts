@@ -995,7 +995,7 @@ function reportStartupToSupervisor(
     process.once('disconnect', onDisconnect);
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      send.call(process, message, (error) => {
+      send.call(process, message, (error: Error | null) => {
         if (error) {
           finish(new Error('Channel worker startup report failed.'));
         }
