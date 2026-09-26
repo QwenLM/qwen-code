@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { sanitizeSessionId } from './protocol.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -19,6 +20,11 @@ import type {
   AgentViewSupervisorFile,
   AgentViewWorkerFile,
 } from './protocol.js';
+
+// Re-exported from its old home: the sanitizer moved to `protocol.js` so
+// the pure row-merging module can canonicalize ids without importing this
+// filesystem store, and every existing importer keeps working.
+export { sanitizeSessionId };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -353,20 +359,34 @@ export async function listAgentViewSessionStates(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
+/**
+ * The roster entry for a session, under the store's one matching rule:
+ * ids compared after `sanitizeSessionId` on both sides. Every surface
+ * that names "the roster entry for this session" goes through this
+ * owner of the rule, so `sessions ps` and `sessions peek` cannot name
+ * the same session two different ways.
+ */
+export function findAgentViewRosterEntry(
+  roster: AgentViewRosterFile,
+  sessionId: string,
+): AgentViewRosterEntry | undefined {
+  const key = sanitizeSessionId(sessionId);
+  return roster.sessions.find(
+    (entry) => sanitizeSessionId(entry.sessionId) === key,
+  );
+}
+
 export async function listAgentViewSessionSnapshots(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionSnapshot[]> {
   const states = await listAgentViewSessionStates(options);
   const roster = await readAgentViewRoster(options);
-  const rosterEntries = new Map(
-    roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
-  );
   const snapshots = await Promise.all(
     states.map(async (state) => {
       const snapshot = {
         sessionId: state.sessionId,
         state,
-        rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
+        rosterEntry: findAgentViewRosterEntry(roster, state.sessionId),
       };
       if (state.ownership === 'unmanaged') {
         return snapshot;
@@ -546,16 +566,6 @@ export async function writeAgentViewSupervisor(
     ...supervisor,
     schemaVersion: 1,
   });
-}
-
-export function sanitizeSessionId(sessionId: string): string {
-  const safe = path
-    .basename(sessionId.replace(/\\/g, '/'))
-    .toLowerCase()
-    .replace(/^\.+/g, '_')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_');
-  return safe || '_';
 }
 
 function compareRosterEntries(
@@ -824,7 +834,7 @@ function normalizeLaunch(
   }) as AgentViewLaunchFile;
 }
 
-function redactAgentViewLaunch(
+export function redactAgentViewLaunch(
   launch: AgentViewLaunchFile | undefined,
 ): AgentViewLaunchFile | undefined {
   if (!launch) return undefined;

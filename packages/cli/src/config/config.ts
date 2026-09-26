@@ -105,6 +105,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { insertAnswerTextSeparator } from '../commands/sessions/control-commands.js';
 import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
@@ -601,6 +602,11 @@ export async function parseArguments(): Promise<CliArgs> {
   ) {
     rawArgv = rawArgv.slice(1);
   }
+
+  // `sessions answer` takes the rest of the line as free text, so carve it
+  // out with `--` before yargs can parse a `--help`/`-h` (or a trailing
+  // bare `help`) out of the answer and drop the reply.
+  rawArgv = insertAnswerTextSeparator(rawArgv);
 
   const yargsInstance = yargs(rawArgv)
     .locale('en')

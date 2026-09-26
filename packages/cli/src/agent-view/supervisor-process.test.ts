@@ -252,6 +252,43 @@ describe('Agent View supervisor process helpers', () => {
       ]),
     );
 
+    // The producer side of the peek join: the roster rename `sessions
+    // ps` shows, and the launch record with its env stripped. Without
+    // these pins, dropping rosterEntry (peek silently stops showing the
+    // rename) or serving the launch record raw (the QWEN_AGENT_VIEW_TOKEN
+    // in env leaks into the IPC reply) stays green under the
+    // toMatchObject assertions above.
+    await upsertAgentViewRosterEntry(
+      {
+        sessionId,
+        projectCwd: globalDir,
+        activeCwd: globalDir,
+        displayName: 'release-debugger',
+        createdAt: '2026-09-05T00:00:00.000Z',
+        updatedAt: '2026-09-05T00:00:00.000Z',
+      },
+      { globalDir },
+    );
+    const storedLaunch = await readAgentViewLaunch(sessionId, { globalDir });
+    if (!storedLaunch) throw new Error('expected launch record');
+    await writeAgentViewLaunch(
+      {
+        ...storedLaunch,
+        env: { QWEN_AGENT_VIEW_TOKEN: 'worker-secret' },
+      },
+      { globalDir },
+    );
+    await expect(handler.peek?.({ sessionId })).resolves.toMatchObject({
+      sessionId,
+      rosterEntry: expect.objectContaining({
+        sessionId,
+        displayName: 'release-debugger',
+      }),
+      launch: expect.objectContaining({ env: {} }),
+      // Still starting, not waiting for input.
+      answerable: false,
+    });
+
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
@@ -1432,6 +1469,176 @@ describe('Agent View supervisor process helpers', () => {
         text: expect.stringMatching(/^(yes|no)$/),
       }),
     ]);
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('reports answerability in peek after the supervisor refusal model', async () => {
+    // peek offers `qwen sessions answer` through the answerable field;
+    // the verdict must flip exactly when queueAnswerForSessionLocked
+    // would accept or refuse, not track the waiting state alone.
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'needs_input',
+      waitingFor: 'approval',
+    });
+
+    // Waiting, live, nothing pending: an answer would be accepted.
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: true });
+
+    await handler.answer?.({ sessionId: result.sessionId, text: 'yes' });
+
+    // The previous answer is still being delivered; a second one is
+    // refused with "is waiting for the previous response", so peek must
+    // stop advertising the command.
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: false });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('refuses answerability in peek while a durable queued prompt awaits delivery', async () => {
+    // The persisted marker outlives the in-memory pending control (a
+    // supervisor restart, or a control the worker already consumed), so
+    // the in-memory check alone re-advertises `qwen sessions answer`
+    // while the answer path still throws "waiting for the previous
+    // response".
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'needs_input',
+      inputKind: 'soft',
+    });
+
+    // A queued prompt no in-memory control backs: only the durable
+    // marker records it. The queuedPromptId keeps the stale-marker sweep
+    // from clearing it as undelivered debris.
+    const queuedAt = '2026-07-17T00:00:00.000Z';
+    await writeAgentViewActivity(
+      result.sessionId,
+      {
+        schemaVersion: 1,
+        inputKind: 'soft',
+        queuedPromptCount: 1,
+        queuedPromptPreview: 'deploy it',
+        queuedPromptId: 'prompt-1',
+        queuedPromptText: 'deploy it',
+        lastQueuedPromptAt: queuedAt,
+        lastActivityAt: queuedAt,
+        capabilities: [],
+      },
+      { globalDir },
+    );
+
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: false });
+    await expect(
+      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+    ).rejects.toThrow('waiting for the previous response');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('refuses answerability in peek while the session is hibernating', async () => {
+    // Mid-hibernation the prompt path throws "not ready for follow-up",
+    // so peek must not advertise `qwen sessions answer` for that window.
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await seedHandler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await seedHandler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'needs_input',
+      inputKind: 'soft',
+    });
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'hibernating',
+    });
+    // A live worker pid keeps a supervisor that restarted mid-hibernation
+    // from healing the record to hibernated (or back to alive).
+    const worker = await readAgentViewWorker(result.sessionId, { globalDir });
+    if (!worker) throw new Error('Missing worker state.');
+    await writeAgentViewWorker(
+      result.sessionId,
+      { ...worker, hostPid: process.pid },
+      { globalDir },
+    );
+
+    // Fresh supervisor: no in-memory host, so peek sees the persisted
+    // hibernating state instead of healing it against the seed host.
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: false });
+    await expect(
+      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+    ).rejects.toThrow('is not ready for follow-up');
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });

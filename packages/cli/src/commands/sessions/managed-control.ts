@@ -1,0 +1,241 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Seeing and answering a background session.
+ *
+ * `qwen sessions ps` can say a background session is waiting for input.
+ * That is only useful if the question can be read and answered, and if a
+ * session can be stopped — otherwise the listing reports a state the user
+ * has no way to act on, and `kill <pid>` is the only exit.
+ *
+ * Each of these is a thin call to a supervisor operation that already
+ * exists; the work here is deciding what to print and refusing to invent
+ * an answer when the supervisor is not running.
+ *
+ * The supervisor is never *started* by these commands. Starting one to
+ * ask it about sessions it cannot have would turn "nothing is running"
+ * into a spawned process and a confusing empty answer.
+ */
+
+import {
+  sanitizeSingleLineTerminalText,
+  truncateToWidth,
+} from '../../ui/utils/textUtils.js';
+import { deriveAgentViewPresentation } from '../../agent-view/presentation.js';
+import type {
+  AgentViewActivityFile,
+  AgentViewLaunchFile,
+  AgentViewRosterEntry,
+  AgentViewSessionStateFile,
+} from '../../agent-view/protocol.js';
+
+/** The supervisor calls these commands make. */
+export interface ManagedControlHandle {
+  peek(sessionId: string): Promise<unknown>;
+  answer(sessionId: string, text: string): Promise<unknown>;
+  stop(sessionId: string): Promise<unknown>;
+}
+
+/**
+ * Injected so the commands are testable without a supervisor, and so the
+ * "no supervisor" path is a value rather than a thrown connection error.
+ */
+export type ConnectSupervisor = () => Promise<ManagedControlHandle | undefined>;
+
+/** What a command wants printed, and with what exit code. */
+export interface ManagedControlResult {
+  lines: string[];
+  exitCode: number;
+}
+
+// Worded after what the code knows — the supervisor socket is unreachable.
+// Detached workers keep their state on disk, so sessions may still exist;
+// `sessions ps` reads the store directly and reports what is on record.
+const NO_SUPERVISOR: ManagedControlResult = {
+  lines: [
+    'No background supervisor is reachable, so there is nothing to show.',
+    'Sessions may still be on record: check `qwen sessions ps`.',
+    'Start a new one with: qwen --bg "<prompt>"',
+  ],
+  exitCode: 1,
+};
+
+/**
+ * Text from a managed session, made safe for a terminal.
+ *
+ * Every string here was written by another process — a model's own
+ * words, or a path it chose — so it carries the same risk as a registry
+ * record: escape sequences that repaint the screen, and bidi overrides
+ * that reorder what is read. `sessions ps` sanitizes for the same reason.
+ *
+ * Everything this file prints is one labelled line, so the one-line
+ * sanitization variant applies: a kept LF would let session text start a
+ * forged continuation at column 0 — a fake `Answer it with:` hint, for
+ * instance. The one-line renderer `ps.ts` has the same constraint; the
+ * recipe is shared in `sanitizeSingleLineTerminalText`.
+ */
+function clean(value: string | undefined, limit = 500): string {
+  if (!value) return '';
+  return truncateToWidth(sanitizeSingleLineTerminalText(value), limit);
+}
+
+interface PeekResponse {
+  sessionId: string;
+  state: AgentViewSessionStateFile;
+  activity?: AgentViewActivityFile;
+  rosterEntry?: AgentViewRosterEntry;
+  launch?: AgentViewLaunchFile;
+  live?: boolean;
+  /**
+   * The supervisor's own verdict that `answer` would be accepted right
+   * now — its refusal model, not the waiting state alone. Absent in
+   * replies from supervisors that predate the field.
+   */
+  answerable?: boolean;
+}
+
+function isPeekResponse(value: unknown): value is PeekResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const state = (value as { state?: unknown }).state;
+  return typeof state === 'object' && state !== null && 'sessionId' in state;
+}
+
+/**
+ * Short handle a user can type back: ids resolve by unique prefix, so the
+ * first eight characters of the full id `--bg` printed are enough.
+ */
+export function shortSessionId(sessionId: string): string {
+  return sessionId.slice(0, 8);
+}
+
+/**
+ * Report what a background session is doing, and what it is waiting for.
+ *
+ * The title and the state line come from `deriveAgentViewPresentation`,
+ * fed the same roster entry, launch record and activity the roster and
+ * `sessions ps` use, so three surfaces cannot describe one session
+ * three ways.
+ */
+export async function peekManagedSession(
+  sessionId: string,
+  connect: ConnectSupervisor,
+): Promise<ManagedControlResult> {
+  const handle = await connect();
+  if (!handle) return NO_SUPERVISOR;
+
+  let response: unknown;
+  try {
+    response = await handle.peek(sessionId);
+  } catch (error) {
+    return failure(error);
+  }
+  if (!isPeekResponse(response)) {
+    return {
+      lines: ['The supervisor returned no state for that session.'],
+      exitCode: 1,
+    };
+  }
+
+  const presentation = deriveAgentViewPresentation({
+    state: response.state,
+    rosterEntry: response.rosterEntry,
+    launch: response.launch,
+    activity: response.activity,
+  });
+  const title = clean(presentation.title, 200);
+  const lines = [
+    `${title}  [${shortSessionId(response.state.sessionId)}]`,
+    `State:     ${presentation.taskState}${response.live === false ? ' (no live process)' : ''}`,
+    `Directory: ${clean(response.state.activeCwd, 200)}`,
+  ];
+
+  const waitingFor = clean(response.activity?.waitingFor, 300);
+  if (waitingFor) {
+    lines.push(`Waiting:   ${waitingFor}`);
+  }
+  const summary = clean(response.activity?.summary, 300);
+  // deriveTitle falls back to this same summary when neither a roster
+  // name nor a launch prompt is available, so printing it again as
+  // `Doing:` would repeat one phrase twice in five lines. Compare the
+  // summary the way the title was derived from it — trimmed, then cleaned
+  // and cut to the title's own 200 cells — or a padded or over-long
+  // summary would slip past the comparison and print twice.
+  if (summary && clean(response.activity?.summary?.trim(), 200) !== title) {
+    lines.push(`Doing:     ${summary}`);
+  }
+  const lastResult = clean(response.activity?.lastResult, 300);
+  if (lastResult) {
+    lines.push(`Last:      ${lastResult}`);
+  }
+
+  // Only offered when it would do something. The supervisor reports the
+  // verdict — its refusal model knows about a pending previous answer,
+  // a live attach elsewhere and a missing process; re-deriving from the
+  // waiting state alone re-advertises a command guaranteed to fail. A
+  // supervisor too old to report the field falls back to the waiting
+  // state.
+  const answerable =
+    typeof response.answerable === 'boolean'
+      ? response.answerable
+      : presentation.taskState === 'waiting';
+  if (answerable) {
+    lines.push(
+      '',
+      `Answer it with: qwen sessions answer ${shortSessionId(response.state.sessionId)} "<your answer>"`,
+    );
+  }
+  return { lines, exitCode: 0 };
+}
+
+/** Answer a background session that stopped to ask something. */
+export async function answerManagedSession(
+  sessionId: string,
+  text: string,
+  connect: ConnectSupervisor,
+): Promise<ManagedControlResult> {
+  if (!text.trim()) {
+    return {
+      lines: ['An answer cannot be empty.'],
+      exitCode: 1,
+    };
+  }
+  const handle = await connect();
+  if (!handle) return NO_SUPERVISOR;
+  try {
+    await handle.answer(sessionId, text);
+  } catch (error) {
+    return failure(error);
+  }
+  return { lines: ['Answer delivered.'], exitCode: 0 };
+}
+
+/** Stop a background session, leaving its transcript in place. */
+export async function stopManagedSession(
+  sessionId: string,
+  connect: ConnectSupervisor,
+): Promise<ManagedControlResult> {
+  const handle = await connect();
+  if (!handle) return NO_SUPERVISOR;
+  try {
+    await handle.stop(sessionId);
+  } catch (error) {
+    return failure(error);
+  }
+  return { lines: ['Stopped.'], exitCode: 0 };
+}
+
+/**
+ * A supervisor error as a sentence.
+ *
+ * The supervisor already words the cases a user meets — an unknown id, an
+ * ambiguous prefix, a session that is not managed — so its message is
+ * repeated rather than reinterpreted. Only the stack is dropped.
+ */
+function failure(error: unknown): ManagedControlResult {
+  const reason = error instanceof Error ? error.message : String(error);
+  return { lines: [clean(reason, 400)], exitCode: 1 };
+}
