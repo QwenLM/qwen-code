@@ -108,6 +108,19 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void refusesStaleSessionSnapshotAfterDeletionOrBindingChange() {
+        SessionRecord snapshot = createSession("storage", "child");
+        authority.authorize(snapshot);
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 2"
+                + " WHERE session_id = ?", snapshot.sessionId());
+        assertUnavailable(() -> authority.authorize(snapshot));
+
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE', deleted_at = NULL,"
+                + " workspace_storage_id = 'replacement' WHERE session_id = ?", snapshot.sessionId());
+        assertUnavailable(() -> authority.authorize(snapshot));
+    }
+
+    @Test
     void rejectsMissingReplacedSymlinkAndOverlappingMounts() throws Exception {
         SessionRecord session = createSession("storage", ".");
         Path root = Files.createDirectory(temp.resolve("root")).toRealPath();

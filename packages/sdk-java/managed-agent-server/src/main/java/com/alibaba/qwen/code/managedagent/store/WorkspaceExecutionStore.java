@@ -30,11 +30,20 @@ public class WorkspaceExecutionStore {
         ContextBinding binding = session.workspace();
         if (binding == null || !"ACTIVE".equals(session.status())
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
+                || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
         List<Boolean> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
+                + " s.agent_id AS session_agent, s.status AS session_status,"
+                + " s.deleted_at AS session_deleted_at,"
+                + " s.workspace_id AS session_workspace,"
+                + " s.workspace_generation AS session_generation,"
+                + " s.workspace_storage_id AS session_storage,"
+                + " s.cwd_relative AS session_cwd,"
+                + " s.context_config_ref AS session_context,"
+                + " s.context_revision AS session_revision,"
                 + " s.workspace_config_ref, s.workspace_policy_ref,"
                 + " r.tenant_id AS registry_tenant, r.workspace_id,"
                 + " r.workspace_generation, r.storage_id, r.state,"
@@ -50,6 +59,15 @@ public class WorkspaceExecutionStore {
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
                 (row, index) -> session.tenantId().equals(row.getString("tenant_id"))
                         && session.sessionId().equals(row.getString("session_id"))
+                        && "qwen-code".equals(row.getString("session_agent"))
+                        && "ACTIVE".equals(row.getString("session_status"))
+                        && row.getObject("session_deleted_at") == null
+                        && binding.getWorkspaceId().equals(row.getString("session_workspace"))
+                        && binding.getWorkspaceGeneration() == row.getLong("session_generation")
+                        && binding.getStorageId().equals(row.getString("session_storage"))
+                        && binding.getCwdRelative().equals(row.getString("session_cwd"))
+                        && binding.getContextConfigRef().equals(row.getString("session_context"))
+                        && binding.getContextRevision() == row.getLong("session_revision")
                         && session.tenantId().equals(row.getString("registry_tenant"))
                         && session.tenantId().equals(row.getString("command_tenant"))
                         && session.sessionId().equals(row.getString("command_session"))
