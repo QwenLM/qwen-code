@@ -19,6 +19,9 @@ const observed = vi.hoisted(() => ({
   props: undefined as MessageListProps | undefined,
   collapseRows: false,
   hideRows: false,
+  scrollToMessage: undefined as
+    | ((messageId: string, callId?: string, onSettled?: () => void) => boolean)
+    | undefined,
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
@@ -33,7 +36,15 @@ vi.mock('./MessageList', () => ({
       observed.props = props;
       useImperativeHandle(
         ref,
-        () => ({ scrollToBottom: vi.fn(), scrollToMessage: () => true }),
+        () => ({
+          scrollToBottom: vi.fn(),
+          scrollToMessage: (messageId, callId, onSettled) => {
+            if (observed.scrollToMessage)
+              return observed.scrollToMessage(messageId, callId, onSettled);
+            onSettled?.();
+            return true;
+          },
+        }),
         [],
       );
       return (
@@ -74,6 +85,7 @@ afterEach(() => {
   container?.remove();
   observed.collapseRows = false;
   observed.hideRows = false;
+  observed.scrollToMessage = undefined;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -181,6 +193,20 @@ async function setup(
   options: { degraded?: boolean; collapseRows?: boolean } = {},
 ) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const resizeCallbacks = new Set<ResizeObserverCallback>();
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        resizeCallbacks.add(this.callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks.delete(this.callback);
+      }
+    },
+  );
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 1;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -189,6 +215,12 @@ async function setup(
     return id;
   });
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  const advanceFrame = () =>
+    act(() => {
+      const current = [...frames.entries()];
+      frames.clear();
+      current.forEach(([, callback]) => callback(0));
+    });
   const settleFrames = () =>
     act(() => {
       for (let round = 0; frames.size > 0 && round < 20; round++) {
@@ -282,7 +314,14 @@ async function setup(
     click,
     list,
     row,
+    advanceFrame,
     settleFrames,
+    triggerResize: () =>
+      act(() => {
+        resizeCallbacks.forEach((callback) =>
+          callback([], {} as ResizeObserver),
+        );
+      }),
     render,
   };
 }
@@ -465,6 +504,274 @@ describe('TranscriptViewport scroll restoration and fallback', () => {
     await click('history.loadEarlier');
     settleFrames();
     expect(row(key).getBoundingClientRect().top).toBe(before);
+  });
+
+  it('restores the reading row after a delayed virtualizer measurement', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, triggerResize } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 170;
+    const targetKey = `msg:${observed.props!.messages[2]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+
+    list().scrollTop += 40;
+    triggerResize();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
+
+  it('does not replay a pre-jump anchor after same-range navigation', async () => {
+    const {
+      store,
+      click,
+      list,
+      row,
+      getTranscriptPage,
+      settleFrames,
+      triggerResize,
+    } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 170;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+
+    list().scrollTop = 170;
+    const target = observed.props!.messages.at(-1)!;
+    const targetKey = `msg:${target.id}`;
+    let resolveLocation!: (
+      value: Awaited<ReturnType<typeof store.locateViewportOrdinal>>,
+    ) => void;
+    vi.spyOn(store, 'locateViewportOrdinal').mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolveLocation = done;
+        }),
+    );
+    observed.scrollToMessage = (messageId) => {
+      const targetRow = row(`msg:${messageId}`);
+      list().scrollTop += targetRow.getBoundingClientRect().top - 20;
+      return true;
+    };
+    await click('history.openEarlier');
+    act(() => {
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    const range = store.getViewportSnapshot().ranges[0]!;
+    await act(async () =>
+      resolveLocation({
+        view: 'historical',
+        turnId: target.sourceBlockIds![0]!,
+        blockId: target.sourceBlockIds![0]!,
+        rangeId: range.id,
+        pageId: range.pageIds.at(-1)!,
+      }),
+    );
+    settleFrames();
+    const afterNavigation = row(targetKey).getBoundingClientRect().top;
+    triggerResize();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(afterNavigation);
+  });
+
+  it('keeps an older resize restore from releasing a newer navigation restore', async () => {
+    const {
+      store,
+      click,
+      list,
+      row,
+      getTranscriptPage,
+      settleFrames,
+      advanceFrame,
+      triggerResize,
+    } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 170;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+
+    list().scrollTop += 40;
+    triggerResize();
+    advanceFrame();
+
+    const target = observed.props!.messages.at(-1)!;
+    let resolveLocation!: (
+      value: Awaited<ReturnType<typeof store.locateViewportOrdinal>>,
+    ) => void;
+    vi.spyOn(store, 'locateViewportOrdinal').mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolveLocation = done;
+        }),
+    );
+    observed.scrollToMessage = (messageId) => {
+      const targetRow = row(`msg:${messageId}`);
+      list().scrollTop += targetRow.getBoundingClientRect().top - 20;
+      return true;
+    };
+    await click('history.openEarlier');
+    const range = store.getViewportSnapshot().ranges[0]!;
+    await act(async () =>
+      resolveLocation({
+        view: 'historical',
+        turnId: target.sourceBlockIds![0]!,
+        blockId: target.sourceBlockIds![0]!,
+        rangeId: range.id,
+        pageId: range.pageIds[0]!,
+      }),
+    );
+    getTranscriptPage.mockImplementation(() => new Promise(() => {}));
+
+    advanceFrame();
+    act(() => {
+      list().scrollTop = 0;
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses a deferred scroll-to-message restore at an edge', async () => {
+    const {
+      click,
+      list,
+      row,
+      getTranscriptPage,
+      settleFrames,
+      advanceFrame,
+      triggerResize,
+      render,
+    } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 0;
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2'], true));
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+    getTranscriptPage.mockImplementation(() => new Promise(() => {}));
+    list().scrollTop = 200;
+    observed.hideRows = true;
+    render();
+    let finishDeferredScroll!: () => void;
+    const scrollToMessage = vi.fn((_messageId, _callId, onSettled) => {
+      finishDeferredScroll = () => {
+        list().scrollTop = 159;
+        list().dispatchEvent(new Event('scroll', { bubbles: true }));
+        list().scrollTop = 160;
+        onSettled?.();
+      };
+      return true;
+    });
+    observed.scrollToMessage = scrollToMessage;
+    triggerResize();
+    advanceFrame();
+    expect(scrollToMessage).toHaveBeenCalledOnce();
+    observed.hideRows = false;
+    render();
+    settleFrames();
+    act(() => finishDeferredScroll());
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries anchor restoration after a deferred virtual scroll is reset', async () => {
+    const {
+      click,
+      list,
+      row,
+      getTranscriptPage,
+      settleFrames,
+      advanceFrame,
+      triggerResize,
+      render,
+    } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 0;
+    const targetKey = `msg:${observed.props!.messages[0]!.id}`;
+    const before = row(targetKey).getBoundingClientRect().top;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2'], true));
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+
+    list().scrollTop = 200;
+    observed.hideRows = true;
+    render();
+    let finishDeferredScroll!: () => void;
+    observed.scrollToMessage = vi.fn((_messageId, _callId, onSettled) => {
+      finishDeferredScroll = () => {
+        list().scrollTop = 0;
+        onSettled?.();
+      };
+      return true;
+    });
+    triggerResize();
+    advanceFrame();
+
+    act(() => finishDeferredScroll());
+    observed.hideRows = false;
+    render();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(before);
+  });
+
+  it('keeps the reader position after a dispatched scroll supersedes the saved anchor', async () => {
+    const { click, list, row, getTranscriptPage, settleFrames, triggerResize } =
+      await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 100;
+    const targetKey = `msg:${observed.props!.messages[2]!.id}`;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2']));
+    await click('history.loadEarlier');
+    settleFrames();
+
+    act(() => {
+      list().scrollTop -= 20;
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    const afterReaderScroll = row(targetKey).getBoundingClientRect().top;
+    triggerResize();
+    settleFrames();
+
+    expect(row(targetKey).getBoundingClientRect().top).toBe(afterReaderScroll);
+  });
+
+  it('does not load another page for a delayed scroll event from restoration', async () => {
+    const { click, list, getTranscriptPage, settleFrames } = await setup();
+    await click('history.openEarlier');
+    settleFrames();
+    list().scrollTop = 0;
+    getTranscriptPage.mockResolvedValue(page(['old1', 'old2'], true));
+
+    await click('history.loadEarlier');
+    settleFrames();
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
+    getTranscriptPage.mockImplementation(() => new Promise(() => {}));
+
+    act(() => {
+      list().dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    settleFrames();
+
+    expect(getTranscriptPage).toHaveBeenCalledTimes(2);
   });
 
   it('preserves the legacy loader when the turn index is degraded', async () => {
