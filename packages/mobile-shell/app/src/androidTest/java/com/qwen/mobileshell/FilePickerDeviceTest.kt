@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -124,8 +125,14 @@ class FilePickerDeviceTest {
     @Test fun providerOwnedByPickerContextIsRejectedDespiteReadGrant() {
         val uri = document()
         val provider = requireNotNull(context.packageManager.resolveContentProvider(uri.authority!!, 0))
-        assertEquals(instrumentation.context.applicationInfo.uid, provider.applicationInfo.uid)
-        assertNull(delivered(selection(listOf(uri)), pickerContext = instrumentation.context))
+        val ownerInfo = context.packageManager.getApplicationInfo(provider.packageName, 0)
+        // Instrumentation's synthetic ApplicationInfo can have UID 0 on older Android.
+        val ownerContext = object : ContextWrapper(context) {
+            override fun getApplicationInfo() = ownerInfo
+        }
+        assertEquals("Picker context must belong to the provider UID", provider.applicationInfo.uid, ownerContext.applicationInfo.uid)
+        assertArrayEquals("Control: a different-UID context accepts the granted URI", arrayOf(uri), delivered(selection(listOf(uri))))
+        assertNull(delivered(selection(listOf(uri)), pickerContext = ownerContext))
     }
 
     @Test fun mixedSelectionRejectsAllFilesWhenOneIsUnsafe() {
