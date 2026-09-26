@@ -421,7 +421,7 @@ it.skipIf(process.platform === 'win32')(
     await expect(transport.start()).rejects.toMatchObject({
       code: 'BROWSER_DISCONNECTED',
       message: expect.stringContaining(
-        'Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry.',
+        'install the extension from https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph or enable it at chrome://extensions',
       ),
     });
     expect(transport.isConnected()).toBe(false);

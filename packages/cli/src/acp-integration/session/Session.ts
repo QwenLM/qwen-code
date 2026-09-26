@@ -2077,6 +2077,23 @@ export async function buildAvailableCommandsSnapshot(
   };
 }
 
+// The two caller-caused `switchModel` refusals: the model is not
+// registered for the auth type, or it is media-only and cannot serve as
+// the primary model. Every other `switchModel` throw is a daemon-side
+// fault (auth refresh, credential, I/O) and must stay an internal error.
+// Message-keyed because core throws plain Errors; a reworded message
+// degrades to internal error, never to a false refusal. `[\s\S]`, not
+// `.`: a model id can carry a newline, which `.` refuses to match — that
+// would degrade a definite caller-caused refusal into an internal error.
+function isCallerCausedModelRefusal(error: Error): boolean {
+  return (
+    /^Model '[\s\S]+' not found for authType '[\s\S]+'$/.test(error.message) ||
+    /^(?:Image|Voice|Realtime)-only model '[\s\S]+' cannot be used as the primary model$/.test(
+      error.message,
+    )
+  );
+}
+
 /**
  * Session represents an active conversation session with the AI model.
  * It uses modular components for consistent event emission:
@@ -3679,10 +3696,14 @@ export class Session implements SessionContext {
     }
     if (!this.liveSpeakToUserTool) {
       const tool = new SpeakToUserTool(async (message) => {
-        await this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
-          callerSessionId: this.sessionId,
-          message,
-        });
+        const result = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.liveSpeakToUser,
+          {
+            callerSessionId: this.sessionId,
+            message,
+          },
+        );
+        return result['accepted'] !== false;
       });
       registry.registerTool(tool);
       if (registry.getTool(SPEAK_TO_USER_TOOL_NAME) !== tool) {
@@ -11841,11 +11862,23 @@ export class Session implements SessionContext {
               : {}),
           }
         : undefined;
-    await this.config.switchModel(
-      selectedAuthType,
-      parsed.modelId,
-      switchOptions,
-    );
+    try {
+      await this.config.switchModel(
+        selectedAuthType,
+        parsed.modelId,
+        switchOptions,
+      );
+    } catch (error) {
+      // `switchModel` throws plain Errors for its two caller-caused
+      // refusals (an unknown model for the auth type, a media-only model
+      // as primary) and for daemon-side faults (auth refresh, credential,
+      // I/O) alike. Only the former are client errors on this surface —
+      // keep every other failure an internal error.
+      if (error instanceof Error && isCallerCausedModelRefusal(error)) {
+        throw RequestError.invalidParams(undefined, error.message);
+      }
+      throw error;
+    }
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;
@@ -13038,6 +13071,7 @@ export class Session implements SessionContext {
           function_name: toolName,
           function_args: args,
           duration_ms: durationMs,
+          started_at_ms: startTime,
           status,
           execution_status: executionStatus,
           success: false,
@@ -13102,6 +13136,8 @@ export class Session implements SessionContext {
               callId,
               toolName,
               args,
+              startedAt: startTime,
+              durationMs: Date.now() - startTime,
               message: errorParts,
               error,
               success: false,
@@ -13109,7 +13145,13 @@ export class Session implements SessionContext {
               persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
             });
           } else {
-            await this.toolCallEmitter.emitError(callId, toolName, error);
+            await this.toolCallEmitter.emitError(
+              callId,
+              toolName,
+              error,
+              undefined,
+              { startedAt: startTime, durationMs: Date.now() - startTime },
+            );
           }
         } catch (emitError) {
           debugLogger.debug(
@@ -13830,7 +13872,6 @@ export class Session implements SessionContext {
             }
           }
 
-          let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
           const cancelStaleTodoPlanApproval = async () => {
             const configRevision =
@@ -14117,7 +14158,6 @@ export class Session implements SessionContext {
                 confirmationDetails.type === 'info')
             ) {
               // Auto-approve, skip requestPermission.
-              // didRequestPermission stays false → emitStart below.
             } else if (!hookHandled) {
               if (planShellDecision.classification !== 'not-applicable') {
                 const finalPreDisplayPlanShellError =
@@ -14150,7 +14190,6 @@ export class Session implements SessionContext {
               }
 
               // Show permission dialog via ACP requestPermission
-              didRequestPermission = true;
               const content =
                 buildPermissionRequestContent(confirmationDetails);
 
@@ -14484,14 +14523,13 @@ export class Session implements SessionContext {
             }
           }
 
-          if ((!didRequestPermission || isAgentTool) && !isTodoWriteTool) {
-            // Approved agents also need the initial creating frame when the
-            // provider does not emit preparation updates.
+          if (!isTodoWriteTool) {
             const startParams: ToolCallStartParams = {
               callId,
               toolName,
               args,
               status: 'in_progress',
+              startedAt: startTime,
             };
             try {
               await this.toolCallEmitter.emitStart(startParams);
@@ -15258,6 +15296,8 @@ export class Session implements SessionContext {
                 callId,
                 toolName,
                 args,
+                startedAt: startTime,
+                durationMs: Date.now() - startTime,
                 message: responseParts,
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
@@ -15288,6 +15328,7 @@ export class Session implements SessionContext {
               function_name: toolName,
               function_args: args,
               duration_ms: durationMs,
+              started_at_ms: startTime,
               status,
               execution_status: executionStatus,
               success: succeeded,

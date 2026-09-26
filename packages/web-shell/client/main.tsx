@@ -8,12 +8,11 @@ import { isRemoteConnectionKnown } from './config/remote-connections';
 import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
-import {
-  DaemonWorkspaceProvider,
-  type DaemonProductSessionContext,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -27,7 +26,8 @@ import {
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
-import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
+import { inferStandaloneBasePath } from './utils/sessionPath';
+
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -173,53 +173,18 @@ function getInitialLanguage(): WebShellLanguage | undefined {
   return readStoredLanguage();
 }
 
-function getSessionIdFromUrl(): string | undefined {
-  return parseSessionId(window.location.pathname);
-}
-
-function getWorkspaceIdFromUrl(): string | undefined {
-  return (
-    new URLSearchParams(window.location.search).get('workspace') || undefined
-  );
-}
-
-function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
-  const context = new URLSearchParams(window.location.search).get('context');
-  return context === 'standalone' || context === 'live'
-    ? { kind: context }
-    : undefined;
-}
-
-function replaceStandaloneSessionUrl(
-  sessionId: string | undefined,
-  workspaceId?: string,
-  sessionContext?: DaemonProductSessionContext,
-): void {
-  const url = new URL(window.location.href);
-  url.pathname = buildSessionPathname(url.pathname, sessionId);
-  if (
-    sessionId &&
-    (sessionContext?.kind === 'standalone' || sessionContext?.kind === 'live')
-  ) {
-    url.searchParams.set('context', sessionContext.kind);
-    url.searchParams.delete('workspace');
-  } else if (sessionId && workspaceId) {
-    url.searchParams.set('workspace', workspaceId);
-    url.searchParams.delete('context');
-  } else {
-    url.searchParams.delete('workspace');
-    url.searchParams.delete('context');
-  }
-  // Strip one-shot query params so bookmarked / shared URLs do not
-  // permanently override stored preferences on every page load.
-  url.searchParams.delete('theme');
-  url.searchParams.delete('language');
-  url.searchParams.delete('lang');
-  // Boot already scrubbed ?token= (dev included), so drop it here too.
-  // `daemon` is connection identity, not a one-shot preference: keep it so
-  // session navigation and refresh stay on the selected remote daemon.
-  url.searchParams.delete('token');
-  window.history.replaceState(null, '', url);
+function getDevelopmentManagedAgentProvider():
+  | ManagedAgentProvider
+  | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('managedProvider') !== 'java') return undefined;
+  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
+  return createJavaManagedAgentProvider({
+    baseUrl: window.location.origin,
+    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
+    productScope: tenantId,
+  });
 }
 
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
@@ -244,15 +209,12 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [documentLanguage, setDocumentLanguage] = useState<WebShellLanguage>(
     () => language ?? normalizeLanguage(navigator.language),
   );
-  const [sessionId, setSessionId] = useState<string | undefined>(() =>
-    getSessionIdFromUrl(),
+  const [navigationBasePath] = useState(() =>
+    inferStandaloneBasePath(window.location.pathname),
   );
-  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
-    getWorkspaceIdFromUrl(),
+  const [managedAgentProvider] = useState(() =>
+    getDevelopmentManagedAgentProvider(),
   );
-  const [sessionContext, setSessionContext] = useState<
-    DaemonProductSessionContext | undefined
-  >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
@@ -265,7 +227,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     url.searchParams.delete('language');
     url.searchParams.delete('lang');
     if (url.search !== before) {
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
     }
   }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
@@ -312,29 +274,6 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
     applyBrandToDocument(brand);
   }, []);
-  const handleSessionIdChange = useCallback(
-    (
-      nextSessionId?: string,
-      nextWorkspaceId?: string,
-      _nextWorkspaceCwd?: string,
-      nextSessionContext?: DaemonProductSessionContext,
-    ) => {
-      setSessionId(nextSessionId);
-      const nonWorkspaceContext =
-        nextSessionContext?.kind === 'standalone' ||
-        nextSessionContext?.kind === 'live'
-          ? nextSessionContext
-          : undefined;
-      setSessionContext(nonWorkspaceContext);
-      setWorkspaceId(nonWorkspaceContext ? undefined : nextWorkspaceId);
-      replaceStandaloneSessionUrl(
-        nextSessionId,
-        nextWorkspaceId,
-        nonWorkspaceContext,
-      );
-    },
-    [],
-  );
 
   return (
     <ErrorBoundary
@@ -366,7 +305,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               if (theme !== undefined) url.searchParams.set('theme', theme);
               if (language !== undefined)
                 url.searchParams.set('language', language);
-              window.history.replaceState(null, '', url);
+              window.history.replaceState(window.history.state, '', url);
               window.location.reload();
             }}
             retryMode={canReload ? 'reload' : 'reset'}
@@ -389,9 +328,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <StandaloneContext.Provider value={true}>
           <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
             <WorkspaceSessionProvider
-              sessionId={sessionId}
-              workspaceId={workspaceId}
-              sessionContext={sessionContext}
+              urlNavigation={{ basePath: navigationBasePath }}
               chromeTheme={documentTheme}
               chromeLanguage={documentLanguage}
               webShellProps={{
@@ -402,12 +339,14 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onLanguageChange: handleLanguageChange,
                 onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
-                onSessionIdChange: handleSessionIdChange,
+                managedAgentProvider,
                 sidebar: { enabled: true, showLive: true },
+                showToolCalls: true,
                 className: macosOverlayTitlebar
                   ? MACOS_TITLEBAR_CLASS
                   : undefined,
                 header: {
+                  showMobileAccess: true,
                   items: [
                     'title',
                     'environment',
@@ -459,7 +398,7 @@ async function main() {
     const url = new URL(window.location.href);
     if (url.searchParams.has('token')) {
       url.searchParams.delete('token');
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
     }
   } else {
     removeDaemonTokenFromUrl();

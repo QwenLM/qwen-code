@@ -19,19 +19,19 @@ import type {
   TrajectoryTurn,
 } from './types';
 
+import { resolveToolCallName } from '../adapters/toolClassification';
+
 /**
  * User records the daemon injects mid-turn. They are real rows, but they do not
  * open a turn — the same split the transcript reader makes server-side with
  * `isReplayTurnStartType`.
- *
- * A `goal_runtime` record carrying display text reaches the client as a plain
- * user chunk with no marker, so it reads here as a turn start. Known gap; it
- * costs a spurious turn header and nothing else.
  */
 const INJECTED_USER_SOURCES: ReadonlySet<string> = new Set([
   'background_notification',
   'cron',
   'mid_turn_message_injected',
+  'goal_runtime',
+  'goal_control',
 ]);
 
 /**
@@ -229,12 +229,19 @@ export function buildTrajectory(
     if (
       timing.toolName !== undefined &&
       row.block.toolName !== undefined &&
-      timing.toolName !== row.block.toolName
+      timing.toolName !== row.block.toolName &&
+      timing.toolName !==
+        resolveToolCallName(row.block.toolName, row.block.rawInput)
     ) {
       return;
     }
     if ((fromSubagent !== undefined) !== row.depth > 0) return;
-    row.timing = { durationMs: timing.durationMs };
+    row.timing = {
+      durationMs: timing.durationMs,
+      ...(timing.startedAt !== undefined
+        ? { startedAt: timing.startedAt }
+        : {}),
+    };
     if (timing.toolStatus !== undefined) row.toolStatus = timing.toolStatus;
   };
 

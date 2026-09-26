@@ -204,6 +204,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterTool = vi.fn();
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
@@ -6922,6 +6923,158 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    it('registers and removes Advisor with the runtime model setting', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          llmClient: { setTools: typeof setTools };
+        }
+      ).llmClient = { setTools };
+      const registry = config.getToolRegistry();
+
+      await config.setAdvisorModel('advisor-model');
+
+      expect(config.getAdvisorModel()).toBe('advisor-model');
+      expect(registry.unregisterTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registry.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(setTools).toHaveBeenCalledTimes(1);
+
+      await config.setAdvisorModel('off');
+
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+      expect(setTools).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not disturb Advisor registration while the tool is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.ADVISOR],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      vi.mocked(registry.unregisterTool).mockClear();
+      vi.mocked(registry.registerFactory).mockClear();
+
+      const applied = await config.setAdvisorModel('advisor-model');
+
+      expect(applied).toBe(false);
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).not.toHaveBeenCalled();
+      expect(registry.registerFactory).not.toHaveBeenCalled();
+    });
+
+    it('does not register Advisor in safe mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        safeMode: true,
+      });
+
+      await config.initialize();
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it('shares the Advisor limit across derived configs and does not reset on toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      const child = Object.create(config) as Config;
+      expect(child.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      await config.setAdvisorModel('off');
+      await config.setAdvisorModel('advisor-model');
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      expect(config.getAdvisorUseCount()).toBe(1);
+    });
+
+    it('treats an Advisor limit of 0 as unlimited', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 0,
+      });
+      for (let i = 0; i < 3; i++) {
+        expect(config.tryConsumeAdvisorUse()).toBe(true);
+      }
+      expect(config.getAdvisorUseCount()).toBe(3);
+    });
+
+    it('resets the Advisor count when a new session starts', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      config.startNewSession('next-advisor-session');
+      expect(config.getAdvisorUseCount()).toBe(0);
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+    });
+
+    it('registers configured Advisor for ordinary subagent registries', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it.each([-1, 1.5, NaN, Infinity, '5'])(
+      'falls back to unlimited for invalid Advisor limit %s',
+      (advisorMaxUses) => {
+        const config = new Config({
+          ...baseParams,
+          advisorMaxUses: advisorMaxUses as number,
+        });
+        expect(config.getAdvisorMaxUses()).toBe(0);
+      },
+    );
+
+    it('defers Advisor when tools.eager omits it', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        eagerTools: [],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      expect(registry.registerPermissionDeferredFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.ensureTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      await config.setAdvisorModel('off');
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
     });
 
     it.each([

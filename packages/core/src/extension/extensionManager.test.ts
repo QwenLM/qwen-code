@@ -44,6 +44,7 @@ import {
 } from './extension-git-credentials.js';
 import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
+import { SkillManager } from '../skills/skill-manager.js';
 
 const mockGit = {
   clone: vi.fn(),
@@ -528,6 +529,91 @@ describe('extension tests', () => {
         else process.env['QWEN_TEST_WORKFLOW_DIR'] = saved;
       }
     });
+  });
+
+  it('retains extension skill discovery errors until the next successful load', async () => {
+    const extensionDirectory = createExtension({
+      extensionsDir: userExtensionsDir,
+      name: 'broken-skill',
+    });
+    const skillDirectory = path.join(extensionDirectory, 'skills', 'review');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    const manifestPath = path.join(skillDirectory, 'SKILL.md');
+    fs.writeFileSync(manifestPath, 'invalid frontmatter');
+    const manager = createExtensionManager();
+    await manager.refreshCache();
+    const [broken] = manager.getLoadedExtensions();
+    expect(broken).toBeDefined();
+    expect(broken.skills).toEqual([]);
+    expect(broken.skillsDiscoveryHasErrors).toBe(true);
+    fs.writeFileSync(
+      manifestPath,
+      '---\nname: review\ndescription: Review code\n---\nBody.',
+    );
+    await manager.refreshCache();
+    const [recovered] = manager.getLoadedExtensions();
+    expect(recovered.skills?.map((skill) => skill.name)).toEqual(['review']);
+    expect(recovered.skillsDiscoveryHasErrors).not.toBe(true);
+    fs.rmSync(skillDirectory, { recursive: true });
+    await manager.refreshCache();
+    expect(manager.getLoadedExtensions()[0].skillsDiscoveryHasErrors).not.toBe(
+      true,
+    );
+  });
+
+  it('propagates Agent Plugin root discovery failures through recovery and confirmed removal', async () => {
+    const pluginDirectory = path.join(userExtensionsDir, 'portable-plugin');
+    createAgentPlugin(pluginDirectory);
+    const skillsDirectory = path.join(pluginDirectory, 'skills');
+    const outsideDirectory = path.join(tempWorkspaceDir, 'outside-skills');
+    const manager = createExtensionManager();
+    const skillManager = new SkillManager({
+      isSafeMode: () => false,
+      getBareMode: () => false,
+      getProjectRoot: () => tempWorkspaceDir,
+      getDisabledSkillLevels: () => new Set(['project', 'user', 'bundled']),
+      getActiveExtensions: () =>
+        manager.getLoadedExtensions().filter((extension) => extension.isActive),
+    } as unknown as Config);
+    const refresh = async () => {
+      await manager.refreshCache();
+      await skillManager.refreshCache();
+      return manager.getLoadedExtensions()[0];
+    };
+
+    await refresh();
+    expect(skillManager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+      'portable-plugin:direct',
+    ]);
+    fs.renameSync(skillsDirectory, outsideDirectory);
+    fs.symlinkSync(
+      outsideDirectory,
+      skillsDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const broken = await refresh();
+    expect(broken.format).toBe('agent-plugins-v1');
+    expect(broken.skills).toEqual([]);
+    expect(broken.skillsDiscoveryHasErrors).toBe(true);
+    expect(skillManager.getCachedSkills()).toEqual([]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(true);
+
+    fs.unlinkSync(skillsDirectory);
+    fs.renameSync(outsideDirectory, skillsDirectory);
+    const recovered = await refresh();
+    expect(recovered.skills?.map((skill) => skill.name)).toEqual(['direct']);
+    expect(recovered.skillsDiscoveryHasErrors).not.toBe(true);
+    expect(skillManager.getCachedSkills()?.map((skill) => skill.name)).toEqual([
+      'portable-plugin:direct',
+    ]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(false);
+
+    fs.rmSync(skillsDirectory, { recursive: true });
+    const removed = await refresh();
+    expect(removed.skills).toEqual([]);
+    expect(removed.skillsDiscoveryHasErrors).not.toBe(true);
+    expect(skillManager.getCachedSkills()).toEqual([]);
+    expect(skillManager.hasDiscoveryErrors()).toBe(false);
   });
 
   describe('extension skill states', () => {

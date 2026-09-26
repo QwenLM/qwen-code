@@ -1899,12 +1899,16 @@ export default {
   'Context Usage': 'Utilisation du contexte',
   'No API response yet. Send a message to see actual usage.':
     "Pas encore de réponse API. Envoyez un message pour voir l'utilisation réelle.",
+  'Estimated usage, including the conversation':
+    'Utilisation estimée, conversation comprise',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Pas encore d'utilisation du fournisseur. Ce sont des estimations locales, conversation comprise.",
   'Estimated pre-conversation overhead':
     'Surcharge estimée avant la conversation',
   'Context window': 'Fenêtre de contexte',
   Used: 'Utilisé',
   Free: 'Libre',
-  'Autocompact buffer': 'Tampon de compaction automatique',
+  'Autocompact buffer': 'Réserve de compaction',
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',

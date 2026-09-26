@@ -14,6 +14,17 @@ function mockPairingStore(overrides: Partial<PairingStore> = {}): PairingStore {
 }
 
 describe('SenderGate', () => {
+  it('disabled rejects even listed or approved users without creating pairing requests', () => {
+    const store = mockPairingStore({
+      isApproved: vi.fn().mockReturnValue(true),
+    });
+    const gate = new SenderGate('disabled', ['alice'], store);
+    expect(gate.isAllowed('alice')).toBe(false);
+    expect(gate.check('alice')).toEqual({ allowed: false });
+    expect(store.isApproved).not.toHaveBeenCalled();
+    expect(store.createRequest).not.toHaveBeenCalled();
+  });
+
   describe('open policy', () => {
     it('allows any sender', () => {
       const gate = new SenderGate('open');
