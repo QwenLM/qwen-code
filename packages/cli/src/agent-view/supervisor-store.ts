@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+import { sanitizeSessionId } from './protocol.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -19,6 +20,11 @@ import type {
   AgentViewSupervisorFile,
   AgentViewWorkerFile,
 } from './protocol.js';
+
+// Re-exported from its old home: the sanitizer moved to `protocol.js` so
+// the pure row-merging module can canonicalize ids without importing this
+// filesystem store, and every existing importer keeps working.
+export { sanitizeSessionId };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -560,16 +566,6 @@ export async function writeAgentViewSupervisor(
     ...supervisor,
     schemaVersion: 1,
   });
-}
-
-export function sanitizeSessionId(sessionId: string): string {
-  const safe = path
-    .basename(sessionId.replace(/\\/g, '/'))
-    .toLowerCase()
-    .replace(/^\.+/g, '_')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"|?*\x00-\x1F]/g, '_');
-  return safe || '_';
 }
 
 function compareRosterEntries(
