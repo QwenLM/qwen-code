@@ -147,8 +147,17 @@ figures with nothing calling it. So when the gate fires on a **subsystem**
 (not a single symbol), date the wiring rather than the code:
 
 ```bash
-# has anything outside it ever referenced it?
-"$RG" -l '<dir>/' --glob '!<dir>/**' packages
+# has anything outside it ever referenced it? Search the directory's LAST
+# PATH SEGMENT (`<name>`), not `<dir>` — `<dir>` stays repo-root-relative,
+# the spelling SKILL.md's `git log -- <dir>` uses. In-repo references are
+# relative import specifiers ('./agent-view/x.js'), so a full path never
+# appears in file contents: '-l '<dir>/'' exits 1 for a subsystem that IS
+# wired, and that null reads as "no external reference". The exclusion
+# needs the '**/' prefix to anchor; '!<name>/**' alone excludes nothing.
+"$RG" -l '<name>/' --glob '!**/<name>/**' packages
+# Classify the hits, never count them: a same-named sibling directory
+# contributes files that reference IT rather than `<dir>`, so read each
+# hit's import specifier before concluding the subsystem is wired.
 # and are the PRs that would wire it still open?
 gh pr list --repo QwenLM/qwen-code --search '<feature> in:title' --state all
 ```
@@ -304,6 +313,19 @@ nothing ever said out loud that a five-figure subsystem had no caller.
 The deletion verdict was right and stays right. The silence was not: this is
 the stalled-wiring finding above, owed to that PR stack, not to a cleanup
 list.
+
+**That measurement is dated, and the directive it produced expires with it.**
+As of the commit adding this text the wiring has landed: `--bg` in `cli.ts`
+is the entry point the paragraph above calls missing — that file carried no
+`agent-view/` reference at this PR's base commit and carries four now — and
+`commands/sessions/ps.ts:22` was already importing
+`agent-view/supervisor-store.js` at the base. So "zero external references"
+is a 2026-09-04 fact, not a live one; re-posting it in the present tense
+would be a false public claim about a stack that merged, which is the trust
+cost this section says outweighs the finding. The grep needs classifying
+too: a bare `agent-view/` search also returns
+`ui/layouts/DefaultAppLayout.tsx`, which imports the _unrelated_
+`ui/components/agent-view/`.
 
 **3. The naive count is wrong in both directions.**
 `eslint.legacy-filenames.mjs` lists 559 bare basenames. Checking "does a

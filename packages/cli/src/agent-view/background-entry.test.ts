@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const ensureAgentViewSupervisor = vi.fn();
@@ -88,6 +89,15 @@ function supervisorClosedError(): Error & { code: string } {
 // the window when it starts, so a row stamped when the mock is built can
 // land a millisecond earlier and read as a session from a previous
 // launch.
+// `projectCwd` must round-trip through `path.resolve` because that is the
+// value production compares against — the writer stores
+// `path.resolve(cwd)` (supervisor-dispatch.ts) and the entry's row
+// predicate matches on exact identity against `path.resolve(cwd)`
+// (background-entry.ts). A hardcoded POSIX literal never equals it on
+// Windows, where `path.resolve('/w/app')` is drive-relative, so every row
+// these tests seed would stop matching and the exit-2 cases would fall
+// through to exit 1 on that lane alone. Same rule as server.test.ts's
+// workspace fixtures.
 function recordedSession(
   overrides: Partial<{
     sessionId: string;
@@ -101,7 +111,7 @@ function recordedSession(
     sessionId: 'sess-recorded',
     ownership: 'managed',
     sessionState: 'starting',
-    projectCwd: '/w/app',
+    projectCwd: path.resolve('/w/app'),
     createdAt: new Date(Date.now() + 1_000).toISOString(),
     ...overrides,
   };
@@ -559,7 +569,9 @@ describe('runBackgroundDispatch', () => {
       recordedSession({
         createdAt: new Date(Date.now() - 60_000).toISOString(),
       }),
-      recordedSession({ projectCwd: '/w/other' }),
+      // Resolved like the default so this row stays a genuine cwd MISMATCH
+      // rather than a malformed path on every platform.
+      recordedSession({ projectCwd: path.resolve('/w/other') }),
       recordedSession({ ownership: 'unmanaged' }),
     ]);
 
