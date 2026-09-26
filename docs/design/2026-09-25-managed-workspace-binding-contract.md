@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-Status: implemented as a standalone package; nothing is wired yet. Updated: 2026-09-25. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [This reply](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703) to [the W0a questions](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126) settled the placement and the timing of the boot envelope. Below, "the reference contract" is the proposal's [Workspace and Session cwd design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) together with the [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453) of its public OpenAPI, and "the reference schema" is its [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql), all at the commit that #12380 links.
+Status: implemented as a standalone package. Since W0c-1 the worker uses its TypeScript twin through the `managed-context/1` envelope ([Managed Context Worker](2026-09-26-managed-context-worker.md)); the Broker does not use it yet. Updated: 2026-09-26. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [This reply](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703) to [the W0a questions](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126) settled the placement and the timing of the boot envelope. Below, "the reference contract" is the proposal's [Workspace and Session cwd design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) together with the [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453) of its public OpenAPI, and "the reference schema" is its [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql), all at the commit that #12380 links.
 
 ## Problem
 
@@ -259,7 +259,7 @@ None of these succeeds on an unchanged retry. W0a raises them as one exception t
   - Tests in the matching test package, including the fixture consumer.
 - `packages/sdk-java/runtime-broker/README.md` and `QWEN.md`: a section on the package.
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` and `.schema.json` (new).
-- `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. It is not wired into the worker yet.
+- `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. The worker uses it since W0c-1.
 - This design document, in both languages.
 
 No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the worker boot document, the attestation contract or any CI workflow changes. The SDK Java workflow already runs the `runtime-broker` tests and Checkstyle, and its path filters cover both `packages/sdk-java/**` and `packages/cli/src/serve/**`.
@@ -286,7 +286,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
 - No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace.
 - A replacement snapshot cannot drop a Workspace, lower its generation, or change its storage ID without a new generation.
 - The Java package uses only the JDK: no other Broker class, Spring, CLI internals or scheduler.
-- The documentation does not claim persistence, wiring or capability advertisement.
+- The documentation does not claim persistence or capability advertisement. The worker was wired later, in W0c-1.
 
 ## Open questions
 

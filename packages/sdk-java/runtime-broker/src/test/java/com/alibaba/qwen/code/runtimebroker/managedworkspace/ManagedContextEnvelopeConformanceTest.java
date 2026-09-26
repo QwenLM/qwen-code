@@ -135,6 +135,48 @@ class ManagedContextEnvelopeConformanceTest {
                     outcomes.required(1).required("properties")
                             .required("status"), name);
         }
+        assertEquals(JSON.readTree("""
+                {"enum": ["managed_runtime_attestation_invalid",
+                          "managed_runtime_identity_conflict"]}
+                """), definitions.required("attestationOutcome")
+                .required("oneOf").required(1).required("properties")
+                .required("code"));
+        assertEquals(JSON.readTree("""
+                {"enum": ["managed_runtime_attestation_invalid",
+                          "managed_runtime_identity_conflict",
+                          "managed_context_conflict"]}
+                """), definitions.required("installationOutcome")
+                .required("oneOf").required(1).required("properties")
+                .required("code"));
+        assertEquals(JSON.readTree("{\"enum\": [\"session\", \"workspace\"]}"),
+                definitions.required("isolationClass"));
+        assertEquals(JSON.readTree(
+                "{\"$ref\": \"#/$defs/managedContext\"}"),
+                schema().required("properties").required("managedContext"));
+        for (String name : List.of("bootV2", "attestationRequestV3",
+                "attestationResponseV3")) {
+            assertEquals(reference("isolationClass"), definitions
+                    .required(name).required("properties")
+                    .required("isolationClass"), name);
+        }
+        JsonNode properties = schema().required("properties");
+        assertEquals(reference("bootV2"), properties.required("boot"));
+        assertEquals(reference("readyV2"), properties.required("ready"));
+        assertEquals(reference("attestationResponseV3"),
+                properties.required("attestationResponse"));
+        assertEquals(reference("attestationOutcome"), properties
+                .required("attestationCases").required("items")
+                .required("properties").required("expected"));
+        assertEquals(reference("installationOutcome"), properties
+                .required("installationSequences").required("items")
+                .required("properties").required("steps").required("items")
+                .required("properties").required("expected"));
+        assertEquals(reference("attestationResponseV3"), definitions
+                .required("attestationOutcome").required("oneOf").required(0)
+                .required("properties").required("body"));
+        assertEquals(reference("receipt"), definitions
+                .required("installationOutcome").required("oneOf").required(0)
+                .required("properties").required("body"));
         JsonNode reference = JSON.readTree(
                 "{\"$ref\": \"#/$defs/managedContext\"}");
         for (String name : List.of("bootV2", "readyV2",
@@ -296,13 +338,19 @@ class ManagedContextEnvelopeConformanceTest {
         }
     }
 
+    private static JsonNode reference(String definition) {
+        return JSON.createObjectNode().put("$ref", "#/$defs/" + definition);
+    }
+
     private static JsonNode constant(JsonNode definitions, String definition,
             String field) {
         return definitions.required(definition).required("properties")
                 .required(field).required("const");
     }
 
-    /** An accepted request carries protocol version 3 and the token. */
+    /**
+     * An accepted request carries protocol version 3 and the protocol token.
+     */
     private static void checkMarkers(JsonNode fixtures, JsonNode request,
             String id) {
         assertEquals(PROTOCOL_VERSION, request.required("protocolVersion"),

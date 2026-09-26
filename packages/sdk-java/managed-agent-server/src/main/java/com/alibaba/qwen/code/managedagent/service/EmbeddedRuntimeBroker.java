@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
@@ -14,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import java.io.IOException;
@@ -47,6 +49,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -57,8 +68,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
-        HttpRuntimeTransport transport = new HttpRuntimeTransport();
-        RuntimeProvisioner provisioner = provisioner(broker, transport);
+        HttpRuntimeTransport http = new HttpRuntimeTransport();
+        WorkspaceRuntimeResolver workspaces = workspaceExecutionStore == null ? null
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
+        RuntimeTransport transport = workspaces == null ? http
+                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
+                        bindingRepository, sessionRepository);
+        RuntimeProvisioner baseProvisioner = provisioner(broker, http);
+        RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
+                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces);
         HarnessSessionResolver resolver = sessionId -> {
             SessionRecord session = store.findSessionById(sessionId)
                     .orElse(null);
@@ -68,6 +86,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 failed.completeExceptionally(new IllegalArgumentException(
                         "Session is not owned by this service"));
                 return failed;
+            }
+            if (session.workspace() != null) {
+                if (workspaces != null) {
+                    return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+                }
+                return CompletableFuture.failedFuture(
+                        new RuntimeBrokerException(409,
+                                "workspace_unavailable",
+                                "Hosted Workspace execution is not available.",
+                                false));
             }
             return CompletableFuture.completedFuture(new RuntimeScope(
                     session.tenantId(), workspaceId,
@@ -153,7 +181,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     Path.of(broker.getNodeExecutable()).toAbsolutePath()
                             .toString(),
                     Path.of(broker.getWorkerEntry()).toAbsolutePath()
-                            .toString()),
+                            .toString(), "managed-runtime-worker"),
                     Path.of(broker.getStateDirectory()), transport);
         }
         if ("static".equals(broker.getProvisioner())) {
