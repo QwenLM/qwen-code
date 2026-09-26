@@ -533,8 +533,11 @@ function checkDeferredSwap(standaloneDir: string): void {
       throw pendingSwapError(standaloneDir);
     }
     const batPid = parseInt(marker, 10);
-    if (Number.isNaN(batPid)) {
-      // A torn marker is no liveness proof either.
+    if (!Number.isSafeInteger(batPid) || batPid <= 0 || batPid > 2147483647) {
+      // A torn marker is no liveness proof either, and a value that cannot be a
+      // PID makes process.kill throw ERR_INVALID_ARG_TYPE instead of answering
+      // the liveness question. Send it to the error that carries the removal
+      // steps rather than one that tells the user to wait.
       throw pendingSwapError(standaloneDir);
     }
     if (!isProcessProvablyGone(batPid)) {

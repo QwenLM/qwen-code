@@ -1070,9 +1070,82 @@ describe('standalone-update', () => {
         );
         expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
         expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+        // Fast path only: acquireLock wrote this lock itself, so the throw has
+        // to release it. The release is keyed on the thrown message text, so
+        // rewording that literal must not silently start leaking the lock.
+        expect(fs.existsSync(lockPath)).toBe(false);
       } finally {
         kill.mockRestore();
       }
+    });
+
+    it('fails closed on the lock-theft path when the bat PID cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      // The shape the fix exists for: a deferred swap keeps the lock (the
+      // finally in performStandaloneUpdate releases it only when the result is
+      // not 'deferred') and the bat deletes marker-then-lock only at its
+      // :cleanup label, so the lock is present holding the exited CLI's PID
+      // while the elevated bat lives. acquireLock therefore reaches the gate
+      // by stealing the lock, not through the fast path.
+      fs.writeFileSync(lockPath, '999999999');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+          'A previous update is still being applied',
+        );
+        expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+        expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+        // Theft path: this process never owned the lock, so it must survive —
+        // the opposite of the fast-path assertion above.
+        expect(fs.readFileSync(lockPath, 'utf-8')).toBe('999999999');
+      } finally {
+        kill.mockRestore();
+      }
+    });
+
+    it('still steals a lock whose holder cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+
+      // Pins the permissive direction the comment on isProcessProvablyGone
+      // declares: the lock-liveness callers keep using isProcessAlive on
+      // purpose. No marker and no .new here, so nothing but the lock check is
+      // under test — treating an unsignalable holder as alive would make the
+      // lock un-stealable and re-block updates forever.
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+        expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+      } finally {
+        kill.mockRestore();
+      }
+    });
+
+    it('routes an impossible deferred PID to the remediation message', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      // Parses as a number but cannot be a PID, so process.kill answers
+      // ERR_INVALID_ARG_TYPE rather than ESRCH and the probe says nothing
+      // about liveness. This is a torn marker, not a live bat, so the user
+      // needs the removal steps instead of being told to wait.
+      fs.writeFileSync(`${standaloneDir}.deferred`, '99999999999999');
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'remove the pending swap and .qwen-update.lock',
+      );
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+      expect(fs.existsSync(lockPath)).toBe(false);
     });
   });
 
