@@ -25,12 +25,13 @@ function context(overrides: Partial<AgentContext> = {}) {
     port: 47821,
     version: '0.1.5',
     pid: 100,
+    processIdentity: 'self',
     askConsent: vi.fn(async () => true),
     readRecord: () => record,
     writeRecord: (next) => {
       record = next;
     },
-    isAlive: () => true,
+    ownsProcess: () => true,
     terminate: vi.fn(),
     startRelay: vi.fn(async () => undefined),
     now: () => new Date('2026-09-14T00:00:00Z'),
@@ -100,6 +101,7 @@ describe('handleHttpRequest', () => {
     expect(ctx.startRelay).not.toHaveBeenCalled();
     expect(record()).toMatchObject({
       pid: 100,
+      processIdentity: 'self',
       origin: ORIGIN,
       phase: 'connecting',
     });
@@ -158,6 +160,7 @@ describe('handleHttpRequest', () => {
     const { ctx, setRecord } = context();
     setRecord({
       pid: 42,
+      processIdentity: 'old-relay',
       origin: ORIGIN,
       daemonUrl: `${ORIGIN}/`,
       sessionId: 'old',
@@ -175,6 +178,7 @@ describe('handleHttpRequest', () => {
     const { ctx, setRecord } = context();
     setRecord({
       pid: 42,
+      processIdentity: 'old-relay',
       origin: ORIGIN,
       daemonUrl: `${ORIGIN}/`,
       sessionId: 'session-1',
@@ -198,9 +202,10 @@ describe('handleHttpRequest', () => {
   });
 
   it('reads a relay that died without saying so as stopped', async () => {
-    const { ctx, setRecord } = context({ isAlive: () => false });
+    const { ctx, setRecord } = context({ ownsProcess: () => false });
     setRecord({
       pid: 42,
+      processIdentity: 'old-relay',
       origin: ORIGIN,
       daemonUrl: `${ORIGIN}/`,
       sessionId: 'session-1',
@@ -218,6 +223,7 @@ describe('handleHttpRequest', () => {
     const { ctx, setRecord, record } = context();
     setRecord({
       pid: 42,
+      processIdentity: 'old-relay',
       origin: ORIGIN,
       daemonUrl: `${ORIGIN}/`,
       sessionId: 'session-1',
@@ -238,6 +244,24 @@ describe('handleHttpRequest', () => {
     expect(own.status).toBe(200);
     expect(ctx.terminate).toHaveBeenCalledWith(42);
     expect(record()).toMatchObject({ pid: null, phase: 'stopped' });
+  });
+
+  it('does not signal a reused pid without the recorded relay identity', async () => {
+    const { ctx, setRecord } = context({ ownsProcess: () => true });
+    setRecord({
+      pid: 42,
+      origin: ORIGIN,
+      daemonUrl: `${ORIGIN}/`,
+      sessionId: 'old',
+      phase: 'connected',
+      updatedAt: '',
+    });
+
+    await handleHttpRequest(
+      req('POST', '/connect', { origin: ORIGIN }, connectBody),
+      ctx,
+    );
+    expect(ctx.terminate).not.toHaveBeenCalled();
   });
 });
 

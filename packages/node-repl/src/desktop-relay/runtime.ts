@@ -6,7 +6,8 @@
 
 /** Production wiring: the processes, sockets and files the agent touches. */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -15,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 import WebSocket, { type RawData } from 'ws';
 import {
   AcpRelay,
-  buildRewarmUrl,
   type AcpRelayEnd,
   type OpenRelaySocket,
 } from './acp-relay.js';
@@ -162,32 +162,14 @@ export function createRecordStore(home: string): RecordStore {
   };
 }
 
-export function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-async function rewarm(request: ConnectRequest): Promise<void> {
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-  };
-  if (request.token) headers['authorization'] = `Bearer ${request.token}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    await fetch(buildRewarmUrl(request.daemonUrl, request.workspace), {
-      method: 'POST',
-      headers,
-      body: '{}',
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+export function ownsRelayProcess(
+  pid: number,
+  processIdentity: string,
+): boolean {
+  const result = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8',
+  });
+  return result.status === 0 && result.stdout.trim() === processIdentity;
 }
 
 function endMessage(
@@ -219,6 +201,7 @@ async function runRelay(
     if (current?.pid !== process.pid) return;
     store.write({
       pid: phase === 'stopped' || phase === 'failed' ? null : process.pid,
+      processIdentity: current.processIdentity,
       origin: current.origin,
       daemonUrl: current.daemonUrl,
       sessionId: current.sessionId,
@@ -240,7 +223,6 @@ async function runRelay(
     clientVersion: packageVersion(),
     rpc: mcp,
     openSocket: openWsSocket,
-    rewarm: () => rewarm(request),
     onPhase: (phase) => {
       update(phase);
       if (phase === 'connected') {
@@ -276,15 +258,18 @@ export async function runAgent(home: string): Promise<void> {
   // this path writes to stdout, so the socket carries only the reply.
   const socket = new net.Socket({ fd: 0, readable: true, writable: true });
   const store = createRecordStore(home);
+  const processIdentity = `qwen-desktop-relay-${randomBytes(8).toString('hex')}`;
+  process.title = processIdentity;
   await serveConnection(socket, {
     http: {
       port: DESKTOP_RELAY_PORT,
       version: packageVersion(),
       pid: process.pid,
+      processIdentity,
       askConsent: (message) => askConsent(message),
       readRecord: store.read,
       writeRecord: store.write,
-      isAlive,
+      ownsProcess: ownsRelayProcess,
       terminate: (pid) => {
         try {
           process.kill(pid, 'SIGTERM');

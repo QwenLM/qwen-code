@@ -109,18 +109,25 @@ describe('connectDesktopRelay', () => {
       ok: true,
     });
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
-      'https://devbox:4170/desktop-relay/credential',
+      'https://devbox:4170/workspaces/%2Fw/runtime/ensure',
     );
     expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual({
       authorization: 'Bearer t',
       'content-type': 'application/json',
     });
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe(
+      'https://devbox:4170/desktop-relay/credential',
+    );
+    expect(fetchImpl.mock.calls[1]?.[1]?.headers).toEqual({
+      authorization: 'Bearer t',
+      'content-type': 'application/json',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
       sessionId: 's1',
       workspace: { kind: 'cwd', value: '/w' },
     });
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe('http://127.0.0.1:47821/connect');
-    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+    expect(fetchImpl.mock.calls[2]?.[0]).toBe('http://127.0.0.1:47821/connect');
+    expect(JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body))).toEqual({
       ...request,
       token: 'scoped',
     });
@@ -128,11 +135,13 @@ describe('connectDesktopRelay', () => {
 
   it('passes on the refusal code', async () => {
     const fetchImpl = vi.fn<FetchLike>(async (input) =>
-      input.includes('/desktop-relay/credential')
-        ? new Response(JSON.stringify({ credential: 'scoped' }))
-        : new Response(JSON.stringify({ ok: false, code: 'denied' }), {
-            status: 403,
-          }),
+      input.includes('/runtime/ensure')
+        ? new Response(JSON.stringify({ ok: true }))
+        : input.includes('/desktop-relay/credential')
+          ? new Response(JSON.stringify({ credential: 'scoped' }))
+          : new Response(JSON.stringify({ ok: false, code: 'denied' }), {
+              status: 403,
+            }),
     );
     await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
       ok: false,
@@ -141,10 +150,26 @@ describe('connectDesktopRelay', () => {
   });
 
   it('does not send the daemon token when credential minting fails', async () => {
-    const fetchImpl = respond(401, { error: 'Unauthorized' });
+    const fetchImpl = vi.fn<FetchLike>(async (input) =>
+      input.includes('/runtime/ensure')
+        ? new Response(JSON.stringify({ ok: true }))
+        : new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+          }),
+    );
     await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
       ok: false,
       code: 'credential_failed',
+      message: 'Unauthorized',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not mint a scoped credential when bearer-authenticated prewarm fails', async () => {
+    const fetchImpl = respond(401, { error: 'Unauthorized' });
+    await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
+      ok: false,
+      code: 'prewarm_failed',
       message: 'Unauthorized',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);

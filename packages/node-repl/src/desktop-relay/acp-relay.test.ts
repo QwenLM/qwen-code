@@ -8,7 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AcpRelay,
   buildAcpUrl,
-  buildRewarmUrl,
   type AcpRelayOptions,
   type RelaySocketHandlers,
 } from './acp-relay.js';
@@ -84,7 +83,7 @@ async function connect(h: Harness): Promise<void> {
   });
 }
 
-describe('buildAcpUrl / buildRewarmUrl', () => {
+describe('buildAcpUrl', () => {
   it('keeps the base path and picks the route for the workspace', () => {
     expect(buildAcpUrl('https://host:4170/base')).toBe(
       'wss://host:4170/base/acp',
@@ -95,12 +94,6 @@ describe('buildAcpUrl / buildRewarmUrl', () => {
     expect(
       buildAcpUrl('http://127.0.0.1:4170', { kind: 'cwd', value: '/w/a b' }),
     ).toBe('ws://127.0.0.1:4170/workspaces/%2Fw%2Fa%20b/acp');
-    expect(buildRewarmUrl('http://h:1/')).toBe(
-      'http://h:1/workspace/acp/preheat',
-    );
-    expect(buildRewarmUrl('http://h:1/', { kind: 'id', value: 'w1' })).toBe(
-      'http://h:1/workspaces/w1/runtime/ensure',
-    );
   });
 });
 
@@ -192,9 +185,8 @@ describe('AcpRelay', () => {
     h.relay.stop();
   });
 
-  it('warms the runtime and retries a failed registration, then gives up', async () => {
-    const rewarm = vi.fn(async () => undefined);
-    const h = harness({ rewarm, maxRegisterAttempts: 2 });
+  it('retries a failed registration, then gives up', async () => {
+    const h = harness({ maxRegisterAttempts: 2 });
     const ended = h.relay.run();
     h.handlers().open();
     await h.deliver({
@@ -208,7 +200,6 @@ describe('AcpRelay', () => {
       code: 'register_failed',
       message: 'No live ACP channel',
     });
-    expect(rewarm).toHaveBeenCalledTimes(1);
     expect(h.sent.filter((f) => f['type'] === 'mcp_register')).toHaveLength(2);
 
     await h.deliver({

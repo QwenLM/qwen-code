@@ -56,8 +56,6 @@ export interface AcpRelayOptions {
   clientVersion: string;
   rpc: { handle(message: unknown): Promise<JsonRpcMessage | undefined> };
   openSocket: OpenRelaySocket;
-  /** Warms the ACP runtime that owns the session before a register retry. */
-  rewarm?: () => Promise<void>;
   onPhase?: (phase: AcpRelayPhase) => void;
   serverName?: string;
   maxRegisterAttempts?: number;
@@ -93,22 +91,6 @@ export function buildAcpUrl(
   );
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.toString();
-}
-
-/**
- * The legacy preheat route warms only the primary workspace; a secondary
- * session's runtime is warmed through its own ensure route.
- */
-export function buildRewarmUrl(
-  daemonUrl: string,
-  workspace?: WorkspaceSelector,
-): string {
-  return relativeTo(
-    daemonUrl,
-    workspace === undefined
-      ? 'workspace/acp/preheat'
-      : `workspaces/${encodeURIComponent(workspace.value)}/runtime/ensure`,
-  ).toString();
 }
 
 interface InboundFrame {
@@ -256,13 +238,6 @@ export class AcpRelay {
           message: `${reason} after ${this.registerAttempts} attempt(s)`,
         });
         return;
-      }
-      // Registration needs a live ACP child; the usual cause of a failure is a
-      // cold or reaped one, so warm it before asking again.
-      try {
-        await this.options.rewarm?.();
-      } catch {
-        // A failed warm-up is not fatal: the retry may still find a live child.
       }
       if (this.ended !== undefined || this.phase === 'connected') return;
       this.sendRegister();

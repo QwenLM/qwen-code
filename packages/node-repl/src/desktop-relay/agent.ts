@@ -32,6 +32,7 @@ export type RelayRecordPhase =
 /** What is kept on disk about the one relay that may be running. Never the token. */
 export interface RelayRecord {
   pid: number | null;
+  processIdentity?: string;
   origin: string;
   daemonUrl: string;
   sessionId: string;
@@ -52,10 +53,11 @@ export interface AgentContext {
   version: string;
   /** This process; a record carrying it belongs to the relay about to start here. */
   pid: number;
+  processIdentity: string;
   askConsent(message: string): Promise<boolean>;
   readRecord(): RelayRecord | undefined;
   writeRecord(record: RelayRecord): void;
-  isAlive(pid: number): boolean;
+  ownsProcess(pid: number, processIdentity: string): boolean;
   terminate(pid: number): void;
   /** Runs an approved relay until it ends. */
   startRelay(request: ConnectRequest, origin: string): Promise<void>;
@@ -200,7 +202,9 @@ function currentRecord(ctx: AgentContext): RelayRecord | undefined {
   // A relay that died without writing its end still reads as live on disk.
   if (
     LIVE_PHASES.has(record.phase) &&
-    (record.pid === null || !ctx.isAlive(record.pid))
+    (record.pid === null ||
+      record.processIdentity === undefined ||
+      !ctx.ownsProcess(record.pid, record.processIdentity))
   ) {
     return { ...record, pid: null, phase: 'stopped' };
   }
@@ -273,12 +277,14 @@ export async function handleHttpRequest(
     if (
       typeof previous?.pid === 'number' &&
       previous.pid !== ctx.pid &&
-      ctx.isAlive(previous.pid)
+      previous.processIdentity !== undefined &&
+      ctx.ownsProcess(previous.pid, previous.processIdentity)
     ) {
       ctx.terminate(previous.pid);
     }
     ctx.writeRecord({
       pid: ctx.pid,
+      processIdentity: ctx.processIdentity,
       origin,
       daemonUrl: parsed.daemonUrl,
       sessionId: parsed.sessionId,
@@ -317,7 +323,8 @@ export async function handleHttpRequest(
     if (
       typeof record.pid === 'number' &&
       record.pid !== ctx.pid &&
-      ctx.isAlive(record.pid)
+      record.processIdentity !== undefined &&
+      ctx.ownsProcess(record.pid, record.processIdentity)
     ) {
       ctx.terminate(record.pid);
     }

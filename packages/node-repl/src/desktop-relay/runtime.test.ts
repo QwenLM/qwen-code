@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openWsSocket } from './runtime.js';
+import { openWsSocket, ownsRelayProcess } from './runtime.js';
 
 const servers: Server[] = [];
 const sockets = new Set<Socket>();
@@ -36,6 +37,28 @@ afterEach(async () => {
           new Promise<void>((resolve) => server.close(() => resolve())),
       ),
   );
+});
+
+describe('ownsRelayProcess', () => {
+  it('requires the process title as well as a live pid', async () => {
+    const identity = `qwen-relay-test-${process.pid}`;
+    const child = spawn(
+      process.execPath,
+      [
+        '-e',
+        `process.title=${JSON.stringify(identity)};process.stdout.write('ready');setTimeout(()=>{},30000)`,
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    await once(child.stdout, 'data');
+    try {
+      expect(ownsRelayProcess(child.pid!, identity)).toBe(true);
+      expect(ownsRelayProcess(child.pid!, `${identity}-other`)).toBe(false);
+    } finally {
+      child.kill('SIGTERM');
+      await once(child, 'exit');
+    }
+  });
 });
 
 describe('openWsSocket', () => {

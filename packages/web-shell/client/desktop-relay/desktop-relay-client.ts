@@ -145,6 +145,42 @@ export async function connectDesktopRelay(
   fetchImpl: FetchLike = defaultFetch,
 ): Promise<DesktopRelayConnectResult> {
   try {
+    const prewarmResponse = await withTimeout(10_000, (signal) =>
+      fetchImpl(
+        daemonEndpoint(
+          request.daemonUrl,
+          request.workspace === undefined
+            ? 'workspace/acp/preheat'
+            : `workspaces/${encodeURIComponent(request.workspace.value)}/runtime/ensure`,
+        ),
+        {
+          method: 'POST',
+          headers: {
+            ...(request.token
+              ? { authorization: `Bearer ${request.token}` }
+              : {}),
+            'content-type': 'application/json',
+          },
+          body: '{}',
+          cache: 'no-store',
+          signal,
+        },
+      ),
+    );
+    if (!prewarmResponse.ok) {
+      const body = (await prewarmResponse.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      return {
+        ok: false,
+        code: 'prewarm_failed',
+        ...(typeof body['error'] === 'string'
+          ? { message: body['error'] }
+          : {}),
+      };
+    }
+
     let relayCredential = request.token;
     if (request.token) {
       const credentialResponse = await withTimeout(10_000, (signal) =>
