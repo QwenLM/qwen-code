@@ -732,4 +732,48 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
       overflow: 'hidden',
     });
   });
+
+  it('rebuilds the box on a width-only resize, so the shrink survives it too', () => {
+    // The renderer's width setter clears an explicit flexShrink exactly the
+    // way its height setter does, so a width-only resize needs the remount
+    // just as much — and the folded key only turns over through boxWidth
+    // there. A reused node would keep its old width and its cleared shrink
+    // inside the region until the picker is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('rebuilds the preview box on a width-only resize too', async () => {
+    // The preview branch folds the same two values into its own key for the
+    // same reason; a width-only resize has to rebuild it as well.
+    const { container, rerender } = renderPicker([session(1), session(2)], {
+      enablePreview: true,
+      sessionService: serviceWith(vi.fn().mockResolvedValue(loadedSession([]))),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      flexShrink: 1,
+    });
+  });
 });

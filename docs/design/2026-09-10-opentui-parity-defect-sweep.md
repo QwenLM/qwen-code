@@ -2175,10 +2175,11 @@ seventy-three identical and fifty-eight divergent, two of them the sampled check
 apart, the rest carry 258 rows only ink draws and 288 only this port draws. The
 seventy-three/fifty-eight split those counts were taken over is the one Coverage
 boundary withdraws: it does not reproduce from these frames, and the row counts
-fall with it. The tally above and the census
-below count from it, and stand as that pass's own readings rather than as live
-tallies — the same narrative past every per-pass re-run paragraph above is written
-in.
+fall with it. The census below counts
+from it, and stands as that pass's own reading rather than as a live tally; the
+tally above is untouched by the withdrawal — removing exactly those rows leaves
+it unchanged — and is superseded instead, with every per-pass re-run paragraph
+above, by the widened re-run the Coverage boundary records.
 
 Those fifty-six fall in eleven families by primary cause, four of them new to that
 pass. Seven are non-deterministic and no fix can close them: the two single-frame
@@ -2426,7 +2427,8 @@ chrome were reserved twice: the overlay left five blank rows inside the slot at
 every terminal height, and windowed its command list at sixteen rows on a
 forty-row terminal where ink shows a fixed eighteen. It now reads the region
 budget the mount is already handed and subtracts only its own chrome, so the list
-reaches ink's eighteen and the slot keeps no unused rows. The cap stays — the
+reaches ink's eighteen and, up to a thirty-seven-row terminal, the slot keeps no
+unused rows. The cap stays — the
 window never exceeds the eighteen rows ink hard-codes, so past a thirty-seven-row
 terminal the region outgrows the window and the rows below it stay blank, three of
 them on a forty-row terminal — and at a region of fourteen rows or below the
@@ -3148,12 +3150,13 @@ What was verified, and how far the verification reaches:
   taken for a usable control either.
 - The session picker's window is derived from the raw terminal height — seven
   reserved rows, three rows per item — while its box is sized by the fixed
-  region, so on a short terminal the window's last rows, and the down-scroll
-  marker on them, are clipped and the cursor can reach a session that was never
-  drawn. ink's picker derives the identical window from the same raw rows inside
-  an equally fixed and clipped region, so this is parity with an ink-side
-  limitation, recorded the way Decision 67 records ink's footer wrapping rather
-  than fixed on one leg.
+  region, so on a short terminal the row the clip takes is the last windowed
+  item's metadata line: every session's title and marker still paint, the
+  down-scroll marker with them, and the cursor can reach a session whose
+  second line was never drawn. ink's picker derives the identical window from
+  the same raw rows inside an equally fixed and clipped region, so this is
+  parity with an ink-side limitation, recorded the way Decision 67 records
+  ink's footer wrapping rather than fixed on one leg.
 - The stats dialog carries its own copy of the ref mirror rather than calling the
   shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
   performs the same double write, and nothing memoises on the writer's identity. It

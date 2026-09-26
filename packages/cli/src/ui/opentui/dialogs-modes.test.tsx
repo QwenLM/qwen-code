@@ -926,6 +926,20 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     ).not.toBeNull();
   });
 
+  it('still paints the refusal where the title alone fills a narrow row', () => {
+    // Twenty-four columns leaves the title run's own sixteen: the subtitle's
+    // leftover is zero, so a gate that renders the subtitle only into the
+    // leftover silences the refusal outright — and a rejected Enter whose
+    // reason paints nothing reads as a dead key. The title yields half the
+    // row instead.
+    mocks.state.width = 24;
+    const { setValue } = renderUntrusted(5);
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(screen.getByText(/^Cannot/)).not.toBeNull();
+  });
+
   it('clears the refusal when the highlight moves to a mode the gate allows', () => {
     // The gate reads the mode, never the scope, so the highlight move is the
     // transition that invalidates the refusal: while it stayed up beside a

@@ -152,15 +152,24 @@ function DialogTitle(props: {
   // ink puts the whole run — prefix, title and dim subtitle — inside one
   // `wrap="truncate"` Text, so the subtitle only gets the columns the title
   // left and neither wraps onto a second row the budget does not pay for.
+  // Where the title fills the row on its own it yields half of it instead:
+  // the subtitle can be the only place a trust-gate refusal paints, and a
+  // rejected Enter whose reason paints nothing reads as a dead key.
   const titleWidth = getCachedStringWidth(titleRun);
+  const leftover = contentWidth - titleWidth;
+  const subtitleColumns = props.subtitle
+    ? leftover > 0
+      ? leftover
+      : Math.floor(contentWidth / 2)
+    : 0;
   return (
     <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
       <text fg={C.text} attributes={1}>
-        {clipToWidth(titleRun, contentWidth)}
+        {clipToWidth(titleRun, contentWidth - subtitleColumns)}
       </text>
-      {props.subtitle && titleWidth < contentWidth ? (
+      {props.subtitle && subtitleColumns > 0 ? (
         <text fg={C.dim}>
-          {truncateToWidth(props.subtitle, contentWidth - titleWidth)}
+          {truncateToWidth(props.subtitle, subtitleColumns)}
         </text>
       ) : null}
     </box>
