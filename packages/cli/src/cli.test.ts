@@ -942,6 +942,17 @@ describe('runCliEntry', () => {
       expect(stderr.join('')).not.toContain('Unknown argument');
     });
 
+    it('routes the managed root given between mcp and the subcommand', async () => {
+      await runCliEntry(['mcp', '--managed-extensions', managedRoot, 'list']);
+
+      expect(mocks.mcpListHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ managedExtensions: managedRoot }),
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+      expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+    });
+
     it('rejects a managed root that does not exist', async () => {
       await runCliEntry([
         'mcp',

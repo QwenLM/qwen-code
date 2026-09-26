@@ -64,29 +64,63 @@ const RESERVED_CLI_FLAGS = new Set([
   '--input-file',
 ]);
 
-// yargs' grammar accepts far more spellings than the dashed canonical one,
-// and an exact-string match never sees the spelling a caller actually sent.
+// yargs-parser's camelCase, mirrored: hyphens and underscores are word
+// separators, and an already mixed-case word is not lowercased first. The
+// grammar is the entrance surface here, so the port must stay exact — an
+// approximation drifts from what the CLI actually binds.
+const yargsCamelCase = (str: string): string => {
+  const isMixedCase = str !== str.toLowerCase() && str !== str.toUpperCase();
+  const word = isMixedCase ? str : str.toLowerCase();
+  if (!word.includes('-') && !word.includes('_')) return word;
+  let camel = '';
+  let upperNext = false;
+  let i = 0;
+  while (i < word.length && word.charAt(i) === '-') i++;
+  for (; i < word.length; i++) {
+    let chr = word.charAt(i);
+    if (upperNext) {
+      upperNext = false;
+      chr = chr.toUpperCase();
+    }
+    if (i !== 0 && (chr === '-' || chr === '_')) {
+      upperNext = true;
+    } else if (chr !== '-' && chr !== '_') {
+      camel += chr;
+    }
+  }
+  return camel;
+};
+
+const RESERVED_KEYS = new Set(
+  [...RESERVED_CLI_FLAGS].map((flag) =>
+    yargsCamelCase(flag.replace(/^-+/, '')),
+  ),
+);
+
 // Canonicalize the way yargs binds a token before the lookup:
-// - `--flag=value` and `-f=value` carry the value in the same token.
-// - camel-case-expansion treats every hyphen as a word boundary, so
-//   `--managed--extensions` binds `managedExtensions` exactly like
-//   `--managed-extensions` and `--managedExtensions` do: collapse hyphen
-//   runs, then decamelize.
-// - `--no-x` boolean negation guards the same surface as `--x`.
+// - `--flag=value` carries the value in the same token, and an inline value
+//   disables boolean negation (`--no-sandbox=true` binds `noSandbox`, not
+//   `sandbox`), so the `no-` fold applies only without `=`.
+// - camel-case-expansion adds a camelCase alias key only when the key
+//   contains a hyphen, and that expansion also splits on underscores, so
+//   `--allowed_mcp-server-names` binds `allowedMcpServerNames`.
+// - dot-notation nests under the first segment (`--m.x` binds `m`, which
+//   alias-propagates to `--model`), so the top-level key is the segment
+//   before the first dot.
 // - a single-dash group binds every character (`-dm value` binds `-m`), so
 //   any reserved short flag anywhere in the group is a match.
 const isReservedArg = (arg: string): boolean => {
-  const flag = arg.split('=')[0] ?? '';
-  if (flag.startsWith('--')) {
-    const collapsed = `--${flag.slice(2).split('-').filter(Boolean).join('-')}`;
-    const decamelized = collapsed
-      .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-      .toLowerCase();
-    const folded = decamelized.startsWith('--no-')
-      ? `--${decamelized.slice('--no-'.length)}`
-      : decamelized;
-    return RESERVED_CLI_FLAGS.has(folded);
+  if (arg.startsWith('--')) {
+    const eq = arg.indexOf('=');
+    let key = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    if (eq === -1 && key.startsWith('no-')) {
+      key = key.slice('no-'.length);
+    }
+    const topLevel = key.split('.')[0] ?? '';
+    if (RESERVED_KEYS.has(topLevel)) return true;
+    return key.includes('-') && RESERVED_KEYS.has(yargsCamelCase(topLevel));
   }
+  const flag = arg.split('=')[0] ?? '';
   if (flag.startsWith('-') && flag.length > 1) {
     return [...flag.slice(1)].some((char) =>
       RESERVED_CLI_FLAGS.has(`-${char.toLowerCase()}`),

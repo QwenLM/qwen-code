@@ -263,54 +263,79 @@ describe('managed extension activation migration', () => {
     expect(inventory(managedExtensionsDir)).toEqual(managedBefore);
   });
 
-  it.each(['package removed', 'launcher option removed'] as const)(
-    'allows an explicit user install to adopt retained managed preferences after %s',
-    async (withdrawal) => {
-      const managedPackage = path.join(managedExtensionsDir, 'deployed');
-      writePackage(managedPackage, '2.0.0');
-      const deployed = manager();
-      await deployed.refreshCache();
-      const managedId = deployed.getLoadedExtensions()[0].id;
-      await deployed.setExtensionDefaultActivation(managedId, 'disabled');
-      await deployed.setExtensionWorkspaceActivation(
-        managedId,
-        otherWorkspace,
-        'disabled',
-      );
-      deployed.toggleFavorite(name);
-      deployed.setMcpServerDisabled(name, 'helper', true);
-      const before = await deployed.getExtensionStoreSnapshot();
-      if (withdrawal === 'package removed')
-        fs.rmSync(managedPackage, { recursive: true });
-      const user = manager(withdrawal === 'package removed');
-      await user.refreshCache();
-      expect(user.getLoadedExtensions()).toEqual([]);
-      expect(await user.getExtensionStoreSnapshot()).toEqual(before);
-      const installed = await user.installExtension({ type: 'local', source });
-      const after = await user.getExtensionStoreSnapshot();
-      expect(installed).toMatchObject({
-        name,
-        source: 'user',
-        isActive: false,
-      });
-      expect(installed.id).not.toBe(managedId);
-      expect(after.extensions[managedId]).toBeUndefined();
-      expect(after.extensions[installed.id]).toMatchObject({
-        defaultActivation: 'disabled',
-        workspaceOverrides: before.extensions[managedId].workspaceOverrides,
-        artifactGeneration: after.generation,
-      });
-      expect(after.extensions[installed.id].managed).toBeUndefined();
-      expect(user.isFavorite(name)).toBe(true);
-      expect(user.getDisabledMcpServers(name)).toEqual(['helper']);
-      const installedFiles = inventory(installed.path);
-      await expect(
-        user.uninstallExtensionById(managedId, false),
-      ).resolves.toEqual(after);
-      expect(inventory(installed.path)).toEqual(installedFiles);
-      expect(await user.getExtensionStoreSnapshot()).toEqual(after);
-    },
-  );
+  it('allows an explicit user install to adopt retained managed preferences after package removal', async () => {
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0].id;
+    await deployed.setExtensionDefaultActivation(managedId, 'disabled');
+    await deployed.setExtensionWorkspaceActivation(
+      managedId,
+      otherWorkspace,
+      'disabled',
+    );
+    deployed.toggleFavorite(name);
+    deployed.setMcpServerDisabled(name, 'helper', true);
+    const before = await deployed.getExtensionStoreSnapshot();
+    fs.rmSync(managedPackage, { recursive: true });
+    const user = manager();
+    await user.refreshCache();
+    expect(user.getLoadedExtensions()).toEqual([]);
+    expect(await user.getExtensionStoreSnapshot()).toEqual(before);
+    const installed = await user.installExtension({ type: 'local', source });
+    const after = await user.getExtensionStoreSnapshot();
+    expect(installed).toMatchObject({
+      name,
+      source: 'user',
+      isActive: false,
+    });
+    expect(installed.id).not.toBe(managedId);
+    expect(after.extensions[managedId]).toBeUndefined();
+    expect(after.extensions[installed.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      workspaceOverrides: before.extensions[managedId].workspaceOverrides,
+      artifactGeneration: after.generation,
+    });
+    expect(after.extensions[installed.id].managed).toBeUndefined();
+    expect(user.isFavorite(name)).toBe(true);
+    expect(user.getDisabledMcpServers(name)).toEqual(['helper']);
+    const installedFiles = inventory(installed.path);
+    await expect(
+      user.uninstallExtensionById(managedId, false),
+    ).resolves.toEqual(after);
+    expect(inventory(installed.path)).toEqual(installedFiles);
+    expect(await user.getExtensionStoreSnapshot()).toEqual(after);
+  });
+
+  it('refuses an explicit user install over a retained managed policy when the launcher option is removed', async () => {
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    await deployed.setExtensionDefaultActivation(
+      deployed.getLoadedExtensions()[0].id,
+      'disabled',
+    );
+    const before = await deployed.getExtensionStoreSnapshot();
+    // The deployment still ships the package, but this process cannot see
+    // the root: its empty managed listing proves nothing, so the install
+    // must fail closed rather than consume the live managed policy, its
+    // activation surface, and its stash.
+    const user = manager(false);
+    await user.refreshCache();
+    expect(user.getLoadedExtensions()).toEqual([]);
+    expect(await user.getExtensionStoreSnapshot()).toEqual(before);
+    const managedBefore = inventory(managedExtensionsDir);
+    await expect(
+      user.installExtension({ type: 'local', source }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await user.getExtensionStoreSnapshot()).toEqual(before);
+    expect(inventory(managedExtensionsDir)).toEqual(managedBefore);
+    expect(
+      fs.existsSync(path.join(process.env['QWEN_HOME']!, 'extensions', name)),
+    ).toBe(false);
+  });
 
   it('preserves saved managed settings when an explicit user install takes over its settings directory', async () => {
     const settings = [
@@ -647,6 +672,56 @@ describe('managed extension activation migration', () => {
       defaultActivation: 'disabled',
       preservedDefaultActivation: 'enabled',
     });
+  });
+
+  it('clears stored managed-identity secrets when the withdrawal hand-back fires', async () => {
+    const settings = [
+      {
+        name: 'Token',
+        description: 'Secret token',
+        envVar: 'API_TOKEN',
+        sensitive: true,
+      },
+    ];
+    writePackage(
+      path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
+      '1.0.0',
+    );
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    fs.writeFileSync(
+      path.join(managedPackage, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '2.0.0', settings }),
+    );
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Token',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+
+    // A genuine, proven withdrawal hands the policy back to the user copy:
+    // the hand-back deletes the managed marker every secret cleanup path
+    // keys on, so it must clear the managed identity's stored secrets
+    // itself rather than orphan them in the backend.
+    fs.rmSync(managedPackage, { recursive: true });
+    await deployed.refreshCache();
+    const restored = await deployed.getExtensionStoreSnapshot();
+    const handedBack = Object.values(restored.extensions).find(
+      (policy) => policy.name === name,
+    );
+    expect(handedBack?.managed).toBeUndefined();
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(false);
+    expect(
+      deployed
+        .getLoadedExtensions()
+        .some((extension) => extension.source === 'user'),
+    ).toBe(true);
   });
 
   it('rechecks managed ownership when committing a prepared user install', async () => {

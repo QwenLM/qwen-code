@@ -112,6 +112,17 @@ export interface ExtensionStoreSnapshot {
   extensions: Record<string, ExtensionPolicy>;
 }
 
+interface ManagedHandBackOptions {
+  managedAbsenceProven?: boolean;
+  // Fired once per policy whose managed marker the proven-withdrawal
+  // hand-back deletes. Secrets written during the managed episode live
+  // under the managed identity and every cleanup path keys on the marker
+  // being present, so the caller must finish the transition (the store
+  // itself cannot: it knows neither the managed id formula nor the
+  // workspace cwds the clear must cover).
+  onManagedHandBack?: (name: string) => void;
+}
+
 export interface ExtensionStoreBatchMutationOutcome {
   snapshot: ExtensionStoreSnapshot;
   updated: boolean;
@@ -496,7 +507,7 @@ export class ExtensionStore {
 
   async ensureInitialized(
     extensions: readonly ExtensionIdentity[],
-    options: { managedAbsenceProven?: boolean } = {},
+    options: ManagedHandBackOptions = {},
   ): Promise<ExtensionStoreSnapshot> {
     return await this.withLock(
       async () => await this.ensureInitializedUnlocked(extensions, options),
@@ -509,10 +520,12 @@ export class ExtensionStore {
       extensions: readonly ExtensionIdentity[];
       managedAbsenceProven?: boolean;
     }>,
+    options: ManagedHandBackOptions = {},
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
       const { value, extensions, managedAbsenceProven } = await readArtifacts();
       const snapshot = await this.ensureInitializedUnlocked(extensions, {
+        ...options,
         managedAbsenceProven,
       });
       return { value, snapshot };
@@ -521,7 +534,7 @@ export class ExtensionStore {
 
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
-    options: { managedAbsenceProven?: boolean } = {},
+    options: ManagedHandBackOptions = {},
   ): Promise<ExtensionStoreSnapshot> {
     // Fail closed: only a caller that can see the deployment root may treat
     // an absent managed identity as a withdrawal. Handing back on an
@@ -761,6 +774,7 @@ export class ExtensionStore {
         } else if (managedAbsenceProven) {
           delete policy.managed;
           restorePreservedActivationSurface(policy);
+          options.onManagedHandBack?.(policy.name);
           changed = true;
         }
         // Absence unproven: the policy keeps its managed marker and stash so

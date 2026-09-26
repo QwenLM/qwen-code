@@ -549,6 +549,48 @@ describe('managed extensions', () => {
     expect(writes).not.toContain(entry);
   });
 
+  it('treats an unparseable agent-plugins manifest as a failing managed package', async () => {
+    // A plugin.json that exists but cannot be parsed is a failing package,
+    // not an unrelated directory: the refresh must warn and keep the name
+    // reservation, exactly like a corrupt qwen-extension.json.
+    const userPath = writeExtension(user, 'portable', { version: 'user' });
+    const entry = path.join(managed, 'portable');
+    fs.mkdirSync(entry);
+    fs.writeFileSync(
+      path.join(entry, AGENT_PLUGIN_MANIFEST),
+      JSON.stringify({ $schema: AGENT_PLUGIN_SCHEMA, name: 'portable' }),
+    );
+    const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()).toEqual([
+      expect.objectContaining({ name: 'portable', source: 'managed' }),
+    ]);
+    const managedId = subject.getLoadedExtensions()[0].id;
+
+    // Truncate the manifest mid-string: the declared name is no longer
+    // recoverable, but the entry must still fail loudly and reserve its
+    // basename rather than be skipped as an asset directory.
+    fs.writeFileSync(path.join(entry, AGENT_PLUGIN_MANIFEST), '{"name": "por');
+    await subject.refreshCache();
+    const writes = warning.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(writes).toContain(entry);
+    expect(writes).toContain('failed to load');
+    expect(subject.getLoadedExtensions()).toEqual([]);
+
+    // The retained managed policy stays authoritative: by-name and by-id
+    // uninstall both refuse instead of releasing or touching the user copy.
+    await expect(
+      subject.uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    await expect(
+      subject.uninstallExtensionById(managedId, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
+      true,
+    );
+  });
+
   // Windows cannot create directory symlinks without extra privileges.
   it.skipIf(process.platform === 'win32')(
     'moves the source fingerprint when a name-reserving managed entry is removed',
@@ -929,6 +971,100 @@ describe('managed extensions', () => {
     expect(
       (await subject.getExtensionStoreSnapshot()).extensions[managedId],
     ).toBeUndefined();
+  });
+
+  it('keeps the managed marker and stash while an unnamed managed entry fails to load', async () => {
+    // The deployed directory name differs from the declared name, so once
+    // the manifest is corrupted the failing entry cannot be proven not to
+    // be the deployed package: absence is not proven, and the refresh must
+    // not hand the retained policy back to the same-name user copy.
+    const userPath = writeExtension(user, 'mine', {
+      name: 'portable',
+      version: 'user',
+    });
+    const extensionPath = writeExtension(managed, 'portable-1.4.0', {
+      name: 'portable',
+    });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0].id;
+    await deployed.setExtensionDefaultActivation(managedId, 'disabled');
+    const before = await deployed.getExtensionStoreSnapshot();
+    expect(before.extensions[managedId]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+
+    fs.writeFileSync(path.join(extensionPath, EXTENSIONS_CONFIG_FILENAME), '{');
+    await deployed.refreshCache();
+    const userExtension = deployed
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userExtension.source).toBe('user');
+    expect(userExtension.isActive).toBe(false);
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[userExtension.id],
+    ).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+      preservedDefaultActivation: 'enabled',
+    });
+
+    // Once the entry is genuinely cleaned up, the hand-back fires and the
+    // user copy resumes with its pre-managed activation.
+    fs.rmSync(extensionPath, { recursive: true });
+    await deployed.refreshCache();
+    const restored = await deployed.getExtensionStoreSnapshot();
+    expect(restored.extensions[userExtension.id]?.managed).toBeUndefined();
+    expect(restored.extensions[userExtension.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+    expect(
+      deployed.getLoadedExtensions().find((e) => e.name === 'portable')
+        ?.isActive,
+    ).toBe(true);
+    expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
+      true,
+    );
+  });
+
+  it('refuses the destructive by-id path for a policy still carrying the managed marker', async () => {
+    // A policy re-keyed onto a user identity id by a run that could not
+    // prove absence keeps its managed marker; the second ownership gate
+    // must read that marker, not a `source` field the policy type lacks.
+    const userPath = writeExtension(user, 'portable', { version: 'user' });
+    const managedPackage = writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const deployed = manager();
+    await deployed.refreshCache();
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[
+        deployed.getLoadedExtensions()[0].id
+      ]?.managed,
+    ).toBe(true);
+
+    const unflagged = manager({ managedExtensionsDir: undefined });
+    await unflagged.refreshCache();
+    const userCopy = unflagged
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userCopy.source).toBe('user');
+    const rekeyed = await unflagged.getExtensionStoreSnapshot();
+    expect(rekeyed.extensions[userCopy.id]?.managed).toBe(true);
+
+    // The package is withdrawn and the user artifact disappears without a
+    // release: the managed-marked policy is all that is left. A fresh
+    // flagged process that never refreshed holds no loaded extension for
+    // the id, so only the marker itself can stop the destructive path.
+    fs.rmSync(managedPackage, { recursive: true });
+    fs.rmSync(userPath, { recursive: true });
+    const flagged = manager();
+    await expect(
+      flagged.uninstallExtensionById(userCopy.id, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await flagged.getExtensionStoreSnapshot()).toEqual(rekeyed);
   });
 
   it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {

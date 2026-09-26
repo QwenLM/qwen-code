@@ -1430,41 +1430,60 @@ export class ExtensionManager {
     // Stamping post-load would mask that change until something else moved.
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
+    const handedBackManagedNames: string[] = [];
     const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(async () => {
-        let managedListFailed = false;
-        const discovered = await this.loadDiscoveredExtensions(
-          this.workspaceDir,
-          {
-            createDataDir: options?.createDataDir,
-            onManagedListFailure: () => {
-              managedListFailed = true;
+      await this.extensionStore.readConsistent(
+        async () => {
+          let managedListFailed = false;
+          let unnamedManagedFailure = false;
+          const discovered = await this.loadDiscoveredExtensions(
+            this.workspaceDir,
+            {
+              createDataDir: options?.createDataDir,
+              onManagedListFailure: () => {
+                managedListFailed = true;
+              },
+              onManagedLoadFailure: (failure) => {
+                // A failing entry whose declared name could not be recovered
+                // can still be a deployed package the stale-entry branch
+                // would otherwise hand back to a same-name user copy.
+                if (failure.name === undefined) unnamedManagedFailure = true;
+              },
             },
+          );
+          const requested = new Set(
+            requestedNames.map((name) => name.toLowerCase()),
+          );
+          const loaded =
+            requested.size > 0
+              ? discovered.filter((extension) =>
+                  requested.has(extension.name.toLowerCase()),
+                )
+              : discovered;
+          return {
+            value: loaded,
+            extensions: loaded.map((extension) => ({
+              id: extension.id,
+              name: extension.name,
+              source: extension.source,
+            })),
+            // The store may treat a missing managed identity as a withdrawal
+            // only when this process can see the root: an unconfigured or
+            // unlistable root makes the managed set unknown, not empty — as
+            // does an entry that failed before its name could be read.
+            managedAbsenceProven:
+              this.managedExtensionsDir !== undefined &&
+              !managedListFailed &&
+              !unnamedManagedFailure,
+          };
+        },
+        {
+          onManagedHandBack: (name) => {
+            handedBackManagedNames.push(name);
           },
-        );
-        const requested = new Set(
-          requestedNames.map((name) => name.toLowerCase()),
-        );
-        const loaded =
-          requested.size > 0
-            ? discovered.filter((extension) =>
-                requested.has(extension.name.toLowerCase()),
-              )
-            : discovered;
-        return {
-          value: loaded,
-          extensions: loaded.map((extension) => ({
-            id: extension.id,
-            name: extension.name,
-            source: extension.source,
-          })),
-          // The store may treat a missing managed identity as a withdrawal
-          // only when this process can see the root: an unconfigured or
-          // unlistable root makes the managed set unknown, not empty.
-          managedAbsenceProven:
-            this.managedExtensionsDir !== undefined && !managedListFailed,
-        };
-      });
+        },
+      );
+    await this.clearHandedBackManagedSecrets(handedBackManagedNames);
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
@@ -1506,38 +1525,76 @@ export class ExtensionManager {
     names?: string[];
   }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
+    const handedBackManagedNames: string[] = [];
     const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(async () => {
-        let managedListFailed = false;
-        const loadedAll = await this.loadDiscoveredExtensions(
-          this.workspaceDir,
-          {
-            manifestOnly: true,
-            onManagedListFailure: () => {
-              managedListFailed = true;
+      await this.extensionStore.readConsistent(
+        async () => {
+          let managedListFailed = false;
+          let unnamedManagedFailure = false;
+          const loadedAll = await this.loadDiscoveredExtensions(
+            this.workspaceDir,
+            {
+              manifestOnly: true,
+              onManagedListFailure: () => {
+                managedListFailed = true;
+              },
+              onManagedLoadFailure: (failure) => {
+                if (failure.name === undefined) unnamedManagedFailure = true;
+              },
             },
+          );
+          const loaded =
+            requestedNames.length > 0
+              ? loadedAll.filter((extension) =>
+                  requestedNames.some(
+                    (name) =>
+                      name.toLowerCase() === extension.name.toLowerCase(),
+                  ),
+                )
+              : loadedAll;
+          return {
+            value: loaded,
+            extensions: loaded.map((extension) => ({
+              id: extension.id,
+              name: extension.name,
+              source: extension.source,
+            })),
+            managedAbsenceProven:
+              this.managedExtensionsDir !== undefined &&
+              !managedListFailed &&
+              !unnamedManagedFailure,
+          };
+        },
+        {
+          onManagedHandBack: (name) => {
+            handedBackManagedNames.push(name);
           },
-        );
-        const loaded =
-          requestedNames.length > 0
-            ? loadedAll.filter((extension) =>
-                requestedNames.some(
-                  (name) => name.toLowerCase() === extension.name.toLowerCase(),
-                ),
-              )
-            : loadedAll;
-        return {
-          value: loaded,
-          extensions: loaded.map((extension) => ({
-            id: extension.id,
-            name: extension.name,
-            source: extension.source,
-          })),
-          managedAbsenceProven:
-            this.managedExtensionsDir !== undefined && !managedListFailed,
-        };
-      });
+        },
+      );
+    await this.clearHandedBackManagedSecrets(handedBackManagedNames);
     return { snapshot, extensions };
+  }
+
+  // The refresh-time hand-back deletes the managed marker every secret
+  // cleanup path keys on, so it must finish the transition itself: secrets
+  // written for the managed package live under the managed identity and
+  // would otherwise sit orphaned in the backend forever. A cleanup failure
+  // is a warning, never a refresh failure — the release path's preference
+  // cleanup follows the same rule.
+  private async clearHandedBackManagedSecrets(
+    names: readonly string[],
+  ): Promise<void> {
+    for (const name of names) {
+      try {
+        await clearStoredExtensionSecrets(name, getManagedExtensionId(name), [
+          this.workspaceDir,
+        ]);
+      } catch (error) {
+        debugLogger.warn(
+          `Managed extension "${name}" was handed back, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
+        );
+      }
+    }
   }
 
   private static stampPath(target: string, followSymlinks = true): string {
@@ -1777,9 +1834,14 @@ export class ExtensionManager {
       manifestOnly?: boolean;
       createDataDir?: boolean;
       onManagedListFailure?: () => void;
+      onManagedLoadFailure?: (failure: {
+        directory: string;
+        name?: string;
+      }) => void;
     } = {},
   ): Promise<Extension[]> {
-    const { onManagedListFailure, ...loadOptions } = options;
+    const { onManagedListFailure, onManagedLoadFailure, ...loadOptions } =
+      options;
     const failedManaged: Array<{
       directory: string;
       error: unknown;
@@ -1802,6 +1864,7 @@ export class ExtensionManager {
       },
       (directory, error, name) => {
         failedManaged.push({ directory, error, name });
+        onManagedLoadFailure?.({ directory, name });
       },
     );
     const managedNames = new Set(
@@ -1839,6 +1902,22 @@ export class ExtensionManager {
   ): Promise<void> {
     if (extension.source === 'managed') {
       throw new ManagedExtensionReadOnlyError(extension.name);
+    }
+    if (!this.managedExtensionsDir) {
+      // This process cannot see the deployment root, so its empty managed
+      // listing proves nothing: a retained managed policy for the name must
+      // fail closed, the way the by-id release path already does. Only a
+      // flagged run can tell a genuine withdrawal from an unseen root.
+      const snapshot = await this.extensionStore.readSnapshot();
+      const retained = Object.values(snapshot.extensions).some(
+        (policy) =>
+          policy.managed === true &&
+          policy.name.toLowerCase() === extension.name.toLowerCase(),
+      );
+      if (retained) {
+        throw new ManagedExtensionReadOnlyError(extension.name);
+      }
+      return;
     }
     const failedManaged: Array<{
       directory: string;
@@ -3678,7 +3757,15 @@ export class ExtensionManager {
       }
       if (extension) await this.assertUserManagedExtension(extension);
       if (!policy || policy.declarationOnly) return snapshot;
-      await this.assertUserManagedExtension(policy);
+      // A policy carries no `source` field: its managed marker is the
+      // store-side ownership record. A managed-marked policy re-keyed onto
+      // a user identity id (absence unproven at the last refresh) must not
+      // fall through to the destructive user path — the guarded release
+      // branch above owns every genuinely withdrawn managed policy.
+      await this.assertUserManagedExtension({
+        name: policy.name,
+        source: policy.managed ? 'managed' : 'user',
+      });
       const destinationDirectory =
         extension && extension.installMetadata?.type !== 'link'
           ? extension.path

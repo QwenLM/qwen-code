@@ -427,7 +427,11 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
-  const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
+  // A subcommand is the first positional after `mcp`, wherever it sits:
+  // inspecting argv[1] alone misreads `mcp --managed-extensions <root> list`
+  // as flag-only and prints help with exit 0 while the requested mutation
+  // silently never runs. firstPositionalArg skips the known value slots.
+  const hasSubcommand = firstPositionalArg(argv.slice(1)) !== undefined;
   if (!hasSubcommand) {
     printMcpHelp();
     return;
