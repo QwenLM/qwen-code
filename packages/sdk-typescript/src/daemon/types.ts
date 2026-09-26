@@ -491,6 +491,64 @@ export interface DaemonGitBranchesResult {
   detached: boolean;
 }
 
+/** One worktree of the workspace's repository. */
+export interface DaemonGitWorktree {
+  /** Absolute path as git records it. */
+  path: string;
+  head: string;
+  /** Short branch name; `null` when detached or bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** Present when the worktree is locked; the reason when git recorded one. */
+  locked?: string;
+  /** Present when the directory is gone and git would prune the entry. */
+  prunable?: string;
+  /** The main worktree, listed first and never removable. */
+  isMain: boolean;
+  /** The selected workspace's own checkout. */
+  isWorkspace: boolean;
+  /** Present for worktrees Qwen Code created under `.qwen/worktrees/`. */
+  slug?: string;
+}
+
+/** Response from `GET /workspaces/:workspace/git/worktrees`. */
+export interface DaemonGitWorktreesResult {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  worktrees: DaemonGitWorktree[];
+}
+
+/** Response from `GET /workspaces/:workspace/git/worktrees/status?path=`. */
+export interface DaemonGitWorktreeStatus {
+  v: 1;
+  path: string;
+  /** `false` when the working tree could not be read. */
+  available: boolean;
+  branch?: string | null;
+  detached?: boolean;
+  staged?: number;
+  unstaged?: number;
+  untracked?: number;
+  conflicted?: number;
+  ahead?: number;
+  behind?: number;
+}
+
+/** Response from `POST /workspaces/:workspace/git/worktrees/remove`. */
+export interface DaemonGitWorktreeRemoveResult {
+  removed: true;
+  path: string;
+  /**
+   * Present when git dropped the registration but the directory is still on
+   * disk: the checkout's deletion failed, or the entry was stale and cleared
+   * by a prune, which deletes no files.
+   */
+  directoryRemains?: true;
+}
+
 /** Response from `POST /workspaces/:workspace/git/checkout`. */
 export interface DaemonGitCheckoutResult {
   branch: string;
@@ -964,10 +1022,10 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /**
-       * False, and required: modeled child heap ceilings are not applied.
-       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
+       * True only when managed child-count admission and the fixed old-space
+       * ceiling are both applied. Does not bound total process RSS.
        */
-      enforced: false;
+      enforced: boolean;
       /**
        * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
@@ -980,11 +1038,11 @@ export interface DaemonStatusReport {
         baselineMaxBytes: number;
       } | null;
       /**
-       * The per-child heap partition the daemon models but does not apply.
+       * The fixed per-child heap partition, applied only under `enforce`.
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe' | 'admit';
+        mode: 'off' | 'observe' | 'admit' | 'enforce';
         admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
@@ -998,9 +1056,10 @@ export interface DaemonStatusReport {
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
-         * apply: children still run on the host-derived ceiling. A channel
-         * swap at full occupancy also books one, and on a host too small to
-         * model a partition this equals the total ACP spawn count.
+         * apply. Under `observe` and `admit`, children retain legacy heap
+         * arguments. A channel swap at full occupancy also books one, and on
+         * a host too small to model a partition this equals the total ACP
+         * spawn count.
          */
         refusals: number;
       } | null;
@@ -1345,6 +1404,7 @@ export function parseDaemonBackgroundTurn(
 
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
@@ -1376,10 +1436,16 @@ export interface DaemonSession {
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
   /**
-   * Present on a create response when the request carried `modelServiceId`.
-   * `false` means the spawn-time model switch failed and the session is
-   * running on the agent default model (also surfaced via the
-   * `model_switch_failed` session event).
+   * Only present on a fresh spawn (`attached: false`) that carried
+   * `modelServiceId` or `startupConfig`. Always true for successful
+   * startupConfig preparation. For legacy model selection, true confirms
+   * the model switch; false means the apply failed (surfaced via
+   * `model_switch_failed`) and the session is running on the agent's
+   * default model. An attach omits the key or, when it coalesced with an
+   * in-flight spawn, reports the spawn owner's outcome — on attach the
+   * `model_switch_failed` event is the caller's signal. Lets create
+   * callers distinguish a confirmed selection from a silent fallback
+   * instead of assuming the requested model is live.
    */
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
@@ -1663,6 +1729,14 @@ export interface DaemonSessionTranscriptPage {
   replayError?: string;
   targetRecordId?: string;
   hasOlder?: boolean;
+}
+
+/** Complete persisted tool replay for one navigation turn; agents are summaries. */
+export interface DaemonSessionToolCalls {
+  v: 1;
+  sessionId: string;
+  turnId: string;
+  events: DaemonEvent[];
 }
 
 export interface DaemonSessionTurnIndexPageOptions {
@@ -3024,6 +3098,12 @@ export interface DaemonContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
   startupContext?: number;
+  /**
+   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older daemons report 0 there.
+   */
   messages: number;
   /** Provider total not accounted for by any category. Absent from older daemons. */
   unattributed?: number;
@@ -3658,15 +3738,35 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Creation-only selection; does not change shared defaults or later session behavior. */
+export interface SessionStartupConfig {
+  modelServiceId: string;
+  reasoningEffort?: ReasoningSelection;
+}
+
+/** Confirmed state after startup preparation, not a lifetime policy. */
+export interface SessionStartupConfigApplied extends SessionStartupConfig {
+  effectiveReasoning?:
+    | {
+        state: 'enabled';
+        effort?: Exclude<ReasoningSelection, 'default' | 'none'>;
+      }
+    | { state: 'disabled' }
+    | { state: 'provider-default' };
+}
+
 /** Returned from `POST /session/:id/config-option`. */
-export type ReasoningSelection =
-  | 'none'
-  | 'default'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max';
+export const DAEMON_REASONING_SELECTIONS = [
+  'none',
+  'default',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+
+export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
@@ -3980,6 +4080,11 @@ export interface DaemonLiveStatus {
   blocker?: DaemonLiveBlocker;
   message?: string;
   callId?: string;
+  coordinator?: {
+    workspaceCwd: string;
+    workspaceId?: string;
+    sessionId: string;
+  };
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
@@ -4059,6 +4164,15 @@ export interface DaemonLiveSetupStatus {
   modelError?: string;
   /** Absent on daemons that predate selectable Live Voice models. */
   voice?: string;
+  /**
+   * The base URL the selected model connects through: the stored
+   * `liveVoice.endpoint`, empty while the default is in use, or with
+   * `keySource: 'route'` the route's `baseUrl` (which cannot be set here).
+   * Absent on daemons that predate a configurable endpoint.
+   */
+  endpoint?: string;
+  /** Why the stored endpoint would be refused at call time. */
+  endpointError?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
   models?: Array<{ id: string; provider: string; name?: string }>;
   /**
@@ -4080,9 +4194,19 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
-  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  /**
+   * `modelId` or `provider:modelId` of a `realtimeOnly` route, or any model
+   * id used with the stored `endpoint` and key.
+   */
   model?: string;
   voice?: string;
+  /**
+   * An OpenAI-compatible base URL (`https://…/compatible-mode/v1`) on a
+   * DashScope or `*.maas.aliyuncs.com` host, stored as entered; empty
+   * restores the default. Refused with `live_endpoint_unused` when the model
+   * follows a `realtimeOnly` route.
+   */
+  endpoint?: string;
 }
 
 export interface DaemonLiveMuteUpdate {

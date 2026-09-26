@@ -29,6 +29,7 @@ vi.mock('node:fs/promises', { spy: true });
 const realFsPromises =
   await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -1481,6 +1482,17 @@ describe('runAcpAgent shutdown cleanup', () => {
   afterAll(() => {
     processOnSpy.mockRestore();
     processOffSpy.mockRestore();
+  });
+
+  it('rejects a tool sandbox before ACP initialization or transport setup', async () => {
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ network: 'closed' });
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('does not support ACP sessions');
+    expect(mockConfig.initialize).not.toHaveBeenCalled();
+    expect(ndJsonStream).not.toHaveBeenCalled();
   });
 
   it('starts telemetry only after a matching successful initialize response is sent', async () => {
@@ -8664,6 +8676,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'classifies an unconfirmed source write with recording available=%s',
+    async (available) => {
+      const sessionId = 'session-A';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue(
+          available
+            ? { recordSessionSource: vi.fn().mockResolvedValue(false) }
+            : undefined,
+        );
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+          sessionId,
+          sourceType: 'scheduled_task',
+        }),
+      ).resolves.toEqual({
+        sessionId,
+        sourceType: 'scheduled_task',
+        persisted: false,
+        reason: available ? 'write_not_confirmed' : 'recording_unavailable',
+      });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('enables the dedicated screen tool for a compatible Live source', async () => {
     const sessionId = 'session-A';
@@ -27623,6 +27665,42 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['load', 'resume'] as const)(
+    '%s returns a typed error for a Managed session',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      vi.mocked(loadCliConfig).mockRejectedValueOnce(
+        new SessionExecutionEngineError(
+          'persisted-1',
+          'belongs to managed, cannot execute with legacy',
+        ),
+      );
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        await expect(
+          action === 'load'
+            ? agent.loadSession(params)
+            : agent.unstable_resumeSession(params),
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: {
+            errorKind: 'session_execution_engine_unavailable',
+            sessionId: 'persisted-1',
+          },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each(['load', 'resume'] as const)(
     '%s binds sessionIdContext while loading the Config',

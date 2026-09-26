@@ -20,6 +20,12 @@ import {
   type CallableTool,
 } from '@google/genai';
 import type OpenAI from 'openai';
+import {
+  InMemoryImagePayloadStore,
+  buildReattachParts,
+  replaceImagePayloadsInPlace,
+  trailingReattachPartCount,
+} from '../../services/image-payload-references.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
@@ -1388,6 +1394,47 @@ describe('OpenAIContentConverter', () => {
 
       expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
       expect(name).not.toContain('.');
+    });
+
+    // DashScope places its cache breakpoint `trailingReattachPartCount`
+    // blocks before the end of the last message (#11627), so every part of
+    // the reattach region, labels included, must stay exactly one block.
+    it('emits one wire block per reattach region part', () => {
+      const store = new InMemoryImagePayloadStore();
+      const history: Content[] = ['a', 'b'].map((data) => ({
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data } }],
+      }));
+      const replaced = replaceImagePayloadsInPlace(history, store);
+      const contents: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: 'what changed?' },
+            { inlineData: { mimeType: 'image/png', data: 'new-shot' } },
+            ...buildReattachParts(replaced, 2),
+          ],
+        },
+      ];
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        { model: 'models/test', contents },
+        requestContext,
+      );
+      const content = messages.at(-1)?.content as Array<{ type: string }>;
+      const regionCount = trailingReattachPartCount(contents);
+
+      expect(regionCount).toBe(5);
+      expect(content.map((block) => block.type)).toEqual([
+        'text',
+        'image_url',
+        'text',
+        'text',
+        'image_url',
+        'text',
+        'image_url',
+      ]);
+      expect(content.length - regionCount).toBe(2);
     });
 
     it('preserves ordered multi-part startup reminder user content', () => {

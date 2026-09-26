@@ -351,6 +351,16 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         items: { type: 'string' },
       },
+      tokenQr: {
+        type: 'boolean',
+        label: 'Token QR',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
+        showInDialog: false,
+      },
       maxConcurrentSubSessionsPerCaller: {
         type: 'integer',
         label: 'Max Concurrent Sub-Sessions Per Caller',
@@ -552,6 +562,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
+      },
+      batchAutoCollect: {
+        type: 'boolean',
+        label: 'Batch Auto Collect',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description:
+          "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
+        showInDialog: false,
       },
       showSessionRecap: {
         type: 'boolean',
@@ -1544,15 +1564,70 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  batch: {
+    type: 'object',
+    label: 'Batch',
+    category: 'Model',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.',
+    showInDialog: false,
+    properties: {
+      model: {
+        type: 'string',
+        label: 'Batch Model',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.',
+        showInDialog: false,
+      },
+      authType: {
+        type: 'string',
+        label: 'Batch Auth Type',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Batch Model Base URL',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Optional exact modelProviders baseUrl to distinguish entries with the same model ID.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  advisorMaxUses: {
+    type: 'integer',
+    label: 'Advisor Session Call Limit',
+    category: 'Model',
+    requiresRestart: true,
+    default: 0,
+    minimum: 0,
+    description:
+      'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
+    showInDialog: true,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',
     category: 'Model',
-    requiresRestart: false,
+    requiresRestart: true,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
-    showInDialog: true,
+      'Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.',
+    showInDialog: false,
   },
 
   visionModel: {
@@ -2728,6 +2803,31 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      executionSandbox: {
+        type: 'object',
+        label: 'Tool Execution Sandbox',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as
+          | import('./execution-sandbox-settings.js').ExecutionSandboxSettings
+          | undefined,
+        description:
+          'Linux tool execution confinement. Operator scopes only; workspace settings cannot override it. Model/auth/session traffic stays on the host.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          required: ['filesystem', 'network'],
+          additionalProperties: false,
+          properties: {
+            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            filesystem: {
+              type: 'string',
+              enum: ['read-only', 'workspace-write'],
+            },
+            network: { type: 'string', enum: ['open', 'closed'] },
+          },
+        },
+      },
       codeModeOnly: {
         type: 'boolean',
         label: 'Code Mode Only (Experimental)',
@@ -4107,7 +4207,7 @@ const SETTINGS_SCHEMA = {
             default:
               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
             description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+              'Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.',
             showInDialog: false,
           },
           voice: {

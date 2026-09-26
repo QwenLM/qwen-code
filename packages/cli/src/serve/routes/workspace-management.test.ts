@@ -19,6 +19,8 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
+import { createServer, get as httpGet } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { realpathSync } from 'node:fs';
 import {
   mkdir,
@@ -3587,5 +3589,215 @@ describe('POST /workspace-directory-picker', () => {
     await vi.waitFor(() => {
       expect(observed?.aborted).toBe(true);
     });
+  });
+});
+
+describe('remote daemon proxy routes', () => {
+  const REMOTE = 'http://127.0.0.1:5199';
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(body: unknown, status = 200): globalThis.Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('bounds the suggestion proxy and forwards the target credential', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        dir: '/srv',
+        sep: '/',
+        suggestions: [],
+        truncated: false,
+      }),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' })
+      .set('X-Daemon-Token', 'target-secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ dir: '/srv', truncated: false });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${REMOTE}/workspace-path-suggestions?prefix=%2Fsrv%2F`);
+    // A 3xx would replay the forwarded bearer on an origin nobody named.
+    expect(init.redirect).toBe('error');
+    // A caller-named origin that accepts and then goes quiet must not pin the
+    // daemon request forever.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer target-secret',
+    );
+  });
+
+  it('bounds the registration proxy the same way', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ workspaceId: 'w1' }, 201));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .set('X-Daemon-Token', 'target-secret')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/', persist: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ workspaceId: 'w1' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${REMOTE}/workspaces`);
+    expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('error');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(String(init.body))).toEqual({
+      cwd: '/srv/shared-checkout/',
+      persist: true,
+    });
+  });
+
+  it('refuses an upstream body over the byte cap instead of buffering it', async () => {
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(oversized, { status: 200 }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('remote_unreachable');
+    expect(res.body.error).toContain('1048576-byte limit');
+  });
+
+  it('refuses an oversized body announced by content-length before reading it', async () => {
+    // A stream body lets the declared length stand on its own, so the
+    // precheck — not the byte counter — is what rejects this one.
+    const small = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"dir":"/srv"}'));
+        controller.close();
+      },
+    });
+    const headers = new Headers({ 'content-type': 'application/json' });
+    headers.set('content-length', String(4 * 1024 * 1024));
+    fetchMock.mockResolvedValue(new Response(small, { status: 200, headers }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('1048576-byte limit');
+  });
+
+  it('reports a registration failure the target explained, not remote_unreachable', async () => {
+    // A bodyless 401 from a wrong target token used to reach the caller as
+    // `502 remote_unreachable` whose explanation was a JSON parse error.
+    fetchMock.mockResolvedValue(new Response(null, { status: 401 }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).toBe('Remote daemon returned 401');
+    expect(res.body.error).not.toContain('JSON');
+  });
+
+  it('reports an HTML gateway failure with the real status', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).not.toContain('<html>');
+  });
+
+  it('forwards the target error detail on the suggestion proxy', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: '`prefix` must be an absolute path', code: 'invalid_prefix' },
+        400,
+      ),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: '`prefix` must be an absolute path',
+      code: 'invalid_prefix',
+    });
+  });
+
+  it('aborts the upstream request when the caller hangs up', async () => {
+    let captured: AbortSignal | undefined;
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise<globalThis.Response>((_resolve, reject) => {
+          captured = init.signal as AbortSignal;
+          captured.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        }),
+    );
+    const { app } = createApp();
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const { port } = server.address() as AddressInfo;
+      const client = httpGet({
+        host: '127.0.0.1',
+        port,
+        path: `/remote-workspace-path-suggestions?daemon=${encodeURIComponent(
+          REMOTE,
+        )}&prefix=%2Fsrv%2F`,
+      });
+      client.on('error', () => {
+        // The destroyed socket is the point of this test.
+      });
+      await vi.waitFor(() => expect(captured).toBeInstanceOf(AbortSignal));
+      expect(captured?.aborted).toBe(false);
+
+      client.destroy();
+
+      // Browse fires one suggestion request per debounced keystroke; a request
+      // the browser discarded must not keep an outbound socket alive until the
+      // 30s transfer timeout expires.
+      await vi.waitFor(() => expect(captured?.aborted).toBe(true));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
