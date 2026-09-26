@@ -101,6 +101,50 @@ describe('channel harness ownership', () => {
     }
   });
 
+  it('does not visit a new preheated channel while an older settlement awaits exit', async () => {
+    let releaseExit!: () => void;
+    let startedKill!: () => void;
+    const exit = new Promise<void>((resolve) => {
+      releaseExit = resolve;
+    });
+    const killing = new Promise<void>((resolve) => {
+      startedKill = resolve;
+    });
+    const old = makeChannel({ extMethodImpl: () => ({ available: true }) });
+    const fresh = makeChannel();
+    const kill = old.channel.kill.bind(old.channel);
+    vi.spyOn(old.channel, 'kill').mockImplementation(async () => {
+      startedKill();
+      await exit;
+      await kill();
+    });
+    const factory = vi
+      .fn<() => Promise<AcpChannel>>()
+      .mockResolvedValueOnce(old.channel)
+      .mockResolvedValue(fresh.channel);
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 0,
+    });
+    let operation: Promise<boolean> | undefined;
+    try {
+      await bridge.preheat();
+      operation = bridge.isWorkspaceMemoryRememberAvailable!();
+      await killing;
+      await bridge.preheat();
+      expect(fresh.killed).toBe(false);
+      releaseExit();
+      expect(await operation).toBe(true);
+      expect(fresh.killed).toBe(false);
+      expect(bridge.isChannelLive()).toBe(true);
+      expect(factory).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseExit();
+      await operation;
+      await bridge.shutdown();
+    }
+  });
+
   it('keeps the replacement idle timer armed when an old channel exits late', async () => {
     vi.useFakeTimers();
     const old = makeChannel();

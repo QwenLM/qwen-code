@@ -21,6 +21,7 @@ import {
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
+const MANAGED_LOCK_SCHEMA_VERSION = 3;
 const MALFORMED_RETRY_COUNT = 3;
 const MALFORMED_RETRY_DELAY_MS = 50;
 const CLAIMED_PRIMARY_WAIT_ATTEMPTS = 20;
@@ -269,14 +270,52 @@ interface SealedSessionWriterLockRecord extends SessionWriterOwnerRecord {
   transcript: SealedTranscriptProof;
 }
 
+/**
+ * The commit position a Managed authority pins into its sealed lock. A new
+ * authority compares it against the scanned log before accepting a takeover,
+ * so a seal proof never silently adopts a log that drifted after sealing.
+ */
+export interface SessionWriterCommitProof {
+  last_commit_sequence: number;
+  committed_prefix_hash: string;
+}
+
+interface ActiveManagedSessionWriterLockRecord
+  extends SessionWriterOwnerRecord {
+  schema_version: typeof MANAGED_LOCK_SCHEMA_VERSION;
+  state: 'active';
+  format_version: number;
+}
+
+interface SealedManagedSessionWriterLockRecord
+  extends SessionWriterOwnerRecord {
+  schema_version: typeof MANAGED_LOCK_SCHEMA_VERSION;
+  state: 'sealed';
+  sealed_at: string;
+  format_version: number;
+  last_commit_sequence: number;
+  committed_prefix_hash: string;
+  transcript: SealedTranscriptProof;
+}
+
+type ManagedSessionWriterLockRecord =
+  | ActiveManagedSessionWriterLockRecord
+  | SealedManagedSessionWriterLockRecord;
+
 type SessionWriterLockRecord =
   | LegacySessionWriterLockRecord
   | ActiveSessionWriterLockRecord
-  | SealedSessionWriterLockRecord;
+  | SealedSessionWriterLockRecord
+  | ManagedSessionWriterLockRecord;
 
 type ActiveLockRecord =
   | LegacySessionWriterLockRecord
-  | ActiveSessionWriterLockRecord;
+  | ActiveSessionWriterLockRecord
+  | ActiveManagedSessionWriterLockRecord;
+
+type SealedLockRecord =
+  | SealedSessionWriterLockRecord
+  | SealedManagedSessionWriterLockRecord;
 
 export interface AcquireSessionWriterLeaseOptions {
   runtimeBaseDir: string;
@@ -286,14 +325,31 @@ export interface AcquireSessionWriterLeaseOptions {
   qwenVersion?: string | null;
   reclaimPolicy?: 'local' | 'never';
   takeoverPolicy?: 'never' | 'certified';
+  /**
+   * Write lock records in the Managed schema (3), pinning the log format the
+   * writer speaks. Old binaries report the unknown schema as malformed and
+   * refuse to write, which is the barrier that keeps a Managed log closed to
+   * them. Sealing such a lease requires the authority's commit proof, and a
+   * sealed schema-3 lock may only be taken over by a schema-3 acquirer.
+   */
+  lockSchema?: {
+    readonly schemaVersion: 3;
+    readonly formatVersion: number;
+  };
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
+}
+
+export interface SealedManagedMaintenanceLease {
+  assertOwnedAndUnchanged(): Promise<void>;
+  assertCleanupOwned(): void;
+  release(): Promise<void>;
 }
 
 type ExistingLockState =
   | { kind: 'missing' }
   | { kind: 'live'; record: ActiveLockRecord; raw: string }
   | { kind: 'stale'; record: ActiveLockRecord; raw: string }
-  | { kind: 'sealed'; record: SealedSessionWriterLockRecord; raw: string }
+  | { kind: 'sealed'; record: SealedLockRecord; raw: string }
   | { kind: 'malformed' };
 
 interface TranscriptFingerprint {
@@ -460,14 +516,30 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
   if (record['schema_version'] === LEGACY_LOCK_SCHEMA_VERSION) {
     return record['state'] === undefined;
   }
-  if (record['schema_version'] !== LOCK_SCHEMA_VERSION) return false;
-  if (record['state'] === 'active') return true;
-  return (
-    record['state'] === 'sealed' &&
-    typeof record['sealed_at'] === 'string' &&
-    Number.isFinite(Date.parse(record['sealed_at'])) &&
-    isSealedTranscriptProof(record['transcript'])
-  );
+  if (record['schema_version'] === LOCK_SCHEMA_VERSION) {
+    if (record['state'] === 'active') return true;
+    return (
+      record['state'] === 'sealed' &&
+      typeof record['sealed_at'] === 'string' &&
+      Number.isFinite(Date.parse(record['sealed_at'])) &&
+      isSealedTranscriptProof(record['transcript'])
+    );
+  }
+  if (record['schema_version'] === MANAGED_LOCK_SCHEMA_VERSION) {
+    if (!isManagedFormatVersion(record['format_version'])) return false;
+    if (record['state'] === 'active') return true;
+    return (
+      record['state'] === 'sealed' &&
+      typeof record['sealed_at'] === 'string' &&
+      Number.isFinite(Date.parse(record['sealed_at'])) &&
+      isSealedTranscriptProof(record['transcript']) &&
+      Number.isSafeInteger(record['last_commit_sequence']) &&
+      (record['last_commit_sequence'] as number) >= 0 &&
+      typeof record['committed_prefix_hash'] === 'string' &&
+      /^[0-9a-f]{64}$/.test(record['committed_prefix_hash'])
+    );
+  }
+  return false;
 }
 
 function parseLockRecord(raw: string): SessionWriterLockRecord | null {
@@ -485,6 +557,27 @@ function isActiveLockRecord(
   return (
     record.schema_version === LEGACY_LOCK_SCHEMA_VERSION ||
     record.state === 'active'
+  );
+}
+
+function isManagedFormatVersion(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 1;
+}
+
+function isManagedLockRecord(
+  record: SessionWriterLockRecord,
+): record is ManagedSessionWriterLockRecord {
+  return record.schema_version === MANAGED_LOCK_SCHEMA_VERSION;
+}
+
+function isValidCommitProof(value: unknown): value is SessionWriterCommitProof {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proof = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(proof['last_commit_sequence']) &&
+    (proof['last_commit_sequence'] as number) >= 0 &&
+    typeof proof['committed_prefix_hash'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(proof['committed_prefix_hash'])
   );
 }
 
@@ -1128,7 +1221,7 @@ async function closeTranscriptProof(proof: OpenTranscriptProof): Promise<void> {
 }
 
 function assertSealedProofMatches(
-  sealed: SealedSessionWriterLockRecord,
+  sealed: SealedLockRecord,
   relativePath: string,
   proof: OpenTranscriptProof,
 ): void {
@@ -1621,6 +1714,8 @@ export class SessionWriterLease {
   private lockFileIdentity: { dev: bigint; ino: bigint } | undefined;
   private readonly retiredPath: string;
   private readonly claimPath: string;
+  private readonly managedFormatVersion: number | undefined;
+  private takenOverCommitProof: SessionWriterCommitProof | undefined;
 
   private constructor(
     private readonly lockPath: string,
@@ -1631,6 +1726,9 @@ export class SessionWriterLease {
     this.sessionId = options.sessionId;
     this.runtimeBaseDir = options.runtimeBaseDir;
     this.transcriptPath = options.transcriptPath;
+    this.managedFormatVersion = isManagedLockRecord(lockRecord)
+      ? lockRecord.format_version
+      : undefined;
     this.lockRecordRaw = JSON.stringify(lockRecord);
     this.retiredPath = `${lockPath}.released.${encodeURIComponent(this.ownerId)}`;
     this.claimPath = `${lockPath}.claim`;
@@ -1641,6 +1739,16 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError();
     }
     return this.expectedTranscriptState.exists;
+  }
+
+  /**
+   * The commit proof a sealed Managed lock carried when this lease took it
+   * over. The accepting authority verifies its scanned log against this before
+   * advancing the session; absent when the lease did not take over a Managed
+   * seal.
+   */
+  get takeoverCommitProof(): SessionWriterCommitProof | undefined {
+    return this.takenOverCommitProof;
   }
 
   static async acquire(
@@ -1671,6 +1779,106 @@ export class SessionWriterLease {
             `Close the owning session normally and retry. For residual locks, fence all writers including ACP children before recovery; see docs/users/conversations-recovery.md.`,
         );
       }
+      throw error;
+    }
+  }
+
+  static async acquireSealedManagedMaintenance(options: {
+    runtimeBaseDir: string;
+    sessionId: string;
+    activeTranscriptPath: string;
+    transcriptPath: string;
+  }): Promise<SealedManagedMaintenanceLease> {
+    const lockPath = getSessionWriterLockPath(
+      options.runtimeBaseDir,
+      options.sessionId,
+    );
+    const claimPath = `${lockPath}.claim`;
+    await assertPathMissing(claimPath);
+    const observed = await this.inspectExistingLock(
+      lockPath,
+      options.sessionId,
+    );
+    if (observed.kind !== 'sealed' || !isManagedLockRecord(observed.record)) {
+      throw new SessionWriterUnavailableError();
+    }
+    if (
+      observed.record.transcript.relative_path !==
+      getTranscriptRelativePath(
+        options.runtimeBaseDir,
+        options.activeTranscriptPath,
+      )
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    const claimRecord = { ...observed.record, owner_id: randomUUID() };
+    const claimRaw = JSON.stringify(claimRecord);
+    if (!(await installLockRecord(claimPath, claimRecord))) {
+      throw new SessionWriterUnavailableError();
+    }
+    try {
+      const primaryIdentity = nodeFs.lstatSync(lockPath, { bigint: true });
+      const claimIdentity = nodeFs.lstatSync(claimPath, { bigint: true });
+      let released = false;
+      let expectedTranscriptState: TranscriptState | undefined;
+      const assertCleanupOwned = () => {
+        if (released) throw new SessionWriterLostError();
+        for (const [candidate, identity] of [
+          [lockPath, primaryIdentity],
+          [claimPath, claimIdentity],
+        ] as const) {
+          try {
+            const current = nodeFs.lstatSync(candidate, { bigint: true });
+            if (
+              !current.isFile() ||
+              current.isSymbolicLink() ||
+              current.dev !== identity.dev ||
+              current.ino !== identity.ino ||
+              nodeFs.readFileSync(candidate, 'utf8') !==
+                (candidate === lockPath ? observed.raw : claimRaw)
+            ) {
+              throw new SessionWriterLostError();
+            }
+          } catch (error) {
+            if (error instanceof SessionWriterError) throw error;
+            throw new SessionWriterUnavailableError({
+              cause: error instanceof Error ? error : undefined,
+            });
+          }
+        }
+      };
+      const assertOwnedAndUnchanged = async () => {
+        assertCleanupOwned();
+        const proof = await openTranscriptProof(options.transcriptPath);
+        try {
+          if (
+            proof.state.exists !== observed.record.transcript.exists ||
+            proof.state.byteLength !== observed.record.transcript.byte_length ||
+            proof.sha256 !== observed.record.transcript.sha256 ||
+            (expectedTranscriptState !== undefined &&
+              !sameTranscriptState(proof.state, expectedTranscriptState))
+          ) {
+            throw new SessionTranscriptChangedError();
+          }
+          await validateOpenTranscriptProof(options.transcriptPath, proof);
+          assertCleanupOwned();
+          expectedTranscriptState ??= proof.state;
+        } finally {
+          await closeTranscriptProof(proof);
+        }
+      };
+      await assertOwnedAndUnchanged();
+      return {
+        assertOwnedAndUnchanged,
+        assertCleanupOwned,
+        release: async () => {
+          assertCleanupOwned();
+          await removeExactRecord(claimPath, claimRaw);
+          released = true;
+        },
+      };
+    } catch (error) {
+      await removeExactRecord(claimPath, claimRaw);
       throw error;
     }
   }
@@ -1707,8 +1915,14 @@ export class SessionWriterLease {
 
     const processStartIdentity = await readProcessStartIdentity(process.pid);
     const pidNamespaceId = readPidNamespaceId();
-    const lockRecord: ActiveSessionWriterLockRecord = {
-      schema_version: LOCK_SCHEMA_VERSION,
+    const lockSchema = normalizedOptions.lockSchema;
+    const lockRecord: ActiveLockRecord = {
+      ...(lockSchema === undefined
+        ? { schema_version: LOCK_SCHEMA_VERSION }
+        : {
+            schema_version: MANAGED_LOCK_SCHEMA_VERSION,
+            format_version: lockSchema.formatVersion,
+          }),
       state: 'active',
       session_id: normalizedOptions.sessionId,
       owner_id: randomUUID(),
@@ -1761,6 +1975,19 @@ export class SessionWriterLease {
           lockRecord,
           normalizedOptions,
         );
+      }
+      // A Managed lock may only be continued by a writer that speaks its
+      // schema: reclaiming or taking it over with a baseline writer would
+      // silently downgrade the record and drop the sealed commit proof.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema === undefined
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            'Session writer lock uses a schema this acquire cannot continue',
+          ),
+        });
       }
       if (normalizedOptions.reclaimPolicy === 'never') {
         throw new SessionWriterConflictError();
@@ -1845,9 +2072,22 @@ export class SessionWriterLease {
   private static async takeOverSealed(
     lockPath: string,
     observed: Extract<ExistingLockState, { kind: 'sealed' }>,
-    lockRecord: ActiveSessionWriterLockRecord,
+    lockRecord: ActiveLockRecord,
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {
+    // A sealed Managed lock carries the authority's commit proof; continuing
+    // it with a baseline writer would drop that proof and downgrade the
+    // record, so only a schema-3 acquirer may take it over.
+    if (
+      isManagedLockRecord(observed.record) &&
+      options.lockSchema === undefined
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          'Sealed session writer lock uses a schema this acquire cannot continue',
+        ),
+      });
+    }
     const relativePath = getTranscriptRelativePath(
       options.runtimeBaseDir,
       options.transcriptPath,
@@ -1900,6 +2140,12 @@ export class SessionWriterLease {
         options,
         proof.state,
       );
+      if (isManagedLockRecord(observed.record)) {
+        lease.takenOverCommitProof = {
+          last_commit_sequence: observed.record.last_commit_sequence,
+          committed_prefix_hash: observed.record.committed_prefix_hash,
+        };
+      }
       await releaseTransitionClaim(claimPath, claimRaw);
       claimAcquired = false;
       await removeExactRecord(retiredPath, observed.raw).catch((error) => {
@@ -2249,6 +2495,99 @@ export class SessionWriterLease {
     return this.runExclusive(() => this.appendJsonLineOnce(value));
   }
 
+  /**
+   * Discards a trailing byte range this owner has proven was never committed,
+   * then re-pins the transcript proof.
+   *
+   * Only the active writer may change the file, so a caller cannot repair a
+   * torn tail by editing it: `acquire` would reject the result as changed
+   * outside its writer. The retained prefix must already be verified by the
+   * caller — this method checks ownership and identity, not meaning.
+   */
+  truncateTo(byteLength: number): Promise<void> {
+    return this.runExclusive(() => this.truncateToOnce(byteLength));
+  }
+
+  private async truncateToOnce(byteLength: number): Promise<void> {
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new SessionWriterUnavailableError();
+    }
+    await this.assertOwnedAndUnchangedOnce();
+    const expected = this.expectedTranscriptState;
+    if (!expected?.exists || !this.expectedTranscriptHasher) {
+      throw new SessionWriterUnavailableError();
+    }
+    if (byteLength > expected.byteLength) {
+      throw new SessionWriterUnavailableError();
+    }
+    if (byteLength === expected.byteLength) return;
+
+    let handle: fs.FileHandle | undefined;
+    try {
+      handle = await openTranscriptForAppend(this.transcriptPath, expected);
+      const beforeState = await getOpenTranscriptState(
+        this.transcriptPath,
+        handle,
+        true,
+      );
+      if (!sameTranscriptState(beforeState, expected)) {
+        throw new SessionTranscriptChangedError();
+      }
+      await this.readOwnedLock();
+      assertVerifiableTranscriptIdentity(beforeState.fingerprint);
+      await handle.truncate(byteLength);
+      await handle.sync();
+      const afterState = transcriptStateFromStat(await handle.stat());
+      if (
+        afterState.byteLength !== byteLength ||
+        !sameFileIdentity(afterState.fingerprint, beforeState.fingerprint) ||
+        !sameFileSecurityMetadata(
+          afterState.fingerprint,
+          beforeState.fingerprint,
+        )
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      await handle.close();
+      handle = undefined;
+
+      // The rolling hash covers the discarded bytes and cannot be rewound, so
+      // the retained prefix is re-read to rebuild it.
+      const snapshot = await captureTranscriptSnapshot(
+        this.transcriptPath,
+        afterState,
+        () => this.released,
+      );
+      if (
+        !snapshot.state.exists ||
+        snapshot.state.byteLength !== byteLength ||
+        !sameFileIdentity(snapshot.state.fingerprint, afterState.fingerprint) ||
+        !sameFileSecurityMetadata(
+          snapshot.state.fingerprint,
+          afterState.fingerprint,
+        )
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      await this.readOwnedLock();
+      this.expectedTranscriptState = snapshot.state;
+      this.expectedTranscriptHasher = snapshot.hasher;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST' || code === 'ENOENT') {
+        throw new SessionTranscriptChangedError();
+      }
+      if (error instanceof SessionWriterError) throw error;
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    } finally {
+      if (handle) {
+        await handle.close().catch(() => undefined);
+      }
+    }
+  }
+
   private async appendJsonLineOnce(value: unknown): Promise<void> {
     let serialized: string | undefined;
     try {
@@ -2473,10 +2812,17 @@ export class SessionWriterLease {
     return this.terminalPromise;
   }
 
-  sealForHandoff(): Promise<void> {
+  /**
+   * Seals the writer for a later certified takeover. A lease writing Managed
+   * (schema 3) records must seal with the authority's commit proof; a
+   * baseline lease ignores it.
+   */
+  sealForHandoff(commitProof?: SessionWriterCommitProof): Promise<void> {
     if (this.terminalOperation === 'release') return this.release();
     this.terminalOperation = 'seal';
-    this.terminalPromise ??= this.runExclusive(() => this.sealForHandoffOnce());
+    this.terminalPromise ??= this.runExclusive(() =>
+      this.sealForHandoffOnce(commitProof),
+    );
     return this.terminalPromise;
   }
 
@@ -2559,29 +2905,56 @@ export class SessionWriterLease {
     await directory?.handle.close().catch(() => undefined);
   }
 
-  private async sealForHandoffOnce(): Promise<void> {
+  private async sealForHandoffOnce(
+    commitProof?: SessionWriterCommitProof,
+  ): Promise<void> {
     if (this.released) return;
     const ownedRecord = await this.readOwnedLockForRelease();
     if (!this.expectedTranscriptState) {
       throw new SessionWriterUnavailableError();
+    }
+    if (
+      this.managedFormatVersion !== undefined &&
+      !isValidCommitProof(commitProof)
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          'Managed session writer seal requires the commit proof',
+        ),
+      });
     }
     const relativePath = getTranscriptRelativePath(
       this.runtimeBaseDir,
       this.transcriptPath,
     );
     const proof = await openTranscriptProof(this.transcriptPath);
-    const sealedRecord: SealedSessionWriterLockRecord = {
-      ...ownedRecord,
-      schema_version: LOCK_SCHEMA_VERSION,
-      state: 'sealed',
-      sealed_at: new Date().toISOString(),
-      transcript: {
-        relative_path: relativePath,
-        exists: proof.state.exists,
-        byte_length: proof.state.byteLength,
-        sha256: proof.sha256,
-      },
+    const transcriptProof: SealedTranscriptProof = {
+      relative_path: relativePath,
+      exists: proof.state.exists,
+      byte_length: proof.state.byteLength,
+      sha256: proof.sha256,
     };
+    let sealedRecord: SealedLockRecord;
+    if (this.managedFormatVersion === undefined) {
+      sealedRecord = {
+        ...ownedRecord,
+        schema_version: LOCK_SCHEMA_VERSION,
+        state: 'sealed',
+        sealed_at: new Date().toISOString(),
+        transcript: transcriptProof,
+      };
+    } else {
+      sealedRecord = {
+        ...ownedRecord,
+        schema_version: MANAGED_LOCK_SCHEMA_VERSION,
+        state: 'sealed',
+        sealed_at: new Date().toISOString(),
+        format_version: this.managedFormatVersion,
+        last_commit_sequence: commitProof!.last_commit_sequence,
+        committed_prefix_hash: commitProof!.committed_prefix_hash,
+        transcript: transcriptProof,
+      };
+    }
     const sealedRaw = JSON.stringify(sealedRecord);
     const sealedCandidatePath = `${this.lockPath}.sealed-candidate.${encodeURIComponent(
       this.ownerId,

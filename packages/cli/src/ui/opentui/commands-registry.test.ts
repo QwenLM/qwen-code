@@ -69,6 +69,7 @@ const ALL_DIALOG_KINDS: readonly InkDialogKind[] = [
   'memory',
   'model',
   'fast-model',
+  'advisor-model',
   'voice-model',
   'vision-model',
   'compaction-model',
@@ -161,6 +162,7 @@ describe('routeDialogToOpenTui (ink dialog-switch parity)', () => {
     const cases: Array<[InkDialogKind, string]> = [
       ['model', 'primary'],
       ['fast-model', 'fast'],
+      ['advisor-model', 'advisor'],
       ['voice-model', 'voice'],
       ['vision-model', 'vision'],
       ['compaction-model', 'compaction'],
