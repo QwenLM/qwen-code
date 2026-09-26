@@ -154,7 +154,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireWellFormed(
+                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
         return resolveScope(harnessId).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
@@ -900,7 +901,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
                     blocked = request.isManagedContext() && timedOut != null
-                            && blockRecovery(timedOut);
+                            && blockRecoveryQuietly(timedOut, null);
                 } finally {
                     releaseOperationQuietly(bindingId, operationGeneration);
                     // A retry cannot succeed once the binding is blocked.
@@ -950,7 +951,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 if (request.isManagedContext() || !retryable) {
                                     // A retry cannot succeed once the binding
                                     // is blocked, so say so.
-                                    if (blockRecovery(currentClaim) && retryable) {
+                                    if (blockRecoveryQuietly(currentClaim, cause)
+                                            && retryable) {
                                         throw conflict(
                                                 "runtime_broker_recovery_blocked",
                                                 "Managed Runtime recovery is blocked.",
@@ -1382,6 +1384,30 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return bindingRepository.compareAndSet(claimed, claimed.withState(
                 RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                 claimed.getLease(), clock.instant())) != null;
+    }
+
+    /**
+     * Blocks recovery and answers whether the binding is now blocked. The
+     * deadline and the failure handler hold the same claim, so the one that
+     * writes second finds the block already there. A write or read that
+     * fails answers false, and the failure is kept on {@code cause}.
+     */
+    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
+            Throwable cause) {
+        try {
+            if (blockRecovery(claimed)) {
+                return true;
+            }
+            RuntimeBindingRecord latest = bindingRepository.findById(
+                    claimed.getBindingId());
+            return latest != null && latest.getState()
+                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+        } catch (RuntimeException failure) {
+            if (cause != null) {
+                cause.addSuppressed(failure);
+            }
+            return false;
+        }
     }
 
     private void blockRecovery(String bindingId, long operationGeneration) {

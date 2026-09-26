@@ -242,6 +242,108 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
+    void aDeadlineThatFindsTheBindingAlreadyBlockedReportsTheBlock() throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        AtomicInteger blockWrites = new AtomicInteger();
+        java.util.concurrent.CountDownLatch deadlineTried = new java.util.concurrent.CountDownLatch(1);
+        // The failure handler records the block, then is still in that
+        // database round trip when the deadline tries to record its own.
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            if ("compareAndSet".equals(method.getName())
+                                    && ((RuntimeBindingRecord) args[1]).getState()
+                                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED) {
+                                if (blockWrites.getAndIncrement() == 0) {
+                                    Object written = invoke(method, delegate, args);
+                                    deadlineTried.await(8, TimeUnit.SECONDS);
+                                    return written;
+                                }
+                                deadlineTried.countDown();
+                            }
+                            return invoke(method, delegate, args);
+                        });
+        FailingProvisioner provisioner = new FailingProvisioner(false);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            assertBlocked(service);
+            assertEquals(2, blockWrites.get());
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
+    void aLateFailureAfterTheDeadlineBlockedReportsTheBlock() throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        AtomicInteger blockWrites = new AtomicInteger();
+        FailingProvisioner provisioner = new FailingProvisioner(true);
+        // The launch fails after the deadline recorded the block but before
+        // the deadline answered, so the failure handler answers first.
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            Object result = invoke(method, delegate, args);
+                            if ("compareAndSet".equals(method.getName())
+                                    && ((RuntimeBindingRecord) args[1]).getState()
+                                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                    && blockWrites.getAndIncrement() == 0) {
+                                provisioner.pending.completeExceptionally(new RuntimeBrokerException(
+                                        503, "runtime_provision_failed", "late failure", true));
+                            }
+                            return result;
+                        });
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            assertBlocked(service);
+            assertEquals(2, blockWrites.get());
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
+    void aNonRetryableFailedLaunchKeepsItsOwnAnswer() throws Exception {
+        InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+        FailingProvisioner provisioner = new FailingProvisioner(new RuntimeBrokerException(409,
+                "runtime_broker_attestation_conflict", "another Runtime answered", false));
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_attestation_conflict",
+                    ((RuntimeBrokerException) error.getCause()).getCode());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findActive(REQUEST).getState());
+            assertBlocked(service);
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
+    void aBlockThatCannotBeRecordedKeepsTheFailuresAnswer() throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        AtomicInteger blockWrites = new AtomicInteger();
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            if ("compareAndSet".equals(method.getName())
+                                    && ((RuntimeBindingRecord) args[1]).getState()
+                                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                    && blockWrites.getAndIncrement() == 0) {
+                                throw new IllegalStateException("transient database failure");
+                            }
+                            return invoke(method, delegate, args);
+                        });
+        FailingProvisioner provisioner = new FailingProvisioner(false);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            RuntimeBrokerException failure = (RuntimeBrokerException) error.getCause();
+            assertEquals("runtime_provision_failed", failure.getCode());
+            assertTrue(failure.isRetryable());
+            // The resource handle was persisted, so the next call blocks.
+            assertBlocked(service);
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    @Test
     void theCallThatHitsTheDeadlineReportsTheBlock() throws Exception {
         InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
         FailingProvisioner provisioner = new FailingProvisioner(true);
@@ -346,9 +448,17 @@ class ManagedContextRecoveryTest {
         private final java.util.concurrent.CountDownLatch released =
                 new java.util.concurrent.CountDownLatch(1);
         private final boolean hang;
+        private final RuntimeBrokerException failure;
 
         private FailingProvisioner(boolean hang) {
             this.hang = hang;
+            this.failure = new RuntimeBrokerException(503, "runtime_provision_failed",
+                    "ambiguous launch", true);
+        }
+
+        private FailingProvisioner(RuntimeBrokerException failure) {
+            this.hang = false;
+            this.failure = failure;
         }
 
         @Override
@@ -376,8 +486,7 @@ class ManagedContextRecoveryTest {
         @Override
         public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
             launches.incrementAndGet();
-            return hang ? pending : CompletableFuture.failedFuture(new RuntimeBrokerException(
-                    503, "runtime_provision_failed", "ambiguous launch", true));
+            return hang ? pending : CompletableFuture.failedFuture(failure);
         }
     }
 }

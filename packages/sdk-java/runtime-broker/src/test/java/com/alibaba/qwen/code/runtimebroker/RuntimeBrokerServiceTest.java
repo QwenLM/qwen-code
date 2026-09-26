@@ -1352,6 +1352,16 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void refusesAnIllFormedRuntimeSessionIdBeforeResolvingTheScope() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> fixture.service.acquire("harness", "s\uD800",
+                            "bootstrap"));
+            assertNull(fixture.resolver.lastHarness.get());
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",

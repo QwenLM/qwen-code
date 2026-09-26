@@ -158,20 +158,23 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     @Override
     public CompletionStage<Map<String, Object>> installContext(
-            RuntimeBindingRecord runtime, RuntimeSession session,
+            RuntimeBindingRecord runtime, RuntimeSessionRecord sessionRecord,
             String operationId, ContextBinding binding) {
-        if (runtime == null || session == null) {
+        if (runtime == null || sessionRecord == null) {
             throw new IllegalArgumentException("runtime and session are required");
         }
         // The record ties the lease and seed to the placement they serve.
         RuntimeProvisionRequest request = runtime.getRequest();
         RuntimeLease lease = runtime.getLease();
         RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        RuntimeSession session = sessionRecord.getSession();
         String isolationKey = "session".equals(
                 session.getScope().getIsolationClass())
                         ? session.getHarnessSessionId() : null;
         if (runtime.getState() != RuntimeBindingRecord.State.READY
                 || lease == null || seed == null
+                || !runtime.getBindingId().equals(sessionRecord.getBindingId())
+                || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
                 || !request.getScope().equals(session.getScope())
                 || !java.util.Objects.equals(request.getIsolationKey(),
                         isolationKey)) {

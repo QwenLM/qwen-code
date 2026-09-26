@@ -33,11 +33,12 @@ public interface RuntimeTransport {
 
     /**
      * Installs directory context only; does not activate a Session. The
-     * binding must be READY and hold the Session's placement: its scope and,
+     * binding must be READY and be the one the Session was acquired on, at
+     * the same generation, and hold the Session's placement: its scope and,
      * under session isolation, its Harness Session.
      */
     default CompletionStage<Map<String, Object>> installContext(
-            RuntimeBindingRecord runtime, RuntimeSession session,
+            RuntimeBindingRecord runtime, RuntimeSessionRecord session,
             String operationId, ContextBinding binding) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_runtime_incompatible",

@@ -22,20 +22,20 @@ binding slot 和 binding 都持久化可空 `storage_id`。managed-context reque
 
 ## 3. 协议准入与安装
 
-使用封闭的 [managed-context envelope](2026-09-25-managed-context-envelope.zh-CN.md) 及 [Worker 行为](2026-09-26-managed-context-worker.zh-CN.md)。启动进程或发送请求前，校验标识符、可打印 storage ID、规范的正十进制 generation、SHA-256 digest、绝对 mount root、bearer token 和安全整数 epoch。保留 Unicode；拒绝未配对代理项，不能静默替换。写入器会把它变成 `?`，因此这一规则同样适用于每个 Runtime Session ID，以及 tool v2 引用中的 `sessionId`、`promptId`、`callId` 和 `argsDigest`，否则它们会以另一个 Session 或另一次调用的身份到达 Worker。
+使用封闭的 [managed-context envelope](2026-09-25-managed-context-envelope.zh-CN.md) 及 [Worker 行为](2026-09-26-managed-context-worker.zh-CN.md)。启动进程或发送请求前，校验标识符、可打印 storage ID、规范的正十进制 generation、SHA-256 digest、绝对 mount root、bearer token 和安全整数 epoch。保留 Unicode；拒绝未配对代理项，不能静默替换。写入器会把它变成 `?`，因此这一规则同样适用于每个 Runtime Session ID，以及 tool v2 引用中的 `sessionId`、`promptId`、`callId` 和 `argsDigest`，否则它们会以另一个 Session 或另一次调用的身份到达 Worker。工具名与工具输入维持现有处理方式。
 
-| 接口                                        | 所有权与验证                                                                                                                                                                                                                                             |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| boot v2 / ready v2                          | 进程引导；精确校验 ready 字段集合、managedContext、seed 身份及规范 loopback origin，禁止降级 boot v1。                                                                                                                                                   |
-| POST `/internal/managed-runtime/v3/attest`  | 选定 Runtime；比较所有持久化 Workspace/storage/root 与 seed 字段，包括 incarnation。向 Broker 独立准入校验暴露已证明的 storage 身份。                                                                                                                    |
-| POST `/internal/managed-runtime/v3/context` | 选定 Runtime 与具名 Session：客户端接收 READY 的 binding 记录和该 Session，要求记录的 scope，以及 session 隔离下的隔离键，都属于该 Session。发送不可变 W0a binding、计算后的 digest 和 operation ID；逐字段对照原请求与接收方 incarnation 校验 receipt。 |
-| tool v2                                     | 已有 Session owner 与原 execution reference。保留 context-unavailable/conflict 拒绝原因，不能伪装成 Runtime 身份替换；原执行仍可 status/cancel。                                                                                                         |
+| 接口                                        | 所有权与验证                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| boot v2 / ready v2                          | 进程引导；精确校验 ready 字段集合、managedContext、seed 身份及规范 loopback origin，禁止降级 boot v1。                                                                                                                                                                                                                                |
+| POST `/internal/managed-runtime/v3/attest`  | 选定 Runtime；比较所有持久化 Workspace/storage/root 与 seed 字段，包括 incarnation。向 Broker 独立准入校验暴露已证明的 storage 身份。                                                                                                                                                                                                 |
+| POST `/internal/managed-runtime/v3/context` | 选定 Runtime 与具名 Session：客户端接收 READY 的 binding 记录和该 Session 的记录，要求该 Session 是在这个 binding 的当前 generation 上 acquire 的，并且 binding 的 scope，以及 session 隔离下的隔离键，都属于该 Session。发送不可变 W0a binding、计算后的 digest 和 operation ID；逐字段对照原请求与接收方 incarnation 校验 receipt。 |
+| tool v2                                     | 已有 Session owner 与原 execution reference。保留 context-unavailable/conflict 拒绝原因，不能伪装成 Runtime 身份替换；原执行仍可 status/cancel。                                                                                                                                                                                      |
 
 Context 请求和响应限制为 16 KiB，响应要求 JSON UTF-8 与 no-store，拒绝重定向和不兼容 peer。安装是显式 transport 操作，不能在 acquire 时自动调用：W0c-2 无权选择冻结的 Session 配置。成功 receipt 仅证明 context installation，不代表激活或执行授权。
 
 ## 4. 有界启动与恢复
 
-managed-context 请求必须先持久化 resource handle，再启动进程。已有该 handle 但尚无 attested lease 的 binding 不得自动再次启动。首次失败或结果不确定的尝试进入 `RECOVERY_BLOCKED`；重复 warm 和 Broker 重启不能分配替代 generation。阻塞一旦记录成功，失败的这次调用就返回 409 `runtime_broker_recovery_blocked`，而不是可重试的错误，超过期限的情形也是如此。若阻塞无法记录，本次调用保留原来的应答；只要 resource handle 已被持久化，下一次调用就会阻塞 binding。即使在 handle 持久化后、进程启动前崩溃，也阻止自动重试。legacy 启动策略不变。
+managed-context 请求必须先持久化 resource handle，再启动进程。已有该 handle 但尚无 attested lease 的 binding 不得自动再次启动。首次失败或结果不确定的尝试进入 `RECOVERY_BLOCKED`；重复 warm 和 Broker 重启不能分配替代 generation。阻塞一旦记录成功，以可重试错误失败的这次调用改为返回 409 `runtime_broker_recovery_blocked`，超过期限的情形也是如此；不可重试的错误照原样返回。若阻塞无法记录，本次调用保留原来的应答；只要 resource handle 已被持久化，下一次调用就会阻塞 binding。即使在 handle 持久化后、进程启动前崩溃，也阻止自动重试。legacy 启动策略不变。
 
 ready 和 attestation 不兼容时关闭准入，provisioner 终止失败子进程。恢复需要原进程不能继续执行的证据以及授权生命周期操作；本切片不新增公开重试接口。已 ready Runtime 的 reconciliation 仅进行观测，并使用保存的 request/seed。
 
@@ -51,7 +51,7 @@ ready 和 attestation 不兼容时关闭准入，provisioner 终止失败子进�
 - 在真实进程上验证安装重放、Session 冲突、目录缺失拒绝以及 legacy boot v1 保持原样。
 - 固定 legacy request/scope hash；跨 repository 实例测试已有 schema 升级、storage 往返与篡改拒绝。
 - 证明不确定启动后的重复 warm、重启均不会再启动进程；覆盖启动前持久化标记处的崩溃以及超过期限的情形。
-- 在发送前拒绝安装到另一个 placement 的 Runtime 或非 READY 的 binding，拒绝格式不良的 Session 或引用 ID；容忍并发的 schema 升级。
+- 在发送前拒绝安装到 Session 所 acquire 的 binding 之外的 binding、另一个 placement 的 Runtime 或非 READY 的 binding，拒绝格式不良的 Session 或引用 ID；容忍并发的 schema 升级。
 - 推送前运行定向测试、Java Checkstyle，并完成两轮干净的自审。
 
 E2E 计划与观测记录放在 `.qwen/e2e-tests/managed-context-broker.md`。基线先使用全局 CLI，最终使用本地 bundle；不需要模型凭证或外部模型调用。

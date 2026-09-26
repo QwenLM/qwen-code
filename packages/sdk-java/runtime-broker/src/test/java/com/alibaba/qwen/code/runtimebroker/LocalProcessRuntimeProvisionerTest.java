@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -80,8 +81,9 @@ class LocalProcessRuntimeProvisionerTest {
                 assertEquals("storage:a", ready.getRequest().getStorageId());
                 var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
                         "tenant-a", "workspace-a", 7, "storage:a", "服务/api", "config:a", 1);
-                RuntimeSession session = new RuntimeSession("harness", "session-中文",
-                        "bootstrap", scope);
+                RuntimeSessionRecord session = new RuntimeSessionRecord(new RuntimeSession(
+                        "harness", "session-中文", "bootstrap", scope), ready.getBindingId(),
+                        ready.getGeneration(), RuntimeSessionRecord.State.READY, 0, Instant.now());
                 var receipt = transport.installContext(ready, session, "op-1", binding)
                         .toCompletableFuture().get(5, TimeUnit.SECONDS);
                 assertEquals(binding.getContextDigest(), receipt.get("contextDigest"));
