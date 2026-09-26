@@ -4,38 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 
-export type ManagedSessionJsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | ManagedSessionJsonValue[]
-  | { [key: string]: ManagedSessionJsonValue };
+export type { ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 
-const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
-const MAX_ERROR_VALUE_LENGTH = 4096;
-
 export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
+
+const MAX_ERROR_VALUE_LENGTH = 4096;
 
 export const MANAGED_SESSION_LIMITS = {
   maxIdBytes: 512,
   // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
   // such as `source` or `stopReason`, borrowed from its error-message cap.
   maxTextBytes: 4096,
-  maxTimeMs: 8_640_000_000_000_000,
   maxJsonDepth: 64,
-  maxHeaderBytes: 64 * 1024,
+  maxTimeMs: 8_640_000_000_000_000,
   maxEventBytes: 1024 * 1024,
   maxCommitMarkerBytes: 64 * 1024,
   maxTransactionEvents: 256,
@@ -100,7 +92,18 @@ export const MANAGED_SESSION_DOMAINS = [
   'team_plan',
   'session_message',
   'session_metadata',
+  // New to the v1 index. None of the history domains above describes the
+  // per-prompt file backups a session takes, and the rule for adding a name is
+  // an explicit schema, producer and consumer: the recorder's sink commits it,
+  // the message projection restores the original record, and the existing file
+  // history accumulator folds those records into the session's snapshots.
   'file_history',
+  // Also new to the v1 index. The source a session was created from is read
+  // back as a record — the session directory, the transcript index's side-task
+  // check and the bridge's listing all parse the original `systemPayload` — so
+  // it cannot ride in `session_metadata`, whose body is a metadata patch. The
+  // domain name is the only discriminator a reader has for a body shape, so a
+  // second shape under one name would make neither readable.
   'session_source',
 ] as const;
 
@@ -158,15 +161,6 @@ export const MANAGED_SESSION_ACTION_SOURCES = [
 export type ManagedSessionActionSource =
   (typeof MANAGED_SESSION_ACTION_SOURCES)[number];
 
-const MANAGED_SESSION_ACTION_STATES = [
-  'requested',
-  'decided',
-  'cancelled',
-  'expired',
-] as const;
-
-type ManagedSessionActionState = (typeof MANAGED_SESSION_ACTION_STATES)[number];
-
 export interface ManagedSessionKey {
   readonly tenantId: string;
   readonly workspaceId: string;
@@ -203,7 +197,7 @@ export interface ManagedSessionEvent {
   readonly kind: ManagedSessionEventKind;
   readonly occurredAt: number;
   readonly subject?: ManagedSessionSubject;
-  readonly payload: Readonly<Partial<Record<string, ManagedSessionJsonValue>>>;
+  readonly payload: Readonly<Record<string, ManagedSessionJsonValue>>;
 }
 
 export interface ManagedSessionHeader {
@@ -242,10 +236,6 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
-  return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
-}
-
 function object(
   value: unknown,
   label: string,
@@ -253,91 +243,12 @@ function object(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail(`${label} must be a JSON object.`);
   }
-  const prototype = Object.getPrototypeOf(value) as object | null;
-  if (prototype !== Object.prototype && prototype !== null) {
-    fail(`${label} must be a plain JSON object.`);
-  }
   return value as Record<string, ManagedSessionJsonValue>;
 }
 
-function assertJsonValue(
-  value: unknown,
-  label: string,
-  ancestors = new Set<object>(),
-  depth = 1,
-): asserts value is ManagedSessionJsonValue {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) fail(`${label} numbers must be finite.`);
-    return;
-  }
-  if (typeof value !== 'object') {
-    fail(`${label} must contain only JSON values.`);
-  }
-  if (depth > MANAGED_SESSION_LIMITS.maxJsonDepth) {
-    fail(
-      `${label} exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
-    );
-  }
-  if (ancestors.has(value)) fail(`${label} must not contain cycles.`);
-
-  ancestors.add(value);
-  try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = Reflect.ownKeys(descriptors);
-    const prototype = Object.getPrototypeOf(value) as object | null;
-    if (Array.isArray(value)) {
-      if (prototype !== Array.prototype) {
-        fail(`${label} must be a plain JSON array.`);
-      }
-      if (
-        keys.length !== value.length + 1 ||
-        keys.some(
-          (key) =>
-            key !== 'length' &&
-            (typeof key !== 'string' ||
-              !/^(0|[1-9][0-9]*)$/.test(key) ||
-              Number(key) >= value.length ||
-              !descriptors[key].enumerable ||
-              !('value' in descriptors[key])),
-        )
-      ) {
-        fail(`${label} must be a dense JSON array.`);
-      }
-      for (let index = 0; index < value.length; index++) {
-        assertJsonValue(
-          descriptors[String(index)].value,
-          `${label}[${index}]`,
-          ancestors,
-          depth + 1,
-        );
-      }
-      return;
-    }
-
-    if (prototype !== Object.prototype && prototype !== null) {
-      fail(`${label} objects must be plain JSON objects.`);
-    }
-    for (const key of keys) {
-      if (typeof key !== 'string') {
-        fail(`${label} objects must not contain symbol keys.`);
-      }
-      const keyLabel = safeErrorValue(`${label}.${key}`);
-      const descriptor = descriptors[key];
-      if (!descriptor.enumerable || !('value' in descriptor)) {
-        fail(`${keyLabel} must be an enumerable data property.`);
-      }
-      assertJsonValue(descriptor.value, keyLabel, ancestors, depth + 1);
-    }
-  } finally {
-    ancestors.delete(value);
-  }
+/** Record keys and values are untrusted; never echo them into an error raw. */
+function safeErrorValue(value: string): string {
+  return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
 function assertNoUnknownKeys(
@@ -427,19 +338,31 @@ export function assertManagedSessionKey(
   const record = object(value, label);
   assertNoUnknownKeys(record, ['tenantId', 'workspaceId', 'sessionId'], label);
   return {
-    tenantId: assertManagedSessionStableId(
-      record['tenantId'],
-      `${label}.tenantId`,
-    ),
-    workspaceId: assertManagedSessionStableId(
+    tenantId: assertKeyComponent(record['tenantId'], `${label}.tenantId`),
+    workspaceId: assertKeyComponent(
       record['workspaceId'],
       `${label}.workspaceId`,
     ),
-    sessionId: assertManagedSessionStableId(
-      record['sessionId'],
-      `${label}.sessionId`,
-    ),
+    sessionId: assertKeyComponent(record['sessionId'], `${label}.sessionId`),
   };
+}
+
+/**
+ * §2.1 derives on-disk resource roots from these components, so they must be
+ * usable as a single path segment.
+ */
+function assertKeyComponent(
+  value: ManagedSessionJsonValue | undefined,
+  label: string,
+): string {
+  const id = assertManagedSessionStableId(value, label);
+  if (/[/\\]/.test(id)) {
+    fail(`${label} must not contain a path separator.`);
+  }
+  if (/^\.+$/.test(id)) {
+    fail(`${label} must not be a relative path segment.`);
+  }
+  return id;
 }
 
 export function managedSessionKeysEqual(
@@ -563,6 +486,7 @@ type FieldKind =
   | 'ids'
   | 'sequence'
   | 'sequenceOrNull'
+  | 'time'
   | 'timeOrNull'
   | 'ref'
   | 'refOrNull'
@@ -750,25 +674,12 @@ const EVENT_ACTORS: Readonly<
   'domain.committed': ['trusted_entry'],
 };
 
-const ACTIVATION_SUBJECT_KINDS: Readonly<
-  Record<ManagedSessionEventKind, boolean>
-> = {
-  'input.accepted': false,
-  'wake.requested': false,
-  'activation.changed': false,
-  'model.attempt': true,
-  'message.committed': false,
-  'tool.intent': true,
-  'action.changed': false,
-  'tool.receipt': false,
-  'checkpoint.committed': true,
-  'context.compacted': true,
-  'cancel.requested': false,
-  'turn.settled': false,
-  'config.bound': false,
-  'lifecycle.changed': false,
-  'domain.committed': false,
-};
+const HARNESS_ONLY_KINDS: readonly ManagedSessionEventKind[] = [
+  'model.attempt',
+  'tool.intent',
+  'context.compacted',
+  'checkpoint.committed',
+];
 
 function assertField(
   payload: Record<string, ManagedSessionJsonValue>,
@@ -797,6 +708,9 @@ function assertField(
     case 'sequenceOrNull':
       if (value !== null) assertManagedSessionSequence(value, at);
       return;
+    case 'time':
+      assertManagedSessionTime(value, at);
+      return;
     case 'timeOrNull':
       if (value !== null) assertManagedSessionTime(value, at);
       return;
@@ -824,7 +738,8 @@ function assertField(
       assertSubject(value, at);
       return;
     case 'json':
-      assertJsonValue(value, at);
+      if (value === undefined) fail(`${at} is required.`);
+      canonicalDigest(value, MANAGED_SESSION_LIMITS.maxEventBytes, at);
       return;
     default: {
       const exhaustive: never = kind;
@@ -850,12 +765,6 @@ function assertPayloadRules(
 ): void {
   const at = `payload`;
   switch (kind) {
-    case 'wake.requested': {
-      if ((payload['requiredSequence'] as number) < 1) {
-        fail(`${at}.requiredSequence must start at 1.`);
-      }
-      return;
-    }
     case 'activation.changed': {
       const phase = assertEnum(
         payload['phase'],
@@ -901,7 +810,7 @@ function assertPayloadRules(
       );
       const state = assertEnum(
         payload['state'],
-        MANAGED_SESSION_ACTION_STATES,
+        ['requested', 'decided', 'cancelled', 'expired'] as const,
         `${at}.state`,
       );
       if ((state === 'decided') === (payload['decisionRef'] === null)) {
@@ -914,38 +823,27 @@ function assertPayloadRules(
       return;
     }
     case 'lifecycle.changed': {
-      const to = assertEnum(
-        payload['to'],
-        MANAGED_SESSION_LIFECYCLE_STATES,
-        `${at}.to`,
-      );
-      const from =
-        payload['from'] === null
-          ? null
-          : assertEnum(
-              payload['from'],
-              MANAGED_SESSION_LIFECYCLE_STATES,
-              `${at}.from`,
-            );
-      if (!isManagedSessionLifecycleTransitionAllowed(from, to)) {
-        fail(`${at} cannot transition from ${from ?? 'null'} to ${to}.`);
+      assertEnum(payload['to'], MANAGED_SESSION_LIFECYCLE_STATES, `${at}.to`);
+      if (payload['from'] !== null) {
+        assertEnum(
+          payload['from'],
+          MANAGED_SESSION_LIFECYCLE_STATES,
+          `${at}.from`,
+        );
       }
       return;
     }
     case 'context.compacted': {
-      const from = payload['fromSequence'] as number;
-      const to = payload['toSequence'] as number;
-      if (from < 1 || to < 1) {
-        fail(`${at} sequence references must start at 1.`);
-      }
+      const from = assertManagedSessionSequence(
+        payload['fromSequence'],
+        `${at}.fromSequence`,
+      );
+      const to = assertManagedSessionSequence(
+        payload['toSequence'],
+        `${at}.toSequence`,
+      );
       if (to < from) {
         fail(`${at}.toSequence must not precede ${at}.fromSequence.`);
-      }
-      return;
-    }
-    case 'checkpoint.committed': {
-      if ((payload['coveredSequence'] as number) < 1) {
-        fail(`${at}.coveredSequence must start at 1.`);
       }
       return;
     }
@@ -955,39 +853,27 @@ function assertPayloadRules(
         MANAGED_SESSION_DOMAINS,
         `${at}.domain`,
       );
-      if (payload['version'] !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
-        fail(`${at}.version must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`);
+      if (payload['version'] !== MANAGED_SESSION_FORMAT_VERSION) {
+        fail(`${at}.version must be ${MANAGED_SESSION_FORMAT_VERSION}.`);
       }
-      const recordRef = payload[
-        'recordRef'
-      ] as unknown as ManagedSessionDurableRef;
+      const recordRef = assertManagedSessionDurableRef(
+        payload['recordRef'],
+        `${at}.recordRef`,
+      );
       if (recordRef.kind !== `managed-${domain}`) {
         fail(`${at}.recordRef.kind must be managed-${domain}.`);
       }
-      if (recordRef.schemaVersion !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
-        fail(
-          `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
-        );
+      if (recordRef.schemaVersion !== 1) {
+        fail(`${at}.recordRef.schemaVersion must be 1.`);
       }
       return;
     }
-    case 'input.accepted':
-    case 'message.committed':
-    case 'tool.intent':
-    case 'tool.receipt':
-    case 'cancel.requested':
-    case 'turn.settled':
-    case 'config.bound':
+    default:
       return;
-    default: {
-      const exhaustive: never = kind;
-      return exhaustive;
-    }
   }
 }
 
 export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
-  assertJsonValue(value, 'event');
   const record = object(value, 'event');
   assertNoUnknownKeys(
     record,
@@ -1034,7 +920,7 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     record['subject'] === undefined
       ? undefined
       : assertSubject(record['subject'], 'event.subject');
-  if (ACTIVATION_SUBJECT_KINDS[kind] && subject?.type !== 'activation') {
+  if (HARNESS_ONLY_KINDS.includes(kind) && subject?.type !== 'activation') {
     fail(`${kind} requires an activation subject.`);
   }
 
@@ -1052,7 +938,7 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
       'event.occurredAt',
     ),
     ...(subject === undefined ? {} : { subject }),
-    payload,
+    payload: Object.freeze(payload),
   };
 }
 
@@ -1065,12 +951,9 @@ export function assertManagedSessionEventActor(
   event: ManagedSessionEvent,
   actor: ManagedSessionActorClass,
 ): void {
-  if (!EVENT_ACTORS[event.kind].includes(actor)) {
-    fail(`${event.kind} must not be requested by ${actor}.`);
-  }
   if (event.kind === 'action.changed') {
     const source = event.payload['source'] as ManagedSessionActionSource;
-    const state = event.payload['state'] as ManagedSessionActionState;
+    const state = event.payload['state'] as string;
     const expected: ManagedSessionActorClass =
       state === 'requested' && source === 'tool_call'
         ? 'harness'
@@ -1080,7 +963,20 @@ export function assertManagedSessionEventActor(
         `action.changed ${state}/${source} must be requested by ${expected}, not ${actor}.`,
       );
     }
+    assertHarnessSubject(event, actor);
+    return;
   }
+  if (!EVENT_ACTORS[event.kind].includes(actor)) {
+    fail(`${event.kind} must not be requested by ${actor}.`);
+  }
+  assertHarnessSubject(event, actor);
+}
+
+/** Every kind the Harness may request is a Harness-advancing record. */
+function assertHarnessSubject(
+  event: ManagedSessionEvent,
+  actor: ManagedSessionActorClass,
+): void {
   if (actor === 'harness' && event.subject?.type !== 'activation') {
     fail(`${event.kind} from the harness requires an activation subject.`);
   }
@@ -1112,31 +1008,14 @@ export function isManagedSessionLifecycleTransitionAllowed(
   from: ManagedSessionLifecycleState | null,
   to: ManagedSessionLifecycleState,
 ): boolean {
-  if (
-    (from !== null && !MANAGED_SESSION_LIFECYCLE_STATES.includes(from)) ||
-    !MANAGED_SESSION_LIFECYCLE_STATES.includes(to)
-  ) {
-    return false;
-  }
   if (from === null) return to === 'idle';
-  if (to === 'recovery_blocked') {
-    return from !== 'deleted' && from !== 'recovery_blocked';
-  }
+  if (to === 'recovery_blocked') return from !== 'deleted';
   return LIFECYCLE_TRANSITIONS[from].includes(to);
-}
-
-function managedSessionReaderVersion(value: unknown): number | null {
-  if (typeof value !== 'string') return null;
-  const match = /^managed-session\/(0|[1-9][0-9]*)$/.exec(value);
-  if (match === null) return null;
-  const version = Number(match[1]);
-  return Number.isSafeInteger(version) ? version : null;
 }
 
 export function parseManagedSessionHeader(
   value: unknown,
 ): ManagedSessionHeader {
-  assertJsonValue(value, 'header');
   const record = object(value, 'header');
   assertNoUnknownKeys(
     record,
@@ -1153,19 +1032,14 @@ export function parseManagedSessionHeader(
     'header',
   );
   if (record['formatVersion'] !== MANAGED_SESSION_FORMAT_VERSION) {
-    fail('header.formatVersion is not supported by this reader.');
+    fail(
+      `header.formatVersion ${String(record['formatVersion'])} is not supported by this reader.`,
+    );
   }
-  const minimumReader = record['minimumReader'];
-  const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
-  const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_MINIMUM_READER,
-  );
-  if (
-    requiredReaderVersion === null ||
-    currentReaderVersion === null ||
-    requiredReaderVersion > currentReaderVersion
-  ) {
-    fail('header.minimumReader is not supported by this reader.');
+  if (record['minimumReader'] !== MANAGED_SESSION_MINIMUM_READER) {
+    fail(
+      `header.minimumReader ${String(record['minimumReader'])} is not supported by this reader.`,
+    );
   }
   if (record['engine'] !== 'managed') {
     fail('header.engine must be managed.');
@@ -1173,7 +1047,7 @@ export function parseManagedSessionHeader(
   const proof = record['baseTranscriptProof'];
   return {
     formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-    minimumReader: minimumReader as string,
+    minimumReader: MANAGED_SESSION_MINIMUM_READER,
     sessionKey: assertManagedSessionKey(
       record['sessionKey'],
       'header.sessionKey',
@@ -1205,7 +1079,6 @@ export function parseManagedSessionHeader(
 export function parseManagedSessionCommitMarker(
   value: unknown,
 ): ManagedSessionCommitMarker {
-  assertJsonValue(value, 'commit');
   const record = object(value, 'commit');
   assertNoUnknownKeys(
     record,
@@ -1278,7 +1151,8 @@ export function parseManagedSessionCommitMarker(
 }
 
 /**
- * Digest over the full committed events, including payloads and session scope.
+ * Digest over the committed events. It covers full event content, not just
+ * identities, so a replaced or corrupted body cannot match a stored marker.
  */
 export function managedSessionEventsDigest(
   events: readonly ManagedSessionEvent[],
@@ -1291,33 +1165,27 @@ export function managedSessionEventsDigest(
       `transaction identity must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
     );
   }
-  assertJsonValue(events, 'events', new Set<object>(), 0);
-  const encoded = canonicalManagedSessionJson(
-    events as unknown as ManagedSessionJsonValue,
+  return canonicalDigest(
+    events,
+    MANAGED_SESSION_LIMITS.maxTransactionBytes,
+    'transaction events',
   );
-  if (
-    Buffer.byteLength(encoded, 'utf8') >
-    MANAGED_SESSION_LIMITS.maxTransactionBytes
-  ) {
-    return fail('transaction identity exceeds the maximum encoded size.');
-  }
-  return createHash('sha256').update(encoded).digest('hex');
 }
 
-function canonicalManagedSessionJson(value: ManagedSessionJsonValue): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalManagedSessionJson).join(',')}]`;
+function canonicalDigest(
+  value: unknown,
+  maxBytes: number,
+  label: string,
+): string {
+  try {
+    return managedToolDigest(value, maxBytes);
+  } catch (cause) {
+    return fail(
+      `${label} is not canonically encodable: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
   }
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.keys(value)
-      .sort()
-      .map(
-        (key) =>
-          `${JSON.stringify(key)}:${canonicalManagedSessionJson(value[key])}`,
-      )
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 export function assertManagedSessionTransaction(
@@ -1332,25 +1200,20 @@ export function assertManagedSessionTransaction(
       `a transaction must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionEvents} events.`,
     );
   }
-  assertJsonValue(events, 'transaction.events', new Set<object>(), 0);
-  if (!Number.isSafeInteger(encodedBytes) || encodedBytes < 1) {
-    fail('transaction encoded size must be a positive safe integer.');
-  }
   if (encodedBytes > MANAGED_SESSION_LIMITS.maxTransactionBytes) {
     fail(
       `a transaction must not exceed ${MANAGED_SESSION_LIMITS.maxTransactionBytes} bytes.`,
     );
   }
   const key = events[0].sessionKey;
-  for (let index = 0; index < events.length; index++) {
-    const event = events[index];
+  events.forEach((event, index) => {
     if (!managedSessionKeysEqual(event.sessionKey, key)) {
       fail('a transaction must not span sessions.');
     }
     if (index > 0 && event.sequence !== events[index - 1].sequence + 1) {
       fail('a transaction must append a contiguous sequence range.');
     }
-  }
+  });
 }
 
 /**
@@ -1361,21 +1224,15 @@ export function parseManagedSessionRecordJson(
   text: string,
   maxBytes: number,
 ): ManagedSessionJsonValue {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
-    fail('record byte limit must be a positive safe integer.');
-  }
   if (Buffer.byteLength(text, 'utf8') > maxBytes) {
     fail(`record exceeds ${maxBytes} UTF-8 bytes.`);
   }
   assertNoDuplicateJsonKeys(text);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text) as ManagedSessionJsonValue;
   } catch {
     return fail('record is not valid JSON.');
   }
-  assertJsonValue(parsed, 'record');
-  return parsed;
 }
 
 const JSON_ESCAPES: Readonly<Record<string, string>> = {
@@ -1441,9 +1298,12 @@ function assertNoDuplicateJsonKeys(text: string): void {
       let probe = index;
       while (probe < text.length && /\s/.test(text[probe])) probe++;
       if (text[probe] === ':' && stack.length > 0) {
+        if (value === '__proto__') {
+          fail('record must not use "__proto__" as a JSON key.');
+        }
         const keys = stack[stack.length - 1];
         if (keys.has(value)) {
-          fail(`record has the duplicate JSON key "${safeErrorValue(value)}".`);
+          fail(`record has the duplicate JSON key "${value}".`);
         }
         keys.add(value);
       }

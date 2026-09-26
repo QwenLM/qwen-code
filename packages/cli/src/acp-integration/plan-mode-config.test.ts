@@ -53,7 +53,10 @@ vi.mock('./acp-output.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('@qwen-code/acp-bridge/ndJsonStream')
+  >()),
   ndJsonStream: vi.fn(),
 }));
 

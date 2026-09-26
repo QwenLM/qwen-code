@@ -157,7 +157,7 @@ describe('ContentGenerationPipeline — concurrent streams (issue #3516)', () =>
     } as ContentGeneratorConfig;
 
     const config: PipelineConfig = {
-      cliConfig: {} as Config,
+      cliConfig: { getRuntimeEnvironment: () => process.env } as Config,
       provider: mockProvider,
       contentGeneratorConfig,
       errorHandler: mockErrorHandler,

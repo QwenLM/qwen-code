@@ -93,6 +93,7 @@ function resolveStreamGuardMs(
   configLabel: string,
   envName: string,
   defaultMs: number,
+  environment: Readonly<NodeJS.ProcessEnv>,
 ): number {
   // 1. Explicit config field (programmatic) wins:
   //    - `<= 0` disables the watchdog (downstream `> 0` guards skip it).
@@ -116,7 +117,7 @@ function resolveStreamGuardMs(
   // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
   //    notation/floats/signs so a typo can't silently become a surprising
   //    timeout. `0` disables; values above the timer ceiling are rejected.
-  const raw = process.env[envName];
+  const raw = environment[envName];
   const trimmed = raw?.trim();
   if (trimmed) {
     if (/^\d+$/.test(trimmed)) {
@@ -137,23 +138,27 @@ function resolveStreamGuardMs(
 
 export function resolveStreamIdleTimeoutMs(
   config: ContentGeneratorConfig,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): number {
   return resolveStreamGuardMs(
     config.streamIdleTimeoutMs,
     'streamIdleTimeoutMs',
     QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
     DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    environment,
   );
 }
 
 export function resolveStreamMaxLifetimeMs(
   config: ContentGeneratorConfig,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): number {
   return resolveStreamGuardMs(
     config.streamMaxLifetimeMs,
     'streamMaxLifetimeMs',
     QWEN_STREAM_MAX_LIFETIME_MS_ENV,
     DEFAULT_STREAM_MAX_LIFETIME_MS,
+    environment,
   );
 }
 

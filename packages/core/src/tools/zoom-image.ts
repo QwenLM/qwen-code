@@ -19,9 +19,10 @@ import {
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
 import { ToolErrorType } from './tool-error.js';
-import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { ToolNames } from './tool-names.js';
+import { getZoomImageToolDefinition } from './builtin-tool-definitions.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 
 export interface ZoomImageParams {
   file_path: string;
@@ -148,50 +149,18 @@ export class ZoomImageTool extends BaseDeclarativeTool<
   static readonly Name = ToolNames.ZOOM_IMAGE;
 
   constructor(private readonly config: Config) {
+    const definition = getZoomImageToolDefinition();
     super(
-      ZoomImageTool.Name,
-      ToolDisplayNames.ZOOM_IMAGE,
-      'Crops a region from a full-resolution static image and returns a magnified view. Coordinates are integers normalized from 0 to 1000 against the displayed image, with (0,0) at top-left and (1000,1000) at bottom-right. Use this when text, numbers, lines, or other details are too small to inspect confidently. You may call it repeatedly; coordinates always refer to the original full-resolution image, never to a previously returned view.',
-      Kind.Read,
-      {
-        type: 'object',
-        properties: {
-          file_path: {
-            type: 'string',
-            description: 'Absolute path to a static PNG, JPEG, or WebP image.',
-          },
-          x1: {
-            type: 'integer',
-            minimum: 0,
-            maximum: 1000,
-            description: 'Left edge in normalized image coordinates.',
-          },
-          y1: {
-            type: 'integer',
-            minimum: 0,
-            maximum: 1000,
-            description: 'Top edge in normalized image coordinates.',
-          },
-          x2: {
-            type: 'integer',
-            minimum: 0,
-            maximum: 1000,
-            description: 'Right edge in normalized image coordinates.',
-          },
-          y2: {
-            type: 'integer',
-            minimum: 0,
-            maximum: 1000,
-            description: 'Bottom edge in normalized image coordinates.',
-          },
-        },
-        required: ['file_path', 'x1', 'y1', 'x2', 'y2'],
-      },
-      true,
-      false,
-      true,
-      false,
-      'zoom crop magnify image picture screenshot chart diagram small text detail',
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
+      definition.shouldDefer,
+      definition.alwaysLoad,
+      definition.searchHint,
     );
   }
 

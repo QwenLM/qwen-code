@@ -14,6 +14,8 @@ import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, Config } from '../../config/config.js';
 import { hasRebuiltToolRegistry } from '../../tools/agent/agent.js';
 import { join } from 'node:path';
+import { createManagedAgentTestConfig } from '../managed-child-execution-test-utils.js';
+import type { ManagedChildExecutionScope } from '../../tools/managed-tool-session.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -49,6 +51,8 @@ import {
 function createMockConfig() {
   const registry = createMockToolRegistry();
   return {
+    createManagedChildExecutionScope:
+      Config.prototype.createManagedChildExecutionScope,
     getModel: vi.fn().mockReturnValue('test-model'),
     getToolRegistry: vi.fn().mockReturnValue(registry),
     getMonitorRegistry: vi.fn().mockReturnValue({
@@ -66,6 +70,7 @@ function createMockConfig() {
     getTargetDir: vi.fn().mockReturnValue('/tmp'),
     createToolRegistry: vi.fn().mockResolvedValue(createMockToolRegistry()),
     getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+    getRuntimeEnvironment: () => process.env,
     getContentGeneratorConfig: vi.fn().mockReturnValue({
       model: 'test-model',
       authType: 'openai',
@@ -104,6 +109,7 @@ describe('InProcessBackend', () => {
   let backend: InProcessBackend;
 
   beforeEach(() => {
+    vi.mocked(AgentCore).mockClear();
     runReasoningLoopMock.mockReset();
     runReasoningLoopMock.mockResolvedValue({
       text: 'Done',
@@ -111,6 +117,87 @@ describe('InProcessBackend', () => {
       turnsUsed: 1,
     });
     backend = new InProcessBackend(createMockConfig());
+  });
+
+  it('drains a managed reasoning loop before parent Runtime and registry release', async () => {
+    const { config, sessions } = createManagedAgentTestConfig();
+    Object.assign(config, createMockConfig());
+    const scopedBackend = new InProcessBackend(config);
+    let finish!: () => void;
+    const pendingLoop = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    runReasoningLoopMock.mockImplementationOnce(async () => {
+      await pendingLoop;
+      return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+    });
+    await scopedBackend.spawnAgent(createSpawnConfig('managed'));
+    await vi.waitFor(() => expect(runReasoningLoopMock).toHaveBeenCalled());
+    const childRegistry = (
+      destructureAgentCoreCall(vi.mocked(AgentCore).mock.calls.at(-1)!)
+        .runtimeContext as unknown as Config
+    ).getToolRegistry();
+    const closing = config.closeManagedToolSession();
+    expect(sessions[1]!.close).not.toHaveBeenCalled();
+    expect(childRegistry.stop).not.toHaveBeenCalled();
+    finish();
+    await closing;
+    expect(sessions[1]!.close).toHaveBeenCalledOnce();
+    expect(childRegistry.stop).toHaveBeenCalledOnce();
+    await scopedBackend.cleanup();
+  });
+
+  it('seals an initializing scope before waiting for spawn during backend cleanup', async () => {
+    const { config } = createManagedAgentTestConfig();
+    Object.assign(config, createMockConfig());
+    let scope: ManagedChildExecutionScope | undefined;
+    vi.spyOn(config, 'createManagedChildExecutionScope').mockImplementation(
+      function (this: Config) {
+        scope = Config.prototype.createManagedChildExecutionScope.call(this);
+        return scope;
+      },
+    );
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(config.createToolRegistry).mockImplementation(async () => {
+      await gate;
+      return createMockToolRegistry() as unknown as ReturnType<
+        Config['getToolRegistry']
+      >;
+    });
+    const scopedBackend = new InProcessBackend(config);
+    const spawning = scopedBackend
+      .spawnAgent(createSpawnConfig('managed'))
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(scope).toBeDefined());
+    const closing = scopedBackend.cleanup();
+    expect(scope!.signal!.aborted).toBe(true);
+    finish();
+    await closing;
+    expect(await spawning).toBeInstanceOf(Error);
+    expect(scopedBackend.getAgent('managed')).toBeUndefined();
+    await config.closeManagedToolSession();
+  });
+
+  it('retains the stopped managed instance until cleanup succeeds before respawn', async () => {
+    const { config, sessions } = createManagedAgentTestConfig();
+    Object.assign(config, createMockConfig());
+    const scopedBackend = new InProcessBackend(config);
+    await scopedBackend.spawnAgent(createSpawnConfig('managed'));
+    await scopedBackend.getAgent('managed')!.waitForCompletion();
+    vi.mocked(sessions[1]!.close).mockRejectedValue(new Error('worker drain'));
+    scopedBackend.stopAgent('managed');
+    await expect(
+      scopedBackend.spawnAgent(createSpawnConfig('managed')),
+    ).rejects.toThrow('worker drain');
+    expect(sessions).toHaveLength(2);
+    vi.mocked(sessions[1]!.close).mockResolvedValue(undefined);
+    await scopedBackend.spawnAgent(createSpawnConfig('managed'));
+    expect(sessions).toHaveLength(3);
+    await scopedBackend.cleanup();
+    await config.closeManagedToolSession();
   });
 
   it('should have IN_PROCESS type', () => {
@@ -1003,6 +1090,7 @@ describe('InProcessBackend', () => {
         getSummary: vi.fn().mockReturnValue({}),
       },
       createChat: vi.fn().mockRejectedValue(new Error('Auth failed')),
+      clearPendingApprovals: vi.fn(),
       prepareTools: vi.fn().mockReturnValue([]),
       getEventEmitter: vi.fn().mockReturnValue({
         on: vi.fn(),

@@ -86,7 +86,12 @@ function resolveTier(
     return null;
 
   // Prompt tier
-  if (method === 'POST' && p.startsWith('/session/') && p.endsWith('/prompt'))
+  if (
+    method === 'POST' &&
+    ((p.startsWith('/session/') && p.endsWith('/prompt')) ||
+      p === '/managed/sessions' ||
+      (p.startsWith('/managed/sessions/') && p.endsWith('/prompts')))
+  )
     return 'prompt';
 
   if (method === 'POST' && /^\/sessions\/catalog$/i.test(p)) return 'read';
@@ -113,7 +118,12 @@ function normalizeIp(raw: string): string {
 export function createKeyExtractor(hostname: string): (req: Request) => string {
   const loopback = isLoopbackBind(hostname);
   return (req: Request): string => {
-    const raw = req.get('x-qwen-client-id');
+    const managedPath =
+      req.path === '/managed/sessions' ||
+      req.path.startsWith('/managed/sessions/');
+    const raw = req.get(
+      managedPath ? 'x-qwen-managed-client-id' : 'x-qwen-client-id',
+    );
     const clientId =
       raw && raw.length <= MAX_CLIENT_ID_LENGTH && CLIENT_ID_RE.test(raw)
         ? raw

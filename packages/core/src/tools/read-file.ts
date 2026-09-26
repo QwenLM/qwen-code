@@ -14,12 +14,16 @@ import type {
   ToolResult,
   ToolResultDisplay,
 } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
+import { ToolNames } from './tool-names.js';
+import {
+  getReadFileToolDefinition,
+  projectReadFileToolClassifierInput,
+} from './builtin-tool-definitions.js';
 
-import type { PartListUnion, FunctionDeclaration } from '@google/genai';
+import type { FunctionDeclaration, PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
@@ -30,6 +34,7 @@ import {
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -130,7 +135,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     );
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute(
+    signal: AbortSignal,
+    _updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
+  ): Promise<ToolResult> {
+    if (shellExecutionConfig?.requireProcessGroupExit) signal.throwIfAborted();
     const absPath = path.resolve(this.params.file_path);
     const projectRoot = this.config.getTargetDir();
     // Auto-memory files (AGENTS.md and friends under the auto-memory
@@ -179,6 +189,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       });
     }
 
+    if (shellExecutionConfig?.requireProcessGroupExit) signal.throwIfAborted();
     if (useFastPath && stats && isFullRead) {
       const status = cache.check(stats);
       if (
@@ -206,9 +217,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         offset: this.params.offset ?? undefined,
         limit: this.params.limit ?? undefined,
         pages: this.params.pages ?? undefined,
+        inputModalities: this.config.getEffectiveInputModalities?.(),
         preserveUnsupportedImage: prepareForVisionBridge,
         preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
+        requireProcessGroupExit: shellExecutionConfig?.requireProcessGroupExit,
       },
     );
 
@@ -587,44 +600,18 @@ export class ReadFileTool extends BaseDeclarativeTool<
   }
 
   constructor(private config: Config) {
+    const definition = getReadFileToolDefinition();
     super(
-      ReadFileTool.Name,
-      ToolDisplayNames.READ_FILE,
+      definition.name,
+      definition.displayName,
       buildReadFileDescription(config.getEffectiveInputModalities?.() ?? {}),
-      Kind.Read,
-      {
-        properties: {
-          file_path: {
-            description:
-              "The absolute path to the file to read (e.g., '/home/user/project/file.txt'). Relative paths are not supported. You must provide an absolute path.",
-            type: 'string',
-          },
-          offset: {
-            description:
-              "Optional: For text files, the 0-based line number to start reading from. Requires 'limit' to be set. Use for paginating through large files. Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.",
-            type: ['integer', 'null'],
-          },
-          limit: {
-            description:
-              "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit). Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.",
-            type: ['integer', 'null'],
-          },
-          pages: {
-            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input. Omit or set to null for Jupyter notebooks (.ipynb); null is treated as omitted.`,
-            type: ['string', 'null'],
-          },
-        },
-        required: ['file_path'],
-        type: 'object',
-      },
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 
-  // Recompute the model-facing description from the model's CURRENT input
-  // modalities each time the declaration is assembled, so a mid-session
-  // `/model` switch (e.g. to a text-only model) is reflected — the constructor
-  // value only captures the modalities at build time. See
-  // {@link buildReadFileDescription}.
   override get schema(): FunctionDeclaration {
     return {
       name: this.name,
@@ -633,6 +620,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
       ),
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  override toAutoClassifierInput(_params: ReadFileToolParams): string {
+    return projectReadFileToolClassifierInput();
   }
 
   protected override validateToolParamValues(
@@ -699,6 +690,13 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
       return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
+    }
+
+    // Omitted and null options normalize to absent keys, not `undefined`
+    // values, so the params stay exact JSON: a Managed Runtime digests them
+    // and rejects values that JSON would silently drop.
+    for (const key of ['offset', 'limit', 'pages'] as const) {
+      if (params[key] === undefined) delete params[key];
     }
 
     return null;

@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { hasBoundedJsonStructure } from '@qwen-code/acp-bridge/ndJsonStream';
-import { DAEMON_ACP_NDJSON_LIMITS } from '@qwen-code/acp-bridge/spawnChannel';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  hasBoundedJsonStructure,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 
 // Leave room for the JSON-RPC/HTTP envelopes without changing ACP capacity.
 export const MAX_MANAGED_MEDIA_RESPONSE_BYTES =

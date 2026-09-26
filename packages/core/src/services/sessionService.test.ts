@@ -43,6 +43,8 @@ import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptTooLargeError,
 } from './session-transcript-reader.js';
+import * as transcriptReader from './session-transcript-reader.js';
+import { SessionExecutionEngineAccumulator } from './session-execution-engine.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -86,8 +88,11 @@ describe('SessionService', () => {
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
   let rmSyncSpy: MockInstance<typeof fs.rmSync>;
+  let transcriptSnapshotSpy: MockInstance<
+    typeof transcriptReader.readSessionTranscriptSnapshot
+  >;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
     vi.mocked(path.join).mockImplementation((...args) => args.join('/'));
     vi.mocked(path.dirname).mockImplementation((p) => {
@@ -148,6 +153,38 @@ describe('SessionService', () => {
       }),
     );
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
+    const actualJsonl = await vi.importActual<typeof jsonl>(
+      '../utils/jsonl-utils.js',
+    );
+    vi.mocked(jsonl.parseLineTolerantWithIntegrity).mockImplementation(
+      actualJsonl.parseLineTolerantWithIntegrity,
+    );
+    // These service tests supply parsed records; keep that fixture boundary
+    // while deriving ownership through the real parser and accumulator.
+    transcriptSnapshotSpy = vi
+      .spyOn(transcriptReader, 'readSessionTranscriptSnapshot')
+      .mockImplementation(
+        async (filePath, sessionId, collectRecords = true) => {
+          const records = await jsonl.read<ChatRecord>(filePath);
+          const stats = await fs.promises.stat(filePath);
+          const owner = new SessionExecutionEngineAccumulator(sessionId);
+          const lines = records.map((record) => JSON.stringify(record));
+          for (const line of lines) owner.parseLine(line, filePath);
+          return {
+            records: collectRecords ? records : [],
+            firstRecord: records[0],
+            stats,
+            sourceReadComplete: owner.sourceComplete,
+            executionEngine: owner.finish({
+              filePath,
+              dev: stats.dev,
+              ino: stats.ino,
+              size: Buffer.byteLength(lines.join('\n')),
+              lastUpdated: new Date(stats.mtimeMs).toISOString(),
+            }),
+          };
+        },
+      );
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
 
     type MaintenanceInternals = {
@@ -1103,9 +1140,11 @@ describe('SessionService', () => {
       });
 
       expect(loaded?.conversation.messages).toHaveLength(2);
-      expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
+      // Reads go through the snapshot reader, which reports a truncated tail
+      // via `sourceReadComplete` rather than an `onIncompleteRead` callback.
+      expect(transcriptSnapshotSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
-        { onIncompleteRead: expect.any(Function) },
+        sessionIdB,
       );
       expect(statSyncSpy).toHaveBeenCalledTimes(1);
     });
@@ -5064,7 +5103,7 @@ describe('SessionService', () => {
   });
 
   describe('forkSession', () => {
-    // forkSession uses real disk I/O through `jsonl.read` and `fs.*`.
+    // forkSession uses real snapshot parsing and disk I/O through `fs.*`.
     // The outer describe hoist-mocks `node:path`, `../utils/paths.js`, and
     // `../utils/jsonl-utils.js`; restore the real implementations inside this
     // describe's setup so the fork actually reads/writes tmp files.
@@ -5116,6 +5155,7 @@ describe('SessionService', () => {
       vi.mocked(jsonl.parseLineTolerant).mockImplementation(
         actualJsonl.parseLineTolerant,
       );
+      transcriptSnapshotSpy.mockRestore();
 
       // Restore any fs spies installed by the outer beforeEach.
       vi.mocked(readdirSyncSpy).mockRestore?.();

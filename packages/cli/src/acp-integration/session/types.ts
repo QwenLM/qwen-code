@@ -95,6 +95,8 @@ export interface ToolCallStartParams {
   callId: string;
   /** Arguments passed to the tool */
   args?: Record<string, unknown>;
+  /** Metadata from the same prepared invocation that the scheduler owns. */
+  metadata?: ResolvedToolMetadata;
   /** Status of the tool call */
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   /** Transient phase recognized by clients that support tool preparation. */

@@ -20,10 +20,10 @@ import { ndJsonStream, type Stream } from '@agentclientprotocol/sdk';
  * in-process bridge (issue #4156) when that lands, to wrap an in-process
  * `QwenAgent` without spawning a `qwen --acp` child.
  *
- * `abort(reason?)` is the universal teardown primitive. It calls
- * `WritableStream.abort()` on both underlying byte-level
- * `TransformStream`s, which immediately settles any pending `read()` /
- * `write()` operations on both sides so the channel can be reclaimed.
+ * `abort(reason?)` is the universal teardown primitive. It errors
+ * both underlying byte-level `TransformStream` controllers, immediately settling
+ * pending `read()` / `write()` operations on both sides so the channel can be
+ * reclaimed.
  * Use this to terminate the channel during shutdown / crash simulation
  * / daemon teardown.
  *
@@ -41,8 +41,11 @@ import { ndJsonStream, type Stream } from '@agentclientprotocol/sdk';
  * the opposite `ReadableStream` after pending writes flush, and in
  * practice the SDK's `ndJsonStream` outer wrapper does not reliably
  * propagate close at all. `abort` is forceful and synchronous-by-spec,
- * so it is the safe primitive for lifecycle teardown across an
+ * so it is the safe primitive for stream teardown across an
  * `ndJsonStream`-wrapped pair.
+ *
+ * SDK RPC promises still need the connection owner's close/cancel guard;
+ * closing streams alone does not reject outstanding SDK requests.
  *
  * Consumers that don't need teardown (most test sites, which let the
  * channel die with the test scope) can ignore `abort`. `abort` is a
@@ -54,20 +57,28 @@ export function createInMemoryChannel(): {
   agentStream: Stream;
   abort(reason?: unknown): void;
 } {
-  const ab = new TransformStream<Uint8Array, Uint8Array>();
-  const ba = new TransformStream<Uint8Array, Uint8Array>();
+  let abController!: TransformStreamDefaultController<Uint8Array>;
+  let baController!: TransformStreamDefaultController<Uint8Array>;
+  const ab = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      abController = controller;
+    },
+  });
+  const ba = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      baController = controller;
+    },
+  });
   const clientStream = ndJsonStream(ab.writable, ba.readable);
   const agentStream = ndJsonStream(ba.writable, ab.readable);
   return {
     clientStream,
     agentStream,
     abort(reason?: unknown) {
-      // Fire-and-forget; both `abort()` calls return promises that we
-      // intentionally do not await (callers want the synchronous
-      // "tear it down now" semantic) and which may reject if the
-      // stream is already in errored state — both are expected.
-      ab.writable.abort(reason).catch(() => {});
-      ba.writable.abort(reason).catch(() => {});
+      // The NDJSON writer can hold the writable lock while sending a frame.
+      // Error the controllers so closure cannot be lost in that window.
+      abController.error(reason);
+      baController.error(reason);
     },
   };
 }

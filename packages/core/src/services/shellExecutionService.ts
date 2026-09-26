@@ -32,6 +32,10 @@ import { getShellContextEnvVars } from './shellContextEnv.js';
 import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
+import {
+  ownProcessGroup,
+  type OwnedProcessGroup,
+} from '../utils/owned-process-group.js';
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
@@ -275,6 +279,8 @@ function createPreSpawnAbortedHandle(): ShellExecutionHandle {
 export interface ShellExecutionConfig {
   /** Emit buffered output snapshots while a non-PTY command is running. */
   streamBufferedOutput?: boolean;
+  /** Internal Runtime ownership: foreground completion requires POSIX group exit. */
+  requireProcessGroupExit?: boolean;
   terminalWidth?: number;
   terminalHeight?: number;
   pager?: string;
@@ -714,13 +720,15 @@ const getCleanupStrategy = () =>
 export class ShellExecutionService {
   private static activePtys = new Map<number, ActivePty>();
   private static activeChildProcesses = new Set<number>();
+  private static ownedProcessGroups = new Map<number, OwnedProcessGroup>();
 
   static cleanup() {
     const strategy = getCleanupStrategy();
+    for (const group of this.ownedProcessGroups.values()) group.killSync();
     // Cleanup PTYs
     for (const [pid, pty] of this.activePtys) {
       try {
-        strategy.killPty(pid, pty);
+        if (!this.ownedProcessGroups.has(pid)) strategy.killPty(pid, pty);
       } catch {
         // ignore
       }
@@ -732,7 +740,50 @@ export class ShellExecutionService {
     }
 
     // Cleanup child processes
-    strategy.killChildProcesses(this.activeChildProcesses);
+    strategy.killChildProcesses(
+      new Set(
+        [...this.activeChildProcesses].filter(
+          (pid) => !this.ownedProcessGroups.has(pid),
+        ),
+      ),
+    );
+  }
+
+  private static retainProcessGroup(
+    handle: ShellExecutionHandle,
+    signal: AbortSignal,
+    required: boolean | undefined,
+  ): ShellExecutionHandle {
+    if (!required || handle.pid === undefined) return handle;
+    const pid = handle.pid;
+    let promotion = false;
+    const group = ownProcessGroup(pid, signal, (reason) => {
+      promotion = getShellAbortReasonKind(reason) === 'background';
+    });
+    this.ownedProcessGroups.set(pid, group);
+    return {
+      pid,
+      result: (async () => {
+        const result = await handle.result;
+        await group.exited;
+        if (this.ownedProcessGroups.get(pid) === group)
+          this.ownedProcessGroups.delete(pid);
+        if (promotion) {
+          return {
+            ...result,
+            aborted: true,
+            promoted: false,
+            error: Object.assign(
+              new Error(
+                'Owned foreground shell execution cannot be promoted to background.',
+              ),
+              { code: 'SHELL_PROCESS_GROUP_PROMOTION_UNSUPPORTED' },
+            ),
+          };
+        }
+        return result;
+      })(),
+    };
   }
 
   static {
@@ -852,6 +903,29 @@ export class ShellExecutionService {
     if (abortSignal.aborted) {
       return createPreSpawnAbortedHandle();
     }
+    if (
+      shellExecutionConfig.requireProcessGroupExit &&
+      os.platform() === 'win32'
+    ) {
+      return {
+        pid: undefined,
+        result: Promise.resolve({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: null,
+          signal: null,
+          error: Object.assign(
+            new Error(
+              'Verified shell process group exit is not supported on Windows.',
+            ),
+            { code: 'SHELL_PROCESS_GROUP_EXIT_UNSUPPORTED' },
+          ),
+          aborted: false,
+          pid: undefined,
+          executionMethod: 'none',
+        }),
+      };
+    }
 
     if (shouldUseNodePty) {
       let removeAbortListener: (() => void) | undefined;
@@ -886,7 +960,7 @@ export class ShellExecutionService {
           if (abortSignal.aborted) {
             return createPreSpawnAbortedHandle();
           }
-          return this.executeWithPty(
+          const handle = this.executeWithPty(
             commandToExecute,
             cwd,
             onOutputEvent,
@@ -896,6 +970,11 @@ export class ShellExecutionService {
             Terminal,
             options.postPromote,
           );
+          return this.retainProcessGroup(
+            handle,
+            abortSignal,
+            shellExecutionConfig.requireProcessGroupExit,
+          );
         } catch (_e) {
           // Fallback to child_process
         }
@@ -903,7 +982,7 @@ export class ShellExecutionService {
     }
 
     if (abortSignal.aborted) return createPreSpawnAbortedHandle();
-    return this.childProcessFallback(
+    const handle = this.childProcessFallback(
       commandToExecute,
       cwd,
       onOutputEvent,
@@ -914,6 +993,12 @@ export class ShellExecutionService {
       shellExecutionConfig.pager,
       options.postPromote,
       shellExecutionConfig.streamBufferedOutput,
+      shellExecutionConfig.requireProcessGroupExit,
+    );
+    return this.retainProcessGroup(
+      handle,
+      abortSignal,
+      shellExecutionConfig.requireProcessGroupExit,
     );
   }
 
@@ -928,6 +1013,7 @@ export class ShellExecutionService {
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
     streamBufferedOutput = false,
+    requireProcessGroupExit = false,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -975,6 +1061,9 @@ export class ShellExecutionService {
       });
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
+        const streamsClosed = requireProcessGroupExit
+          ? new Promise<void>((done) => child.once('close', () => done()))
+          : undefined;
         let stdoutDecoder: TextDecoder | null = null;
         let stderrDecoder: TextDecoder | null = null;
 
@@ -1161,7 +1250,7 @@ export class ShellExecutionService {
           }
         };
 
-        const handleExit = (
+        const finalizeExit = (
           code: number | null,
           signal: NodeJS.Signals | null,
         ) => {
@@ -1206,6 +1295,23 @@ export class ShellExecutionService {
             pid: undefined,
             executionMethod: 'child_process',
           });
+        };
+
+        let finishing = false;
+        const handleExit = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          if (!requireProcessGroupExit || child.pid === undefined) {
+            finalizeExit(code, signal);
+            return;
+          }
+          if (finishing) return;
+          finishing = true;
+          void Promise.all([
+            this.ownedProcessGroups.get(child.pid)?.exited,
+            streamsClosed,
+          ]).then(() => finalizeExit(code, signal));
         };
 
         // Named handler refs so the background-promote branch below can
@@ -1635,6 +1741,7 @@ export class ShellExecutionService {
         };
 
         const abortHandler = async () => {
+          if (requireProcessGroupExit) return;
           // Default reason (none set) is treated as cancel — historical
           // behavior. Switch on `kind` so any future ShellAbortReason
           // variant fails the type-check at the `never` default rather
@@ -2204,8 +2311,12 @@ export class ShellExecutionService {
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
+            const ownedGroup = shellExecutionConfig.requireProcessGroupExit
+              ? this.ownedProcessGroups.get(ptyProcess.pid)
+              : undefined;
 
             const finalize = async () => {
+              if (ownedGroup) await ownedGroup.exited;
               const finalBuffer = Buffer.concat(outputChunks);
               let fullOutput = '';
 
@@ -2775,6 +2886,7 @@ export class ShellExecutionService {
         };
 
         const abortHandler = async () => {
+          if (shellExecutionConfig.requireProcessGroupExit) return;
           // Switch on the discriminated `kind` so any future
           // ShellAbortReason variant fails the type-check at the
           // `never` default rather than silently falling through to the

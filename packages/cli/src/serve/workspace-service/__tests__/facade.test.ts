@@ -3725,6 +3725,46 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reload', () => {
+    it('waits for owned Runtime containment before publishing settings or reloading children', async () => {
+      let resolve!: () => void;
+      const pending = new Promise<void>((r) => {
+        resolve = r;
+      });
+      const reloadDaemonEnv = vi
+        .fn()
+        .mockResolvedValue({ updatedKeys: [], removedKeys: [] });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        env: { updatedKeys: [], removedKeys: [] },
+        changedKeys: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          beforeReload: () => pending,
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+        }),
+      );
+      const reload = svc.reload(makeCtx());
+      expect(reloadDaemonEnv).not.toHaveBeenCalled();
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      resolve();
+      await reload;
+      expect(reloadDaemonEnv).toHaveBeenCalledOnce();
+      const blocked = createDaemonWorkspaceService(
+        makeDeps({
+          beforeReload: async () => {
+            throw new Error('containment failed');
+          },
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+        }),
+      );
+      await expect(blocked.reload(makeCtx())).rejects.toThrow(
+        'containment failed',
+      );
+      expect(reloadDaemonEnv).toHaveBeenCalledOnce();
+    });
+
     it('surfaces a parent runtime environment reload failure', async () => {
       const publishWorkspaceEvent = vi.fn();
       const invokeWorkspaceCommand = vi.fn().mockResolvedValue({

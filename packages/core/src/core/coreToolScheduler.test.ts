@@ -24,9 +24,11 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { ManagedToolInvocationLifecycle } from '../tools/tools.js';
+import type { ModifyContext } from '../tools/modifiable-tool.js';
+import type { ManagedToolExecutionResult } from '../tools/managed-tool-runtime.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
-import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -65,6 +67,7 @@ import {
   isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
 import type { CallableTool, Part, PartListUnion } from '@google/genai';
+import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   MockModifiableTool,
   MockTool,
@@ -94,10 +97,6 @@ import {
 } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
-import {
-  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
-  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
-} from '../tools/tool-call.js';
 import {
   getInvocationContext,
   runWithInvocationContext,
@@ -188,6 +187,7 @@ vi.mock(
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
+const modifyWithEditorCalls = vi.hoisted(() => vi.fn());
 const modifyWithEditorOverride = vi.hoisted(() => ({
   value: undefined as
     | (() => Promise<{
@@ -237,8 +237,12 @@ vi.mock('../tools/modifiable-tool.js', async (importOriginal) => {
     await importOriginal<typeof import('../tools/modifiable-tool.js')>();
   return {
     ...actual,
-    modifyWithEditor: (...args: Parameters<typeof actual.modifyWithEditor>) =>
-      modifyWithEditorOverride.value?.() ?? actual.modifyWithEditor(...args),
+    modifyWithEditor: (...args: Parameters<typeof actual.modifyWithEditor>) => {
+      modifyWithEditorCalls(...args);
+      return (
+        modifyWithEditorOverride.value?.() ?? actual.modifyWithEditor(...args)
+      );
+    },
   };
 });
 
@@ -1000,6 +1004,7 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    toolInvocationGuard?: ToolInvocationGuard;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
@@ -1093,6 +1098,7 @@ describe('CoreToolScheduler', () => {
         getUsageStatisticsEnabled: () => true,
         getDebugMode: () => false,
         getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+        getApprovalModeRevision: () => 0,
         setApprovalMode: options.setApprovalMode ?? vi.fn(),
         getPermissionsAllow: () => [],
         getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
@@ -1130,6 +1136,11 @@ describe('CoreToolScheduler', () => {
           options.toolOutputBatchBudget ?? Number.POSITIVE_INFINITY,
         getToolRegistry: () => mockToolRegistry,
         getCwd: () => '/repo',
+        getTargetDir: () => '/repo',
+        getConditionalRulesRegistry: () => undefined,
+        getSkillManager: () => undefined,
+        getIdeMode: () => false,
+        getToolInvocationGuard: () => options.toolInvocationGuard,
         getUseModelRouter: () => false,
         getLlmClient: options.getLlmClient ?? (() => null),
         getPlanFilePath:
@@ -1249,686 +1260,1159 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
-    boundaryDiagnosticsEnabled.value = true;
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: 'created issue',
-      returnDisplay: 'created issue',
-    });
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute,
-    });
-    const isToolEnabled = vi.fn().mockResolvedValue(true);
-    const messageBus = {
-      request: vi.fn().mockImplementation(
-        async (request: {
-          eventName: string;
-        }): Promise<HookExecutionResponse> => ({
-          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-          correlationId: `${request.eventName}-hook`,
-          success: true,
-          output: { decision: 'allow' },
+  describe('managed invocation lifecycle', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+
+    function fixture(
+      options: {
+        prepare?: () => Promise<void>;
+        drain?: () => Promise<void>;
+        permission?: PermissionDecision;
+        name?: string;
+        params?: Record<string, unknown>;
+        edit?: boolean;
+        postHook?: ManagedToolExecutionResult['postHook'];
+        failureHook?: ManagedToolExecutionResult['failureHook'];
+        drainedResult?: ManagedToolExecutionResult;
+        execute?: (signal: AbortSignal) => Promise<ToolResult>;
+        preflight?: () => Promise<{
+          shouldProceed: boolean;
+          blockType?: 'ask';
+        }>;
+      } = {},
+    ) {
+      const order: string[] = [];
+      let prepared = false;
+      let authorized = false;
+      let cancelled = false;
+      let result: ManagedToolExecutionResult | undefined;
+      const onConfirm = vi.fn(async () => {
+        order.push('confirm');
+      });
+      const managed: ManagedToolInvocationLifecycle = {
+        prepare: vi.fn(async () => {
+          order.push('prepare');
+          await options.prepare?.();
+          prepared = true;
         }),
-      ),
-    };
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        permissionManager: {
-          isToolEnabled,
-          findMatchingDenyRule: () => undefined,
-          hasRelevantRules: () => false,
-          evaluate: vi.fn().mockResolvedValue('default'),
-          hasMatchingAskRule: () => false,
-        },
-        messageBus,
-        disableHooks: false,
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-call',
-        name: ToolNames.TOOL_CALL,
-        args: {
-          name: deferred.name,
-          arguments: { title: 'Cache-safe tools' },
-        },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge',
-      },
-      new AbortController().signal,
-    );
-
-    expect(execute).toHaveBeenCalledOnce();
-    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
-    expect(messageBus.request.mock.calls[0][0]).toEqual(
-      expect.objectContaining({
-        eventName: 'PreToolUse',
-        input: expect.objectContaining({
-          tool_name: deferred.name,
-          tool_input: { title: 'Cache-safe tools' },
+        preflight: vi.fn(async () => {
+          if (cancelled) throw new Error('Runtime invocation was cancelled');
+          order.push('preflight');
+          return options.preflight?.() ?? { shouldProceed: true };
         }),
-      }),
-    );
-
-    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.request.name).toBe(deferred.name);
-    expect(completed.request.args).toEqual({ title: 'Cache-safe tools' });
-    expect(
-      completed.status === 'success'
-        ? completed.response.responseParts[0]?.functionResponse?.name
-        : undefined,
-    ).toBe(ToolNames.TOOL_CALL);
-    const producerObservations = boundaryObserveMock.mock.calls
-      .map(([observation]) => observation)
-      .filter(
-        (observation) =>
-          observation.toolCallId === 'bridge-call' &&
-          observation.stage.startsWith('producer_'),
-      );
-    expect(producerObservations).toHaveLength(2);
-    for (const observation of producerObservations) {
-      expect(
-        typeof observation.mutated === 'function'
-          ? observation.mutated()
-          : observation.mutated,
-      ).toBe(false);
-    }
-  });
-
-  it('rejects tool_call targets that are not hidden deferred tools', async () => {
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const visible = new MockTool({ name: ToolNames.READ_FILE, execute });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [visible.name, visible],
-        ]),
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-visible',
-        name: ToolNames.TOOL_CALL,
-        args: { name: visible.name, arguments: { file_path: 'README.md' } },
+        confirmPreflight: vi.fn(async () => {
+          order.push('confirmPreflight');
+        }),
+        authorize: vi.fn(() => {
+          authorized = true;
+          order.push('authorize');
+        }),
+        prepareExecution: vi.fn(async () => ({
+          executionCallId: 'remote-tool-use',
+          invocationBindingId: 'remote-tool-use',
+        })),
+        cancelAndDrain: vi.fn(async () => {
+          cancelled = true;
+          order.push('drain');
+          await options.drain?.();
+          if (options.drainedResult) result = options.drainedResult;
+        }),
+        get result() {
+          return result;
+        },
+        get toolUseId() {
+          if (!prepared) throw new Error('not prepared');
+          return 'remote-tool-use';
+        },
+      };
+      const invocation: ToolInvocation<Record<string, unknown>, ToolResult> = {
+        managed,
+        get params() {
+          if (!prepared) throw new Error('not prepared');
+          return options.params ?? { file_path: '/repo/remote.txt' };
+        },
+        getDescription: () => {
+          if (!prepared) throw new Error('not prepared');
+          return 'remote description';
+        },
+        toolLocations: () => [],
+        getDefaultPermission: vi.fn(async () => {
+          if (!prepared) throw new Error('not prepared');
+          order.push('permission');
+          return options.permission ?? 'allow';
+        }),
+        getConfirmationDetails: vi.fn(
+          async (): Promise<ToolCallConfirmationDetails> =>
+            options.edit
+              ? {
+                  type: 'edit',
+                  title: 'Edit remote file',
+                  fileName: 'remote.txt',
+                  filePath: '/repo/remote.txt',
+                  fileDiff: 'remote diff',
+                  originalContent: 'original',
+                  newContent: 'proposed',
+                  onConfirm,
+                }
+              : {
+                  type: 'info',
+                  title: 'remote confirm',
+                  prompt: 'confirm',
+                  onConfirm,
+                },
+        ),
+        execute: vi.fn(async (signal) => {
+          if (!authorized) throw new Error('not authorized');
+          order.push('execute');
+          const raw = (await options.execute?.(signal)) ?? {
+            llmContent: 'remote output',
+            returnDisplay: 'remote output',
+          };
+          result = {
+            executionStatus: raw.executionStatus ?? 'success',
+            result: raw,
+            postHook: options.postHook ?? {
+              shouldStop: false,
+              additionalContext: 'remote post context',
+            },
+            failureHook: options.failureHook,
+          };
+          return raw;
+        }),
+      };
+      const tool = new MockTool({ name: options.name ?? 'read_file' });
+      vi.spyOn(tool, 'build').mockReturnValue(invocation);
+      const request: ToolCallRequestInfo = {
+        callId: 'remote-call',
+        prompt_id: 'remote-prompt',
+        name: options.name ?? 'read_file',
+        args: { file_path: 'remote.txt' },
         isClientInitiated: false,
-        prompt_id: 'prompt-bridge-visible',
-      },
-      new AbortController().signal,
-    );
-
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(
-        ToolErrorType.INVALID_TOOL_PARAMS,
-      );
-      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
-      );
+      };
+      return { tool, invocation, managed, request, order, onConfirm };
     }
-    expect(execute).not.toHaveBeenCalled();
-  });
 
-  it('does not unwrap tool_call denied by the legacy permission fallback', async () => {
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute,
+    it('prepares before publishing invocation or evaluating permissions', async () => {
+      const ready = deferred<void>();
+      const f = fixture({ prepare: () => ready.promise });
+      const updates = vi.fn((calls: ToolCall[]) => {
+        for (const call of calls)
+          if ('invocation' in call && call.invocation)
+            call.invocation.getDescription();
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+        onToolCallsUpdate: updates,
+      });
+      const pending = h.scheduler.schedule(
+        f.request,
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(f.managed.prepare).toHaveBeenCalledOnce());
+      expect(f.invocation.getDefaultPermission).not.toHaveBeenCalled();
+      expect(updates).not.toHaveBeenCalled();
+      ready.resolve();
+      await pending;
+      expect(f.order.slice(0, 4)).toEqual([
+        'prepare',
+        'permission',
+        'preflight',
+        'authorize',
+      ]);
+      expect(f.invocation.execute).toHaveBeenCalledOnce();
     });
-    const { scheduler, ensureTool, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        getPermissionsDeny: () => [ToolNames.TOOL_CALL],
-      });
 
-    await scheduler.schedule(
-      {
-        callId: 'bridge-legacy-deny',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-legacy-deny',
-      },
-      new AbortController().signal,
-    );
-
-    expect(ensureTool).not.toHaveBeenCalled();
-    expect(execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
-      );
-      expect(
-        String(
-          completed.response.responseParts[0]?.functionResponse?.response?.[
-            'error'
-          ],
-        ).startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
-      ).toBe(true);
-    }
-  });
-
-  it.each(['Tool_Call', ' tool_call ', 'TOOL_CALL'])(
-    'denies the bridge when the legacy deny entry is a case/whitespace variant (%s)',
-    async (denyEntry) => {
-      // R2-1: Config stores permissions.deny entries verbatim (getPermissionsDeny
-      // does no normalization), and the _schedule legacy-deny fallback matches
-      // case- and whitespace-insensitively (excludedTool.toLowerCase().trim()
-      // === normalizedToolName). The pre-resolution bridge gate must apply the
-      // same normalization, otherwise 'Tool_Call' slips past the gate's exact
-      // compare, the envelope is unwrapped, and only the resolved TARGET name
-      // is checked against the deny list — executing a denied call.
-      const execute = vi.fn();
-      const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-      const deferred = new MockTool({
-        name: 'mcp__github__create_issue',
-        shouldDefer: true,
-        execute,
-      });
-      const { scheduler, ensureTool, onAllToolCallsComplete } =
-        createSchedulerForLegacyToolTests({
-          toolsByName: new Map([
-            [bridge.name, bridge],
-            [deferred.name, deferred],
-          ]),
-          deferredHiddenNames: new Set([deferred.name]),
-          getPermissionsDeny: () => [denyEntry],
+    it.each(['prepare failure', 'permission denial'])(
+      'drains before batch completion on %s',
+      async (reason) => {
+        const drain = deferred<void>();
+        const f = fixture({
+          drain: () => drain.promise,
+          permission: 'deny',
+          prepare:
+            reason === 'prepare failure'
+              ? async () => {
+                  throw new Error('prepare rejected');
+                }
+              : undefined,
         });
-
-      await scheduler.schedule(
-        {
-          callId: 'bridge-legacy-deny-variant',
-          name: ToolNames.TOOL_CALL,
-          args: { name: deferred.name, arguments: {} },
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-legacy-deny-variant',
-        },
-        new AbortController().signal,
-      );
-
-      expect(ensureTool).not.toHaveBeenCalled();
-      expect(execute).not.toHaveBeenCalled();
-      const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.EXECUTION_DENIED,
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['read_file', f.tool]]),
+        });
+        const pending = h.scheduler.schedule(
+          f.request,
+          new AbortController().signal,
         );
-      }
-    },
-  );
-
-  it('does not unwrap tool_call denied by the PermissionManager bridge gate', async () => {
-    // Twin of the legacy-deny test for the PermissionManager half of the
-    // bridge gate: isToolEnabled(tool_call) resolving false must keep the
-    // request wrapped so the downstream permission check rejects it, never
-    // resolving/executing the deferred target.
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute,
-    });
-    const isToolEnabled = vi
-      .fn()
-      .mockImplementation(async (name: string) => name !== ToolNames.TOOL_CALL);
-    const { scheduler, ensureTool, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        permissionManager: {
-          isToolEnabled,
-          findMatchingDenyRule: () => 'permissions.deny: tool_call',
-        },
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-pm-deny',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-pm-deny',
+        await vi.waitFor(() =>
+          expect(f.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+        );
+        expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+        drain.resolve();
+        await pending;
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        expect(f.invocation.execute).not.toHaveBeenCalled();
       },
-      new AbortController().signal,
     );
 
-    expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(ensureTool).not.toHaveBeenCalled();
-    expect(execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
-      );
+    it('runs remote preflight before the final guard and never repeats tool hooks locally', async () => {
+      const f = fixture();
+      const messageBus = {
+        request: vi.fn(async () => {
+          throw new Error('local tool hook fired');
+        }),
+      };
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+        disableHooks: false,
+        hooksEnabled: () => true,
+        messageBus,
+        toolInvocationGuard: async () => {
+          f.order.push('guard');
+          return { allowed: true };
+        },
+      });
+      await h.scheduler.schedule(f.request, new AbortController().signal);
+      expect(f.order.slice(0, 5)).toEqual([
+        'prepare',
+        'permission',
+        'preflight',
+        'guard',
+        'authorize',
+      ]);
       expect(
-        String(
-          completed.response.responseParts[0]?.functionResponse?.response?.[
-            'error'
+        messageBus.request.mock.calls.filter(
+          (args) =>
+            JSON.stringify(args).includes('PreToolUse') ||
+            JSON.stringify(args).includes('PostToolUse'),
+        ),
+      ).toHaveLength(0);
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      const calls = h.onAllToolCallsComplete.mock
+        .calls[0][0] as CompletedToolCall[];
+      expect(JSON.stringify(calls[0].response.responseParts)).toContain(
+        'remote post context',
+      );
+    });
+
+    it('confirms the remote preflight ask once and then executes the same invocation', async () => {
+      const f = fixture({
+        preflight: async () => ({ shouldProceed: false, blockType: 'ask' }),
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      const signal = new AbortController().signal;
+      await h.scheduler.schedule(f.request, signal);
+      const waiting = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      expect(waiting.status).toBe('awaiting_approval');
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      expect(f.managed.confirmPreflight).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(f.managed.preflight).toHaveBeenCalledOnce();
+      expect(f.invocation.execute).toHaveBeenCalledOnce();
+    });
+
+    it('preserves physical success when cancellation arrives during the remote write', async () => {
+      const controller = new AbortController();
+      const f = fixture({
+        execute: async () => {
+          controller.abort();
+          return {
+            llmContent: 'written',
+            returnDisplay: 'written',
+            executionStatus: 'success',
+          };
+        },
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      await h.scheduler.schedule(f.request, controller.signal);
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      const calls = h.onAllToolCallsComplete.mock
+        .calls[0][0] as CompletedToolCall[];
+      expect(calls[0].status).toBe('cancelled');
+      expect(calls[0].response.executionStatus).toBe('success');
+      expect(JSON.stringify(calls[0].response.responseParts)).toContain(
+        'remote post context',
+      );
+    });
+
+    it.each(['success', 'cancelled'] as const)(
+      'waits for actual remote %s settlement after an execution timeout',
+      async (physicalStatus) => {
+        vi.stubEnv('QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS', '10');
+        const executed = deferred<ToolResult>();
+        let executionSignal: AbortSignal | undefined;
+        const f = fixture({
+          execute: async (signal) => {
+            executionSignal = signal;
+            return executed.promise;
+          },
+        });
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['read_file', f.tool]]),
+        });
+        try {
+          const pending = h.scheduler.schedule(
+            f.request,
+            new AbortController().signal,
+          );
+          await vi.waitFor(() => expect(executionSignal?.aborted).toBe(true));
+          expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+          executed.resolve({
+            llmContent: 'stopped',
+            returnDisplay: 'stopped',
+            executionStatus: physicalStatus,
+          });
+          await pending;
+          await vi.waitFor(() =>
+            expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+          );
+          const call = h.onAllToolCallsComplete.mock
+            .calls[0][0][0] as CompletedToolCall;
+          expect(call.status).toBe('error');
+          expect(call.response.errorType).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+          expect(call.response.executionStatus).toBe(physicalStatus);
+          if (physicalStatus === 'success')
+            expect(JSON.stringify(call.response.responseParts)).toContain(
+              'remote post context',
+            );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('keeps an earlier user cancellation when the timeout fires before remote settlement', async () => {
+      vi.stubEnv('QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS', '10');
+      const executed = deferred<ToolResult>();
+      const controller = new AbortController();
+      const f = fixture({
+        execute: async () => {
+          controller.abort();
+          return executed.promise;
+        },
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      try {
+        const pending = h.scheduler.schedule(f.request, controller.signal);
+        await vi.waitFor(() =>
+          expect(f.invocation.execute).toHaveBeenCalledOnce(),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+        executed.resolve({
+          llmContent: 'stopped',
+          returnDisplay: 'stopped',
+          executionStatus: 'cancelled',
+        });
+        await pending;
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        const call = h.onAllToolCallsComplete.mock
+          .calls[0][0][0] as CompletedToolCall;
+        expect(call.status).toBe('cancelled');
+        expect(call.response.errorType).not.toBe(
+          ToolErrorType.EXECUTION_TIMEOUT,
+        );
+        expect(call.response.executionStatus).toBe('cancelled');
+        expect(JSON.stringify(call.response.responseParts)).toContain(
+          'User intentionally cancelled this tool call.',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('reprepares full notebook content with unchanged cell arguments after draining', async () => {
+      const oldDrain = deferred<void>();
+      const params = {
+        notebook_path: '/repo/test.ipynb',
+        cell_id: 'a',
+        new_source: 'proposal',
+      };
+      const first = fixture({
+        name: ToolNames.NOTEBOOK_EDIT,
+        permission: 'ask',
+        edit: true,
+        params,
+        drain: () => oldDrain.promise,
+      });
+      const second = fixture({
+        name: ToolNames.NOTEBOOK_EDIT,
+        permission: 'ask',
+        edit: true,
+        params,
+      });
+      const modification = {
+        source: {
+          sessionId: 'c911c54f-ad76-420f-8c76-fb124c0ce623',
+          promptId: first.request.prompt_id,
+          callId: first.request.callId,
+          capabilityDigest: 'a'.repeat(64),
+          policyRevision: 'policy',
+          invocationId: 'old',
+          argsDigest: 'b'.repeat(64),
+        },
+        newContent: '{"cells":[]}',
+      };
+      first.managed.contentModification = vi.fn(() => modification);
+      vi.mocked(first.tool.build)
+        .mockReset()
+        .mockReturnValueOnce(first.invocation)
+        .mockReturnValueOnce(second.invocation);
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.NOTEBOOK_EDIT, first.tool]]),
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const signal = new AbortController().signal;
+      await h.scheduler.schedule({ ...first.request, args: params }, signal);
+      const old = (
+        h.onToolCallsUpdate.mock.calls.at(-1)![0][0] as WaitingToolCall
+      ).confirmationDetails;
+      const pending = old.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        newContent: modification.newContent,
+      });
+      await vi.waitFor(() =>
+        expect(first.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+      );
+      expect(first.managed.contentModification).toHaveBeenCalledWith(
+        modification.newContent,
+      );
+      expect(second.managed.prepare).not.toHaveBeenCalled();
+      oldDrain.resolve();
+      await pending;
+      expect(second.managed.prepare).toHaveBeenCalledWith(
+        signal,
+        { callId: first.request.callId, promptId: first.request.prompt_id },
+        modification,
+      );
+      const current = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      expect(current.status).toBe('awaiting_approval');
+      expect(current.request.args).toEqual(params);
+      expect(first.onConfirm).not.toHaveBeenCalled();
+      await old.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      expect(second.invocation.execute).not.toHaveBeenCalled();
+      await current.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(first.invocation.execute).not.toHaveBeenCalled();
+      expect(second.invocation.execute).toHaveBeenCalledOnce();
+    });
+
+    it.each(['inline', 'editor', 'permission hook'])(
+      'reprepares %s modifications and confirms only the new reference',
+      async (source) => {
+        const oldDrain = deferred<void>();
+        const first = fixture({
+          name: ToolNames.WRITE_FILE,
+          permission: 'ask',
+          edit: true,
+          drain: () => oldDrain.promise,
+        });
+        const second = fixture({
+          name: ToolNames.WRITE_FILE,
+          permission: 'ask',
+          edit: true,
+          params: { file_path: '/repo/remote.txt', content: 'replacement' },
+        });
+        vi.mocked(first.tool.build)
+          .mockReset()
+          .mockReturnValueOnce(first.invocation)
+          .mockReturnValueOnce(second.invocation);
+        const messageBus = {
+          request: vi.fn(
+            async (request: {
+              eventName: string;
+            }): Promise<HookExecutionResponse> => ({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: 'rewrite',
+              success: true,
+              output:
+                request.eventName === 'PermissionRequest'
+                  ? {
+                      hookSpecificOutput: {
+                        decision: {
+                          behavior: 'allow',
+                          updatedInput: {
+                            file_path: '/repo/remote.txt',
+                            content: 'replacement',
+                          },
+                        },
+                      },
+                    }
+                  : {},
+            }),
+          ),
+        };
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([[ToolNames.WRITE_FILE, first.tool]]),
+          approvalMode: ApprovalMode.DEFAULT,
+          ...(source === 'permission hook'
+            ? { disableHooks: false, messageBus }
+            : {}),
+        });
+        const request = {
+          ...first.request,
+          args: { file_path: '/repo/remote.txt', content: 'proposed' },
+        };
+        const signal = new AbortController().signal;
+        let oldConfirmation: ToolCallConfirmationDetails | undefined;
+        let pending = h.scheduler.schedule(request, signal);
+        if (source !== 'permission hook') {
+          await pending;
+          oldConfirmation = (
+            h.onToolCallsUpdate.mock.calls.at(-1)![0][0] as WaitingToolCall
+          ).confirmationDetails;
+          if (source === 'editor')
+            modifyWithEditorOverride.value = async () => ({
+              updatedParams: {
+                file_path: '/repo/remote.txt',
+                content: 'replacement',
+              },
+              updatedDiff: 'buffer diff',
+            });
+          pending = oldConfirmation.onConfirm(
+            source === 'editor'
+              ? ToolConfirmationOutcome.ModifyWithEditor
+              : ToolConfirmationOutcome.ProceedOnce,
+            source === 'inline' ? { newContent: 'replacement' } : undefined,
+          );
+        }
+        await vi.waitFor(() =>
+          expect(first.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+        );
+        expect(second.managed.prepare).not.toHaveBeenCalled();
+        oldDrain.resolve();
+        await pending;
+        if (source === 'editor') {
+          const context = modifyWithEditorCalls.mock.calls.at(
+            -1,
+          )![1] as ModifyContext<Record<string, unknown>>;
+          expect(context.getFilePath(request.args)).toBe('/repo/remote.txt');
+          await expect(context.getCurrentContent(request.args)).resolves.toBe(
+            'original',
+          );
+          await expect(context.getProposedContent(request.args)).resolves.toBe(
+            'proposed',
+          );
+        }
+        expect(second.managed.prepare).toHaveBeenCalledOnce();
+        expect(second.invocation.getDefaultPermission).toHaveBeenCalledOnce();
+        expect(first.onConfirm).not.toHaveBeenCalled();
+        expect(first.invocation.execute).not.toHaveBeenCalled();
+        expect(second.invocation.execute).not.toHaveBeenCalled();
+        const current = h.onToolCallsUpdate.mock.calls.at(
+          -1,
+        )![0][0] as WaitingToolCall;
+        expect(current.status).toBe('awaiting_approval');
+        expect(current.request.args['content']).toBe('replacement');
+        await oldConfirmation?.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        expect(second.invocation.execute).not.toHaveBeenCalled();
+        await current.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        expect(second.onConfirm).toHaveBeenCalledOnce();
+        expect(second.invocation.execute).toHaveBeenCalledOnce();
+        modifyWithEditorOverride.value = undefined;
+      },
+    );
+
+    it.each(
+      ['permission hook', 'inline', 'inline content', 'editor'].flatMap(
+        (source) => ['raw', 'effective'].map((params) => ({ source, params })),
+      ),
+    )(
+      'retains the reference for unchanged $source $params input',
+      async ({ source, params }) => {
+        const rawArgs = { file_path: 'remote.txt', content: 'proposed' };
+        const effectiveArgs = {
+          file_path: '/repo/remote.txt',
+          content: 'proposed',
+        };
+        const updatedInput = params === 'raw' ? rawArgs : effectiveArgs;
+        const f = fixture({
+          name: ToolNames.WRITE_FILE,
+          permission: 'ask',
+          edit: true,
+          params: effectiveArgs,
+        });
+        const messageBus = {
+          request: vi.fn(
+            async (): Promise<HookExecutionResponse> => ({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: 'unchanged',
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  decision: { behavior: 'allow', updatedInput },
+                },
+              },
+            }),
+          ),
+        };
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([[ToolNames.WRITE_FILE, f.tool]]),
+          approvalMode: ApprovalMode.DEFAULT,
+          ...(source === 'permission hook'
+            ? { disableHooks: false, messageBus }
+            : {}),
+        });
+        await h.scheduler.schedule(
+          { ...f.request, args: rawArgs },
+          new AbortController().signal,
+        );
+        if (source !== 'permission hook') {
+          const waiting = h.onToolCallsUpdate.mock.calls.at(
+            -1,
+          )![0][0] as WaitingToolCall;
+          if (source === 'editor')
+            modifyWithEditorOverride.value = async () => ({
+              updatedParams: updatedInput,
+              updatedDiff: 'unchanged',
+            });
+          await waiting.confirmationDetails.onConfirm(
+            source === 'editor'
+              ? ToolConfirmationOutcome.ModifyWithEditor
+              : ToolConfirmationOutcome.ProceedOnce,
+            source === 'inline'
+              ? { updatedInput }
+              : source === 'inline content'
+                ? { newContent: 'proposed' }
+                : undefined,
+          );
+          if (source === 'editor') {
+            const current = h.onToolCallsUpdate.mock.calls.at(
+              -1,
+            )![0][0] as WaitingToolCall;
+            expect(current.status).toBe('awaiting_approval');
+            expect(f.onConfirm).not.toHaveBeenCalled();
+            expect(f.managed.cancelAndDrain).not.toHaveBeenCalled();
+            await current.confirmationDetails.onConfirm(
+              ToolConfirmationOutcome.ProceedOnce,
+            );
+          }
+        }
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        expect(f.tool.build).toHaveBeenCalledOnce();
+        expect(f.managed.prepare).toHaveBeenCalledOnce();
+        expect(f.onConfirm).toHaveBeenCalledOnce();
+        expect(f.onConfirm.mock.calls[0]?.at(0)).toBe(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+        expect(
+          f.onConfirm.mock.calls[0]
+            ?.slice(1)
+            .every((value) => value === undefined),
+        ).toBe(true);
+        expect(f.invocation.execute).toHaveBeenCalledOnce();
+        expect(
+          (h.onAllToolCallsComplete.mock.calls[0][0][0] as CompletedToolCall)
+            .status,
+        ).toBe('success');
+      },
+    );
+
+    it('retains the original input identity through a remote PreToolUse ask bounce', async () => {
+      const f = fixture({
+        params: { file_path: '/repo/file name.txt' },
+        preflight: async () => ({ shouldProceed: false, blockType: 'ask' }),
+      });
+      const rawArgs = { file_path: 'file\\ name.txt' };
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      await h.scheduler.schedule(
+        { ...f.request, args: rawArgs },
+        new AbortController().signal,
+      );
+      const waiting = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      expect(waiting.request.args).toEqual(rawArgs);
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+        { updatedInput: rawArgs },
+      );
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(f.tool.build).toHaveBeenCalledOnce();
+      expect(f.managed.confirmPreflight).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        undefined,
+      );
+      expect(f.invocation.execute).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a rewritten invocation whose new intrinsic permission is deny', async () => {
+      const first = fixture({
+        name: ToolNames.WRITE_FILE,
+        permission: 'ask',
+        edit: true,
+      });
+      const second = fixture({
+        name: ToolNames.WRITE_FILE,
+        permission: 'deny',
+        edit: true,
+      });
+      vi.mocked(first.tool.build)
+        .mockReset()
+        .mockReturnValueOnce(first.invocation)
+        .mockReturnValueOnce(second.invocation);
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.WRITE_FILE, first.tool]]),
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      await h.scheduler.schedule(first.request, new AbortController().signal);
+      const waiting = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+        { newContent: '' },
+      );
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(second.invocation.getDefaultPermission).toHaveBeenCalledOnce();
+      expect(second.invocation.execute).not.toHaveBeenCalled();
+      expect(first.onConfirm).not.toHaveBeenCalled();
+      expect(second.managed.cancelAndDrain).toHaveBeenCalledOnce();
+    });
+
+    it('retains a failed cleanup and rejects subsequent scheduling', async () => {
+      const f = fixture({
+        permission: 'deny',
+        drain: async () => {
+          throw new Error('containment unknown');
+        },
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      await h.scheduler.schedule(f.request, new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(f.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+      );
+      expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+      await expect(
+        h.scheduler.schedule(
+          { ...f.request, callId: 'next-call' },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('containment unknown');
+    });
+
+    it('keeps prepare owned across an abort and drains its late completion', async () => {
+      const preparing = deferred<void>();
+      const draining = deferred<void>();
+      const f = fixture({
+        prepare: () => preparing.promise,
+        drain: () => draining.promise,
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      const controller = new AbortController();
+      const pending = h.scheduler.schedule(f.request, controller.signal);
+      await vi.waitFor(() => expect(f.managed.prepare).toHaveBeenCalledOnce());
+      controller.abort();
+      expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+      preparing.resolve();
+      await vi.waitFor(() =>
+        expect(f.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+      );
+      expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+      draining.resolve();
+      await pending;
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(f.invocation.execute).not.toHaveBeenCalled();
+    });
+
+    it('preserves physical success when the remote PostToolUse hook stops output', async () => {
+      const f = fixture({
+        postHook: {
+          shouldStop: true,
+          stopReason: 'remote stop',
+          additionalContext: 'remote stop context',
+          artifacts: [
+            {
+              kind: 'file',
+              title: 'Hook report',
+              workspacePath: 'reports/hook.html',
+            },
           ],
-        ).startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
-      ).toBe(true);
-    }
-  });
-
-  it('rejects a bridged target the owner execution allowlist does not permit', async () => {
-    // The pre-schedule gates see the wrapper name (tool_call), which is
-    // always allowed; the scheduler must re-check the resolved target
-    // against the owner's execution allowlist.
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'web_fetch',
-      shouldDefer: true,
-      execute,
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        isToolExecutionAllowed: (name: string) => name !== 'web_fetch',
+        },
       });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      await h.scheduler.schedule(f.request, new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      const call = h.onAllToolCallsComplete.mock
+        .calls[0][0][0] as CompletedToolCall;
+      expect(call.status).toBe('error');
+      expect(call.response.executionStatus).toBe('success');
+      expect(call.response.error?.message).toBe('remote stop');
+      expect(JSON.stringify(call.response.responseParts)).toContain(
+        'remote stop context',
+      );
+      expect(call.response.artifacts).toEqual([
+        {
+          kind: 'file',
+          title: 'Hook report',
+          workspacePath: 'reports/hook.html',
+        },
+      ]);
+    });
 
-    await scheduler.schedule(
-      {
-        callId: 'bridge-allowlist-deny',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-allowlist-deny',
+    it.each(['not_started', 'error'] as const)(
+      'never displays remote %s as success when the payload lacks an error',
+      async (executionStatus) => {
+        const f = fixture({
+          execute: async () => ({
+            executionStatus,
+            llmContent: 'no error envelope',
+            returnDisplay: 'no error envelope',
+          }),
+        });
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['read_file', f.tool]]),
+        });
+        await h.scheduler.schedule(f.request, new AbortController().signal);
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        const call = h.onAllToolCallsComplete.mock
+          .calls[0][0][0] as CompletedToolCall;
+        expect(call.status).toBe('error');
+        expect(call.response.executionStatus).toBe(executionStatus);
       },
-      new AbortController().signal,
     );
 
-    expect(execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(completed.response.error?.message).toContain(
-        "is not permitted by this agent's tool policy",
-      );
-      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
-      );
-    }
-  });
+    it.each(['final guard', 'confirmation cancel', 'waiting abort'])(
+      'drains on %s before publishing a completed batch',
+      async (source) => {
+        const drain = deferred<void>();
+        const f = fixture({
+          permission: source === 'final guard' ? 'allow' : 'ask',
+          drain: () => drain.promise,
+        });
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['read_file', f.tool]]),
+          approvalMode: ApprovalMode.DEFAULT,
+          toolInvocationGuard: async () => ({
+            allowed: false,
+            reason: 'policy denied',
+          }),
+        });
+        const controller = new AbortController();
+        let pending = h.scheduler.schedule(f.request, controller.signal);
+        if (source !== 'final guard') {
+          await pending;
+          const call = h.onToolCallsUpdate.mock.calls.at(
+            -1,
+          )![0][0] as WaitingToolCall;
+          if (source === 'confirmation cancel')
+            pending = call.confirmationDetails.onConfirm(
+              ToolConfirmationOutcome.Cancel,
+            );
+          else controller.abort();
+        }
+        await vi.waitFor(() =>
+          expect(f.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+        );
+        expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+        expect(f.managed.authorize).not.toHaveBeenCalled();
+        expect(f.invocation.execute).not.toHaveBeenCalled();
+        drain.resolve();
+        await pending;
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+      },
+    );
 
-  it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([[bridge.name, bridge]]),
-      });
+    it.each(
+      [false, true].flatMap((abort) =>
+        (['success', 'cancelled'] as const).map((physicalStatus) => ({
+          abort,
+          physicalStatus,
+        })),
+      ),
+    )(
+      'waits for recovered physical $physicalStatus after a lost execution receipt (aborted=$abort)',
+      async ({ abort, physicalStatus }) => {
+        const drain = deferred<void>();
+        const controller = new AbortController();
+        const f = fixture({
+          drain: () => drain.promise,
+          execute: async () => {
+            if (abort) controller.abort();
+            throw new Error('Execution receipt unavailable');
+          },
+          drainedResult: {
+            executionStatus: physicalStatus,
+            result: { llmContent: 'written', returnDisplay: 'written' },
+            postHook: {
+              shouldStop: false,
+              additionalContext: 'recovered post context',
+            },
+            failureHook: { additionalContext: 'recovered failure context' },
+          },
+        });
+        const h = createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['read_file', f.tool]]),
+        });
+        const pending = h.scheduler.schedule(f.request, controller.signal);
+        await vi.waitFor(() =>
+          expect(f.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+        );
+        expect(h.onToolCallsUpdate.mock.calls.at(-1)![0][0].status).toBe(
+          'executing',
+        );
+        expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+        drain.resolve();
+        await pending;
+        await vi.waitFor(() =>
+          expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+        );
+        const call = h.onAllToolCallsComplete.mock
+          .calls[0][0][0] as CompletedToolCall;
+        expect(call.response.executionStatus).toBe(physicalStatus);
+        expect(JSON.stringify(call.response.responseParts)).toContain(
+          physicalStatus === 'success'
+            ? 'recovered post context'
+            : 'recovered failure context',
+        );
+        if (abort)
+          expect(JSON.stringify(call.response.responseParts)).toContain(
+            physicalStatus === 'success'
+              ? 'The tool had already completed; its output was discarded.'
+              : 'User intentionally cancelled this tool call.',
+          );
+      },
+    );
 
-    const scheduleInvalidEnvelope = async (callId: string) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        {
-          callId,
-          name: ToolNames.TOOL_CALL,
-          // A recursive bridge target is rejected during resolution with
-          // INVALID_TOOL_PARAMS — a stable error to drive the retry counter.
-          args: { name: ToolNames.TOOL_CALL, arguments: {} },
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-retry',
+    it('rejects unknown execution containment without publishing a physical terminal result', async () => {
+      const f = fixture({
+        execute: async () => {
+          throw new Error('Execution receipt unavailable');
         },
+        drain: async () => {
+          throw new Error('Runtime containment unknown');
+        },
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+      });
+      await expect(
+        h.scheduler.schedule(f.request, new AbortController().signal),
+      ).rejects.toThrow('Runtime containment unknown');
+      expect(h.onToolCallsUpdate.mock.calls.at(-1)![0][0].status).toBe(
+        'executing',
+      );
+      expect(h.onAllToolCallsComplete).not.toHaveBeenCalled();
+      await expect(
+        h.scheduler.schedule(
+          { ...f.request, callId: 'next' },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('Runtime containment unknown');
+    });
+
+    it('uses Runtime failure metadata without firing a second failure hook', async () => {
+      const f = fixture({
+        execute: async () => ({
+          llmContent: 'failed',
+          returnDisplay: 'failed',
+          executionStatus: 'error',
+          error: {
+            message: 'physical failure',
+            type: ToolErrorType.EXECUTION_FAILED,
+          },
+        }),
+        failureHook: { additionalContext: 'runtime failure context' },
+      });
+      const messageBus = {
+        request: vi.fn(
+          async (request: {
+            eventName: string;
+          }): Promise<HookExecutionResponse> => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: request.eventName,
+            success: true,
+            output: {},
+          }),
+        ),
+      };
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([['read_file', f.tool]]),
+        disableHooks: false,
+        messageBus,
+      });
+      await h.scheduler.schedule(f.request, new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      const call = h.onAllToolCallsComplete.mock
+        .calls[0][0][0] as CompletedToolCall;
+      expect(call.status).toBe('error');
+      expect(call.response.executionStatus).toBe('error');
+      expect(call.response.error?.message).toContain('runtime failure context');
+      expect(
+        messageBus.request.mock.calls.some(
+          ([request]) => request.eventName === 'PostToolUseFailure',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not prepare a replacement when the turn aborts while the old reference drains', async () => {
+      const drain = deferred<void>();
+      const first = fixture({
+        name: ToolNames.WRITE_FILE,
+        permission: 'ask',
+        edit: true,
+        drain: () => drain.promise,
+      });
+      const second = fixture({
+        name: ToolNames.WRITE_FILE,
+        permission: 'ask',
+        edit: true,
+      });
+      vi.mocked(first.tool.build)
+        .mockReset()
+        .mockReturnValueOnce(first.invocation)
+        .mockReturnValueOnce(second.invocation);
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.WRITE_FILE, first.tool]]),
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const controller = new AbortController();
+      await h.scheduler.schedule(first.request, controller.signal);
+      const waiting = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      const modifying = waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+        { newContent: 'replacement' },
+      );
+      await vi.waitFor(() =>
+        expect(first.managed.cancelAndDrain).toHaveBeenCalledOnce(),
+      );
+      controller.abort();
+      drain.resolve();
+      await modifying;
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(first.tool.build).toHaveBeenCalledOnce();
+      expect(second.managed.prepare).not.toHaveBeenCalled();
+    });
+
+    it('cancels edited confirmation payloads without constructing another invocation', async () => {
+      const f = fixture({
+        name: ToolNames.WRITE_FILE,
+        permission: 'ask',
+        edit: true,
+      });
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.WRITE_FILE, f.tool]]),
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      await h.scheduler.schedule(f.request, new AbortController().signal);
+      const waiting = h.onToolCallsUpdate.mock.calls.at(
+        -1,
+      )![0][0] as WaitingToolCall;
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.Cancel,
+        { newContent: 'discarded', cancelMessage: 'cancel editing' },
+      );
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(f.tool.build).toHaveBeenCalledOnce();
+      expect(f.onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'cancel editing',
+      });
+      expect(
+        (h.onAllToolCallsComplete.mock.calls[0][0][0] as CompletedToolCall)
+          .status,
+      ).toBe('cancelled');
+    });
+
+    it('binds the Plan Shell directory before remote preparation without preparing the discarded proxy', async () => {
+      const first = fixture({ name: ToolNames.SHELL });
+      const second = fixture({
+        name: ToolNames.SHELL,
+        params: { command: 'pwd', directory: '/repo' },
+      });
+      vi.mocked(first.tool.build)
+        .mockReset()
+        .mockReturnValueOnce(first.invocation)
+        .mockReturnValueOnce(second.invocation);
+      const h = createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.SHELL, first.tool]]),
+        approvalMode: ApprovalMode.PLAN,
+      });
+      await h.scheduler.schedule(
+        { ...first.request, args: { command: 'pwd' } },
         new AbortController().signal,
       );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    };
-
-    const first = await scheduleInvalidEnvelope('bridge-retry-1');
-    const second = await scheduleInvalidEnvelope('bridge-retry-2');
-    const third = await scheduleInvalidEnvelope('bridge-retry-3');
-
-    for (const completed of [first, second]) {
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.INVALID_TOOL_PARAMS,
-        );
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-    expect(third.status).toBe('error');
-    if (third.status === 'error') {
-      expect(third.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
-      expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
-      expect(third.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalledOnce(),
       );
-    }
-  });
-
-  it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
-    // R1-18: invalid envelopes record under the model-facing name
-    // (`tool_call:<msg>`), while a successfully resolved envelope renames the
-    // request to the resolved TARGET before the batch-start prune runs — so
-    // the prune is the only mechanism that clears a stale `tool_call:` count
-    // across a successful bridged execution. Interleave one: without the
-    // prune (e.g. a refactor keying presence by model-facing name), the count
-    // of 2 would survive the successful call and the next two identical
-    // failures would reach the threshold and inject RETRY LOOP DETECTED
-    // prematurely — while the direct-tool isolation test stays green, because
-    // there recording and prune names never diverge.
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: [{ text: 'issue created' }],
-      returnDisplay: 'issue created',
-    });
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute,
-    });
-    const { scheduler, ensureTool, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
+      expect(first.managed.prepare).not.toHaveBeenCalled();
+      expect(first.managed.cancelAndDrain).toHaveBeenCalledOnce();
+      expect(first.tool.build).toHaveBeenNthCalledWith(2, {
+        command: 'pwd',
+        directory: '/repo',
       });
-
-    const scheduleInvalidEnvelope = async (callId: string) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        {
-          callId,
-          name: ToolNames.TOOL_CALL,
-          args: { name: ToolNames.TOOL_CALL, arguments: {} },
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-prune',
-        },
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    };
-
-    const first = await scheduleInvalidEnvelope('bridge-prune-1');
-    const second = await scheduleInvalidEnvelope('bridge-prune-2');
-    for (const completed of [first, second]) {
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-
-    // A bridge envelope that resolves and executes: its batch carries the
-    // resolved TARGET name, so the batch-start prune clears the `tool_call:`
-    // counters accumulated above.
-    onAllToolCallsComplete.mockClear();
-    ensureTool.mockClear();
-    await scheduler.schedule(
-      {
-        callId: 'bridge-prune-success',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-prune',
-      },
-      new AbortController().signal,
-    );
-    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-    const succeeded = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(succeeded.status).toBe('success');
-    expect(execute).toHaveBeenCalledTimes(1);
-
-    // Two more identical invalid envelopes: effectively first and second
-    // failures again — the fourth overall error must still lack the
-    // directive. Removing or name-inverting the prune turns this red.
-    const third = await scheduleInvalidEnvelope('bridge-prune-3');
-    const fourth = await scheduleInvalidEnvelope('bridge-prune-4');
-    for (const completed of [third, fourth]) {
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.INVALID_TOOL_PARAMS,
-        );
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-  });
-
-  it('preserves the bridge response name when a deferred target times out', async () => {
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__slow__operation',
-      shouldDefer: true,
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'timed out',
-        returnDisplay: 'timed out',
-        error: {
-          message: 'timed out',
-          type: ToolErrorType.EXECUTION_TIMEOUT,
-        },
-      }),
+      expect(second.managed.prepare).toHaveBeenCalledOnce();
+      expect(second.invocation.getDefaultPermission).toHaveBeenCalledOnce();
+      expect(
+        (h.onAllToolCallsComplete.mock.calls[0][0][0] as CompletedToolCall)
+          .response.error,
+      ).toBeUndefined();
+      expect(second.invocation.execute).toHaveBeenCalledOnce();
     });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-timeout',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-timeout',
-      },
-      new AbortController().signal,
-    );
-
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
-        ToolNames.TOOL_CALL,
-      );
-    }
-  });
-
-  it('does not resolve a deferred target when tool_call is already aborted', async () => {
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute: vi.fn(),
-    });
-    const { scheduler, ensureTool, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-      });
-    const abortController = new AbortController();
-    abortController.abort();
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-pre-aborted',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-pre-aborted',
-      },
-      abortController.signal,
-    );
-
-    expect(ensureTool).not.toHaveBeenCalled();
-    expect(deferred.execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('cancelled');
-    expect(
-      completed.status === 'cancelled'
-        ? completed.response.responseParts[0]?.functionResponse?.name
-        : undefined,
-    ).toBe(ToolNames.TOOL_CALL);
-    expect(
-      completed.status === 'cancelled'
-        ? completed.response.responseParts[0]?.functionResponse?.response?.[
-            'error'
-          ]
-        : undefined,
-    ).toEqual(expect.stringContaining(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX));
-  });
-
-  it('does not resolve a deferred target when tool_call is aborted during bridge permission lookup', async () => {
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute: vi.fn(),
-    });
-    let releasePermission!: () => void;
-    const permissionPending = new Promise<void>((resolve) => {
-      releasePermission = resolve;
-    });
-    const isToolEnabled = vi.fn().mockImplementation(async () => {
-      await permissionPending;
-      return true;
-    });
-    const { scheduler, ensureTool, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        permissionManager: {
-          isToolEnabled,
-          findMatchingDenyRule: () => undefined,
-        },
-      });
-    const abortController = new AbortController();
-
-    const scheduled = scheduler.schedule(
-      {
-        callId: 'bridge-aborted-during-permission',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-aborted-during-permission',
-      },
-      abortController.signal,
-    );
-    await vi.waitFor(() => expect(isToolEnabled).toHaveBeenCalledOnce());
-    abortController.abort();
-    releasePermission();
-    await scheduled;
-
-    expect(ensureTool).not.toHaveBeenCalled();
-    expect(deferred.execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('cancelled');
-  });
-
-  it('keeps the wrapper name when a resolved bridge call is cancelled mid-execution', async () => {
-    // The pre-abort tests cancel BEFORE bridge resolution, where
-    // modelFacingName is still unset — they cannot observe the rename. This
-    // abort lands AFTER resolution (while the target executes), so the
-    // cancelled functionResponse written to history must carry the wrapper
-    // name, not the deferred target's name.
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    let releaseExecute!: () => void;
-    const executeGate = new Promise<void>((resolve) => {
-      releaseExecute = resolve;
-    });
-    const execute = vi.fn().mockImplementation(async () => {
-      await executeGate;
-      return { llmContent: 'done', returnDisplay: 'done' };
-    });
-    const deferred = new MockTool({
-      name: 'mcp__github__create_issue',
-      shouldDefer: true,
-      execute,
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-      });
-    const abortController = new AbortController();
-
-    scheduler.schedule(
-      {
-        callId: 'bridge-cancel-after-resolve',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-cancel-after-resolve',
-      },
-      abortController.signal,
-    );
-
-    // Resolution has completed once the target's execute() starts.
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-    abortController.abort();
-    releaseExecute();
-
-    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('cancelled');
-    expect(completed.request).toMatchObject({
-      name: deferred.name,
-      args: {},
-      modelFacingName: ToolNames.TOOL_CALL,
-      modelFacingArgs: { name: deferred.name, arguments: {} },
-    });
-    expect(
-      completed.status === 'cancelled'
-        ? completed.response.responseParts[0]?.functionResponse?.name
-        : undefined,
-    ).toBe(ToolNames.TOOL_CALL);
   });
 
   it('restores the invocation context when a delayed confirmation executes', async () => {

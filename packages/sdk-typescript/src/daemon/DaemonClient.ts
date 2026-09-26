@@ -14,6 +14,17 @@ import {
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
+import { isManagedSessionEvent } from './managed-sessions.js';
+import type {
+  DaemonManagedPromptAdmission,
+  DaemonManagedPromptRequest,
+  DaemonManagedRequestOptions,
+  DaemonManagedSessionCreateRequest,
+  DaemonManagedSessionEvent,
+  DaemonManagedSessionList,
+  DaemonManagedSessionSummary,
+  DaemonManagedSessionTranscript,
+} from './managed-sessions.js';
 import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import type {
@@ -1123,6 +1134,7 @@ export class DaemonClient {
       timeoutMs?: number;
       mode?: 'transport' | 'rest';
       signal?: AbortSignal;
+      headers?: Record<string, string>;
     } = {},
   ): Promise<T> {
     const hasBody = opts.body !== undefined;
@@ -1131,7 +1143,10 @@ export class DaemonClient {
       {
         ...(opts.method ? { method: opts.method } : {}),
         headers: this.headers(
-          hasBody ? { 'Content-Type': 'application/json' } : {},
+          {
+            ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+            ...opts.headers,
+          },
           opts.clientId,
         ),
         ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
@@ -2716,6 +2731,150 @@ export class DaemonClient {
       `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
+  }
+
+  private managedRequest<T>(
+    path: string,
+    opts: DaemonManagedRequestOptions,
+    method = 'GET',
+    body?: unknown,
+    idempotencyKey?: string,
+  ): Promise<T> {
+    return this.jsonRequest<T>(path, `${method} ${path.split('?')[0]}`, {
+      method,
+      body,
+      signal: opts.signal,
+      mode: 'rest',
+      headers: {
+        'X-Qwen-Managed-Client-Id': opts.clientId,
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+      },
+    });
+  }
+
+  listManagedSessions(
+    opts: DaemonManagedRequestOptions & {
+      cwd?: string;
+      limit?: number;
+      cursor?: string;
+    },
+  ): Promise<DaemonManagedSessionList> {
+    const query = new URLSearchParams();
+    if (opts.cwd !== undefined) query.set('cwd', opts.cwd);
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    if (opts.cursor !== undefined) query.set('cursor', opts.cursor);
+    return this.managedRequest(`/managed/sessions?${query}`, opts);
+  }
+
+  getManagedSession(
+    sessionId: string,
+    opts: DaemonManagedRequestOptions,
+  ): Promise<DaemonManagedSessionSummary> {
+    return this.managedRequest(
+      `/managed/sessions/${urlEncode(sessionId)}`,
+      opts,
+    );
+  }
+
+  getManagedSessionTranscript(
+    sessionId: string,
+    opts: DaemonManagedRequestOptions & { before?: string; limit?: number },
+  ): Promise<DaemonManagedSessionTranscript> {
+    const query = new URLSearchParams();
+    if (opts.before !== undefined) query.set('before', opts.before);
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+    return this.managedRequest(
+      `/managed/sessions/${urlEncode(sessionId)}/transcript?${query}`,
+      opts,
+    );
+  }
+
+  createManagedSession(
+    request: DaemonManagedSessionCreateRequest,
+    opts: DaemonManagedRequestOptions & { idempotencyKey: string },
+  ): Promise<DaemonManagedPromptAdmission> {
+    return this.managedRequest(
+      '/managed/sessions',
+      opts,
+      'POST',
+      request,
+      opts.idempotencyKey,
+    );
+  }
+
+  sendManagedPrompt(
+    sessionId: string,
+    request: DaemonManagedPromptRequest,
+    opts: DaemonManagedRequestOptions & { idempotencyKey: string },
+  ): Promise<DaemonManagedPromptAdmission> {
+    return this.managedRequest(
+      `/managed/sessions/${urlEncode(sessionId)}/prompts`,
+      opts,
+      'POST',
+      request,
+      opts.idempotencyKey,
+    );
+  }
+
+  cancelManagedPrompt(
+    sessionId: string,
+    promptId: string,
+    opts: DaemonManagedRequestOptions,
+  ): Promise<{ accepted: boolean }> {
+    return this.managedRequest(
+      `/managed/sessions/${urlEncode(sessionId)}/cancel`,
+      opts,
+      'POST',
+      { promptId },
+    );
+  }
+
+  async *subscribeManagedSessionEvents(
+    sessionId: string,
+    opts: DaemonManagedRequestOptions & { lastEventId?: number },
+  ): AsyncGenerator<DaemonManagedSessionEvent> {
+    const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    if (opts.signal?.aborted) return;
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const response = await this._fetch(
+        `${this.baseUrl}/managed/sessions/${urlEncode(sessionId)}/events`,
+        {
+          headers: this.headers({
+            Accept: 'text/event-stream',
+            'X-Qwen-Managed-Client-Id': opts.clientId,
+            ...(opts.lastEventId === undefined
+              ? {}
+              : { 'Last-Event-ID': String(opts.lastEventId) }),
+          }),
+          signal: abort.signal,
+        },
+      );
+      if (!response.ok) {
+        throw await this.failOnError(
+          response,
+          'GET /managed/sessions/:id/events',
+        );
+      }
+      if (!response.body)
+        throw new Error('Managed event response body is missing');
+      for await (const event of parseSseStream(
+        response.body,
+        abort.signal,
+        (value) => (isManagedSessionEvent(value) ? value : undefined),
+      )) {
+        if (event.sessionId !== sessionId) {
+          throw new Error('Invalid Managed session event');
+        }
+        yield event;
+      }
+    } catch (error) {
+      if (!opts.signal?.aborted) throw error;
+    } finally {
+      opts.signal?.removeEventListener('abort', onAbort);
+      abort.abort();
+    }
   }
 
   // -- Workspace agents (workspace memory/agents) ------------------------------

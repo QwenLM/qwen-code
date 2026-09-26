@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
 import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  PRIVATE_MANAGED_TOOL_RUNTIME_ENV,
+  PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+  SERVE_CONTROL_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
   readCronTasks,
@@ -44,6 +49,7 @@ import {
   isTrustedLoopbackMode,
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
+  requestWasAuthenticated,
 } from './auth.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
@@ -100,6 +106,19 @@ import {
   type ServeOptions,
 } from './types.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
+import {
+  createDaemonExecutionEngines,
+  daemonManagedHostArgv,
+} from './daemon-execution-engines.js';
+import { LocalManagedRuntimeProvider } from './managed-runtime-provider.js';
+import { BrokerManagedRuntimeProvider } from './broker-managed-runtime-provider.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import {
+  createHostedHarnessContract,
+  HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
+  installHostedHarnessContractMiddleware,
+  type HostedHarnessContract,
+} from './hosted-harness-contract.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
@@ -181,12 +200,6 @@ import {
 import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
-  createHostedHarnessContract,
-  installHostedHarnessContractMiddleware,
-} from './hosted-harness-contract.js';
-import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
-import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
-import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
 } from './routes/workspace-permissions.js';
@@ -251,6 +264,7 @@ import {
 } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
   createWorkspaceSessionOwnerIndex,
   WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
@@ -387,6 +401,10 @@ import {
 } from './idle-acp-reclamation.js';
 import { readWorkspaceActivity } from './workspace-activity.js';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
+import type { ManagedPromptService } from './managed-prompt-types.js';
+import type { ManagedGatewaySessionEvents } from './managed-gateway-session-events.js';
+import type { ManagedRuntimeProvider } from './managed-runtime-provider.js';
+import { registerManagedRuntimeWorkerRoutes } from './routes/managed-runtime-worker.js';
 
 export {
   createDefaultFsAuditEmit,
@@ -502,6 +520,8 @@ export interface ServeAppDeps {
   restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /** Shared by bootstrap and runtime so one process advertises one generation. */
+  hostedHarnessContract?: HostedHarnessContract;
   /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
@@ -714,6 +734,7 @@ export interface ServeAppDeps {
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
+  acpHttpEnabled?: boolean;
   runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
@@ -730,6 +751,13 @@ export interface ServeAppDeps {
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
   ) => Promise<void>;
+  /** Experimental Managed Gateway admission. Omit to hide its routes. */
+  managedPromptService?: ManagedPromptService;
+  /** Process-local Managed Gateway event broker. Omit to hide its routes. */
+  managedGatewaySessionEvents?: ManagedGatewaySessionEvents;
+  /** Experimental authenticated Tool-only Runtime worker surface. */
+  managedRuntimeWorkerProvider?: ManagedRuntimeProvider;
+  ownedManagedRuntime?: ManagedWorkerBoot;
 }
 
 /**
@@ -823,7 +851,12 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
-  validateHostedHarnessProfile(opts);
+  validateHostedHarnessProfile(opts, {
+    serverToken: 'QWEN_SERVER_TOKEN',
+    brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
+    brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
+    capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
+  });
   if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
     throw new Error(
       '--profile hosted-harness cannot manage scheduled task sessions.',
@@ -871,6 +904,25 @@ export function createServeApp(
   if (opts.requireAuth === true && !tokenConfigured) {
     throw new Error(
       'createServeApp: requireAuth requires a non-empty bearer token.',
+    );
+  }
+  if (opts.profile !== 'hosted-harness' && deps.hostedHarnessContract) {
+    throw new Error(
+      'createServeApp: Hosted Harness contract requires profile hosted-harness.',
+    );
+  }
+  const hostedHarnessContract =
+    opts.profile === 'hosted-harness'
+      ? (deps.hostedHarnessContract ??
+        createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!))
+      : undefined;
+  if (
+    hostedHarnessContract &&
+    hostedHarnessContract.capabilityDigest !==
+      opts.hostedHarnessCapabilityDigest
+  ) {
+    throw new Error(
+      'createServeApp: Hosted Harness contract capability digest does not match the configured digest.',
     );
   }
   const trustedLoopbackMode = isTrustedLoopbackMode({
@@ -1071,7 +1123,9 @@ export function createServeApp(
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot =
-    opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+    opts.profile !== 'hosted-harness' &&
+    !deps.ownedManagedRuntime &&
+    (deps.acpHttpEnabled ?? resolveAcpHttpEnabled(daemonEnvAtBoot));
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
@@ -1115,6 +1169,12 @@ export function createServeApp(
     createServeFeatures({
       opts,
       boundWorkspace,
+      managedSessionsAvailable:
+        deps.managedPromptService !== undefined &&
+        deps.managedGatewaySessionEvents !== undefined,
+      managedSessionCancelAvailable:
+        deps.managedPromptService?.cancel !== undefined &&
+        deps.managedGatewaySessionEvents !== undefined,
       persistSettingAvailable: deps.persistSetting !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
@@ -1260,6 +1320,15 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const ownsDefaultBridge =
+    injectedWorkspaceRegistry === undefined && deps.bridge === undefined;
+  const defaultGenerationGuard = ownsDefaultBridge
+    ? createWorkspaceGenerationGuard()
+    : undefined;
+  const managedToolRuntimeProviderRef: {
+    current: ManagedRuntimeProvider | undefined;
+  } = { current: undefined };
+  let ownedEmbedManagedRuntimeProvider: ManagedRuntimeProvider | undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1288,25 +1357,38 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs || deps.managedChildProcesses
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              processRegistry: deps.managedChildProcesses?.registry,
-              childHeapPolicy: deps.managedChildProcesses?.policy,
-              ...(deps.managedChildProcesses
-                ? {
-                    reclaimIdleChild: async (signal?: AbortSignal) => {
-                      await reclaimIdleAcp?.(
-                        hashDaemonWorkspace(boundWorkspace),
-                        signal,
-                      );
-                    },
-                  }
-                : {}),
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      executionEngines: createDaemonExecutionEngines({
+        workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        runtimeEnvironment: primaryEffectiveEnv ?? process.env,
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+        generationGuard:
+          defaultGenerationGuard ??
+          (() => {
+            throw new Error(
+              'Default Managed pairing requires a generation guard.',
+            );
+          })(),
+        argv: daemonManagedHostArgv(opts),
+        workspaceId: hashDaemonWorkspace(boundWorkspace),
+        requireManagedForOrdinary: opts.profile === 'hosted-harness',
+        legacyFactory: createSpawnChannelFactory({
+          processRegistry: deps.managedChildProcesses?.registry,
+          childHeapPolicy: deps.managedChildProcesses?.policy,
+          ...(deps.managedChildProcesses
+            ? {
+                reclaimIdleChild: async (signal?: AbortSignal) => {
+                  await reclaimIdleAcp?.(
+                    hashDaemonWorkspace(boundWorkspace),
+                    signal,
+                  );
+                },
+              }
+            : {}),
+          ...(acpChildArgs ? { extraArgs: acpChildArgs } : {}),
+        }),
+        resolveToolRuntimeProvider: () => managedToolRuntimeProviderRef.current,
+      }),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1319,6 +1401,9 @@ export function createServeApp(
       fileSystem: createBridgeFileSystemAdapter(fsFactory, {
         allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
       }),
+      childEnvOverrides: {
+        [PRIVATE_MANAGED_TOOL_RUNTIME_ENV]: PRIVATE_MANAGED_TOOL_RUNTIME_VALUE,
+      },
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -1486,6 +1571,16 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  if (ownsDefaultBridge) {
+    ownedEmbedManagedRuntimeProvider =
+      opts.profile === 'hosted-harness'
+        ? new BrokerManagedRuntimeProvider({
+            baseUrl: opts.managedRuntimeBrokerUrl!,
+            token: opts.managedRuntimeBrokerToken!,
+          })
+        : new LocalManagedRuntimeProvider(workspaceRegistry);
+    managedToolRuntimeProviderRef.current = ownedEmbedManagedRuntimeProvider;
+  }
   const getSessionBridges =
     deps.getSessionBridges ??
     (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge));
@@ -2273,6 +2368,8 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
+  installHostedHarnessContractMiddleware(app, hostedHarnessContract);
+
   if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
     // `/health` AFTER `bearerAuth` so probes must carry the token.
@@ -2282,23 +2379,6 @@ export function createServeApp(
   }
 
   installJsonBodyParser(app);
-
-  const hostedHarness =
-    opts.profile === 'hosted-harness'
-      ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
-      : undefined;
-  installHostedHarnessContractMiddleware(app, hostedHarness);
-  if (hostedHarness) {
-    registerHostedHarnessSessionRoutes(
-      app,
-      hostedHarness,
-      primaryBoundWorkspace,
-    );
-    app.use((req, res, next) => {
-      if (req.path === '/capabilities' || req.path === '/health') next();
-      else res.sendStatus(404);
-    });
-  }
 
   // Mutation-route gate factory. Trusted primary loopback requests have
   // operator authority; strict routes otherwise require verified credentials.
@@ -2455,7 +2535,6 @@ export function createServeApp(
     });
   }
   registerCapabilitiesRoutes(app, {
-    hostedHarness,
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
     currentServeFeatures,
@@ -2470,6 +2549,7 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    hostedHarnessContract,
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -3160,6 +3240,23 @@ export function createServeApp(
   const virtualSubagentSessions = new VirtualSubagentSessions();
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
+  if (deps.managedRuntimeWorkerProvider) {
+    registerManagedRuntimeWorkerRoutes(app, {
+      provider: deps.managedRuntimeWorkerProvider,
+      owned: deps.ownedManagedRuntime,
+      authorize: (req, res, next) => {
+        if (
+          listenerIdentityOf(req).kind !== 'primary' ||
+          !requestWasAuthenticated(req)
+        ) {
+          res.status(401).json({ error: 'Unauthorized' });
+          return;
+        }
+        next();
+      },
+    });
+  }
+
   registerSessionCatalogRoutes(app, workspaceRegistry);
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -3176,6 +3273,12 @@ export function createServeApp(
     languageCodes,
     virtualSubagentSessions,
     conversationRuntimeActivity,
+    managedPromptService: deps.managedPromptService,
+    managedGatewaySessionEvents: deps.managedGatewaySessionEvents,
+    hostedHarness: opts.profile === 'hosted-harness',
+    ...(hostedHarnessContract
+      ? { hostedHarnessBootId: hostedHarnessContract.bootId }
+      : {}),
     ...(standaloneSessionService ? { standaloneSessionService } : {}),
     isLiveSessionActive: (sessionId: string) =>
       liveCoordinator.isActiveSession(sessionId),
@@ -3851,6 +3954,8 @@ export function createServeApp(
           .listManaged()
           .map((runtime) => runtime.bridge.shutdown()),
       );
+      stopAppResource(() => defaultGenerationGuard?.close());
+      stopAppResource(() => ownedEmbedManagedRuntimeProvider?.dispose());
       const errors = [
         ...cleanupErrors,
         ...[...drains, ...bridgeDrains]

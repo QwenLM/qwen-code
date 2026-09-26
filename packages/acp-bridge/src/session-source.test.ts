@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isManagedGatewaySessionSourceType,
   isReservedStandaloneSessionSourceType,
   parseSessionSource,
 } from './session-source.js';
@@ -47,5 +48,11 @@ describe('parseSessionSource', () => {
     expect(isReservedStandaloneSessionSourceType('standalone')).toBe(true);
     expect(isReservedStandaloneSessionSourceType('default')).toBe(false);
     expect(isReservedStandaloneSessionSourceType(undefined)).toBe(false);
+  });
+
+  it('identifies managed-gateway Tool Runtime sessions', () => {
+    expect(isManagedGatewaySessionSourceType('managed-gateway')).toBe(true);
+    expect(isManagedGatewaySessionSourceType('default')).toBe(false);
+    expect(isManagedGatewaySessionSourceType(undefined)).toBe(false);
   });
 });

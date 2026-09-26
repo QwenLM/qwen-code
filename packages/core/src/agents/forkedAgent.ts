@@ -42,6 +42,7 @@ import {
   type RuntimeContentGeneratorView,
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { createManagedChildExecutionScope } from '../tools/managed-tool-session.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
 import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
@@ -670,100 +671,119 @@ export async function runForkedAgent(
   // wrapper's bound tools resolve `this.config.getPermissionManager()`
   // through the prototype chain to the scoped wrapper's own override,
   // while `this.config.getApprovalMode()` lands on YOLO.
-  const { config: yoloConfig, cleanup: restoreParentPM } =
-    await createApprovalModeOverride(params.config, ApprovalMode.YOLO);
-  // YOLO never triggers strip → restoreParentPM is a no-op. Kept for
-  // API symmetry with the other createApprovalModeOverride callers; if
-  // this function ever switches away from YOLO the lifecycle stays
-  // correct without further refactor.
-  const filesTouched = new Set<string>();
-  const pendingMutatingPaths = new Map<string, string[]>();
-  const filesWritten = new Set<string>();
-
-  const initialMessages =
-    params.extraHistory &&
-    (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
-      ? params.extraHistory
-      : undefined;
-  const promptConfig: PromptConfig = {
-    systemPrompt: params.systemPrompt,
-    initialMessages,
-  };
-  const modelSelector =
-    params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
-  const modelRuntime = await buildForkedModelRuntime(
-    params.config,
-    yoloConfig,
-    modelSelector,
-  );
-  const modelConfig: ModelConfig = {
-    model: modelRuntime.model,
-  };
-  const runConfig: RunConfig = {
-    max_turns: params.maxTurns,
-    max_time_minutes: params.maxTimeMinutes,
-  };
-  const toolConfig: ToolConfig | undefined =
-    params.tools !== undefined ? { tools: params.tools } : undefined;
-  const executionController = createChildAbortController(params.abortSignal);
-  let completedAfterWrite = false;
-  // Identity marker for the run's own early-completion abort, so the
-  // execute catch below can tell it apart from an external cancel
-  // that races it — an external cancel must still reject the run.
-  const selfAbortReason = new DOMException(
-    'Early completion after successful write',
-    'AbortError',
-  );
-
-  const emitter = new AgentEventEmitter();
-  emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    const filePaths = extractFilePathsFromArgs(event.args);
-    for (const filePath of filePaths) {
-      filesTouched.add(filePath);
-    }
-    if (isMutatingFileTool(event.name)) {
-      pendingMutatingPaths.set(event.callId, filePaths);
-    }
+  const scope = createManagedChildExecutionScope(params.config);
+  let forkConfig: Config | undefined;
+  let restoreParentPM: (() => void) | undefined;
+  scope.onClose(async () => {
+    await forkConfig?.getToolRegistry().stop();
+    restoreParentPM?.();
   });
-  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
-    if (!event.success) {
-      pendingMutatingPaths.delete(event.callId);
-      return;
-    }
-    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
-    pendingMutatingPaths.delete(event.callId);
-    for (const filePath of filePaths) {
-      filesWritten.add(filePath);
-    }
-    const completesEarly =
-      params.completeAfterFirstSuccessfulWrite === true
-        ? filePaths.length > 0
-        : typeof params.completeAfterFirstSuccessfulWrite === 'function'
-          ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
-          : false;
-    if (completesEarly && !executionController.signal.aborted) {
-      completedAfterWrite = true;
-      // Defer the abort out of this emitter handler: agent-core emits a
-      // parallel batch's TOOL_RESULT events one by one, and aborting
-      // synchronously re-enters its onAbort mid-emission, which replaces
-      // the still-unemitted real successes of the same batch with
-      // synthetic cancellation failures — truncating filesWritten below
-      // the writes that actually landed on disk.
-      setImmediate(() => executionController.abort(selfAbortReason));
-    }
-  });
-
+  const executionController = createChildAbortController(
+    scope.signal
+      ? params.abortSignal
+        ? AbortSignal.any([params.abortSignal, scope.signal])
+        : scope.signal
+      : params.abortSignal,
+  );
   try {
-    const headless = await AgentHeadless.create(
-      params.name,
-      yoloConfig,
-      promptConfig,
-      modelConfig,
-      runConfig,
-      toolConfig,
-      emitter,
-      undefined,
-      modelRuntime.runtimeView,
+    const approval = await scope.run(() =>
+      createApprovalModeOverride(scope.config, ApprovalMode.YOLO),
+    );
+    const yoloConfig = approval.config;
+    forkConfig = yoloConfig;
+    restoreParentPM = approval.cleanup;
+    // YOLO never triggers strip → restoreParentPM is a no-op. Kept for
+    // API symmetry with the other createApprovalModeOverride callers; if
+    // this function ever switches away from YOLO the lifecycle stays
+    // correct without further refactor.
+    const filesTouched = new Set<string>();
+    const pendingMutatingPaths = new Map<string, string[]>();
+    const filesWritten = new Set<string>();
+
+    const initialMessages =
+      params.extraHistory &&
+      (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
+        ? params.extraHistory
+        : undefined;
+    const promptConfig: PromptConfig = {
+      systemPrompt: params.systemPrompt,
+      initialMessages,
+    };
+    const modelSelector =
+      params.model ??
+      params.config.getFastModel?.() ??
+      params.config.getModel();
+    const modelRuntime = await scope.run(() =>
+      buildForkedModelRuntime(params.config, yoloConfig, modelSelector),
+    );
+    const modelConfig: ModelConfig = {
+      model: modelRuntime.model,
+    };
+    const runConfig: RunConfig = {
+      max_turns: params.maxTurns,
+      max_time_minutes: params.maxTimeMinutes,
+    };
+    const toolConfig: ToolConfig | undefined =
+      params.tools !== undefined ? { tools: params.tools } : undefined;
+    let completedAfterWrite = false;
+    // Identity marker for the run's own early-completion abort, so the
+    // execute catch below can tell it apart from an external cancel
+    // that races it — an external cancel must still reject the run.
+    const selfAbortReason = new DOMException(
+      'Early completion after successful write',
+      'AbortError',
+    );
+
+    const emitter = new AgentEventEmitter();
+    emitter.on(AgentEventType.TOOL_CALL, (event) => {
+      const filePaths = extractFilePathsFromArgs(event.args);
+      for (const filePath of filePaths) {
+        filesTouched.add(filePath);
+      }
+      if (isMutatingFileTool(event.name)) {
+        pendingMutatingPaths.set(event.callId, filePaths);
+      }
+    });
+    emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+      if (!event.success) {
+        pendingMutatingPaths.delete(event.callId);
+        return;
+      }
+      const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+      pendingMutatingPaths.delete(event.callId);
+      for (const filePath of filePaths) {
+        filesWritten.add(filePath);
+      }
+      const completesEarly =
+        params.completeAfterFirstSuccessfulWrite === true
+          ? filePaths.length > 0
+          : typeof params.completeAfterFirstSuccessfulWrite === 'function'
+            ? filePaths.some(params.completeAfterFirstSuccessfulWrite)
+            : false;
+      if (completesEarly && !executionController.signal.aborted) {
+        completedAfterWrite = true;
+        // Defer the abort out of this emitter handler: agent-core emits a
+        // parallel batch's TOOL_RESULT events one by one, and aborting
+        // synchronously re-enters its onAbort mid-emission, which replaces
+        // the still-unemitted real successes of the same batch with
+        // synthetic cancellation failures — truncating filesWritten below
+        // the writes that actually landed on disk.
+        setImmediate(() => executionController.abort(selfAbortReason));
+      }
+    });
+
+    const headless = await scope.run(() =>
+      AgentHeadless.create(
+        params.name,
+        yoloConfig,
+        promptConfig,
+        modelConfig,
+        runConfig,
+        toolConfig,
+        emitter,
+        undefined,
+        modelRuntime.runtimeView,
+      ),
     );
 
     const context = new ContextState();
@@ -771,7 +791,9 @@ export async function runForkedAgent(
     context.set('hook_context', '');
     const execute = () =>
       runWithForkedModelRuntime(modelRuntime, async () => {
-        await headless.execute(context, executionController.signal);
+        await scope.run(() =>
+          headless.execute(context, executionController.signal),
+        );
       });
 
     try {
@@ -851,14 +873,17 @@ export async function runForkedAgent(
     };
   } finally {
     executionController.abort();
+    await scope.close();
     // Release the per-fork ToolRegistry so AgentTool / SkillTool
     // instances dispose their change-listeners on shared
     // SubagentManager / SkillManager. Same shape as the spawn-path
     // finallys in `agent.ts` and `background-agent-resume.ts`.
-    void yoloConfig
-      .getToolRegistry()
-      .stop()
-      .catch(() => {});
-    restoreParentPM();
+    if (!scope.signal) {
+      void forkConfig
+        ?.getToolRegistry()
+        .stop()
+        .catch(() => {});
+      restoreParentPM?.();
+    }
   }
 }

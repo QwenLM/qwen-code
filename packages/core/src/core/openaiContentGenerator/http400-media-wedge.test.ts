@@ -196,6 +196,7 @@ function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
     ...(modalities ? { modalities } : {}),
   };
   const cliConfig = {
+    getRuntimeEnvironment: () => process.env,
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
     getSessionId: () => 'test-session',

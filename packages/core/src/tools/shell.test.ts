@@ -1708,6 +1708,42 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('Command was cancelled');
       });
 
+      it('awaits the sed checkpoint backup after cancellation before returning', async () => {
+        const controller = new AbortController();
+        let finishBackup!: () => void;
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\n',
+          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
+        });
+        mockFileHistoryService.trackEdit.mockReturnValue(
+          new Promise<void>((resolve) => {
+            finishBackup = resolve;
+          }),
+        );
+        const invocation = shellTool.build({
+          command: "sed -i 's/foo/bar/' file.txt",
+          directory: '/test/dir',
+          is_background: false,
+        });
+        await confirmSedEdit(invocation);
+        let settled = false;
+        const result = invocation.execute(controller.signal).then((value) => {
+          settled = true;
+          return value;
+        });
+        await vi.waitFor(() =>
+          expect(mockFileHistoryService.trackEdit).toHaveBeenCalledTimes(1),
+        );
+        controller.abort();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const settledBeforeBackup = settled;
+        finishBackup();
+        const final = await result;
+        expect(settledBeforeBackup).toBe(false);
+        expect(final.executionStatus).toBe('cancelled');
+        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      });
+
       it('awaits an in-flight sed write after cancellation starts', async () => {
         const abortController = new AbortController();
         let resolveWrite!: () => void;
@@ -3895,6 +3931,7 @@ describe('ShellTool', () => {
 
       const result = await promise;
 
+      expect(result.executionStatus).toBe('cancelled');
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Command was cancelled');
       expect(result.returnDisplay).toMatchObject({

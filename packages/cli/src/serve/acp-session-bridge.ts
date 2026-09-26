@@ -129,6 +129,7 @@ export {
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   PromptDeadlineExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,

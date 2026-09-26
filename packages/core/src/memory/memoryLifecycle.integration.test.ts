@@ -122,31 +122,40 @@ describe('managed auto-memory lifecycle integration', () => {
   });
 
   it('supports a durable memory lifecycle across extraction, recall, and dream', async () => {
+    const extractionHistory = [
+      { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+    ];
     const firstExtraction = mgr.scheduleExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [
         { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
       ],
     });
 
+    const queuedHistory = [
+      ...extractionHistory,
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'The latency dashboard is https://grafana.example/d/api-latency',
+          },
+        ],
+      },
+    ];
     const queuedExtraction = await mgr.scheduleExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
-      history: [
-        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
-        { role: 'model', parts: [{ text: 'Understood.' }] },
-        {
-          role: 'user',
-          parts: [
-            {
-              text: 'The latency dashboard is https://grafana.example/d/api-latency',
-            },
-          ],
-        },
+      extractionHistory: [
+        ...queuedHistory,
+        { role: 'model', parts: [{ text: 'Noted.' }] },
       ],
+      history: queuedHistory,
     });
 
     expect(queuedExtraction.skippedReason).toBe('queued');

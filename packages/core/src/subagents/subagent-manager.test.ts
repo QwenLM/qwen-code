@@ -15,8 +15,9 @@ import {
   SubagentErrorCode,
 } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import type { Config } from '../config/config.js';
+import { type Config, deriveApprovalModeConfig } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { createManagedAgentTestConfig } from '../agents/managed-child-execution-test-utils.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -3546,6 +3547,35 @@ bad`);
       afterEach(() => {
         mockAgentHeadlessCreate.mockReset();
         mockCreateContentGenerator.mockReset();
+      });
+
+      it('inherits the supplied launch approval overlay without allocating a second managed scope', async () => {
+        const { config: parent, sessions } = createManagedAgentTestConfig();
+        const scope = parent.createManagedChildExecutionScope();
+        vi.spyOn(scope.config, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+        const approval = deriveApprovalModeConfig(
+          scope.config,
+          ApprovalMode.PLAN,
+        );
+        vi.spyOn(approval.config, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_OPENAI,
+        });
+        const { dispose } = await manager.createAgentHeadless(
+          agentConfig,
+          approval.config,
+          { managedScope: scope },
+        );
+        const captured = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0]!,
+        ).runtimeContext as Config;
+        expect(captured.getApprovalMode()).toBe(ApprovalMode.PLAN);
+        expect(sessions).toHaveLength(2);
+        await dispose();
+        await parent.closeManagedToolSession();
+        approval.cleanup();
       });
 
       it('removes the interactive question tool from regular subagents', async () => {

@@ -771,11 +771,48 @@ describe('serve fast path argument parsing', () => {
         'external-tool-guard-timeout-ms',
         ['--external-tool-guard-timeout-ms', '3000'],
       ],
+      ['experimental-managed-agents', ['--experimental-managed-agents']],
+      [
+        'experimental-managed-runtime-worker',
+        ['--experimental-managed-runtime-worker'],
+      ],
+      [
+        'experimental-managed-runtime-auto-local',
+        ['--experimental-managed-runtime-auto-local'],
+      ],
+      [
+        'experimental-managed-runtime-url',
+        ['--experimental-managed-runtime-url', 'http://127.0.0.1:4181'],
+      ],
+      [
+        'experimental-managed-runtime-token',
+        ['--experimental-managed-runtime-token', 'test-token'],
+      ],
+      ['profile', ['--profile', 'hosted-harness']],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:4182'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      'experimental-managed-agents',
+      'experimental-managed-runtime-worker',
+      'experimental-managed-runtime-auto-local',
+      'experimental-managed-runtime-url',
+      'experimental-managed-runtime-token',
+      // The Hosted Harness profile and its Broker credentials are resolved by
+      // the full yargs parser.
+      'profile',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
+
       'channel',
       'profile',
       'hosted-harness-capability-digest',

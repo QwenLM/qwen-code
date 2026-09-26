@@ -1751,6 +1751,11 @@ export class SessionWriterLease {
     return this.takenOverCommitProof;
   }
 
+  /** Whether this lease writes Managed (schema 3) lock records. */
+  get writesManagedLockRecords(): boolean {
+    return this.managedFormatVersion !== undefined;
+  }
+
   static async acquire(
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {

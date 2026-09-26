@@ -77,12 +77,14 @@ export type Runtime = 'node' | 'bun' | 'unknown';
  *
  * @returns true when certificate verification should be skipped
  */
-export function isTlsVerificationDisabled(): boolean {
-  const flag = process.env['QWEN_TLS_INSECURE'];
+export function isTlsVerificationDisabled(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  const flag = environment['QWEN_TLS_INSECURE'];
   if (flag !== undefined && /^(1|true|yes|on)$/i.test(flag.trim())) {
     return true;
   }
-  return process.env['NODE_TLS_REJECT_UNAUTHORIZED'] === '0';
+  return environment['NODE_TLS_REJECT_UNAUTHORIZED'] === '0';
 }
 
 /**
@@ -139,6 +141,7 @@ export type SDKType = 'openai' | 'anthropic';
 export function buildRuntimeFetchOptions(
   sdkType: 'openai',
   proxyUrl?: string,
+  environment?: Readonly<NodeJS.ProcessEnv>,
 ): OpenAIRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options for Anthropic SDK
@@ -146,6 +149,7 @@ export function buildRuntimeFetchOptions(
 export function buildRuntimeFetchOptions(
   sdkType: 'anthropic',
   proxyUrl?: string,
+  environment?: Readonly<NodeJS.ProcessEnv>,
 ): AnthropicRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options based on the detected runtime and SDK type
@@ -158,8 +162,13 @@ export function buildRuntimeFetchOptions(
 export function buildRuntimeFetchOptions(
   sdkType: SDKType,
   proxyUrl?: string,
+  environment?: Readonly<NodeJS.ProcessEnv>,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
+
+  if (environment !== undefined && environment !== process.env) {
+    return buildFetchOptionsWithDispatcher(sdkType, proxyUrl, environment);
+  }
 
   // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
   // to let SDK's timeout parameter control the total request time. This ensures
@@ -246,11 +255,12 @@ const NO_DISPATCHER_FALLBACK = {
 export function getOrCreateSharedDispatcher(
   proxyUrl: string,
   insecure: boolean = isTlsVerificationDisabled(),
+  noProxy?: string,
 ): Dispatcher {
   // Secure and insecure dispatchers must not share a cache entry, otherwise a
   // preconnect warmed without the flag could hand a verifying dispatcher to a
   // client that expects verification disabled (or vice versa).
-  const cacheKey = insecure ? `${proxyUrl}#insecure` : proxyUrl;
+  const cacheKey = JSON.stringify([proxyUrl, insecure, noProxy]);
   const cached = dispatcherCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -260,17 +270,18 @@ export function getOrCreateSharedDispatcher(
   const dispatcher = new EnvHttpProxyAgent({
     httpProxy: proxyUrl,
     httpsProxy: proxyUrl,
+    ...(noProxy === undefined ? {} : { noProxy }),
     headersTimeout: 0,
     bodyTimeout: 0,
     keepAliveTimeout: 60_000,
     // EnvHttpProxyAgent can dispatch either directly or through a proxy.
     // `connect` covers a direct NO_PROXY connection, `requestTls` covers the
     // origin through a proxy, and `proxyTls` covers an HTTPS proxy itself.
-    ...(insecure
+    ...(insecure || noProxy !== undefined
       ? {
-          connect: { rejectUnauthorized: false },
-          requestTls: { rejectUnauthorized: false },
-          proxyTls: { rejectUnauthorized: false },
+          connect: { rejectUnauthorized: !insecure },
+          requestTls: { rejectUnauthorized: !insecure },
+          proxyTls: { rejectUnauthorized: !insecure },
         }
       : {}),
   });
@@ -743,8 +754,9 @@ function recordProxyFailure(hostname: string): number {
 function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
+  environment?: Readonly<NodeJS.ProcessEnv>,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
-  const insecure = isTlsVerificationDisabled();
+  const insecure = isTlsVerificationDisabled(environment);
   const { Agent, fetch: undiciFetch } = requireUndici();
   // When no proxy is configured, use a cached plain undici Agent with disabled
   // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
@@ -752,7 +764,11 @@ function buildFetchOptionsWithDispatcher(
   // backends (LM Studio, Ollama, llama.cpp, MLX). The Agent is cached for
   // connection pool reuse, matching the proxy path's caching behavior.
   if (!proxyUrl) {
-    const NO_PROXY_KEY = insecure ? '__no_proxy__#insecure' : '__no_proxy__';
+    const NO_PROXY_KEY = insecure
+      ? '__no_proxy__#insecure'
+      : environment !== undefined
+        ? '__no_proxy__#secure'
+        : '__no_proxy__';
     let dispatcher = dispatcherCache.get(NO_PROXY_KEY);
     if (!dispatcher) {
       dispatcher = new Agent({
@@ -761,7 +777,9 @@ function buildFetchOptionsWithDispatcher(
         keepAliveTimeout: 60_000,
         // For a direct (non-proxy) Agent, `connect` options flow straight to
         // the TLS connector, so this disables upstream cert verification.
-        ...(insecure ? { connect: { rejectUnauthorized: false } } : {}),
+        ...(insecure || environment !== undefined
+          ? { connect: { rejectUnauthorized: !insecure } }
+          : {}),
       });
       dispatcherCache.set(NO_PROXY_KEY, dispatcher);
     }
@@ -769,7 +787,11 @@ function buildFetchOptionsWithDispatcher(
   }
 
   try {
-    const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure);
+    const noProxy =
+      environment === undefined
+        ? undefined
+        : (environment['no_proxy'] ?? environment['NO_PROXY'] ?? '');
+    const dispatcher = getOrCreateSharedDispatcher(proxyUrl, insecure, noProxy);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
     // major version from the packaged one (e.g. v8 vs v7), which
@@ -777,6 +799,14 @@ function buildFetchOptionsWithDispatcher(
     // The no-proxy branch above also pins undiciFetch for consistency.
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   } catch (error) {
+    if (environment !== undefined) {
+      throw new Error(
+        'Failed to create the configured model proxy dispatcher.',
+        {
+          cause: redactProxyError(error),
+        },
+      );
+    }
     // Log dispatcher creation failure - requests will fallback to direct connection
     // bypassing the configured proxy. This is important for environments requiring
     // proxy for security controls (TLS inspection, traffic logging).

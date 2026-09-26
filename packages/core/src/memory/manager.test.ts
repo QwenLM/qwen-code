@@ -17,6 +17,8 @@ import {
 } from './paths.js';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { Content } from '@google/genai';
+import { captureAutoMemoryExtractionHistory } from './extractionAgentPlanner.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -93,6 +95,7 @@ describe('MemoryManager', () => {
       void mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -140,6 +143,7 @@ describe('MemoryManager', () => {
           mgr.scheduleExtract({
             projectRoot,
             sessionId: 'sess',
+            extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
             history: [{ role: 'user', parts: [{ text: 'hi' }] }],
           }),
         ).rejects.toBe(failure);
@@ -168,6 +172,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -175,6 +180,84 @@ describe('MemoryManager', () => {
       await mgr.drain();
       const tasks = mgr.listTasksByType('extract', projectRoot);
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
+    });
+
+    it('returns extraction errors without an unhandled cleanup rejection', async () => {
+      const failure = new Error('missing extraction context');
+      vi.mocked(runAutoMemoryExtract).mockRejectedValue(failure);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const mgr = new MemoryManager();
+        await expect(
+          mgr.scheduleExtract({
+            projectRoot,
+            sessionId: 'sess-1',
+            extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
+            history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          }),
+        ).rejects.toBe(failure);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+        expect(await mgr.drain()).toBe(true);
+        expect(mgr.listTasksByType('extract', projectRoot)[0].status).toBe(
+          'failed',
+        );
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('records a queued extraction failure without an unhandled launch rejection', async () => {
+      const failure = new Error('queued extraction failed');
+      let finishFirst!: (
+        result: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+        )
+        .mockRejectedValueOnce(failure);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const mgr = new MemoryManager();
+        const params = {
+          projectRoot,
+          sessionId: 'sess-1',
+          extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        };
+        const first = mgr.scheduleExtract(params);
+        await vi.waitFor(() =>
+          expect(runAutoMemoryExtract).toHaveBeenCalledOnce(),
+        );
+        const queued = await mgr.scheduleExtract(params);
+        expect(queued.skippedReason).toBe('queued');
+        finishFirst({
+          touchedTopics: [],
+          cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+        });
+        await first;
+        await mgr.drain();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        expect(
+          mgr
+            .listTasksByType('extract', projectRoot)
+            .some(
+              (task) =>
+                task.status === 'failed' && task.error === failure.message,
+            ),
+        ).toBe(true);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
     });
 
     it('records a session mismatch as skipped', async () => {
@@ -190,6 +273,7 @@ describe('MemoryManager', () => {
         projectRoot,
         sessionId: 'sess-1',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -233,6 +317,21 @@ describe('MemoryManager', () => {
         const result = await mgr.scheduleExtract({
           projectRoot,
           sessionId: 'sess-1',
+          extractionHistory: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'write_file',
+                    args: {
+                      file_path: path.join(projectRoot, filePath),
+                    },
+                  },
+                },
+              ],
+            },
+          ],
           history: [
             {
               role: 'model',
@@ -270,6 +369,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: [
           {
             role: 'model',
@@ -318,6 +418,7 @@ describe('MemoryManager', () => {
       const firstPromise = mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'first' }] }],
         history: [{ role: 'user', parts: [{ text: 'first' }] }],
       });
 
@@ -325,6 +426,7 @@ describe('MemoryManager', () => {
       const queued = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'second' }] }],
         history: [{ role: 'user', parts: [{ text: 'second' }] }],
       });
       expect(queued.skippedReason).toBe('queued');
@@ -341,6 +443,85 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps each session snapshot while extraction is queued behind another session', async () => {
+      let resolveFirst!: (
+        result: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+      ) => void;
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+        )
+        .mockResolvedValue({
+          touchedTopics: [],
+          cursor: {
+            sessionId: 'session-b',
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      const mgr = new MemoryManager();
+      const firstConfig = makeMockConfig({ getSessionId: () => 'session-a' });
+      const secondConfig = makeMockConfig({ getSessionId: () => 'session-b' });
+      const liveHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'Session A preference' }] },
+        { role: 'model', parts: [{ text: 'A response' }] },
+      ];
+      const chat = { getHistoryTailShallow: () => liveHistory };
+      const firstSnapshot = captureAutoMemoryExtractionHistory(chat, {});
+      const first = mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'session-a',
+        config: firstConfig,
+        history: structuredClone(liveHistory),
+        extractionHistory: firstSnapshot,
+      });
+      liveHistory[0].parts![0].text = 'Session B preference';
+      liveHistory[1].parts![0].text = 'B response';
+      const queuedSnapshot = captureAutoMemoryExtractionHistory(chat, {});
+      const queued = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'session-b',
+        config: secondConfig,
+        history: structuredClone(liveHistory),
+        extractionHistory: queuedSnapshot,
+      });
+      expect(queued.skippedReason).toBe('queued');
+      liveHistory[0].parts![0].text = 'A later unscheduled turn';
+      liveHistory.length = 0;
+      resolveFirst({
+        touchedTopics: [],
+        cursor: { sessionId: 'session-a', updatedAt: new Date().toISOString() },
+      });
+      await first;
+      await mgr.drain({ timeoutMs: 1000 });
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls.map(([params]) => ({
+          sessionId: params.sessionId,
+          config: params.config,
+          extractionHistory: params.extractionHistory,
+        })),
+      ).toEqual([
+        {
+          sessionId: 'session-a',
+          config: firstConfig,
+          extractionHistory: [
+            { role: 'user', parts: [{ text: 'Session A preference' }] },
+            { role: 'model', parts: [{ text: 'A response' }] },
+          ],
+        },
+        {
+          sessionId: 'session-b',
+          config: secondConfig,
+          extractionHistory: [
+            { role: 'user', parts: [{ text: 'Session B preference' }] },
+            { role: 'model', parts: [{ text: 'B response' }] },
+          ],
+        },
+      ]);
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: ['user'],
@@ -353,6 +534,7 @@ describe('MemoryManager', () => {
       await mgrA.scheduleExtract({
         projectRoot,
         sessionId: 'sess-a',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
       await mgrA.drain();
@@ -658,11 +840,13 @@ describe('MemoryManager', () => {
         mgr.scheduleExtract({
           projectRoot: '/project-a',
           sessionId: 'sess',
+          extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
           history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         }),
         mgr.scheduleExtract({
           projectRoot: '/project-b',
           sessionId: 'sess',
+          extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
           history: [{ role: 'user', parts: [{ text: 'hi' }] }],
         }),
       ]);
@@ -698,6 +882,7 @@ describe('MemoryManager', () => {
       await mgr.scheduleExtract({
         projectRoot: '/p',
         sessionId: 'sess',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
       await mgr.drain();
@@ -727,6 +912,7 @@ describe('MemoryManager', () => {
       await mgr.scheduleExtract({
         projectRoot: '/p',
         sessionId: 'sess',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
       await mgr.drain();
@@ -738,6 +924,7 @@ describe('MemoryManager', () => {
       await mgr.scheduleExtract({
         projectRoot: '/p',
         sessionId: 'sess-2',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi again' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi again' }] }],
       });
       await mgr.drain();
@@ -1118,6 +1305,9 @@ describe('MemoryManager', () => {
       void mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-extract',
+        extractionHistory: [
+          { role: 'user', parts: [{ text: 'do some work' }] },
+        ],
         history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
         config,
       });
@@ -1380,6 +1570,7 @@ describe('MemoryManager', () => {
       void mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -1389,6 +1580,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess-2',
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
       expect(result.skippedReason).not.toBe('already_running');
@@ -1437,6 +1629,10 @@ describe('MemoryManager', () => {
       void mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess',
+        extractionHistory: [
+          { role: 'user', parts: [{ text: 'first history' }] },
+          { role: 'model', parts: [{ text: 'first response' }] },
+        ],
         history: [
           { role: 'user', parts: [{ text: 'first history' }] },
           { role: 'model', parts: [{ text: 'first response' }] },
@@ -1449,6 +1645,10 @@ describe('MemoryManager', () => {
       const secondResult = await mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess',
+        extractionHistory: [
+          { role: 'user', parts: [{ text: 'second history' }] },
+          { role: 'model', parts: [{ text: 'second response' }] },
+        ],
         history: [
           { role: 'user', parts: [{ text: 'second history' }] },
           { role: 'model', parts: [{ text: 'second response' }] },
@@ -1461,6 +1661,10 @@ describe('MemoryManager', () => {
       const thirdResult = await mgr.scheduleExtract({
         projectRoot: '/project',
         sessionId: 'sess',
+        extractionHistory: [
+          { role: 'user', parts: [{ text: 'third history' }] },
+          { role: 'model', parts: [{ text: 'third response' }] },
+        ],
         history: [
           { role: 'user', parts: [{ text: 'third history' }] },
           { role: 'model', parts: [{ text: 'third response' }] },
@@ -1488,6 +1692,10 @@ describe('MemoryManager', () => {
       // not the second call's stale history reference.
       expect(runAutoMemoryExtract).toHaveBeenLastCalledWith(
         expect.objectContaining({
+          extractionHistory: [
+            { role: 'user', parts: [{ text: 'third history' }] },
+            { role: 'model', parts: [{ text: 'third response' }] },
+          ],
           history: [
             { role: 'user', parts: [{ text: 'third history' }] },
             { role: 'model', parts: [{ text: 'third response' }] },
@@ -1529,6 +1737,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -1567,6 +1776,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -1599,6 +1809,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -1625,6 +1836,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
@@ -1666,6 +1878,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'first' }] }],
         history: [{ role: 'user', parts: [{ text: 'first' }] }],
       });
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
@@ -1675,6 +1888,7 @@ describe('MemoryManager', () => {
         projectRoot: '/project',
         sessionId: 'sess',
         config,
+        extractionHistory: [{ role: 'user', parts: [{ text: 'trailing' }] }],
         history: [{ role: 'user', parts: [{ text: 'trailing' }] }],
       });
       expect(queuedResult.skippedReason).toBe('queued');

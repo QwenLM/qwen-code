@@ -33,6 +33,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
     } as ContentGeneratorConfig;
 
     mockCliConfig = {
+      getRuntimeEnvironment: () => process.env,
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     } as unknown as Config;
 

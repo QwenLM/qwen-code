@@ -46,15 +46,18 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
-  isManagedSessionTranscriptSync,
-  managedSessionResourceRoot,
-  readManagedSessionTitleInfoSync,
-  readManagedSessionSourceSync,
   readLastJsonStringFieldSync,
+  isManagedSessionTranscriptSync,
+  localManagedSessionKey,
+  managedSessionResourceRoot,
   readLastMatchingLineFieldSync,
+  readManagedSessionSourceSync,
+  readManagedSessionTitleInfoSync,
   readSessionTitleInfoFromFileSync,
   type MatchingRecordFieldReader,
 } from '../utils/sessionStorageUtils.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import { MANAGED_SESSION_HEADER_SUBTYPE } from '../managed-runtime/managed-session-records.js';
 import {
   isSessionArtifactRecord,
   getWebPreviewSnapshotId,
@@ -73,11 +76,16 @@ import {
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
+  readSessionTranscriptSnapshot,
   type SelectiveSessionRestoreOptions,
   type SessionLiveRestoreProjection,
   type SessionRestoreProjection,
 } from './session-transcript-reader.js';
-import { SessionExecutionEngineError } from './session-execution-engine.js';
+import {
+  assertSessionExecutionEngine,
+  SessionExecutionEngineError,
+  type SessionExecutionEngineState,
+} from './session-execution-engine.js';
 import {
   SessionWriterError,
   SessionWriterLease,
@@ -409,6 +417,7 @@ export interface ConversationRecord {
  * Data structure for resuming an existing session.
  */
 export interface ResumedSessionData extends SessionSourcesRestoreState {
+  executionEngine?: SessionExecutionEngineState;
   conversation: ConversationRecord;
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
@@ -448,6 +457,10 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+// Creation metadata is written before the first prompt, so it sits well inside
+// this head; the bound keeps a transcript without newlines from being read
+// whole just to answer whether it has a parent or a source.
+const CREATION_METADATA_SCAN_BYTES = 1024 * 1024;
 
 export interface SessionContentSearchOptions {
   /** Most recent session files to scan, default 200. */
@@ -1052,6 +1065,25 @@ export class SessionService {
     return this.getSessionFilePath(sessionId, 'active');
   }
 
+  async readExecutionEngine(
+    sessionId: string,
+  ): Promise<SessionExecutionEngineState | undefined> {
+    const snapshot = await readSessionTranscriptSnapshot(
+      this.getSessionFilePath(sessionId, 'active'),
+      sessionId,
+      false,
+    );
+    if (!snapshot) return undefined;
+    const first = snapshot.firstRecord;
+    if (
+      !first ||
+      !(await this.sessionBelongsToCurrentProject(first.sessionId, first.cwd))
+    ) {
+      throw new SessionStorageEntryError(sessionId, 'unknown_project');
+    }
+    return snapshot.executionEngine;
+  }
+
   assertLegacySessionExecution(sessionId: string): void {
     if (
       isManagedSessionTranscriptSync(this.getSessionTranscriptPath(sessionId))
@@ -1260,6 +1292,7 @@ export class SessionService {
           records = await jsonl.readLines<ChatRecord>(
             filePath,
             MAX_PROMPT_SCAN_LINES,
+            { maxBytes: CREATION_METADATA_SCAN_BYTES },
           );
         }
         if (records.length === 0) continue;
@@ -1753,6 +1786,19 @@ export class SessionService {
   private removeFileHistoryBackups(sessionId: string): void {
     fs.rmSync(
       path.join(Storage.getGlobalQwenDir(), FILE_HISTORY_DIR, sessionId),
+      { recursive: true, force: true },
+    );
+  }
+
+  /**
+   * A Managed session stores its event bodies -- prompt content, domain records
+   * -- as resources under its own directory, so removing only the transcript
+   * would orphan them. Workspace-owned resources live under a separate root and
+   * are deliberately untouched.
+   */
+  private removeManagedSessionResources(sessionId: string): void {
+    fs.rmSync(
+      managedSessionResourceRoot(this.storage.getRuntimeBaseDir(), sessionId),
       { recursive: true, force: true },
     );
   }
@@ -2960,23 +3006,6 @@ export class SessionService {
   }
 
   /**
-   * Reads all records from a session file.
-   */
-  private async readAllRecords(
-    filePath: string,
-    onIncompleteRead?: () => void,
-  ): Promise<ChatRecord[]> {
-    try {
-      return await jsonl.read<ChatRecord>(filePath, { onIncompleteRead });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        debugLogger.error('Error reading session file:', error);
-      }
-      return [];
-    }
-  }
-
-  /**
    * Reconstructs a linear conversation from tree-structured records.
    *
    * Delegates validation, parentUuid walking, and fragment aggregation to the
@@ -3103,10 +3132,9 @@ export class SessionService {
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
-    let sourceReadComplete = true;
-    const records = await this.readAllRecords(filePath, () => {
-      sourceReadComplete = false;
-    });
+    const snapshot = await readSessionTranscriptSnapshot(filePath, sessionId);
+    const records = snapshot?.records ?? [];
+    const sourceReadComplete = snapshot?.sourceReadComplete ?? true;
     if (records.length === 0) {
       return;
     }
@@ -3121,11 +3149,30 @@ export class SessionService {
       return;
     }
 
-    // Reconstruct linear history
-    const { messages, gaps } = this.reconstructHistory(records, {
-      detectGaps: true,
-    });
-    if (messages.length === 0) {
+    // A Managed log keeps the conversation inside committed events, with the
+    // bodies in the session's resource store, and writes no equivalent legacy
+    // line. Walking physical records would hand back the wrappers instead.
+    const managed = records.some(
+      (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
+    );
+    const { messages, gaps } = managed
+      ? {
+          messages: await readManagedSessionRecords({
+            transcriptPath: filePath,
+            runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+            sessionKey: localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              firstRecord.sessionId,
+            ),
+          }),
+          gaps: [] as HistoryGap[],
+        }
+      : this.reconstructHistory(records, {
+          detectGaps: true,
+        });
+    // The header proves the session exists, so an empty Managed history is a
+    // session nothing has been said in yet, not a missing one.
+    if (messages.length === 0 && !managed) {
       return;
     }
 
@@ -3143,7 +3190,7 @@ export class SessionService {
     }
 
     const lastMessage = messages[messages.length - 1];
-    stats ??= await fs.promises.stat(filePath);
+    stats = snapshot!.stats;
 
     const conversation: ConversationRecord = {
       sessionId: firstRecord.sessionId,
@@ -3177,7 +3224,8 @@ export class SessionService {
     return {
       conversation,
       filePath,
-      lastCompletedUuid: lastMessage.uuid,
+      executionEngine: snapshot!.executionEngine,
+      lastCompletedUuid: lastMessage?.uuid ?? null,
       fileHistorySnapshots,
       ...(sourceReadComplete
         ? restoreSessionSources(records, firstRecord.sessionId)
@@ -3506,10 +3554,7 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
     assertCleanupOwned?.();
-    fs.rmSync(
-      managedSessionResourceRoot(this.storage.getRuntimeBaseDir(), sessionId),
-      { recursive: true, force: true },
-    );
+    this.removeManagedSessionResources(sessionId);
   }
 
   private async removeSessionFiles(sessionId: string): Promise<boolean> {
@@ -3902,6 +3947,13 @@ export class SessionService {
         return false;
       }
 
+      // Appending a custom_title record to a Managed session would stand up a
+      // second title authority beside its committed session_metadata record and
+      // would touch the transcript outside its writer. Managed renames go
+      // through the authority, so refuse here and say why. Identified from the
+      // header rather than the execution-engine reader, which reports
+      // `unavailable` for any transcript with a completeness diagnostic and
+      // would therefore also reject legacy sessions that rename fine today.
       if (isManagedSessionTranscriptSync(filePath)) {
         throw new SessionExecutionEngineError(
           sessionId,
@@ -3988,11 +4040,19 @@ export class SessionService {
       );
     }
 
-    // Read + parse the full source transcript.
-    const records = await jsonl.read<ChatRecord>(sourcePath);
+    const snapshot = await readSessionTranscriptSnapshot(
+      sourcePath,
+      sourceSessionId,
+    );
+    const records = snapshot?.records ?? [];
     if (records.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
+    assertSessionExecutionEngine(
+      snapshot?.executionEngine,
+      sourceSessionId,
+      'legacy',
+    );
 
     if (
       !(await this.sessionBelongsToCurrentProject(
@@ -4051,6 +4111,7 @@ export class SessionService {
           (record.subtype === 'session_sources_snapshot' ||
             record.subtype === 'parent_session' ||
             record.subtype === 'session_source' ||
+            record.subtype === 'session_execution_engine' ||
             record.subtype === 'turn_result' ||
             (options.source && record.subtype === 'custom_title'))
         ),
@@ -4058,6 +4119,12 @@ export class SessionService {
     if (sourceRecords.length === 0) {
       throw new Error(`Source session not found or empty: ${sourceSessionId}`);
     }
+    const sourceEngine = records.find(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_execution_engine',
+    );
+    if (sourceEngine) sourceRecords.unshift(sourceEngine);
 
     // Rebuild the parentUuid chain in active-history order so the fork is a
     // clean linear descendant. `forkedFrom` captures the origin of each

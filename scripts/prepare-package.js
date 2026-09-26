@@ -347,6 +347,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'codeModeHost.js',
       'sandboxBwrapRelay.js',
       'sandboxFileWorker.js',
+      'managed-runtime-worker.js',
       'chunks',
       'vendor',
       '*.sb',

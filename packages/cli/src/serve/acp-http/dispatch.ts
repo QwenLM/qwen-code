@@ -1186,6 +1186,21 @@ export function toRpcError(err: unknown): {
         },
       };
     }
+    case 'PromptIdConflictError': {
+      const conflictErr = err as {
+        sessionId?: unknown;
+        promptId?: unknown;
+      };
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: {
+          errorKind: 'prompt_id_conflict',
+          sessionId: conflictErr.sessionId,
+          promptId: conflictErr.promptId,
+        },
+      };
+    }
     default:
       return {
         code: RPC.INTERNAL_ERROR,
@@ -2279,6 +2294,7 @@ export class AcpDispatcher {
                 // transcripts that carry the reserved source string.
                 if (
                   metadata === undefined ||
+                  metadata.sourceType === 'managed-gateway' ||
                   (this.liveSessionIsolation !== undefined &&
                     isReservedStandaloneSessionSource(metadata))
                 ) {

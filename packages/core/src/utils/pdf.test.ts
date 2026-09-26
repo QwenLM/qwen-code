@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   parsePDFPageRange,
   isPdftotextAvailable,
+  isPdftoppmAvailable,
   getPDFPageCount,
   extractPDFText,
   resetPdftotextCache,
@@ -22,6 +23,10 @@ import {
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+}));
+
+vi.mock('./owned-command.js', () => ({
+  runOwnedCommand: vi.fn(),
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -41,7 +46,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, rm, mkdtemp } from 'node:fs/promises';
+import { runOwnedCommand, type OwnedCommandResult } from './owned-command.js';
 const mockExecFile = vi.mocked(execFile);
 const mockReaddir = vi.mocked(readdir);
 const mockReadFile = vi.mocked(readFile);
@@ -119,6 +125,225 @@ describe('pdf utilities', () => {
     vi.clearAllMocks();
     resetPdftotextCache();
     resetPdftoppmCache();
+  });
+
+  describe('owned PDF processes', () => {
+    const completed: OwnedCommandResult = {
+      stdout: '',
+      stderr: '',
+      code: 0,
+      signal: null,
+    };
+    const owned = { requireProcessGroupExit: true, cwd: '/workspace' };
+    const mockOwned = vi.mocked(runOwnedCommand);
+
+    beforeEach(() => {
+      mockOwned.mockReset().mockResolvedValue(completed);
+      vi.mocked(rm).mockReset().mockResolvedValue(undefined);
+      vi.mocked(mkdtemp).mockReset().mockResolvedValue('/tmp/pdf-render-test');
+    });
+
+    it('uses the owned metadata command with the invocation cwd and signal', async () => {
+      const signal = new AbortController().signal;
+      mockOwned.mockResolvedValue({ ...completed, stdout: 'Pages: 7\n' });
+      await expect(
+        getPDFPageCount('/workspace/paper.pdf', { ...owned, signal }),
+      ).resolves.toBe(7);
+      expect(mockOwned).toHaveBeenCalledWith(
+        'pdfinfo',
+        ['--', '/workspace/paper.pdf'],
+        {
+          cwd: '/workspace',
+          signal,
+          timeout: 10000,
+        },
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it.each([isPdftotextAvailable, isPdftoppmAvailable])(
+      'does not share an owned probe with a cancelled invocation',
+      async (probe) => {
+        const controller = new AbortController();
+        let finish!: (value: OwnedCommandResult) => void;
+        mockOwned.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        );
+        const first = probe({ ...owned, signal: controller.signal }).catch(
+          (error: unknown) => error,
+        );
+        controller.abort(new Error('cancel first probe'));
+        await expect(probe(owned)).resolves.toBe(true);
+        finish(completed);
+        expect(await first).toBe(controller.signal.reason);
+        await expect(probe(owned)).resolves.toBe(true);
+        expect(mockOwned).toHaveBeenCalledTimes(3);
+      },
+    );
+
+    it('does not start any PDF process for a pre-aborted invocation', async () => {
+      const signal = AbortSignal.abort(new Error('already cancelled'));
+      await expect(
+        getPDFPageCount('paper.pdf', { ...owned, signal }),
+      ).rejects.toBe(signal.reason);
+      await expect(isPdftotextAvailable({ ...owned, signal })).rejects.toBe(
+        signal.reason,
+      );
+      await expect(isPdftoppmAvailable({ ...owned, signal })).rejects.toBe(
+        signal.reason,
+      );
+      await expect(
+        extractPDFText('paper.pdf', { ...owned, signal }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: expect.stringMatching(/cancelled/),
+      });
+      await expect(
+        renderPDFPagesToImages('paper.pdf', { ...owned, signal }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: expect.stringMatching(/cancelled/),
+      });
+      expect(mockOwned).not.toHaveBeenCalled();
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mkdtemp).not.toHaveBeenCalled();
+    });
+
+    it('does not classify unsupported process ownership as missing Poppler', async () => {
+      const error = Object.assign(
+        new Error('Verified process exit is unsupported'),
+        { code: 'ERR_OWNED_COMMAND_UNSUPPORTED' },
+      );
+      mockOwned.mockResolvedValue({ ...completed, code: null, error });
+      await expect(getPDFPageCount('paper.pdf', owned)).rejects.toBe(error);
+      await expect(isPdftotextAvailable(owned)).rejects.toBe(error);
+      await expect(isPdftoppmAvailable(owned)).rejects.toBe(error);
+    });
+
+    it.each(['text', 'render'] as const)(
+      'keeps the dedicated timeout outcome for owned %s',
+      async (stage) => {
+        mockOwned.mockResolvedValueOnce(completed).mockResolvedValueOnce({
+          ...completed,
+          code: null,
+          signal: 'SIGKILL',
+          error: Object.assign(new Error('Command timed out'), {
+            code: 'ETIMEDOUT',
+          }),
+        });
+        const result = await (
+          stage === 'text' ? extractPDFText : renderPDFPagesToImages
+        )('paper.pdf', owned);
+        expect(result).toMatchObject({
+          success: false,
+          error: expect.stringMatching(/timed out/),
+        });
+        expect(mockExecFile).not.toHaveBeenCalled();
+      },
+    );
+
+    it('preserves useful partial text after the owned buffer limit', async () => {
+      mockOwned.mockResolvedValueOnce(completed).mockResolvedValueOnce({
+        ...completed,
+        code: null,
+        signal: 'SIGKILL',
+        stdout: 'x'.repeat(200000),
+        error: Object.assign(new Error('buffer limit'), {
+          code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+        }),
+      });
+      const result = await extractPDFText('paper.pdf', {
+        ...owned,
+        firstPage: 3,
+        lastPage: 5,
+      });
+      expect(result).toMatchObject({
+        success: true,
+        text: expect.stringContaining('text truncated at 100000 characters'),
+      });
+      expect(mockOwned).toHaveBeenLastCalledWith(
+        'pdftotext',
+        ['-layout', '-f', '3', '-l', '5', '--', 'paper.pdf', '-'],
+        expect.objectContaining({ cwd: '/workspace', maxBuffer: 200000 }),
+      );
+    });
+
+    it('waits for owned render exit and directory cleanup before reporting cancellation', async () => {
+      const controller = new AbortController();
+      let finishCommand!: (value: OwnedCommandResult) => void;
+      let finishCleanup!: () => void;
+      mockOwned.mockResolvedValueOnce(completed).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishCommand = resolve;
+          }),
+      );
+      vi.mocked(rm).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishCleanup = resolve;
+          }),
+      );
+      let settled = false;
+      const result = renderPDFPagesToImages('paper.pdf', {
+        ...owned,
+        signal: controller.signal,
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(mockOwned).toHaveBeenCalledTimes(2));
+      controller.abort();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(rm).not.toHaveBeenCalled();
+      finishCommand({ ...completed, code: null, signal: 'SIGKILL' });
+      await vi.waitFor(() =>
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        }),
+      );
+      expect(settled).toBe(false);
+      finishCleanup();
+      await expect(result).resolves.toMatchObject({
+        success: false,
+        error: expect.stringMatching(/cancelled/),
+      });
+      expect(readdir).not.toHaveBeenCalled();
+    });
+
+    it('stops reading rendered pages when cancellation arrives during an output read', async () => {
+      const controller = new AbortController();
+      mockReaddir.mockResolvedValue(['page-1.jpg', 'page-2.jpg'] as never);
+      mockReadFile.mockImplementationOnce(async () => {
+        controller.abort();
+        return Buffer.from('first page');
+      });
+      await expect(
+        renderPDFPagesToImages('paper.pdf', {
+          ...owned,
+          signal: controller.signal,
+        }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: expect.stringMatching(/cancelled/),
+      });
+      expect(mockReadFile).toHaveBeenCalledTimes(1);
+      expect(rm).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces owned output cleanup failure instead of reporting successful media', async () => {
+      const error = new Error('cannot remove render output');
+      mockReaddir.mockResolvedValue(['page-1.jpg'] as never);
+      mockReadFile.mockResolvedValue(Buffer.from('page'));
+      vi.mocked(rm).mockRejectedValueOnce(error);
+      await expect(renderPDFPagesToImages('paper.pdf', owned)).rejects.toBe(
+        error,
+      );
+    });
   });
 
   describe('PDF budget policy helpers', () => {
@@ -404,6 +629,29 @@ describe('pdf utilities', () => {
   });
 
   describe('extractPDFText', () => {
+    it('keeps the legacy cancelled result when cancellation arrives during its shared probe', async () => {
+      const controller = new AbortController();
+      mockExecFile.mockImplementationOnce(
+        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+          controller.abort();
+          (cb as (err: null, stdout: string, stderr: string) => void)(
+            null,
+            '',
+            '',
+          );
+          return {} as ReturnType<typeof execFile>;
+        },
+      );
+      await expect(
+        extractPDFText('paper.pdf', { signal: controller.signal }),
+      ).resolves.toEqual({
+        success: false,
+        error: 'PDF text extraction was cancelled.',
+      });
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+      await expect(isPdftotextAvailable()).resolves.toBe(true);
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+    });
     it('should extract text from a PDF', async () => {
       // First call: isPdftotextAvailable check
       mockExecResult({

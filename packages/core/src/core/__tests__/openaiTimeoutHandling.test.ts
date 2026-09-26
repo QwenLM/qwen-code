@@ -45,6 +45,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
 
     // Mock config
     mockConfig = {
+      getRuntimeEnvironment: () => process.env,
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: 'openai',
         enableOpenAILogging: false,
@@ -278,6 +279,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
 
     it('should use custom timeout from config', () => {
       const customConfig = {
+        getRuntimeEnvironment: () => process.env,
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           enableOpenAILogging: false,
         }),
@@ -315,6 +317,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
 
     it('should handle missing timeout config gracefully', () => {
       const noTimeoutConfig = {
+        getRuntimeEnvironment: () => process.env,
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           enableOpenAILogging: false,
         }),

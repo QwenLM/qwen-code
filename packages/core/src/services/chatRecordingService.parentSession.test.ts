@@ -99,6 +99,130 @@ describe('ChatRecordingService - recordParentSession', () => {
     vi.restoreAllMocks();
   });
 
+  it('defers one immutable engine record to the first record of a fresh session', async () => {
+    const first = chatRecordingService.recordSessionExecutionEngine('managed');
+    const second = chatRecordingService.recordSessionExecutionEngine('managed');
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('legacy'),
+    ).rejects.toThrow(/cannot change managed/);
+    await Promise.all([first, second]);
+    // Nothing is written until the session records something, so a session
+    // that never does leaves no transcript.
+    expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+    await chatRecordingService.recordParentSession('parent-abc');
+    await chatRecordingService.flush();
+    expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+    const [engineRecord, parentRecord] = vi
+      .mocked(jsonl.writeLine)
+      .mock.calls.map((call) => call[1] as ChatRecord);
+    expect(engineRecord).toMatchObject({
+      sessionId: 'test-session-id',
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine: 'managed' },
+    });
+    // The engine record stays the root of the chain the first record extends.
+    expect(parentRecord).toMatchObject({
+      subtype: 'parent_session',
+      parentUuid: engineRecord.uuid,
+    });
+
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('managed'),
+    ).resolves.toBeUndefined();
+    await chatRecordingService.recordParentSession('parent-abc');
+    await chatRecordingService.flush();
+    expect(
+      vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.filter(
+          (call) =>
+            (call[1] as ChatRecord).subtype === 'session_execution_engine',
+        ),
+    ).toHaveLength(1);
+  });
+
+  it('persists one immutable engine record for concurrent initialization of a reopened session', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(jsonl.writeLine).mockReturnValueOnce(gate);
+    const first = chatRecordingService.recordSessionExecutionEngine('managed');
+    const second = chatRecordingService.recordSessionExecutionEngine('managed');
+    let settled = false;
+    void second.then(() => {
+      settled = true;
+    });
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('legacy'),
+    ).rejects.toThrow(/cannot change managed/);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await Promise.all([first, second]);
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+      sessionId: 'test-session-id',
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine: 'managed' },
+    });
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('managed'),
+    ).resolves.toBeUndefined();
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
+
+  it('propagates an engine write failure to every initialization caller of a reopened session', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('managed'),
+    ).rejects.toThrow();
+    await expect(
+      chatRecordingService.recordSessionExecutionEngine('managed'),
+    ).rejects.toThrow();
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces a deferred engine write failure on the first record', async () => {
+    vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+    await chatRecordingService.recordSessionExecutionEngine('managed');
+    await expect(
+      chatRecordingService.recordParentSession('parent-abc'),
+    ).resolves.toBe(false);
+    await expect(chatRecordingService.flush()).rejects.toThrow();
+  });
+
+  it('hydrates the immutable engine from physical restore evidence outside active messages', async () => {
+    const recorder = new ChatRecordingService(mockConfig);
+    recorder.activate(mockLease, {
+      conversation: { messages: [] },
+      lastCompletedUuid: null,
+      executionEngine: {
+        status: 'verified',
+        engine: 'managed',
+        recorded: true,
+        sessionId: 'test-session-id',
+        snapshot: {
+          filePath: '/test/session.jsonl',
+          dev: 1,
+          ino: 1,
+          size: 1,
+          lastUpdated: new Date(0).toISOString(),
+        },
+      },
+    });
+    await recorder.recordSessionExecutionEngine('managed');
+    await expect(
+      recorder.recordSessionExecutionEngine('legacy'),
+    ).rejects.toThrow(/cannot change managed/);
+    expect(jsonl.writeLine).not.toHaveBeenCalled();
+  });
+
   it('records the parent session id as a parent_session system record', async () => {
     const result = await chatRecordingService.recordParentSession('parent-abc');
     await chatRecordingService.flush();

@@ -293,6 +293,7 @@ export function resolveContentGeneratorConfigWithSources(
   const validation = validateModelConfig(
     newContentGeneratorConfig as ContentGeneratorConfig,
     strictModelProvider,
+    config.getRuntimeEnvironment(),
   );
   if (!validation.valid) {
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
@@ -335,11 +336,12 @@ export function hasVertexProjectConfigured(
  */
 function usesVertexApplicationDefaultCredentials(
   config: ContentGeneratorConfig,
+  environment: Readonly<NodeJS.ProcessEnv>,
 ): boolean {
   return (
     config.authType === AuthType.USE_VERTEX_AI &&
     !config.apiKeyEnvKey &&
-    hasVertexProjectConfigured()
+    hasVertexProjectConfigured((key) => environment[key])
   );
 }
 
@@ -350,6 +352,7 @@ function usesVertexApplicationDefaultCredentials(
 export function validateModelConfig(
   config: ContentGeneratorConfig,
   isStrictModelProvider: boolean = false,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): ModelConfigValidationResult {
   const errors: Error[] = [];
 
@@ -359,7 +362,10 @@ export function validateModelConfig(
   }
 
   // API key is required for all other auth types
-  if (!config.apiKey && !usesVertexApplicationDefaultCredentials(config)) {
+  if (
+    !config.apiKey &&
+    !usesVertexApplicationDefaultCredentials(config, environment)
+  ) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
@@ -532,7 +538,11 @@ export async function createContentGenerator(
   config: Config,
   isInitialAuth?: boolean,
 ): Promise<ContentGenerator> {
-  const validation = validateModelConfig(generatorConfig, false);
+  const validation = validateModelConfig(
+    generatorConfig,
+    false,
+    config.getRuntimeEnvironment(),
+  );
   if (!validation.valid) {
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }

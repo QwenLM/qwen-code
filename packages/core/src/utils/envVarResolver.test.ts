@@ -137,6 +137,26 @@ describe('resolveEnvVarsInObject', () => {
     process.env = originalEnv;
   });
 
+  it('uses an explicit environment without ambient fallback, including nested values', () => {
+    process.env['MANAGED_TEST_KEY'] = 'ambient';
+    const input = { nested: ['$MANAGED_TEST_KEY', '${MANAGED_TEST_KEY}'] };
+    expect(resolveEnvVarsInObject(input, undefined, {})).toEqual(input);
+    expect(
+      resolveEnvVarsInObject(input, undefined, {
+        MANAGED_TEST_KEY: 'workspace',
+      }),
+    ).toEqual({
+      nested: ['workspace', 'workspace'],
+    });
+    expect(
+      resolveEnvVarsInString(
+        '$MANAGED_TEST_KEY',
+        { MANAGED_TEST_KEY: 'override' },
+        {},
+      ),
+    ).toBe('override');
+  });
+
   it('should resolve variables in nested objects', () => {
     process.env['API_KEY'] = 'secret-123';
     process.env['DB_URL'] = 'postgresql://localhost/test';

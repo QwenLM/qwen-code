@@ -30,12 +30,14 @@ export interface ServeCapabilityDescriptor {
 }
 
 export const SERVE_CAPABILITY_REGISTRY = {
+  managed_sessions: { since: 'v1' },
+  managed_session_cancel: { since: 'v1' },
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
   daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
-  session_create: { since: 'v1' },
   hosted_harness_private_v1: { since: 'v1' },
+  session_create: { since: 'v1' },
   session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -562,7 +564,8 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * advertised.
  */
 export interface AdvertiseFeatureToggles {
-  hostedHarness?: boolean;
+  managedSessionsAvailable?: boolean;
+  managedSessionCancelAvailable?: boolean;
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
@@ -620,6 +623,7 @@ export interface AdvertiseFeatureToggles {
   realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
+  hostedHarnessAvailable?: boolean;
 }
 
 /**
@@ -658,8 +662,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
-  ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'hosted_harness_private_v1',
+    (toggles) => toggles.hostedHarnessAvailable === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
@@ -833,6 +840,13 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true &&
       toggles.realtimeVoiceWebEnabled === true,
+  ],
+  ['managed_sessions', (toggles) => toggles.managedSessionsAvailable === true],
+  [
+    'managed_session_cancel',
+    (toggles) =>
+      toggles.managedSessionsAvailable === true &&
+      toggles.managedSessionCancelAvailable === true,
   ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);

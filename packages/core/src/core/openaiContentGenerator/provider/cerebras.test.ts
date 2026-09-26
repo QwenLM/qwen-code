@@ -17,6 +17,7 @@ import { CerebrasOpenAICompatibleProvider } from './cerebras.js';
 
 function createCliConfig(): Config {
   return {
+    getRuntimeEnvironment: () => process.env,
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     getProxy: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;

@@ -422,9 +422,11 @@ export class ContentGenerationPipeline {
     this.client = this.config.provider.buildClient();
     this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
       this.contentGeneratorConfig,
+      config.cliConfig.getRuntimeEnvironment(),
     );
     this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
       this.contentGeneratorConfig,
+      config.cliConfig.getRuntimeEnvironment(),
     );
   }
 

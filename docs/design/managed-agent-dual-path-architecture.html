@@ -1,0 +1,3794 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Managed Agent 双链路架构技术方案：Java Control Plane、qwen serve Harness、Legacy ACP 与按需 Tool Runtime。"
+    />
+    <title>Managed Agent 双链路技术方案</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #071019;
+        --bg-soft: #0b1723;
+        --panel: rgba(15, 29, 43, 0.82);
+        --panel-strong: #112233;
+        --line: rgba(142, 177, 207, 0.18);
+        --text: #eef6ff;
+        --muted: #9db1c4;
+        --blue: #68a7ff;
+        --cyan: #51d6c7;
+        --green: #70d790;
+        --amber: #f2bd65;
+        --red: #ff7a85;
+        --purple: #b59aff;
+        --shadow: 0 22px 60px rgba(0, 0, 0, 0.32);
+        --radius: 18px;
+        --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+        --sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background:
+          radial-gradient(
+            circle at 12% 6%,
+            rgba(81, 214, 199, 0.11),
+            transparent 31rem
+          ),
+          radial-gradient(
+            circle at 88% 2%,
+            rgba(104, 167, 255, 0.13),
+            transparent 34rem
+          ),
+          linear-gradient(180deg, #071019 0%, #08131e 45%, #060d15 100%);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .page {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        padding: 28px 22px;
+        border-right: 1px solid var(--line);
+        background: rgba(5, 13, 21, 0.72);
+        backdrop-filter: blur(18px);
+        overflow-y: auto;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        margin-bottom: 26px;
+        font-weight: 760;
+        letter-spacing: 0.01em;
+      }
+
+      .brand-mark {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(81, 214, 199, 0.5);
+        border-radius: 11px;
+        background: linear-gradient(
+          145deg,
+          rgba(81, 214, 199, 0.18),
+          rgba(104, 167, 255, 0.1)
+        );
+        color: var(--cyan);
+        box-shadow: 0 0 30px rgba(81, 214, 199, 0.1);
+      }
+
+      .nav-title {
+        margin: 22px 10px 9px;
+        color: #6f8598;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .nav {
+        display: grid;
+        gap: 3px;
+      }
+
+      .nav a {
+        padding: 8px 10px;
+        border-radius: 9px;
+        color: var(--muted);
+        font-size: 13px;
+        text-decoration: none;
+        transition: 150ms ease;
+      }
+
+      .nav a:hover {
+        color: var(--text);
+        background: rgba(104, 167, 255, 0.09);
+      }
+
+      .sidebar-note {
+        margin-top: 28px;
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.025);
+        font-size: 12px;
+      }
+
+      main {
+        width: min(1260px, 100%);
+        margin: 0 auto;
+        padding: 50px 54px 90px;
+      }
+
+      .hero {
+        position: relative;
+        padding: 42px;
+        overflow: hidden;
+        border: 1px solid rgba(104, 167, 255, 0.24);
+        border-radius: 26px;
+        background:
+          linear-gradient(
+            130deg,
+            rgba(17, 36, 54, 0.97),
+            rgba(10, 25, 38, 0.88)
+          ),
+          var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .hero::after {
+        content: '';
+        position: absolute;
+        right: -80px;
+        top: -90px;
+        width: 330px;
+        height: 330px;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle,
+          rgba(81, 214, 199, 0.2),
+          transparent 67%
+        );
+        pointer-events: none;
+      }
+
+      .eyebrow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border: 1px solid rgba(104, 167, 255, 0.28);
+        border-radius: 999px;
+        background: rgba(104, 167, 255, 0.08);
+        color: #b9d5ff;
+        font-size: 12px;
+        font-weight: 720;
+      }
+
+      .badge.green {
+        border-color: rgba(112, 215, 144, 0.28);
+        background: rgba(112, 215, 144, 0.08);
+        color: #a8e9b9;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        line-height: 1.25;
+        letter-spacing: -0.025em;
+      }
+
+      h1 {
+        max-width: 900px;
+        margin: 0 0 18px;
+        font-size: clamp(34px, 5vw, 62px);
+        font-weight: 830;
+      }
+
+      .hero p {
+        max-width: 900px;
+        margin: 0;
+        color: #b9c9d8;
+        font-size: 17px;
+      }
+
+      .hero-decision {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 30px;
+      }
+
+      .decision-item {
+        padding: 15px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(3, 11, 18, 0.28);
+      }
+
+      .decision-item strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--cyan);
+        font-size: 13px;
+      }
+
+      .decision-item span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      section {
+        scroll-margin-top: 24px;
+        margin-top: 62px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 22px;
+      }
+
+      .section-index {
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+      }
+
+      h2 {
+        margin: 3px 0 0;
+        font-size: clamp(25px, 3vw, 34px);
+      }
+
+      h3 {
+        margin: 0 0 12px;
+        font-size: 19px;
+      }
+
+      h4 {
+        margin: 0 0 8px;
+        color: #dcecff;
+        font-size: 15px;
+      }
+
+      p {
+        color: #c0cfdd;
+      }
+
+      .lead {
+        max-width: 880px;
+        color: #aabdd0;
+        font-size: 15px;
+      }
+
+      .grid-2,
+      .grid-3,
+      .grid-4 {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-4 {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .card {
+        padding: 21px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: 0 10px 34px rgba(0, 0, 0, 0.14);
+      }
+
+      .card.accent-blue {
+        border-top: 2px solid var(--blue);
+      }
+
+      .card.accent-green {
+        border-top: 2px solid var(--green);
+      }
+
+      .card.accent-amber {
+        border-top: 2px solid var(--amber);
+      }
+
+      .card.accent-purple {
+        border-top: 2px solid var(--purple);
+      }
+
+      .card p:last-child,
+      .card ul:last-child {
+        margin-bottom: 0;
+      }
+
+      ul,
+      ol {
+        padding-left: 20px;
+        color: #b9c9d7;
+      }
+
+      li + li {
+        margin-top: 7px;
+      }
+
+      .callout {
+        margin: 20px 0;
+        padding: 18px 20px;
+        border-left: 3px solid var(--cyan);
+        border-radius: 0 14px 14px 0;
+        background: rgba(81, 214, 199, 0.07);
+        color: #cae8e4;
+      }
+
+      .callout.warning {
+        border-left-color: var(--amber);
+        background: rgba(242, 189, 101, 0.07);
+        color: #ecd4ad;
+      }
+
+      .callout.danger {
+        border-left-color: var(--red);
+        background: rgba(255, 122, 133, 0.07);
+        color: #f0bec2;
+      }
+
+      .diagram {
+        padding: 24px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+          linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.018) 1px,
+            transparent 1px
+          ),
+          rgba(4, 13, 21, 0.55);
+        background-size: 26px 26px;
+      }
+
+      .diagram svg {
+        display: block;
+        width: 100%;
+        min-width: 820px;
+        height: auto;
+      }
+
+      .node {
+        fill: #102438;
+        stroke: rgba(104, 167, 255, 0.55);
+        stroke-width: 1.5;
+      }
+
+      .node.green {
+        fill: #102b2b;
+        stroke: rgba(81, 214, 199, 0.7);
+      }
+
+      .node.amber {
+        fill: #2c2417;
+        stroke: rgba(242, 189, 101, 0.65);
+      }
+
+      .node.purple {
+        fill: #241e38;
+        stroke: rgba(181, 154, 255, 0.65);
+      }
+
+      .node.boundary {
+        fill: rgba(81, 214, 199, 0.025);
+        stroke: rgba(81, 214, 199, 0.55);
+        stroke-dasharray: 9 7;
+      }
+
+      .svg-label {
+        fill: #eff7ff;
+        font-family: var(--sans);
+        font-size: 15px;
+        font-weight: 750;
+      }
+
+      .svg-sub {
+        fill: #9fb4c8;
+        font-family: var(--sans);
+        font-size: 11px;
+      }
+
+      .arrow {
+        fill: none;
+        stroke: #6689aa;
+        stroke-width: 2;
+        marker-end: url(#arrowhead);
+      }
+
+      .arrow.green {
+        stroke: #51d6c7;
+      }
+
+      .arrow.amber {
+        stroke: #e4ae58;
+      }
+
+      .arrow.dashed {
+        stroke-dasharray: 7 6;
+      }
+
+      .arrow-label {
+        fill: #8fa8bf;
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .core-arrow {
+        fill: none;
+        stroke: #6689aa;
+        stroke-width: 2;
+        marker-end: url(#core-arrowhead);
+      }
+
+      .core-arrow.green {
+        stroke: #51d6c7;
+      }
+
+      .core-arrow.amber {
+        stroke: #e4ae58;
+      }
+
+      .core-arrow.purple {
+        stroke: #a98cff;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: rgba(10, 24, 37, 0.72);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 720px;
+      }
+
+      th,
+      td {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+        font-size: 13px;
+      }
+
+      th {
+        color: #dcecff;
+        background: rgba(104, 167, 255, 0.065);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+      }
+
+      td {
+        color: #b9c8d6;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      code,
+      pre {
+        font-family: var(--mono);
+      }
+
+      code {
+        padding: 0.13em 0.38em;
+        border: 1px solid rgba(104, 167, 255, 0.18);
+        border-radius: 5px;
+        background: rgba(104, 167, 255, 0.08);
+        color: #cfe1ff;
+        font-size: 0.9em;
+      }
+
+      pre {
+        margin: 14px 0 0;
+        padding: 17px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: #07111b;
+        color: #cce4f7;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .sequence {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(150px, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .sequence-step {
+        position: relative;
+        min-height: 150px;
+        padding: 17px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: rgba(12, 29, 43, 0.78);
+      }
+
+      .sequence-step:not(:last-child)::after {
+        content: '→';
+        position: absolute;
+        right: -16px;
+        top: 50%;
+        z-index: 2;
+        width: 22px;
+        color: var(--cyan);
+        font-weight: 900;
+        text-align: center;
+      }
+
+      .step-no {
+        display: inline-grid;
+        width: 27px;
+        height: 27px;
+        place-items: center;
+        margin-bottom: 13px;
+        border-radius: 8px;
+        background: rgba(81, 214, 199, 0.12);
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .sequence-step p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .tool-flow-diagram {
+        margin: 18px 0 14px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background:
+          radial-gradient(
+            circle at 12% 0%,
+            rgba(81, 214, 199, 0.08),
+            transparent 28rem
+          ),
+          rgba(4, 13, 21, 0.58);
+      }
+
+      .tool-flow-track {
+        display: grid;
+        gap: 13px;
+      }
+
+      .tool-flow-stage {
+        position: relative;
+        display: grid;
+        grid-template-columns: 190px minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(13, 29, 43, 0.78);
+      }
+
+      .tool-flow-stage:not(:last-child)::after {
+        content: '↓';
+        position: absolute;
+        left: 105px;
+        bottom: -19px;
+        z-index: 2;
+        width: 20px;
+        color: var(--cyan);
+        font-weight: 900;
+        text-align: center;
+      }
+
+      .tool-flow-stage h4 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .tool-flow-index {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+      }
+
+      .tool-flow-owner {
+        display: block;
+        margin-top: 6px;
+        color: #7f96aa;
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .tool-flow-steps {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .tool-flow-step {
+        padding: 7px 9px;
+        border: 1px solid rgba(104, 167, 255, 0.25);
+        border-radius: 9px;
+        background: rgba(104, 167, 255, 0.07);
+        color: #cce0ff;
+        font-family: var(--mono);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+      .tool-flow-step.commit {
+        border-color: rgba(81, 214, 199, 0.42);
+        background: rgba(81, 214, 199, 0.09);
+        color: #afe9e2;
+      }
+
+      .tool-flow-step.wait {
+        border-color: rgba(242, 189, 101, 0.42);
+        background: rgba(242, 189, 101, 0.08);
+        color: #efd3a5;
+      }
+
+      .tool-flow-step.execute {
+        border-color: rgba(181, 154, 255, 0.42);
+        background: rgba(181, 154, 255, 0.08);
+        color: #d7c9ff;
+      }
+
+      .tool-flow-arrow {
+        color: #6689aa;
+        font-size: 11px;
+      }
+
+      .tool-flow-diagram figcaption {
+        margin-top: 13px;
+        color: #8298ab;
+        font-size: 11px;
+      }
+
+      .state-flow {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin: 16px 0;
+      }
+
+      .state {
+        padding: 8px 11px;
+        border: 1px solid rgba(104, 167, 255, 0.25);
+        border-radius: 9px;
+        background: rgba(104, 167, 255, 0.07);
+        color: #cce0ff;
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .state.done {
+        border-color: rgba(112, 215, 144, 0.3);
+        background: rgba(112, 215, 144, 0.08);
+        color: #b3eac0;
+      }
+
+      .state.blocked {
+        border-color: rgba(255, 122, 133, 0.35);
+        background: rgba(255, 122, 133, 0.08);
+        color: #f4bac0;
+      }
+
+      .state-arrow {
+        color: #6f8ca7;
+      }
+
+      .timeline {
+        position: relative;
+        display: grid;
+        gap: 16px;
+        margin-top: 20px;
+        padding-left: 34px;
+      }
+
+      .timeline::before {
+        content: '';
+        position: absolute;
+        left: 12px;
+        top: 8px;
+        bottom: 8px;
+        width: 1px;
+        background: linear-gradient(var(--cyan), rgba(104, 167, 255, 0.2));
+      }
+
+      .phase {
+        position: relative;
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: rgba(13, 29, 43, 0.76);
+      }
+
+      .phase::before {
+        content: '';
+        position: absolute;
+        left: -28px;
+        top: 23px;
+        width: 11px;
+        height: 11px;
+        border: 2px solid #071019;
+        border-radius: 50%;
+        background: var(--cyan);
+        box-shadow: 0 0 0 3px rgba(81, 214, 199, 0.18);
+      }
+
+      .phase h3 {
+        color: #e6f3ff;
+      }
+
+      .phase p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .checklist {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px 18px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .checklist li {
+        position: relative;
+        margin: 0;
+        padding: 12px 13px 12px 38px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(12, 28, 42, 0.65);
+      }
+
+      .checklist li::before {
+        content: '✓';
+        position: absolute;
+        left: 13px;
+        color: var(--green);
+        font-weight: 900;
+      }
+
+      .footer {
+        margin-top: 70px;
+        padding-top: 25px;
+        border-top: 1px solid var(--line);
+        color: #758b9f;
+        font-size: 12px;
+      }
+
+      @media (max-width: 1080px) {
+        .page {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: relative;
+          height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .nav {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .nav-title,
+        .sidebar-note {
+          display: none;
+        }
+
+        main {
+          padding-top: 36px;
+        }
+      }
+
+      @media (max-width: 780px) {
+        main {
+          padding: 24px 18px 60px;
+        }
+
+        .sidebar {
+          padding: 18px;
+        }
+
+        .nav {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .hero {
+          padding: 26px;
+        }
+
+        .hero-decision,
+        .grid-2,
+        .grid-3,
+        .grid-4,
+        .checklist {
+          grid-template-columns: 1fr;
+        }
+
+        .sequence {
+          grid-template-columns: 1fr;
+        }
+
+        .sequence-step:not(:last-child)::after {
+          content: '↓';
+          right: 50%;
+          top: auto;
+          bottom: -21px;
+          transform: translateX(50%);
+        }
+
+        .tool-flow-stage {
+          grid-template-columns: 1fr;
+          gap: 11px;
+        }
+
+        .tool-flow-stage:not(:last-child)::after {
+          left: 50%;
+          transform: translateX(-50%);
+        }
+      }
+
+      @media print {
+        :root {
+          color-scheme: light;
+        }
+
+        body {
+          background: #fff;
+          color: #14202a;
+        }
+
+        .page {
+          display: block;
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        main {
+          width: 100%;
+          padding: 0;
+        }
+
+        .hero,
+        .card,
+        .diagram,
+        .table-wrap,
+        .phase,
+        .sequence-step,
+        .tool-flow-diagram,
+        .tool-flow-stage,
+        .checklist li {
+          break-inside: avoid;
+          box-shadow: none;
+          color: #14202a;
+          background: #fff;
+        }
+
+        p,
+        td,
+        li,
+        .lead,
+        .hero p {
+          color: #334b5f;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">MA</div>
+          <div>Managed Agent<br />Architecture</div>
+        </div>
+        <div class="nav-title">方案目录</div>
+        <nav class="nav">
+          <a href="#minimum-runtime">首版运行条件</a>
+          <a href="#ordinary-tools">普通工具接线</a>
+          <a href="#overview">架构总览</a>
+          <a href="#goals">目标与边界</a>
+          <a href="#roles">组件职责</a>
+          <a href="#profiles">部署模式</a>
+          <a href="#routing">双链路路由</a>
+          <a href="#fast-path">首次 Prompt</a>
+          <a href="#protocols">通信协议</a>
+          <a href="#state">状态模型</a>
+          <a href="#lifecycle">Runtime 生命周期</a>
+          <a href="#migration">Legacy 迁移</a>
+          <a href="#recovery">故障恢复</a>
+          <a href="#security">安全隔离</a>
+          <a href="#capacity">容量与观测</a>
+          <a href="#agent-api">Agent API</a>
+          <a href="#event-storage">事件与存储</a>
+          <a href="#delivery">实施阶段</a>
+          <a href="#acceptance">验收标准</a>
+        </nav>
+        <div class="sidebar-note">
+          方案版本 v1.11 · 2026-09-23<br />
+          核心决策：一个 Session 一个固定执行引擎；Managed Harness
+          从第一轮起负责完整模型循环；公开事件先可靠提交，再向客户端推送。
+        </div>
+      </aside>
+
+      <main>
+        <header class="hero">
+          <div class="eyebrow">
+            <span class="badge">TECHNICAL DESIGN</span>
+            <span class="badge green">LEGACY + MANAGED COEXISTENCE</span>
+            <span class="badge">EMBEDDED JAVA BROKER</span>
+          </div>
+          <h1>Managed Agent<br />双链路技术方案</h1>
+          <p>
+            以 Java 作为产品控制面并内置 Runtime Broker 模块，以
+            <code>qwen serve</code> 作为常驻 TS Harness， 保留 Legacy ACP
+            链路，并将 Workspace、MCP 与本地工具执行下沉到按需启动的 Tool
+            Runtime。 模型首 token 不等待 Runtime，只有真正发生本地 Tool Call
+            时才形成等待。
+          </p>
+          <div class="hero-decision">
+            <div class="decision-item">
+              <strong>统一入口</strong>
+              <span
+                >外部客户端继续使用 Java 与现有 qwen serve Session/SSE
+                契约</span
+              >
+            </div>
+            <div class="decision-item">
+              <strong>固定 Owner</strong>
+              <span
+                >Session 创建时选择 Legacy 或 Managed，生命周期内不可切换</span
+              >
+            </div>
+            <div class="decision-item">
+              <strong>低 TTFT</strong>
+              <span
+                >Harness 推理与 Runtime provisioning 并行，不让 Pod 启动阻塞首
+                token</span
+              >
+            </div>
+          </div>
+        </header>
+
+        <section id="minimum-runtime">
+          <div class="section-head">
+            <div>
+              <div class="section-index">00 / FIRST RUNTIME</div>
+              <h2>首版运行条件</h2>
+            </div>
+          </div>
+          <p class="lead">
+            v1.11 保留 v1.2 的总体架构、v1.3 的首版取舍、v1.4 的普通工具接线、
+            v1.5 的统一 Session 身份和 v1.6 的事件可靠投影边界，并补充 Java
+            管控面、Hosted Harness、Runtime Broker 与 Tool Runtime
+            的职责及通信架构图；v1.8 记录 daemon workspace 配额边界和 Managed
+            Session 长期存储 D0 接缝，v1.9 补充 D1a Java/MySQL 私有 Store
+            的实现边界，v1.10 记录真实 Java/Hosted Harness owner 的 settled
+            Session 故障接管证明，v1.11 增加工具执行的 durable identity
+            预留、私有 checkpoint 提交与显式启动顺序。Java 在创建前生成全局唯一
+            RFC UUID， 公共 API、qwen Session Authority、Managed Harness、JSONL
+            和 Runtime Broker scope 使用完全相同的
+            <code>sessionId</code>。不得再生成或持久化第二套 Harness Session
+            ID。 首版仍采用单 Java + qwen Sidecar、预发布静态
+            AgentBundle、Session 独占 Runtime， 复用现有产品 REST/SSE
+            与正式历史。同 Session 多轮复用环境，Harness 仍可承载多个 Session。
+          </p>
+          <p>
+            首版只支持普通工具，以 Read、Write、Edit 和前台 Shell 为最小验收集；
+            自动记忆、子 Agent、后台 Shell 暂不涉及，本轮不补充其专项设计。
+            复用现有配置与 AgentBundle 工具目录表达范围，不新增开关协议。
+            普通工具所需的审批、输出与文件历史保存、Shell
+            后代进程的取消清理仍须完成。 该 profile
+            的初始化和轮次结束不自动启动延期能力；配置要求范围外能力时，
+            创建前按既有 selector 选择 Legacy，显式要求不兼容的 Managed
+            则拒绝准入。
+          </p>
+          <div class="callout warning">
+            <strong>租户边界：</strong>独立 Spring
+            参考服务不做终端用户鉴权，但要求
+            <code>X-Qwen-Tenant-Id</code> 并将它贯穿 Session、Turn、Event 与
+            Broker scope；本地 WebShell 的
+            <code>tenant</code> 参数只用于开发代理。生产部署必须由
+            可信上游鉴权后注入
+            tenantId。完整多租户授权、配额和跨租户隔离仍是生产门槛。
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>首版要求</th>
+                  <th>最小完成边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Prompt 受理与幂等</td>
+                  <td>必需</td>
+                  <td>
+                    固定请求 ID；qwen 持久输入与 WakeIntent 后 Java 才
+                    ACK，响应丢失查原请求；不新增 Java 提前 ACK 的输入队列。
+                  </td>
+                </tr>
+                <tr>
+                  <td>统一 Session 身份</td>
+                  <td>必需</td>
+                  <td>
+                    公共 API、qwen/Harness、JSONL 与 Broker scope 共用 Java
+                    预分配的 RFC UUID；数据库不保存公共 ID 到 Harness ID
+                    的映射。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Broker 调用与查询</td>
+                  <td>必需</td>
+                  <td>
+                    同轮等待、原 execution
+                    查询、门禁映射、取消和实际释放；execute accepted
+                    不等于完成。
+                  </td>
+                </tr>
+                <tr>
+                  <td>AgentBundle</td>
+                  <td>必需</td>
+                  <td>
+                    预发布不可变版本与资源闭包，Harness
+                    离线可读；缺失拒绝准入，Runtime 核验 manifest。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Session 归属与存储</td>
+                  <td>必需</td>
+                  <td>
+                    固定后端、明确持久位置；重启无证明则阻塞，不能新建空 Session
+                    替代。
+                  </td>
+                </tr>
+                <tr>
+                  <td>Runtime 生命周期</td>
+                  <td>必需</td>
+                  <td>
+                    持久创建意图、创建去重、有限启动/idle 期限和容量；取消后迟到
+                    ready 重新校验，释放核验真实退出。
+                  </td>
+                </tr>
+                <tr>
+                  <td>审批与用户问答</td>
+                  <td>条件必需</td>
+                  <td>
+                    已开放工具需要交互时，响应必须经 Java
+                    回到原持久仲裁；不静默自动批准。
+                  </td>
+                </tr>
+                <tr>
+                  <td>跨 Session 共享 Runtime</td>
+                  <td>默认关闭</td>
+                  <td>
+                    独立
+                    ToolSessionBinding、配置/权限/gate/历史及引用计数通过验收后启用。
+                  </td>
+                </tr>
+                <tr>
+                  <td>公开事件接受与 SSE</td>
+                  <td>已有 P0/P1 切片</td>
+                  <td>
+                    源游标、公开序号、Turn
+                    终态和事件在一个事务中提交；同节点提交后直推，溢出或断线从
+                    SQL 补齐。
+                  </td>
+                </tr>
+                <tr>
+                  <td>稳定 Item / Snapshot 物化</td>
+                  <td>已有 P1 切片</td>
+                  <td>
+                    稳定 itemId/contentPartId、用户输入 Item 和 Snapshot
+                    已落地；批次日志/Outbox、跨实例唤醒以及容量与清理门禁仍待完成。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 style="margin-top: 28px">最小受理与故障边界</h3>
+          <pre>
+Client stable request ID → Java 持久统一 Session UUID / BackendBinding
+                        → qwen 提交 input + WakeIntent → CommitReceipt
+                        → Java 返回 accepted
+模型推进与 Runtime 预热并行，不等待 Runtime ready。
+ACK 丢失：原 ID 查询；started 失联：原执行对账或 recovery_blocked。
+取消：先持久请求，再追踪实际停止与资源释放。</pre
+          >
+          <p>
+            qwen Transcript/checkpoint、资源与 Broker Ledger
+            必须有明确持久保存位置。 Java 单独重启查询原
+            Sidecar/Runtime；Sidecar 重启核验 writer 与原调用； Pod
+            替换、卷不可用或旧 owner 不明时，首版不保证自动恢复。
+            多实例必须先完成原 owner 路由与 provision
+            竞争控制，自动跨实例接管仍属于 G。
+          </p>
+          <p>
+            首版使用 A/B/C/E 与 F 的必要验收，完整 D 不阻塞现有产品 API 上的 E
+            闭环。 方法与字段、Bundle 发布、部署矩阵、生命周期、审批及 M01～M10
+            验收见
+            <a href="managed-agent-first-runtime.md">首版运行契约</a>；
+            这些是目标条件，不表示实现或测试已经完成。
+          </p>
+        </section>
+
+        <section id="ordinary-tools">
+          <div class="section-head">
+            <div>
+              <div class="section-index">00B / ORDINARY TOOL INTEGRATION</div>
+              <h2>普通工具首版接线</h2>
+            </div>
+          </div>
+          <p class="lead">
+            Read / Write / Edit / 前台 Shell 复用现有 TS 工具与权限流程。
+            本节补齐发布、会话、工具阶段、资源和环境生命周期之间的衔接；
+            自动记忆、子 Agent、后台 Shell 暂缓；tenantId
+            已贯穿调用链，完整租户授权语义继续作为生产门槛。
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>接缝</th>
+                  <th>v1.6 沿用决策</th>
+                  <th>失败边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Bundle 发布 / 装载</td>
+                  <td>
+                    受信步骤复用共享 TS 定义生成不可变包；Java/Sidecar
+                    共享只读目录，staging 校验资源闭包后原子发布。Session 固定
+                    revision/ref；核验构建与模板。
+                  </td>
+                  <td>
+                    缺资源、摘要或版本不符拒绝准入；bundleDigest、toolManifestDigest、Hosted
+                    capabilityDigest 分型，不能互相代替。
+                  </td>
+                </tr>
+                <tr>
+                  <td>创建 / Prompt</td>
+                  <td>
+                    Java 创建前固定全局 RFC UUID
+                    sessionId、commandId、bundleRef、Workspace storage
+                    binding；同一 sessionId 直接交给公共
+                    API、qwen/Harness、JSONL 与 Broker。qwen 持久
+                    header/定义后确认创建，持久 input/WakeIntent 后确认
+                    Prompt；原命令提供只读查询。
+                  </td>
+                  <td>
+                    不得生成第二套 Harness Session ID；ACK 丢失查原
+                    receipt；not_found/过期/owner 不明不是未执行证明，不能换 ID
+                    或空 Session 重跑。
+                  </td>
+                </tr>
+                <tr>
+                  <td>工具阶段</td>
+                  <td>
+                    control 显式映射原 prepare/confirmation/confirm/preflight
+                    及文件历史；新能力按版本协商，逐操作严格校验；Java
+                    不重写调度与权限。
+                  </td>
+                  <td>
+                    环境 prepare 不代替 invocation build；status/cancel 不创建
+                    execution；改参使旧授权失效，unknown 不重新执行。
+                  </td>
+                </tr>
+                <tr>
+                  <td>结果 bytes</td>
+                  <td>
+                    Runtime 登记不可变输出；Java 代理授权资源分片；qwen
+                    校验、持久接收完整必要引用后返回 CommitReceipt，再 ACK
+                    delivered。
+                  </td>
+                  <td>
+                    下载失败只续读原内容，未转存不得删除唯一副本；ACK
+                    不等于环境可释放。
+                  </td>
+                </tr>
+                <tr>
+                  <td>回收后下一轮</td>
+                  <td>
+                    持久 Workspace 与 file-history root 独立于计算环境。干净
+                    released 后创建新 binding，挂回同一存储与稳定 history
+                    owner；Workspace generation 不变。
+                  </td>
+                  <td>
+                    旧 execution 永远归旧
+                    binding；存储缺失或原执行未知则阻塞，不从 Git
+                    clone/空目录伪造恢复。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 style="margin-top: 28px">一轮工具调用的提交顺序</h3>
+          <figure
+            class="tool-flow-diagram"
+            aria-label="普通工具从会话受理到执行、结果提交和运行时回收的五阶段流程"
+          >
+            <div class="tool-flow-track">
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">01 / ADMISSION</span>
+                  <h4>受理与模型先行</h4>
+                  <span class="tool-flow-owner">Java · Harness</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">发布 Bundle</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">创建 Session</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">持久 Prompt</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">CommitReceipt</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">模型先行</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">02 / PREPARE</span>
+                  <h4>环境与历史准备</h4>
+                  <span class="tool-flow-owner"
+                    >Harness · Broker · Workspace</span
+                  >
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">Tool Call</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">tool.intent</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait"
+                    >Runtime / manifest / gate</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">bindHistory</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">beginTurn 起始快照</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">03 / EXECUTE</span>
+                  <h4>授权与执行</h4>
+                  <span class="tool-flow-owner">Harness · Runtime</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">prepareInvocation</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait">确认 / 权限仲裁</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">confirm</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">preflight</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step wait">Harness final guard</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step execute"
+                    >execute / 原执行查询</span
+                  >
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">04 / RESULT COMMIT</span>
+                  <h4>结果持久提交</h4>
+                  <span class="tool-flow-owner">Runtime · Java · Harness</span>
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step execute">结果 bytes</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">持久接收</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >result CommitReceipt</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit">ACK delivered</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">模型继续</span>
+                </div>
+              </div>
+
+              <div class="tool-flow-stage">
+                <div>
+                  <span class="tool-flow-index">05 / SETTLE</span>
+                  <h4>结算、释放与恢复</h4>
+                  <span class="tool-flow-owner"
+                    >Harness · Workspace · Broker</span
+                  >
+                </div>
+                <div class="tool-flow-steps">
+                  <span class="tool-flow-step">全部工具结算</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >readHistory / 持久备份</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step commit"
+                    >checkpoint + turn.settled</span
+                  >
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">释放 / Runtime idle</span>
+                  <span class="tool-flow-arrow">→</span>
+                  <span class="tool-flow-step">新 binding 挂回原历史</span>
+                </div>
+              </div>
+            </div>
+            <figcaption>
+              青色表示可靠提交点，琥珀色表示等待或仲裁，紫色表示实际执行；下方文字版保留完整协议顺序。
+            </figcaption>
+          </figure>
+          <pre>
+发布 Bundle → 创建 Session → 持久受理 Prompt → 模型先行
+  Tool Call → 提交 tool.intent → 等待 Runtime / manifest / activation gate
+  → bindHistory → Workspace 工具轮次占用 → beginTurn 起始快照
+  → prepareInvocation → 确认 / 原权限仲裁 → confirm（需要时）
+  → preflight → Harness 最终 guard → execute → 原执行查询
+  → 结果 bytes 持久接收 → result CommitReceipt → ACK delivered
+  → 模型继续 → 全部工具结算 → readHistory / 持久备份
+  → authority checkpoint + turn.settled → 释放占用 → Runtime idle
+  → 干净回收 → 下一轮新 binding 挂回原文件与历史</pre
+          >
+          <div class="callout warning">
+            原
+            <code>fileHistory.checkpoint(promptId)</code> 确保的是轮次起始快照，
+            不是轮末持久提交。模型 Final、工具 ACK、Runtime release 分别核验。
+            Session 独占 Runtime 不等于文件隔离：首版同 Workspace
+            的工具轮次从起始快照 到 history
+            提交串行占用；外部文件变更仍按工具原有身份校验处理。
+          </div>
+          <h3 style="margin-top: 28px">首版验证与参数</h3>
+          <p>
+            验证初值：环境启动 120 秒、idle 5 分钟、每 owner 最多 4 个 Runtime
+            和 4 个活跃模型 Turn； 有界队列最多 32、等待 60 秒；Session 工具并发
+            1；前台 Shell 默认 120 秒、上限 600 秒； 审批最长 10
+            分钟，更短既有预算优先。资源分片最多 1 MiB，单次 RPC/读取空闲期限 30
+            秒， 长任务用 accepted + 原状态查询；状态轮询 250 ms 至 2
+            秒并加抖动。
+            模型、输出总量与存储保留沿用既有有限预算并在启动报告列出实际值，
+            超时或未知物理退出仍计入容量；这些初值不代表生产容量结论。
+          </p>
+          <p>
+            M01～M10 加 S01～S08 验证“Edit diff → 审批 → Shell 大输出 → 持久历史
+            → idle 回收 → 同 Session 下一轮读到修改”，并注入
+            ACK/下载丢失、存储缺失与取消。
+            调研锚点、精确字段、封闭操作枚举、资源提交顺序、回收竞争和验收清单见
+            <a href="managed-agent-ordinary-tools-integration.md"
+              >普通工具首版接线设计</a
+            >。普通工具的完整资源提交契约仍待实现；其中 Runtime endpoint
+            持久化、跨 JVM fencing、私有 attestation 和空闲 binding 恢复已完成
+            P3 参考实现与本地跨进程验收。恢复轮询使用有界指数退避和独立的
+            operation deadline；单个不完成的调度器或 attestation future
+            也受此期限约束。创建者 JVM 退出后，另一个 JVM 可按 PID/启动指纹
+            接管同一 local-process worker，且 worker stdout/stderr 不依赖父 JVM
+            管道。
+          </p>
+        </section>
+
+        <section id="overview">
+          <div class="section-head">
+            <div>
+              <div class="section-index">01 / OVERVIEW</div>
+              <h2>架构总览</h2>
+            </div>
+          </div>
+          <p class="lead">
+            下图只展开 Managed 主链路。Java Control Plane 与 Runtime Broker
+            在首版部署于同一 JVM，但保持独立模块和内部路由；Hosted Harness 是
+            <code>qwen serve</code> 内的 Managed 执行引擎；Tool Runtime
+            按需启动。
+          </p>
+          <h3>Managed 四模块架构</h3>
+          <div
+            class="diagram"
+            aria-label="Managed Agent four-module architecture diagram"
+          >
+            <svg viewBox="0 0 1180 620" role="img">
+              <title>Managed Agent 四模块通信架构</title>
+              <desc>
+                Java Control Plane 向 Hosted Harness 提交会话命令并订阅事件，
+                Harness 通过内部 HTTP 调用 Runtime Broker，Broker 主动使用 HTTP
+                JSON 驱动并查询 Tool Runtime。Harness 直接流式调用模型服务。
+              </desc>
+              <defs>
+                <marker
+                  id="core-arrowhead"
+                  markerWidth="10"
+                  markerHeight="10"
+                  refX="9"
+                  refY="3"
+                  orient="auto"
+                  markerUnits="strokeWidth"
+                >
+                  <path d="M0,0 L0,6 L9,3 z" fill="#6689aa"></path>
+                </marker>
+              </defs>
+
+              <rect
+                class="node"
+                x="20"
+                y="250"
+                width="125"
+                height="104"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="82" y="284" text-anchor="middle">
+                用户 / 前端
+              </text>
+              <text class="svg-sub" x="82" y="309" text-anchor="middle">
+                HTTPS REST
+              </text>
+              <text class="svg-sub" x="82" y="329" text-anchor="middle">
+                + Public SSE
+              </text>
+
+              <rect
+                class="node boundary"
+                x="180"
+                y="45"
+                width="340"
+                height="530"
+                rx="20"
+              ></rect>
+              <text class="svg-label" x="350" y="76" text-anchor="middle">
+                Java 管控面部署边界
+              </text>
+              <text class="svg-sub" x="350" y="98" text-anchor="middle">
+                首版同 JVM；产品层与 Broker 逻辑分层
+              </text>
+
+              <rect
+                class="node green"
+                x="220"
+                y="125"
+                width="260"
+                height="165"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="350" y="157" text-anchor="middle">
+                Java Control Plane
+              </text>
+              <text class="svg-sub" x="245" y="187">
+                • 租户、配额与 Session 路由
+              </text>
+              <text class="svg-sub" x="245" y="210">
+                • 持久受理 Prompt / Cancel / Approval
+              </text>
+              <text class="svg-sub" x="245" y="233">
+                • Public Event Store 与可续传 SSE
+              </text>
+              <text class="svg-sub" x="245" y="256">
+                • 统一 sessionId 与审计投影
+              </text>
+              <text class="svg-sub" x="245" y="278">不执行 Agent Loop</text>
+
+              <path class="core-arrow green" d="M350 290 L350 350"></path>
+              <text class="arrow-label" x="361" y="326">
+                同 JVM service 调用
+              </text>
+
+              <rect
+                class="node"
+                x="220"
+                y="350"
+                width="260"
+                height="175"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="350" y="383" text-anchor="middle">
+                Runtime Broker
+              </text>
+              <text class="svg-sub" x="245" y="413">
+                • RuntimeBinding / Lease / Provisioning
+              </text>
+              <text class="svg-sub" x="245" y="436">
+                • Execution Ledger 与幂等恢复
+              </text>
+              <text class="svg-sub" x="245" y="459">
+                • Runtime endpoint 与 token 保管
+              </text>
+              <text class="svg-sub" x="245" y="482">
+                • HTTP Transport、状态查询与资源回收
+              </text>
+              <text class="svg-sub" x="245" y="505">不生成模型输出</text>
+
+              <rect
+                class="node purple"
+                x="585"
+                y="165"
+                width="270"
+                height="250"
+                rx="18"
+              ></rect>
+              <text class="svg-label" x="720" y="199" text-anchor="middle">
+                Hosted Harness
+              </text>
+              <text class="svg-sub" x="720" y="221" text-anchor="middle">
+                qwen serve · Managed Engine
+              </text>
+              <text class="svg-sub" x="612" y="257">
+                • TS Agent Loop 与模型 Context
+              </text>
+              <text class="svg-sub" x="612" y="282">
+                • AgentBundle / Tool Schema
+              </text>
+              <text class="svg-sub" x="612" y="307">
+                • 模型调用、工具选择与 Approval
+              </text>
+              <text class="svg-sub" x="612" y="332">
+                • Transcript / Checkpoint Authority
+              </text>
+              <text class="svg-sub" x="612" y="357">
+                • 多 Session 并发，Session 内单 owner
+              </text>
+              <text class="svg-sub" x="612" y="390">
+                不持有 Runtime endpoint
+              </text>
+
+              <rect
+                class="node purple"
+                x="930"
+                y="55"
+                width="220"
+                height="150"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="1040" y="89" text-anchor="middle">
+                模型服务
+              </text>
+              <text class="svg-sub" x="955" y="119">
+                • 接收 Context / Tool Schema
+              </text>
+              <text class="svg-sub" x="955" y="143">
+                • 流式返回 token / Tool Call
+              </text>
+              <text class="svg-sub" x="955" y="167">• 不访问 Workspace</text>
+
+              <rect
+                class="node green"
+                x="930"
+                y="365"
+                width="220"
+                height="195"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="1040" y="400" text-anchor="middle">
+                Tool Runtime
+              </text>
+              <text class="svg-sub" x="1040" y="422" text-anchor="middle">
+                Pod / Process · Session 或 Workspace 隔离
+              </text>
+              <text class="svg-sub" x="955" y="456">
+                • Workspace / Files / Git / Shell
+              </text>
+              <text class="svg-sub" x="955" y="480">• MCP 与物理进程树</text>
+              <text class="svg-sub" x="955" y="504">
+                • Artifact / Result Receipt
+              </text>
+              <text class="svg-sub" x="955" y="528">• 物理取消与干净回收</text>
+              <text class="svg-sub" x="955" y="550">
+                无模型凭证，不接收 Prompt
+              </text>
+
+              <path
+                class="core-arrow"
+                d="M145 274 C172 274 190 201 220 201"
+              ></path>
+              <path
+                class="core-arrow green"
+                d="M220 251 C190 251 173 330 145 330"
+              ></path>
+              <text class="arrow-label" x="148" y="229">POST command</text>
+              <text class="arrow-label" x="151" y="349">SSE events</text>
+
+              <path class="core-arrow" d="M480 184 L585 184"></path>
+              <path class="core-arrow green" d="M585 242 L480 242"></path>
+              <text class="arrow-label" x="496" y="171">HTTP command</text>
+              <text class="arrow-label" x="497" y="262">source SSE</text>
+
+              <path
+                class="core-arrow purple"
+                d="M855 200 C886 200 902 131 930 131"
+              ></path>
+              <path
+                class="core-arrow green"
+                d="M930 176 C900 221 884 244 855 244"
+              ></path>
+              <text class="arrow-label" x="858" y="114">HTTPS request</text>
+              <text class="arrow-label" x="865" y="263">token stream</text>
+
+              <path
+                class="core-arrow amber"
+                d="M585 350 C545 350 530 435 480 435"
+              ></path>
+              <text class="arrow-label" x="489" y="379">
+                internal HTTP JSON
+              </text>
+              <text class="arrow-label" x="500" y="397">stable ID + query</text>
+
+              <path
+                class="core-arrow"
+                d="M480 460 C650 460 775 440 930 440"
+              ></path>
+              <path
+                class="core-arrow green"
+                d="M930 510 C770 560 635 530 480 500"
+              ></path>
+              <text class="arrow-label" x="647" y="448">
+                Broker-initiated HTTP
+              </text>
+              <text class="arrow-label" x="655" y="550">
+                HTTP response / status GET
+              </text>
+
+              <text class="arrow-label" x="590" y="592">
+                禁止：前端→Harness / Runtime；Harness→Runtime；Runtime→Java
+                反向建连
+              </text>
+            </svg>
+          </div>
+          <div class="callout">
+            <strong>两条不同的热路径：</strong>无工具 Turn 走
+            <code>Java → Harness → Model</code>，Runtime 正在启动也不阻塞首
+            token；出现 Tool Call 后才走
+            <code>Harness → Broker → Runtime</code>。Harness 不直连 Runtime，
+            Runtime 也不主动反连 Java。
+          </div>
+
+          <h3 style="margin-top: 28px">核心通信矩阵</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>通信边</th>
+                  <th>谁发起</th>
+                  <th>如何通信</th>
+                  <th>承载内容</th>
+                  <th>关键约束</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>前端 ↔ Java Control Plane</td>
+                  <td>前端发命令；Java 输出事件</td>
+                  <td>HTTPS REST + SSE，支持断点续传</td>
+                  <td>Session、Prompt、Cancel、Approval 和公共事件</td>
+                  <td>浏览器不接触 Harness 与 Runtime 内部端点</td>
+                </tr>
+                <tr>
+                  <td>Java Control Plane ↔ Hosted Harness</td>
+                  <td>Java 发命令并发起 SSE 订阅</td>
+                  <td>Sidecar loopback HTTP + SSE</td>
+                  <td>
+                    统一 sessionId、Prompt、Resume、Cancel、Transcript 和源事件
+                  </td>
+                  <td>Java 持久受理后异步推进，不长时占用请求线程</td>
+                </tr>
+                <tr>
+                  <td>Java Control Plane → Runtime Broker</td>
+                  <td>Java 产品层</td>
+                  <td>首版为同 JVM service 调用，保持各自事务边界</td>
+                  <td>预热、RuntimeBinding、租约、配额、Ledger 与回收</td>
+                  <td>Broker 是逻辑模块，首版不是独立服务</td>
+                </tr>
+                <tr>
+                  <td>Hosted Harness → Runtime Broker</td>
+                  <td>Harness</td>
+                  <td>
+                    内部 HTTP JSON；稳定 commandId / executionCallId + 有界查询
+                  </td>
+                  <td>
+                    Prepare、Manifest、Control、Execute、Cancel、Release 和
+                    Result ACK
+                  </td>
+                  <td>
+                    Harness 只持有 Broker endpoint，不持有 Runtime endpoint
+                  </td>
+                </tr>
+                <tr>
+                  <td>Runtime Broker ↔ Tool Runtime</td>
+                  <td>命令和事件连接都由 Broker 发起</td>
+                  <td>HTTP POST/GET；当前 execution 进度使用有界状态查询</td>
+                  <td>准备环境、工具执行、进度、取消、结果、Artifact 与释放</td>
+                  <td>
+                    Runtime 不反连 Java；断线按原 executionCallId
+                    查询，不宣称已实现 Runtime SSE
+                  </td>
+                </tr>
+                <tr>
+                  <td>Hosted Harness ↔ 模型服务</td>
+                  <td>Harness</td>
+                  <td>Provider HTTPS 流式协议</td>
+                  <td>Context、Tool Schema、token delta 和 Tool Call</td>
+                  <td>模型凭证只在 Harness；Runtime 无模型凭证</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout warning">
+            <strong>部署边界不等于责任边界：</strong>Broker 首版虽然内嵌在 Java
+            Control Plane，仍必须通过独立的 service / repository / transport
+            边界管理 Runtime。未来只在需要独立扩缩容或隔离 Kubernetes
+            权限时才拆为远程 Broker，不改 Harness 和公共 API。
+          </div>
+
+          <h3 style="margin-top: 32px">双链路兼容视图</h3>
+          <div class="diagram" aria-label="Managed Agent architecture diagram">
+            <svg viewBox="0 0 1120 470" role="img">
+              <defs>
+                <marker
+                  id="arrowhead"
+                  markerWidth="10"
+                  markerHeight="10"
+                  refX="9"
+                  refY="3"
+                  orient="auto"
+                  markerUnits="strokeWidth"
+                >
+                  <path d="M0,0 L0,6 L9,3 z" fill="#6689aa"></path>
+                </marker>
+              </defs>
+
+              <rect
+                class="node"
+                x="20"
+                y="190"
+                width="130"
+                height="72"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="85" y="219" text-anchor="middle">
+                用户 / 前端
+              </text>
+              <text class="svg-sub" x="85" y="241" text-anchor="middle">
+                REST + SSE
+              </text>
+
+              <rect
+                class="node green"
+                x="190"
+                y="55"
+                width="260"
+                height="350"
+                rx="20"
+              ></rect>
+              <text class="svg-label" x="320" y="88" text-anchor="middle">
+                Java Control Plane
+              </text>
+              <text class="svg-sub" x="320" y="109" text-anchor="middle">
+                单个 Java 服务 / 同一部署单元
+              </text>
+
+              <rect
+                class="node"
+                x="225"
+                y="132"
+                width="190"
+                height="74"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="320" y="162" text-anchor="middle">
+                Product Control
+              </text>
+              <text class="svg-sub" x="320" y="184" text-anchor="middle">
+                鉴权 · Session Router · SSE
+              </text>
+
+              <rect
+                class="node green"
+                x="225"
+                y="262"
+                width="190"
+                height="105"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="320" y="293" text-anchor="middle">
+                Embedded Runtime Broker
+              </text>
+              <text class="svg-sub" x="320" y="317" text-anchor="middle">
+                RuntimeBinding · Ledger
+              </text>
+              <text class="svg-sub" x="320" y="338" text-anchor="middle">
+                Provisioner · HTTP/SSE Client
+              </text>
+
+              <rect
+                class="node"
+                x="500"
+                y="55"
+                width="220"
+                height="350"
+                rx="20"
+              ></rect>
+              <text class="svg-label" x="610" y="88" text-anchor="middle">
+                qwen serve Sidecar
+              </text>
+              <text class="svg-sub" x="610" y="109" text-anchor="middle">
+                统一 Session / Prompt / SSE
+              </text>
+
+              <rect
+                class="node amber"
+                x="535"
+                y="145"
+                width="150"
+                height="72"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="610" y="175" text-anchor="middle">
+                Legacy Slot
+              </text>
+              <text class="svg-sub" x="610" y="196" text-anchor="middle">
+                qwen --acp
+              </text>
+
+              <rect
+                class="node green"
+                x="535"
+                y="275"
+                width="150"
+                height="72"
+                rx="13"
+              ></rect>
+              <text class="svg-label" x="610" y="305" text-anchor="middle">
+                Managed Slot
+              </text>
+              <text class="svg-sub" x="610" y="326" text-anchor="middle">
+                进程内 TS Harness
+              </text>
+
+              <rect
+                class="node purple"
+                x="790"
+                y="55"
+                width="165"
+                height="78"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="872" y="86" text-anchor="middle">
+                模型服务
+              </text>
+              <text class="svg-sub" x="872" y="108" text-anchor="middle">
+                Harness 直接调用
+              </text>
+
+              <rect
+                class="node amber"
+                x="790"
+                y="160"
+                width="165"
+                height="82"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="872" y="190" text-anchor="middle">
+                Legacy Workspace
+              </text>
+              <text class="svg-sub" x="872" y="212" text-anchor="middle">
+                本地 Tools / MCP
+              </text>
+
+              <rect
+                class="node green"
+                x="950"
+                y="300"
+                width="145"
+                height="82"
+                rx="15"
+              ></rect>
+              <text class="svg-label" x="1022" y="330" text-anchor="middle">
+                Tool Runtime
+              </text>
+              <text class="svg-sub" x="1022" y="352" text-anchor="middle">
+                Pod / Process
+              </text>
+
+              <path class="arrow" d="M150 226 L225 169"></path>
+              <path class="arrow" d="M415 169 L500 169"></path>
+              <path class="arrow amber" d="M685 181 L790 201"></path>
+              <path
+                class="arrow green dashed"
+                d="M685 291 C735 220 740 94 790 94"
+              ></path>
+              <path class="arrow green" d="M535 314 L415 314"></path>
+              <path
+                class="arrow green"
+                d="M320 367 C525 455 810 435 950 341"
+              ></path>
+
+              <text class="arrow-label" x="155" y="199">Product API</text>
+              <text class="arrow-label" x="432" y="157">Daemon API</text>
+              <text class="arrow-label" x="716" y="179">Legacy</text>
+              <text class="arrow-label" x="424" y="302">Tool callback</text>
+              <text class="arrow-label" x="676" y="432">
+                Java-originated HTTP + SSE
+              </text>
+              <text class="arrow-label" x="720" y="86">Model Stream</text>
+            </svg>
+          </div>
+          <div class="callout">
+            <strong>关键判断：</strong>新方案不是替换
+            <code>qwen serve</code>，而是让它继续承担统一会话协议和 TS Agent
+            内核； 本地模式使用本地 Runtime Provider，托管模式调用 Java Control
+            Plane 内嵌的 Runtime Broker 模块。第一阶段不新增独立 Broker 服务。
+          </div>
+        </section>
+
+        <section id="goals">
+          <div class="section-head">
+            <div>
+              <div class="section-index">02 / SCOPE</div>
+              <h2>目标与边界</h2>
+            </div>
+          </div>
+          <div class="grid-2">
+            <article class="card accent-green">
+              <h3>本方案要解决</h3>
+              <ul>
+                <li>第一次 Prompt 不等待 Runtime Pod 启动。</li>
+                <li>完整复用 TS Agent Loop、Context、压缩与工具语义。</li>
+                <li>Legacy 和 Managed 在同一系统内渐进迁移。</li>
+                <li>Java统一管理 Runtime 生命周期、路由、配额和审计。</li>
+                <li>Tool Runtime 不持有模型凭证，不接收用户 Prompt。</li>
+                <li>为后续无状态 Harness 和跨实例恢复保留演进路径。</li>
+              </ul>
+            </article>
+            <article class="card accent-amber">
+              <h3>第一阶段明确不做</h3>
+              <ul>
+                <li>不使用 Java 重写完整 Agent Loop。</li>
+                <li>不把 Legacy Session 原地改为 Managed。</li>
+                <li>不为每个 Session 创建一个 Harness 进程。</li>
+                <li>
+                  不一次性迁移 Channels、Scheduled Task、Hooks 和全部 MCP。
+                </li>
+                <li>不承诺外部副作用 exactly-once。</li>
+                <li>不在第一阶段维护两份权威 Transcript。</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="roles">
+          <div class="section-head">
+            <div>
+              <div class="section-index">03 / RESPONSIBILITIES</div>
+              <h2>组件职责</h2>
+            </div>
+          </div>
+          <div class="grid-4">
+            <article class="card accent-green">
+              <h3>Java Control Plane</h3>
+              <p>产品入口与资源控制面。</p>
+              <ul>
+                <li>鉴权、租户、配额</li>
+                <li>Session 后端路由</li>
+                <li>内嵌 Runtime Broker</li>
+                <li>RuntimeBinding 与 Execution Ledger</li>
+                <li>审计与产品 SSE</li>
+              </ul>
+            </article>
+            <article class="card accent-blue">
+              <h3>qwen serve</h3>
+              <p>统一协议与执行引擎容器。</p>
+              <ul>
+                <li>Session/Prompt API</li>
+                <li>SSE 与重放</li>
+                <li>Legacy/Managed selector</li>
+                <li>固定 Session owner</li>
+                <li>客户端兼容层</li>
+              </ul>
+            </article>
+            <article class="card accent-purple">
+              <h3>Managed Harness</h3>
+              <p>完整 TS Agent 内核。</p>
+              <ul>
+                <li>Context 与模型调用</li>
+                <li>Agent Loop</li>
+                <li>Tool 选择</li>
+                <li>Approval 协调</li>
+                <li>结果生成</li>
+              </ul>
+            </article>
+            <article class="card accent-amber">
+              <h3>Tool Runtime</h3>
+              <p>隔离的 Workspace 执行环境。</p>
+              <ul>
+                <li>文件与 Shell</li>
+                <li>Git 与搜索</li>
+                <li>MCP 实际执行</li>
+                <li>Artifact</li>
+                <li>进程树取消</li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout warning">
+            Java 不运行第二套 Agent，Runtime 也不运行模型循环。一个 Session
+            始终只有一个模型循环 owner。
+          </div>
+          <div class="card" style="margin-top: 16px">
+            <h3>Java Control Plane 内部模块划分</h3>
+            <div class="grid-3">
+              <div>
+                <h4>产品控制层</h4>
+                <ul>
+                  <li>Product API</li>
+                  <li>SessionRouter</li>
+                  <li>HarnessClient</li>
+                  <li>ClientEventAdapter</li>
+                </ul>
+              </div>
+              <div>
+                <h4>Runtime Broker 模块</h4>
+                <ul>
+                  <li>RuntimeBrokerService</li>
+                  <li>RuntimeBindingRepository</li>
+                  <li>ToolExecutionRepository</li>
+                  <li>RuntimeLeaseManager</li>
+                </ul>
+              </div>
+              <div>
+                <h4>可替换基础设施接口</h4>
+                <ul>
+                  <li>RuntimeProvisioner</li>
+                  <li>RuntimeTransport</li>
+                  <li>ArtifactStore</li>
+                  <li>ExecutionEventSubscriber</li>
+                </ul>
+              </div>
+            </div>
+            <p>
+              代码上保持模块边界，部署上先与 Java Control Plane
+              同进程。未来需要独立扩缩容或隔离 Kubernetes 权限时，
+              只把实现替换为 RemoteRuntimeBrokerClient，不改变 Harness 和产品
+              API。
+            </p>
+          </div>
+        </section>
+
+        <section id="profiles">
+          <div class="section-head">
+            <div>
+              <div class="section-index">04 / DEPLOYMENT</div>
+              <h2>部署模式</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Profile</th>
+                  <th>Agent 实现</th>
+                  <th>Runtime</th>
+                  <th>用途</th>
+                  <th>是否依赖 Java</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Local Legacy</strong></td>
+                  <td><code>qwen --acp</code></td>
+                  <td>当前本地环境</td>
+                  <td>保持现有用户行为</td>
+                  <td>否</td>
+                </tr>
+                <tr>
+                  <td><strong>Local Managed</strong></td>
+                  <td>进程内 TS Harness</td>
+                  <td>Auto Local Runtime</td>
+                  <td>开发、验证与单机部署</td>
+                  <td>否</td>
+                </tr>
+                <tr>
+                  <td><strong>Hosted Managed</strong></td>
+                  <td>进程内 TS Harness</td>
+                  <td>Java Control Plane 内嵌 Broker</td>
+                  <td>DataAgent / 生产托管</td>
+                  <td>是</td>
+                </tr>
+                <tr>
+                  <td><strong>Hosted Legacy</strong></td>
+                  <td><code>qwen --acp</code></td>
+                  <td>原 Workspace</td>
+                  <td>迁移期保留未覆盖能力</td>
+                  <td>由 Java 路由</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="grid-2" style="margin-top: 16px">
+            <article class="card">
+              <h3>初期：同一 daemon 双引擎</h3>
+              <pre>
+qwen serve
+├── Legacy Session  → qwen --acp
+└── Managed Session → in-process Harness → Runtime</pre
+              >
+            </article>
+            <article class="card">
+              <h3>目标：Java Pod + Sidecar</h3>
+              <pre>
+Java Pod
+├── Java Control Plane
+│   ├── Product API / Session Router
+│   └── Embedded Runtime Broker
+└── qwen serve Sidecar
+    └── TS Harness
+
+Tool Runtime Pod（按需）</pre
+              >
+            </article>
+          </div>
+        </section>
+
+        <section id="routing">
+          <div class="section-head">
+            <div>
+              <div class="section-index">05 / SESSION ROUTING</div>
+              <h2>双链路选择与固定 Owner</h2>
+            </div>
+          </div>
+          <div class="grid-2">
+            <article class="card accent-blue">
+              <h3>新 Session 选择 Managed</h3>
+              <ul>
+                <li>普通用户 Session。</li>
+                <li>Workspace 已信任且 cwd 精确匹配。</li>
+                <li>没有未迁移的 Hooks、动态 MCP 和 Extension。</li>
+                <li>
+                  不是 Channel、Scheduled Task、Standalone、Worktree 或 Branch。
+                </li>
+                <li>Harness、AgentBundle 与 Runtime 协议版本兼容。</li>
+              </ul>
+            </article>
+            <article class="card accent-amber">
+              <h3>继续选择 Legacy</h3>
+              <ul>
+                <li>已有 Legacy Session。</li>
+                <li>用途或配置兼容性未知。</li>
+                <li>依赖尚未迁移的 MCP、Hooks、Channels。</li>
+                <li>Managed 需要的持久 owner 或配置证明不完整。</li>
+                <li>服务端策略显式保留 Legacy。</li>
+              </ul>
+            </article>
+          </div>
+          <pre>
+{
+  "schemaVersion": 1,
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "executionEngine": "managed"
+}</pre
+          >
+          <div class="callout danger">
+            <strong>禁止跨引擎重试：</strong>Managed 初始化、模型调用或 Tool
+            执行失败后，不得调用 Legacy factory
+            重跑；否则可能产生重复模型费用和重复工具副作用。
+          </div>
+        </section>
+
+        <section id="fast-path">
+          <div class="section-head">
+            <div>
+              <div class="section-index">06 / FAST PATH</div>
+              <h2>第一次 Prompt 与低 TTFT</h2>
+            </div>
+          </div>
+          <p class="lead">
+            Java 收到请求后，同时转发原请求与预热 Runtime；只有 qwen
+            持久受理后才对客户端 ACK。Harness 已经持有预发布的版本化
+            AgentBundle，因此模型调用不依赖 Runtime
+            在线发现工具。缺少必要配置快照时拒绝 Managed 准入。
+          </p>
+          <div class="sequence">
+            <article class="sequence-step">
+              <div class="step-no">01</div>
+              <h4>接收 Prompt</h4>
+              <p>
+                Java 取得可信 tenantId，按统一 sessionId 路由并持久命令
+                ID；参考服务从必填 Header 接收
+                tenantId，生产由上游鉴权注入。qwen 使用同一个 Session UUID
+                持久受理后才返回 accepted。
+              </p>
+            </article>
+            <article class="sequence-step">
+              <div class="step-no">02</div>
+              <h4>并行启动</h4>
+              <p>一路转发 Harness，一路创建或复用 RuntimeBinding。</p>
+            </article>
+            <article class="sequence-step">
+              <div class="step-no">03</div>
+              <h4>模型首 token</h4>
+              <p>Harness 使用 AgentBundle 立即调用模型，不等待 Pod。</p>
+            </article>
+            <article class="sequence-step">
+              <div class="step-no">04</div>
+              <h4>按需等待工具</h4>
+              <p>无 Tool 直接结束；有 Tool 才等待 Runtime ready。</p>
+            </article>
+          </div>
+          <div class="grid-2" style="margin-top: 18px">
+            <article class="card accent-green">
+              <h3>无 Tool Turn</h3>
+              <pre>
+Prompt → Model Stream → Final
+
+Runtime 可以仍处于 provisioning，
+不影响当前 Turn 完成。</pre
+              >
+            </article>
+            <article class="card accent-purple">
+              <h3>有 Tool Turn</h3>
+              <pre>
+Prompt → Model → Tool Call
+                    ↓
+             wait Runtime ready
+                    ↓
+             Tool Result → Model → Final</pre
+              >
+            </article>
+          </div>
+          <div class="callout">
+            AgentBundle 包含 System Prompt、Tool Schema、权限摘要和
+            <code>agentDefinitionRevision</code>；启用扩展时另含 Skill
+            静态描述和 MCP
+            能力快照。普通工具首版的未启用扩展目录为空，不要求预先生成扩展快照。Runtime
+            启动后必须核验相同 revision/manifest digest。首版 definition
+            固定，更新定义使用新 Session；动态发现与完整热更新按 H 扩展。
+          </div>
+        </section>
+
+        <section id="protocols">
+          <div class="section-head">
+            <div>
+              <div class="section-index">07 / PROTOCOLS</div>
+              <h2>通信协议与连接方向</h2>
+            </div>
+          </div>
+          <div class="grid-3">
+            <article class="card">
+              <h3>前端 → Java</h3>
+              <p>
+                继续使用产品 REST/SSE。审批复用现有入口；没有对应入口时补充下列
+                responses 路由。浏览器不直接访问 Harness 和 Runtime。
+              </p>
+              <pre>
+POST /sessions
+POST /sessions/{id}/prompt
+POST /sessions/{id}/cancel
+GET  /sessions/{id}/events
+POST /sessions/{id}/actions/{requestId}/responses</pre
+              >
+            </article>
+            <article class="card">
+              <h3>Java → qwen serve</h3>
+              <p>第一阶段复用 daemon Session/Prompt/Load/Resume/SSE 契约。</p>
+              <pre>
+POST /session
+POST /session/{id}/prompt
+POST /session/{id}/cancel
+POST /session/{id}/resume
+GET  /events</pre
+              >
+              <p>v1.4 补充只读原命令查询（operation 为必填查询参数）：</p>
+              <pre>GET /session/{id}/commands/{commandId}</pre>
+            </article>
+            <article class="card">
+              <h3>qwen serve → Java 内部 Broker</h3>
+              <p>
+                通过 JavaBrokerManagedRuntimeProvider 调用同一 Java Control
+                Plane 的内部接口。
+              </p>
+              <pre>
+POST /internal/runtime-broker/v1/tool-sessions:acquire
+POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}/control
+POST /internal/runtime-broker/v1/executions:prepare
+POST /internal/runtime-broker/v1/executions/{executionCallId}:start
+GET  /internal/runtime-broker/v1/executions/{executionCallId}
+POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
+POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release</pre
+              >
+            </article>
+          </div>
+
+          <div class="callout">
+            v1.11 把工具 intent 与物理副作用拆成两步：
+            <code>executions:prepare</code> 幂等创建
+            <code>PREPARED</code> ledger 并返回真实
+            <code>executionCallId</code>，不触发 Runtime；Harness 将该 ID 与
+            Runtime Session binding 提交到私有
+            <code>await_runtime</code> checkpoint 后，才调用显式
+            <code>:start</code>。GET 不会启动 PREPARED
+            execution，取消可在无副作用时直接结算；旧 create-and-start
+            服务方法继续兼容。Harness 可有界轮询原 ID，连接中断不能生成新 ID
+            重新派发。冷加载后的替代 Harness 已能从 checkpoint
+            重建工具名、Runtime Session binding 与 executionCallId，并直接查询
+            Broker，不创建新的 Runtime entry；结构化 UNKNOWN
+            会按未知结果保留，不能转成重放。 control 按 activation / tool /
+            history / receipt 分型：包含 stageGate / enableGate / renewGate /
+            revokeGate / queryGate、 prepareInvocation / getConfirmation /
+            confirmInvocation / preflightInvocation / cancelInvocation /
+            queryInvocation、bindHistory / beginTurn / checkpoint / readHistory
+            及 queryReceipt。 每种操作单独校验，复用原门禁与 tool
+            v2；status/cancel 不能创建 execution。 qwen 持久接收结果与必要 bytes
+            后的 CommitReceipt 经可信入口核验才记 delivered， release
+            还需核对轮末 history/checkpoint、资源引用和物理退出。 完整方法映射见
+            <a
+              href="managed-agent-first-runtime.md#3-broker-到-runtime-的最小协议"
+              >运行契约</a
+            >。
+          </div>
+          <h3 style="margin-top: 28px">Java → Runtime</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>接口</th>
+                  <th>用途</th>
+                  <th>返回</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>GET /healthz</code></td>
+                  <td>存活与版本探测</td>
+                  <td>状态和协议版本</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/control</code></td>
+                  <td>封闭门禁、工具 v2、history 与原回执操作</td>
+                  <td>类型化结果 / command receipt</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/prepare</code></td>
+                  <td>安装 Workspace、租约与门禁</td>
+                  <td>ready/accepted</td>
+                </tr>
+                <tr>
+                  <td><code>GET /v1/manifest</code></td>
+                  <td>核验工具能力和 digest</td>
+                  <td>版本化 manifest</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/executions</code></td>
+                  <td>提交稳定 executionCallId</td>
+                  <td>accepted</td>
+                </tr>
+                <tr>
+                  <td><code>GET /v1/executions/{id}</code></td>
+                  <td>查询执行状态</td>
+                  <td>权威 snapshot</td>
+                </tr>
+                <tr>
+                  <td><code>GET /v1/executions/{id}/events</code></td>
+                  <td>由 Java发起 SSE</td>
+                  <td>进度与终态事件</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/executions/{id}/cancel</code></td>
+                  <td>请求物理取消</td>
+                  <td>cancel accepted</td>
+                </tr>
+                <tr>
+                  <td><code>GET /v1/resources/{resourceId}</code></td>
+                  <td>原调用登记的授权资源分片</td>
+                  <td>bytes / 长度 / 内容摘要</td>
+                </tr>
+                <tr>
+                  <td><code>POST /v1/release</code></td>
+                  <td>释放绑定或进入 draining</td>
+                  <td>release receipt</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout warning">
+            Runtime Broker 与产品 API 位于同一个 Java
+            服务中，但使用独立的内部路由、鉴权和资源预算。Runtime 不主动连接
+            Java；命令由 Java 发起 HTTP POST，事件由 Java 发起 SSE GET。
+          </div>
+        </section>
+
+        <section id="state">
+          <div class="section-head">
+            <div>
+              <div class="section-index">08 / STATE</div>
+              <h2>核心状态模型</h2>
+            </div>
+          </div>
+          <div class="grid-3">
+            <article class="card accent-blue">
+              <h3>SessionBackendBinding</h3>
+              <pre>
+{
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "engine": "managed",
+  "backendType": "qwen-serve-harness",
+  "backendInstanceId": "harness_xxx",
+  "workspaceGeneration": 4,
+  "state": "active"
+}</pre
+              >
+            </article>
+            <article class="card accent-green">
+              <h3>RuntimeBinding</h3>
+              <pre>
+{
+  "runtimeBindingId": "binding_xxx",
+  "tenantId": "tenant_xxx",
+  "workspaceId": "workspace_xxx",
+  "runtimeInstanceId": "runtime_xxx",
+  "epoch": 3,
+  "state": "ready"
+}</pre
+              >
+            </article>
+            <article class="card accent-purple">
+              <h3>ToolExecution</h3>
+              <pre>
+{
+  "executionCallId": "exec_xxx",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "turnId": "turn_xxx",
+  "runtimeBindingId": "binding_xxx",
+  "activationEpoch": 3,
+  "state": "started"
+}</pre
+              >
+            </article>
+          </div>
+          <h3 style="margin-top: 28px">ToolExecution 状态机</h3>
+          <div class="state-flow">
+            <span class="state">accepted</span
+            ><span class="state-arrow">→</span>
+            <span class="state">dispatched</span
+            ><span class="state-arrow">→</span>
+            <span class="state">runtime_accepted</span
+            ><span class="state-arrow">→</span>
+            <span class="state">started</span
+            ><span class="state-arrow">→</span>
+            <span class="state done">completed</span
+            ><span class="state-arrow">→</span>
+            <span class="state done">delivered</span>
+          </div>
+          <div class="state-flow">
+            <span class="state">cancel_requested</span>
+            <span class="state blocked">recovery_blocked</span>
+            <span class="state blocked">failed</span>
+            <span class="state done">cancelled</span>
+          </div>
+          <p class="lead">
+            <code>executionCallId</code> 是幂等和恢复的核心。网络中断后查询原
+            ID，不生成新 ID 重放副作用。
+          </p>
+        </section>
+
+        <section id="lifecycle">
+          <div class="section-head">
+            <div>
+              <div class="section-index">09 / RUNTIME LIFECYCLE</div>
+              <h2>Runtime 复用与生命周期</h2>
+            </div>
+          </div>
+          <p class="lead">
+            首版默认 Session 独占 Runtime：归属绑定原 Workspace scope、
+            workspaceGeneration、canonicalCwd 和 sessionId，同 Session
+            多轮复用。 原 workspace 级跨 Session
+            复用作为可选优化，须先通过逻辑绑定与隔离验收。 tenantId
+            语义本轮不扩展设计。
+          </p>
+          <p>
+            环境 ready 与 activation gate 分开：没有活跃 Turn 时可以预热并保持
+            gate closed； 实际 Tool Call 仍须安装原 Session/activation
+            门禁并取得 enable ACK，迟到 ready 不授予执行资格。
+          </p>
+          <div class="state-flow">
+            <span class="state">absent</span><span class="state-arrow">→</span>
+            <span class="state">provisioning</span
+            ><span class="state-arrow">→</span>
+            <span class="state">preparing</span
+            ><span class="state-arrow">→</span>
+            <span class="state done">ready</span
+            ><span class="state-arrow">→</span> <span class="state">idle</span
+            ><span class="state-arrow">→</span>
+            <span class="state">draining</span
+            ><span class="state-arrow">→</span>
+            <span class="state done">released</span>
+          </div>
+          <div class="grid-2">
+            <article class="card">
+              <h3>复用规则</h3>
+              <ul>
+                <li>
+                  同 key 只允许一个 active provision；外部创建前持久保存
+                  provisionRequestId。
+                </li>
+                <li>
+                  创建结果不明查原请求，无法确认保持待处理，不换 ID 重建。
+                </li>
+                <li>
+                  取消后迟到 ready 重新核验 Session、generation
+                  和需求，无人持有则 draining。
+                </li>
+                <li>Runtime endpoint 不由 Harness 或模型指定。</li>
+                <li>Workspace generation 变化时创建新 Binding。</li>
+                <li>
+                  干净 idle 回收后下一轮可创建新
+                  binding，挂回原持久文件/history，Workspace generation 不变。
+                </li>
+                <li>
+                  旧执行查询仍指向旧
+                  binding；旧环境未知或持久存储缺失则阻塞，不能重放。
+                </li>
+                <li>
+                  启动 deadline、idle 保留时间和容量有界；同 Session
+                  第二、三轮可复用。
+                </li>
+                <li>
+                  跨 Session 共享必须先有独立配置、权限、文件历史、gate
+                  和释放引用计数。
+                </li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>释放规则</h3>
+              <ul>
+                <li>有未决副作用时不能直接释放。</li>
+                <li>旧 generation 先进入 draining。</li>
+                <li>Artifact 唯一副本未转存前不能清理。</li>
+                <li>Cancel ACK 不代表进程树已经退出。</li>
+                <li>释放必须产生可查询 receipt。</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="migration">
+          <div class="section-head">
+            <div>
+              <div class="section-index">10 / MIGRATION</div>
+              <h2>Legacy 与 Managed 的迁移关系</h2>
+            </div>
+          </div>
+          <div class="diagram">
+            <svg viewBox="0 0 920 240" role="img">
+              <defs>
+                <marker
+                  id="arrowhead2"
+                  markerWidth="10"
+                  markerHeight="10"
+                  refX="9"
+                  refY="3"
+                  orient="auto"
+                  markerUnits="strokeWidth"
+                >
+                  <path d="M0,0 L0,6 L9,3 z" fill="#6689aa"></path>
+                </marker>
+              </defs>
+              <rect
+                class="node amber"
+                x="45"
+                y="68"
+                width="230"
+                height="104"
+                rx="17"
+              ></rect>
+              <text class="svg-label" x="160" y="105" text-anchor="middle">
+                Legacy Session A
+              </text>
+              <text class="svg-sub" x="160" y="130" text-anchor="middle">
+                executionEngine = legacy
+              </text>
+              <text class="svg-sub" x="160" y="151" text-anchor="middle">
+                保留原历史与 owner
+              </text>
+
+              <rect
+                class="node"
+                x="355"
+                y="68"
+                width="210"
+                height="104"
+                rx="17"
+              ></rect>
+              <text class="svg-label" x="460" y="105" text-anchor="middle">
+                显式转换
+              </text>
+              <text class="svg-sub" x="460" y="130" text-anchor="middle">
+                summary / canonical history
+              </text>
+              <text class="svg-sub" x="460" y="151" text-anchor="middle">
+                无活跃副作用
+              </text>
+
+              <rect
+                class="node green"
+                x="645"
+                y="68"
+                width="230"
+                height="104"
+                rx="17"
+              ></rect>
+              <text class="svg-label" x="760" y="105" text-anchor="middle">
+                Managed Session B
+              </text>
+              <text class="svg-sub" x="760" y="130" text-anchor="middle">
+                executionEngine = managed
+              </text>
+              <text class="svg-sub" x="760" y="151" text-anchor="middle">
+                migratedFrom = A
+              </text>
+
+              <path
+                d="M275 120 L355 120"
+                fill="none"
+                stroke="#6689aa"
+                stroke-width="2"
+                marker-end="url(#arrowhead2)"
+              ></path>
+              <path
+                d="M565 120 L645 120"
+                fill="none"
+                stroke="#51d6c7"
+                stroke-width="2"
+                marker-end="url(#arrowhead2)"
+              ></path>
+            </svg>
+          </div>
+          <div class="grid-2" style="margin-top: 16px">
+            <article class="card accent-green">
+              <h3>第一阶段：语义续接</h3>
+              <ul>
+                <li>总结 Legacy 历史。</li>
+                <li>携带必要用户消息、文件引用和任务状态。</li>
+                <li>创建新的 Managed Session ID。</li>
+                <li>保留 migratedFrom 审计关系。</li>
+              </ul>
+            </article>
+            <article class="card accent-purple">
+              <h3>后续：完整迁移</h3>
+              <ul>
+                <li>封存 Legacy writer。</li>
+                <li>转换模型历史、压缩摘要和 Tool Result。</li>
+                <li>核验 MCP、Hooks、Skills 能力兼容。</li>
+                <li>新 owner 持久化后才允许首次执行。</li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout danger">
+            不支持在原 Session ID 上执行
+            <code>legacy → managed</code> 热切换。原 Session
+            可以查看、归档或继续由 Legacy 执行，但不能由 Managed 接管。
+          </div>
+        </section>
+
+        <section id="recovery">
+          <div class="section-head">
+            <div>
+              <div class="section-index">11 / RECOVERY</div>
+              <h2>故障、取消与幂等语义</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>故障场景</th>
+                  <th>处理原则</th>
+                  <th>禁止行为</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Harness 崩溃</td>
+                  <td>
+                    读取正式 Transcript、Checkpoint 和 Java Ledger；新
+                    activation epoch 接管。
+                  </td>
+                  <td>接受旧 Harness 的迟到写入。</td>
+                </tr>
+                <tr>
+                  <td>Runtime 在 started 后断开</td>
+                  <td>
+                    查询原 executionCallId 和原 Runtime；无法证明终态则
+                    recovery_blocked。
+                  </td>
+                  <td>换 Runtime 自动重跑。</td>
+                </tr>
+                <tr>
+                  <td>Java 重启</td>
+                  <td>
+                    恢复 SessionBackendBinding、RuntimeBinding 和 Execution
+                    Ledger。
+                  </td>
+                  <td>为旧调用生成新 executionCallId。</td>
+                </tr>
+                <tr>
+                  <td>Cancel</td>
+                  <td>
+                    先持久 cancel_requested，持续查询模型、工具和进程树终态。
+                  </td>
+                  <td>把 HTTP abort 或 Cancel ACK 当作物理停止。</td>
+                </tr>
+                <tr>
+                  <td>ACK 丢失</td>
+                  <td>
+                    使用稳定 commandId/executionCallId 查询并返回原 receipt。
+                  </td>
+                  <td>用新业务 ID 重复提交。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout warning">
+            exactly-once 不能由 HTTP 重试保证。首版保证的是：稳定
+            ID、at-most-once dispatch、可查询回执，以及在结果不确定时保守进入
+            recovery_blocked。
+          </div>
+        </section>
+
+        <section id="security">
+          <div class="section-head">
+            <div>
+              <div class="section-index">12 / SECURITY</div>
+              <h2>安全与隔离边界</h2>
+            </div>
+          </div>
+          <ul class="checklist">
+            <li>
+              参考 Spring 服务不实现终端用户鉴权，但要求并透传
+              <code>X-Qwen-Tenant-Id</code
+              >；生产由可信上游从鉴权上下文注入，不能信任浏览器查询参数。
+            </li>
+            <li>浏览器只能访问 Java，不能直接访问 Harness 或 Runtime。</li>
+            <li>Hosted qwen serve 只监听 loopback，并由 Java Sidecar 调用。</li>
+            <li>
+              Java 只代理必要的 Session、Prompt、Cancel、Event
+              和已开放能力需要的审批/问答 API。
+            </li>
+            <li>Runtime endpoint 不返回给浏览器和模型。</li>
+            <li>Java与 Runtime 使用短期 Token 或 mTLS。</li>
+            <li>Token 绑定 tenant、workspace、generation 和 epoch。</li>
+            <li>
+              Runtime 不持有模型凭证，Harness 不持有 Kubernetes 管理凭证。
+            </li>
+            <li>Hosted Managed 禁止本地 Tool fallback。</li>
+            <li>
+              tenantId 已进入 Session/Turn/Event/Broker
+              scope；授权、配额与防伪造仍须由产品接入层完成。
+            </li>
+            <li>不同租户禁止复用 RuntimeBinding 和 Workspace。</li>
+          </ul>
+          <h3 style="margin-top: 28px">大输出与 Artifact</h3>
+          <pre>
+{
+  "preview": "bounded preview",
+  "artifactRef": "oss://bucket/path/result.log",
+  "sha256": "...",
+  "size": 18392013,
+  "truncated": true
+}</pre
+          >
+          <p class="lead">
+            SSE 只传有界预览和引用。Java不长期持有大输出，Runtime 在确认
+            Artifact 已持久接收前不能删除唯一副本。
+          </p>
+        </section>
+
+        <section id="capacity">
+          <div class="section-head">
+            <div>
+              <div class="section-index">13 / CAPACITY &amp; OBSERVABILITY</div>
+              <h2>容量模型与可观测性</h2>
+            </div>
+          </div>
+          <div class="grid-2">
+            <article class="card accent-blue">
+              <h3>Harness 容量</h3>
+              <ul>
+                <li>一个进程并发服务多个 Session。</li>
+                <li>同一 Session 的 Turn 串行。</li>
+                <li>限制 active turns，而不只限制 Session 数。</li>
+                <li>测量 RSS、Heap、Event Loop Lag 和 SSE backlog。</li>
+                <li>第一阶段使用 Sidecar，不建设独立 Worker Pool。</li>
+              </ul>
+            </article>
+            <article class="card accent-green">
+              <h3>Runtime 容量</h3>
+              <ul>
+                <li>Provisioning、Ready、Idle、Draining 分开计量。</li>
+                <li>监控 Tool 并发、Workspace、子进程和未决副作用。</li>
+                <li>Harness 容量与 Runtime 容量独立扩缩容。</li>
+                <li>
+                  首版 Session 独占且匹配 generation；跨 Session
+                  共享经隔离验收后开启。
+                </li>
+                <li>高风险任务支持 Session 独占。</li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout warning" style="margin-top: 18px">
+            <strong>当前 daemon workspace 配额语义：</strong>
+            <code>qwen serve</code> 的默认 <code>maxSessions=32</code> 按 daemon
+            内部单个 <code>WorkspaceRuntime</code> /
+            <code>AcpSessionBridge</code> 计算，不是按 tenant、Managed Session
+            或 Tool Runtime Pod 计算。 daemon workspace 以
+            <code>workspaceId + workspaceCwd</code>
+            标识，负责承载模型循环、ACP 子进程、事件游标与 Prompt 队列；Tool
+            Runtime workspace 则负责用户代码、文件、Shell、Git、MCP
+            等本地执行，两者不是同一个资源边界。
+          </div>
+          <p>
+            当前 Java Hosted Harness Connector 创建 Session 时只提交全局唯一的
+            <code>sessionId</code>，不提交 <code>tenantId</code> 或
+            <code>workspaceId</code>；因此现有单 Harness 部署中的不同 tenant
+            通常共同占用默认 daemon workspace 的 Session 配额。一个常驻 Harness
+            实例可以并发服务多个 Session，不同 Session 可并行，同一 Session 的
+            Turn 串行；但实例持有 Session attachment、ACP 子进程、事件 ring
+            和活跃 Prompt 等运行态，必须视为有 owner
+            的有状态服务，不能放在随机负载均衡后 任意漂移请求。
+          </p>
+          <p>
+            生产化需要同时实施 Harness 实例、daemon workspace、tenant、active
+            turn 和 Runtime 五级容量控制，并持久化
+            <code>sessionId → harnessInstanceId / endpoint / bootId</code>
+            的 owner 路由。多 Harness 实例扩容时，后续
+            Turn、取消和事件续传必须命中 Session owner；只有共享 Session
+            Authority 与跨实例恢复完成后，才能把 Harness
+            实例作为可替换计算节点处理。
+          </p>
+          <h3 style="margin-top: 28px">统一链路标识</h3>
+          <pre>
+traceId · tenantId · workspaceId · sessionId · turnId
+executionCallId · runtimeBindingId · harnessInstanceId
+runtimeInstanceId · activationEpoch</pre
+          >
+          <h3 style="margin-top: 28px">核心指标</h3>
+          <div class="grid-3">
+            <div class="card">
+              <code>time_to_first_token</code>
+              <p>首 token，不包含 Turn 总耗时。</p>
+            </div>
+            <div class="card">
+              <code>runtime_provision_latency</code>
+              <p>Runtime 从 absent 到 ready。</p>
+            </div>
+            <div class="card">
+              <code>first_tool_runtime_wait</code>
+              <p>首个 Tool 等待 Runtime 的额外耗时。</p>
+            </div>
+            <div class="card">
+              <code>harness_active_turns</code>
+              <p>Harness 实际并发模型循环。</p>
+            </div>
+            <div class="card">
+              <code>runtime_recovery_blocked_total</code>
+              <p>结果不确定且禁止重放的调用数。</p>
+            </div>
+            <div class="card">
+              <code>tool_duplicate_prevented_total</code>
+              <p>被稳定 ID 阻止的重复派发。</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="agent-api">
+          <div class="section-head">
+            <div>
+              <div class="section-index">14 / PUBLIC AGENT API</div>
+              <h2>面向产品的 Agent API 资源模型</h2>
+            </div>
+          </div>
+          <p class="lead">
+            对外 Agent API 由 Java Control Plane 提供，qwen serve 作为内部
+            Harness 执行引擎，Tool Runtime 始终隐藏在服务端。公共 Session UUID
+            直接作为 qwen/Harness Session 身份；Turn、Item、ACP
+            attachment、内部进程、Pod、 Runtime Session 和 RuntimeBinding
+            继续解耦，避免执行实现变化破坏客户端协议。
+          </p>
+          <div class="callout">
+            <strong>兼容目标：</strong>资源结构参考
+            <a
+              href="https://developers.openai.com/api/reference/typescript/resources/beta/subresources/agents"
+              >OpenAI Agents API</a
+            >
+            的 Agent、Session、Event、Item、Turn、Environment 和 Artifact
+            模型；第一阶段保证语义兼容，不承诺字段级完全兼容。
+          </div>
+
+          <h3 style="margin-top: 28px">资源与内部组件映射</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>公共资源</th>
+                  <th>Java Control Plane</th>
+                  <th>qwen serve / Runtime</th>
+                  <th>关键约束</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Agent</strong></td>
+                  <td>AgentDefinition、版本和元数据</td>
+                  <td>加载固定 revision 的 AgentBundle</td>
+                  <td>Session 创建后不得自动漂移到最新版本</td>
+                </tr>
+                <tr>
+                  <td><strong>Session</strong></td>
+                  <td>租户、Agent、Workspace、BackendBinding</td>
+                  <td>Managed Session Authority 与 Harness activation</td>
+                  <td>
+                    公共 API 与执行侧共用一个 RFC
+                    UUID；生命周期内只有一个执行引擎
+                  </td>
+                </tr>
+                <tr>
+                  <td><strong>Turn</strong></td>
+                  <td>状态、幂等键、错误和终态</td>
+                  <td>一次完整 Agent Loop 和 checkpoint</td>
+                  <td>同一 Session 的 Turn 串行，重试不得重复副作用</td>
+                </tr>
+                <tr>
+                  <td><strong>Item</strong></td>
+                  <td>稳定的公共读模型</td>
+                  <td>message、reasoning、tool call/result 等内部记录</td>
+                  <td>内部事件格式可演进，公共 Item 必须版本化</td>
+                </tr>
+                <tr>
+                  <td><strong>Environment</strong></td>
+                  <td>RuntimeTemplate、RuntimeBinding、Provisioner</td>
+                  <td>Tool Runtime Pod、VM 或本地进程</td>
+                  <td>Runtime endpoint、lease 和 token 不暴露给客户端</td>
+                </tr>
+                <tr>
+                  <td><strong>Artifact</strong></td>
+                  <td>元数据、授权和对象存储引用</td>
+                  <td>Runtime 产生文件并发布 artifactRef</td>
+                  <td>大结果不通过 SSE 或 Java 堆长期中转</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 style="margin-top: 28px">AgentBundle</h3>
+          <pre>
+interface AgentBundle {
+  agentId: string;
+  revision: string;
+  model: ModelConfig;
+  instructions: string;
+  tools: ToolDefinition[];
+  skills: SkillDefinition[];
+  mcpServers: McpDefinition[];
+  permissionPolicy: PermissionPolicy;
+  environmentTemplateId?: string;
+  digest: string;
+}</pre
+          >
+          <p class="lead">
+            Java 保存 AgentDefinition 和 revision；Harness 获取完整 AgentBundle
+            后即可开始模型推理，不依赖 Runtime 在线发现工具。Runtime ready
+            后必须核验相同 revision 和
+            digest，防止模型看到的工具定义与实际执行能力不一致。
+          </p>
+
+          <div class="callout">
+            当前独立 Spring 服务已经提供 Session 创建/列表/查询、输入/取消以及按
+            eventSequence 查询或 SSE 订阅的阶段性接口；这些仍是实验实现。稳定
+            Item/Part ID、用户输入 Item 和 Snapshot
+            已有阶段性物化实现；Artifact、
+            AgentDefinition、完整历史重建、容量清理和生产兼容承诺继续属于 D。D
+            对外开放前还必须完成公共版本、跨实例通知、保留策略以及重放/重建规则的验收。
+          </div>
+          <h3 style="margin-top: 28px">当前阶段性 Session/Event 接口</h3>
+          <pre>
+Public REST
+POST /v1/agents/sessions
+GET  /v1/agents/sessions?cursor=&amp;limit=
+GET  /v1/agents/sessions/{sessionId}
+POST /v1/agents/sessions/{sessionId}/events
+GET  /v1/agents/sessions/{sessionId}/events?after=&amp;limit=&amp;stream=
+
+WebShell adapter
+POST /api/agent/web-shell/v1/sessions/query
+POST /api/agent/web-shell/v1/sessions/get
+POST /api/agent/web-shell/v1/transcript/query
+POST /api/agent/web-shell/v1/events/stream
+POST /api/agent/web-shell/v1/sessions/create
+POST /api/agent/web-shell/v1/turns/submit
+POST /api/agent/web-shell/v1/turns/cancel</pre
+          >
+          <p>
+            WebShell 的流式接口因使用 POST 请求体与可信租户 Header，由前端通过
+            <code>fetch + response.body</code> 解析 SSE，不使用浏览器原生
+            <code>EventSource</code>。当前 Java records 与 TypeScript interfaces
+            分别维护，尚无 OpenAPI/Schema 单一来源；<code>requestId</code>
+            和流请求的 <code>limit</code>
+            也尚未形成有效服务端语义，冻结生产契约前应实现或删除。
+          </p>
+          <h3 style="margin-top: 28px">阶段 D 扩展接口</h3>
+          <pre>
+POST   /v1/agents
+GET    /v1/agents/{agentId}
+POST   /v1/agents/{agentId}
+
+POST   /v1/agents/sessions
+GET    /v1/agents/sessions
+GET    /v1/agents/sessions/{sessionId}
+DELETE /v1/agents/sessions/{sessionId}
+
+POST   /v1/agents/sessions/{sessionId}/events
+GET    /v1/agents/sessions/{sessionId}/events
+GET    /v1/agents/sessions/{sessionId}/turns
+GET    /v1/agents/sessions/{sessionId}/turns/{turnId}
+GET    /v1/agents/sessions/{sessionId}/items
+
+GET    /v1/agents/sessions/{sessionId}/artifacts
+GET    /v1/agents/sessions/{sessionId}/artifacts/{artifactId}/content</pre
+          >
+
+          <div class="grid-2">
+            <article class="card accent-blue">
+              <h3>写入与执行</h3>
+              <ul>
+                <li>
+                  可重试写请求携带调用前已确定的稳定幂等键；同键不同内容拒绝，仅在响应中生成
+                  ID 不足以处理响应丢失。
+                </li>
+                <li>
+                  创建 Session 时固定 agentRevision、executionEngine 和
+                  workspaceGeneration。
+                </li>
+                <li>
+                  首版等待 qwen 输入与 WakeIntent 持久提交后返回
+                  accepted，不等待 Turn 完成。Java 提前 ACK 的异步交付方案后置。
+                </li>
+                <li>Java 同时转发 Harness 并异步创建或复用 RuntimeBinding。</li>
+                <li>Cancel 是一个持久化输入事件，不以 HTTP 连接关闭代替。</li>
+              </ul>
+            </article>
+            <article class="card accent-green">
+              <h3>查询与流式读取</h3>
+              <ul>
+                <li>事件流使用单调 eventSequence，支持 Last-Event-ID 续传。</li>
+                <li>Items 和 Turns 是从权威记录投影出的稳定公共读模型。</li>
+                <li>断线不取消后台 Turn；客户端可以重新查询或订阅。</li>
+                <li>Java重启后仍能查询 Session、Turn 和 executionCallId。</li>
+                <li>大输出只返回有界 preview 和 artifactRef。</li>
+              </ul>
+            </article>
+          </div>
+
+          <h3 style="margin-top: 28px">内部记录到公共 Item 的投影</h3>
+          <pre>
+user.message          -> input_message
+assistant.delta/final -> assistant_message
+reasoning             -> reasoning
+tool.requested        -> tool_call
+tool.completed        -> tool_result
+approval.requested    -> approval_request
+artifact.published    -> artifact
+turn.settled          -> Turn terminal state</pre
+          >
+
+          <div class="callout warning">
+            <strong>不复用旧实验 API：</strong>现有
+            <code>/managed/sessions*</code
+            >、ManagedPromptService、EmbeddedHarnessScheduler 和本地 Gateway
+            conversation/event store 不升级为公共 Agent API。等 Java Agent API
+            覆盖 admission、事件、查询和幂等语义后删除这套过渡控制面，保留普通
+            <code>/session + executionEngines</code> 作为 Harness 接线。
+          </div>
+          <div class="callout danger">
+            <strong>ID 边界：</strong>公共 sessionId 由 Java
+            创建前分配，并原样用于 qwen Session Authority、Managed
+            Harness、JSONL 与 Runtime Broker scope； 不存在 publicSessionId 到
+            harnessSessionId 的映射。公共 agentId、turnId、itemId 和 artifactId
+            仍由 Java 管控面管理；不得把 ACP clientId/attachment、Harness
+            boot/instance、Runtime sessionId、Pod 名称、Runtime endpoint 或
+            execution ID 当作公共 ID 返回。
+          </div>
+        </section>
+
+        <section id="event-storage">
+          <div class="section-head">
+            <div>
+              <div class="section-index">14B / STORAGE &amp; EVENT FLOW</div>
+              <h2>事件接受、推送与持久恢复</h2>
+            </div>
+          </div>
+          <p class="lead">
+            v1.6
+            将“事件已经被可靠接受”和“事件正在向客户端展示”拆成两个明确阶段。
+            第一阶段仍以 SQL 事务作为可靠接受点：同一事务推进 Harness
+            源游标、分配 Session 公开序号、更新 Turn
+            终态并保存公开事件；事务提交后，本节点直接唤醒 SSE。MQ
+            是后续异步分发通道，不是浏览器游标，也不取代首阶段的 SQL 接受点。
+          </p>
+          <div class="callout">
+            <strong>实现基线：</strong
+            ><code>feature/managed-agents-p0-p8</code> 的
+            <code>c818c21910</code> 已落地一部分
+            P0/P1。以下“当前切片”描述实际代码，
+            “目标链路”与“后续阶段”仍是待实现设计，不能作为生产能力声明。
+          </div>
+
+          <h3 style="margin-top: 28px">当前已实现的提交后直推</h3>
+          <pre>
+Hosted Harness source SSE
+  → HarnessEventProjector
+  → bounded batcher
+      首段可见文本立即刷新
+      后续：75ms / 64 events / 64KiB 任一触发
+      tool、审批、错误、取消、终态等边界先刷新前序文本
+  → ManagedAgentStore.recordHarnessEvents（单 SQL 事务）
+      source cursor + public sequence + Turn terminal + event rows
+  → afterCommit
+  → SessionEventHub（本进程、每 Session 有界 512 条）
+  → Public SSE / WebShell SSE
+      gap、overflow、断线：按公开 sequence 从 SQL 补齐
+      空闲 reconciliation 默认 5s</pre
+          >
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>能力</th>
+                  <th>当前实现</th>
+                  <th>边界</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>AgentStateStore</code></td>
+                  <td>
+                    已抽出会话、Turn、命令、事件与恢复游标所需的存储契约。
+                  </td>
+                  <td>
+                    当前仍只有 JDBC/MySQL 方向实现；不是完整数据库无关层。
+                  </td>
+                </tr>
+                <tr>
+                  <td>有界事件批处理</td>
+                  <td>
+                    首段文本优先
+                    TTFT；后续按时间、条数或字节上限成批提交；非文本边界及时刷新。
+                  </td>
+                  <td>
+                    批的是内存接收与 JDBC 写入；数据库中仍是一条公开事件一行。
+                  </td>
+                </tr>
+                <tr>
+                  <td>原子状态推进</td>
+                  <td>
+                    源游标、Session 序号、Turn
+                    终态和该批公开事件在同一事务内更新。
+                  </td>
+                  <td>
+                    尚无 <code>managed_agent_event_batch</code> / Outbox
+                    表，也未做长期保留清理。
+                  </td>
+                </tr>
+                <tr>
+                  <td>同节点 SSE</td>
+                  <td>
+                    只在事务提交成功后发布到
+                    <code>SessionEventHub</code>，避免未提交数据泄漏；连接按
+                    sequence 去重和补洞。
+                  </td>
+                  <td>
+                    Hub 是进程内结构，不承担持久化，也不能直接通知另一个 Java
+                    实例。
+                  </td>
+                </tr>
+                <tr>
+                  <td>跨节点可见性</td>
+                  <td>
+                    另一个 Java 实例可通过数据库 reconciliation
+                    最终发现已提交事件。
+                  </td>
+                  <td>
+                    当前最坏会受默认 5s reconciliation
+                    周期影响；尚无跨节点唤醒总线。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 style="margin-top: 28px">目标链路：SQL 批次日志兼 Outbox</h3>
+          <pre>
+Harness SSE → projector + bounded batcher
+  → AgentStateStore.acceptBatch transaction
+      Session / Turn / source cursor / public sequence
+      + managed_agent_event_batch（短期日志兼 Outbox）
+  ├─ afterCommit → local SessionEventHub → SSE
+  └─ Outbox relay → EventTransport（优先 RocketMQ；Redis Streams 可选；无 MQ 时 SQL scanner）
+                      → Message / Item / Snapshot materializer
+
+reconnect / history → SessionReplayService
+  → consistent Snapshot + journal tail by public sequence</pre
+          >
+          <p>
+            首个关系存储后端继续使用 MySQL；PostgreSQL
+            作为同一业务契约的后续适配器。
+            后端由部署配置选择，不按请求切换，也不以数据库双写作为迁移手段。
+          </p>
+          <div class="grid-2">
+            <article class="card accent-blue">
+              <h3>必须保持的不变量</h3>
+              <ul>
+                <li>
+                  客户端只使用 Session 公开 sequence，不暴露或持久依赖 MQ
+                  offset。
+                </li>
+                <li>
+                  同一个 batch 的状态、水位和 Outbox
+                  内容在一个数据库事务中接受。
+                </li>
+                <li>
+                  SSE 只发布已提交事件；提交响应丢失先按稳定 batch/command
+                  身份核对。
+                </li>
+                <li>
+                  Relay 与消费者按至少一次投递设计，重复发布不能重复追加文本。
+                </li>
+                <li>Snapshot 只覆盖已物化的连续前缀，清理不能制造重放缺口。</li>
+              </ul>
+            </article>
+            <article class="card accent-green">
+              <h3>职责边界</h3>
+              <ul>
+                <li>
+                  <code>AgentStateStore</code
+                  >：业务事务、租约代际、游标、序号和重放。
+                </li>
+                <li>
+                  <code>EventTransport</code>：已提交批次的异步至少一次分发。
+                </li>
+                <li>
+                  <code>SessionReplayService</code>：拼接
+                  Snapshot、短期日志和实时订阅。
+                </li>
+                <li>
+                  <code>SessionArtifactStore</code
+                  >：不可变资源及摘要校验，不承担业务租约。
+                </li>
+                <li>
+                  Harness 私有 journal 仍是模型上下文权威；公共 Item
+                  不能反向重建它。
+                </li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout warning">
+            <strong>不要改成无事务双写：</strong>“Harness SSE 同时异步写 MQ
+            和数据库”无法保证 Session 序号、Turn
+            终态、源游标与公开事件一致。第一阶段先使用 SQL 可靠接受；
+            只有持久源日志、fencing、回放和容量数据都证明可行后，才评估 MQ-first
+            接受路径。
+          </div>
+
+          <h3 style="margin-top: 28px">后续实施顺序</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>阶段</th>
+                  <th>工作</th>
+                  <th>完成判据</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>P0</td>
+                  <td>统一 Session 身份、存储契约和现状基线。</td>
+                  <td>
+                    已完成当前切片；公共 API、Harness、JSONL 与 Broker 使用同一
+                    UUID。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P1</td>
+                  <td>
+                    有界批处理、提交后本机直推；补稳定
+                    itemId/contentPartId、用户输入 Item 和 Snapshot。
+                  </td>
+                  <td>
+                    当前切片已完成；重连不重文、终态不越序、Snapshot 与 tail
+                    可一致拼接。跨实例通知与容量清理继续在 P2 验收。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P2</td>
+                  <td>
+                    批次表/Outbox、Relay、RocketMQ 或 SQL
+                    scanner、物化器、保留清理和跨实例唤醒。
+                  </td>
+                  <td>
+                    两个 Java
+                    实例上的订阅者都能低延迟看到同一提交，重复/乱序/丢通知可自动修复。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P3</td>
+                  <td>
+                    Broker Repository、Execution Ledger 与 Runtime binding
+                    持久恢复；随后补 Harness 私有 journal、Workspace 与 Artifact
+                    恢复。
+                  </td>
+                  <td>
+                    Broker/Runtime 子阶段已完成参考实现和本地验证；工具 intent
+                    已使用 Broker durable execution identity，并在私有
+                    checkpoint 提交后才显式启动。真实 Pod
+                    故障矩阵待集群验收。不能证明的工具副作用进入
+                    <code>UNKNOWN</code> 或 <code>recovery_blocked</code>。
+                  </td>
+                </tr>
+                <tr>
+                  <td>P4</td>
+                  <td>
+                    仅当压测证明 SQL 接受路径无法满足目标时，评估持久源日志或
+                    MQ-first。
+                  </td>
+                  <td>
+                    以
+                    TTFT、写放大、积压、故障恢复和成本数据决策，不以组件偏好替换事务语义。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            完整的数据结构、重放拼接、清理条件、故障语义和容量公式见
+            <a
+              href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-20-managed-agent-storage-event-architecture.zh-CN.md"
+              >《Managed Agent 存储、事件与会话恢复设计》</a
+            >。
+          </p>
+          <div class="callout" style="margin-top: 18px">
+            <strong>2026-09-23 私有 Session 存储进度：</strong>D0、D1a 与 D1b
+            已落地。Core 现在通过 <code>ManagedSessionJournalStore</code> /
+            <code>ManagedSessionJournalHandle</code> 和
+            <code>ManagedSessionResourceStore</code> 工作；<code
+              >LocalJsonlManagedSessionJournalStore</code
+            >
+            封装原有 <code>SessionWriterLease</code>，保持 standalone 的 JSONL
+            精确字节、逐行 sync、writer barrier 与 torn-tail 恢复语义。<code
+              >openManagedSession</code
+            >
+            已支持注入其他 journal/resource backend。Spring 的 Flyway V4 已增加
+            journal head、精确 transaction bytes、resource catalog 和
+            revision/resource ref 四张私有表；内部 HTTP API
+            已实现基于数据库时间的 writer lease/generation、head CAS、checkpoint
+            指针原子推进、幂等回执、分页读取，以及不超过 64 KiB 的事务化
+            <code>MYSQL_INLINE</code>
+            资源；TypeScript HTTP journal/resource adapter 已接入新建 Hosted
+            Session 与冷加载链路，不创建本地权威 transcript。共享 golden fixture
+            跨 Java/TypeScript 固定 header、限额、精确 JSONL
+            字节、摘要、请求元数据和错误分类； 多个独立子 JVM 连接真实 MySQL
+            的测试已证明“提交后 ACK 前崩溃”、租约接管、 幂等回放、旧 writer
+            fencing 和资源恢复。确定性多进程测试还会在第一轮结算后强杀真实 Java
+            与 Hosted Harness、删除旧本地 home，并由替代 owner 在相同 MySQL
+            Store 上完成第二轮；第二次模型请求已验证包含第一轮 prompt 与
+            answer，writer generation、journal revision、committed sequence 和
+            Harness boot ID 均推进。当前未过期 writer secret
+            同时保护恢复、分页和资源读取。私有路由默认关闭，仅在受信服务网络显式设置
+            <code>qwen.managed-agent.session-store.enabled=true</code> 后开放。
+            工具边界还会先通过 Runtime Broker 预留持久
+            <code>executionCallId</code>，把该身份与 Runtime Session binding
+            写入 <code>await_runtime</code> checkpoint，再显式启动工具；读取
+            PREPARED 记录不会产生副作用。冷加载后的 Core 现在还能读取该
+            checkpoint 中的工具名、Runtime Session 与 execution
+            身份，并在不分配新 Runtime 的前提下查询原 Broker 状态；UNKNOWN
+            不会触发工具重放；当前 fenced writer 会先把私有 Session 持久置为
+            <code>BLOCKED_EXECUTION</code>，Java 再以明确恢复错误终止公共
+            Turn，不重新 submit 原 Prompt。进入阻塞状态后，Harness 不再提交
+            Store 必须拒绝的 activation-release 事务，但仍会立即 seal writer，
+            不让所有权残留到 lease 到期。
+          </div>
+          <div class="callout warning">
+            <strong>尚未完成：</strong>大于 64 KiB 的 OSS 不可变资源、物理删除与
+            保留回收尚未实现。现有 owner failover 已证明 settled
+            Session；对于一个 已准入 Turn 中的一个已知
+            execution，恢复协调器现在还能启动或轮询原 Broker ID，把 SETTLED
+            结果提交为 results_ready，在 Turn dispatch lease 下安装替代 Harness
+            generation 与公共 event epoch，并通过绑定 checkpoint/activation 的
+            continuation 继续，且不重放原 Prompt 或工具。 UNKNOWN →
+            BLOCKED_EXECUTION 的 fenced 持久化及公共 Turn 阻断也已实现。 Java
+            现在会在调用 continuation 前先持久安装 attachment event epoch 与
+            cursor，再在响应后推进 cursor，因此不会再留下“已准入但数据库仍是旧
+            epoch”的窗口。但多工具结果映射、恢复态取消、continuation 中途
+            Harness 崩溃后的长期事件/checkpoint 重建、Workspace 状态及
+            Kubernetes 调度恢复仍由 D3 门禁保护，不能据此宣称生产级跨 Pod
+            自动恢复。详细方案见
+            <a
+              href="https://github.com/doudouOUC/qwen-code/blob/feature/managed-agents-p0-p8/docs/design/2026-09-21-managed-session-durable-store.zh-CN.md"
+              >《Managed Session 长期权威存储》</a
+            >。
+          </div>
+          <div class="callout danger">
+            <strong>当前验证边界：</strong>D1 以 Spring MockMvc 与 H2 MySQL
+            兼容模式证明 64 KiB inline 资源及 writer/commit/read HTTP
+            契约，并以共享 golden fixture 约束 Java/TypeScript 协议。真实 MySQL
+            测试覆盖 schema 升级、精确字节、幂等回执，并由多个独立 JVM 证明
+            generation 接管、旧 writer 拒绝和崩溃后的资源恢复。新增确定性
+            端到端测试已杀死真实 Hosted Harness 与 Java owner、删除旧本地盘并在
+            替代进程完成第二轮。新增单测已证明 Broker prepare/GET 不派发、显式
+            start 只派发一次，以及 Harness checkpoint 使用 Broker ID 并先于
+            start；新增冷加载测试还证明替代 Harness 能以持久身份查询原
+            execution，且查询不会获取新 Runtime；UNKNOWN 分支的 fenced
+            BLOCKED_EXECUTION 写入与“不 submit、不重放”公共终态已有模块级测试。
+            新增 TypeScript 单元/契约测试和 Java H2 coordinator/store 测试已覆盖
+            单 execution 的 results_ready continuation、Harness boot 与 event
+            epoch 接管，并证明不重新 submit 原 Prompt。确定性真实进程 E2E 还会在
+            durable PREPARED/await_runtime 已提交、物理执行尚未开始时强杀 原
+            Java 与 Harness，删除旧 Harness 磁盘，并由替代 owner 完成同一
+            execution；连续验证观察到一条 Broker 记录、一次物理副作用、一次初始
+            模型请求、一次回执 continuation 和一个公共终态。新增 Java
+            顺序测试还证明替代 event epoch 会在 continuation
+            调用前持久提交，并在响应后推进 cursor。尚未覆盖多工具、恢复态取消、
+            continuation 中途 Harness 崩溃后的事件/checkpoint
+            重建、其余多进程在途故障矩阵或真实 Kubernetes 调度恢复。P0/P1
+            事件、Item 与 Snapshot 切片已有 H2 和真实 MySQL 模块级验证，
+            尚不代表跨节点通知已经完成。P3 Runtime 恢复切片已增加真实 MySQL
+            下两个独立 JVM 的单物理资源/单次执行证明，并覆盖 local-process
+            接管、UID 条件删除、身份冲突、私有 attestation、有界退避、in-flight
+            调用超时 和超时后续接。 Kubernetes release 使用持久 UID 作为删除
+            precondition； resourceVersion
+            保留作观测与诊断，不用于普通删除，避免 Pod 状态更新造成误冲突。真实
+            集群验收还必须证明部署配置提供的不可变
+            <code>clusterUid</code> 在所有 Java 副本上一致，并在使用持久 handle
+            前拒绝其他集群的值；当前 adapter 不从 Kubernetes API 自动发现该
+            identity。真实 Kubernetes 集群、continuation 准入后的再次崩溃、
+            多工具/取消恢复、容量与 TTFT 仍是发布前验证项。
+          </div>
+        </section>
+
+        <section id="delivery">
+          <div class="section-head">
+            <div>
+              <div class="section-index">15 / DELIVERY PLAN</div>
+              <h2>分阶段实施</h2>
+            </div>
+          </div>
+          <div class="callout">
+            A～H 为能力阶段。首个运行闭环先完成 A/B/C/E 及 F 的 M01～M10 和
+            S01～S08； D 已有 Session/Event API 与本机提交后直推切片，但完整
+            Item/Snapshot 物化、跨实例通知、G 共享 Authority 与 H
+            全量扩展仍按各自门槛后续开放。
+          </div>
+          <div class="timeline">
+            <article class="phase">
+              <h3>阶段 A：冻结协议和基线</h3>
+              <p>
+                固定 Agent、Session、Turn、Item、RuntimeBinding、ToolExecution
+                和 trace identity；采集当前 TTFT、Pod 启动时长与前三轮 Tool
+                分布。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 B：双引擎正式接线</h3>
+              <p>
+                普通 qwen serve 使用 executionEngines；Legacy/Managed 同 Bridge
+                共存；owner 持久化，先以指定流量启用。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 C：Java 内嵌 Runtime Broker</h3>
+              <p>
+                在现有 Java Control Plane 内实现
+                RuntimeBrokerService、RuntimeBinding、Execution Ledger 和
+                Java→Runtime HTTP/SSE；不新增独立部署服务。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 D：Public Agent API MVP</h3>
+              <p>
+                实现 Agent、Session、Event、Turn 和 Item；固定 AgentBundle
+                revision；将 qwen 内部记录投影为稳定公共资源，并废弃旧实验
+                Managed Gateway API。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 E：Hosted Harness</h3>
+              <p>
+                qwen serve 成为 Java Sidecar；Prompt 与 Runtime provisioning
+                并行；Hosted 模式禁止本地工具 fallback。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 F：可靠性与故障注入</h3>
+              <p>
+                覆盖 ACK 丢失、SSE 重连、started 后断线、Harness/Java/Runtime
+                崩溃、Cancel 竞争和 Artifact 失败。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 G：Session Authority 外置</h3>
+              <p>
+                权威事件和 checkpoint 进入共享存储；Harness 可替换；引入
+                activation epoch 和 fencing，取消粘性要求。
+              </p>
+            </article>
+            <article class="phase">
+              <h3>阶段 H：扩大 Managed 范围</h3>
+              <p>
+                依次迁移 Built-in
+                Tools、Skills、MCP、Hooks、Media、Channels、Scheduled
+                Tasks、Worktree 和历史操作。
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="acceptance">
+          <div class="section-head">
+            <div>
+              <div class="section-index">16 / ACCEPTANCE</div>
+              <h2>核心验收标准</h2>
+            </div>
+          </div>
+          <p class="lead">
+            首版运行验收以
+            <a href="managed-agent-first-runtime.md#8-首版验收与阶段关系"
+              >M01～M10</a
+            >
+            为准：慢启动首 token、同轮工具、受理/执行 ACK 丢失、取消/迟到
+            ready、独占隔离、 重启恢复或准确阻塞、SSE
+            重连、容量与审批。多副本/共享 Runtime 只在启用时追加门槛。 以下保留
+            A～H 全量清单；租户语义仍需单独验收，公开序号已有实验切片， 稳定
+            Item/Snapshot 属于 D，跨实例接管属于 G。
+          </p>
+          <ol class="checklist">
+            <li>Runtime 人为延迟 15 秒，模型首 token 仍提前返回。</li>
+            <li>无 Tool Turn 在 Runtime 未就绪时可以正常完成。</li>
+            <li>同一 Turn 的 Tool Call 可以等待 Runtime 后继续。</li>
+            <li>Legacy 和 Managed Session 在同一 daemon 中同时工作。</li>
+            <li>Session 冷恢复后仍使用原执行引擎。</li>
+            <li>Managed 失败不会切换到 Legacy 重试。</li>
+            <li>Legacy 只能创建新的 Managed continuation。</li>
+            <li>Runtime started 后断线不会重复执行工具。</li>
+            <li>Cancel 后根进程和后代进程最终退出。</li>
+            <li>Harness 崩溃后旧 epoch 的迟到写入被拒绝。</li>
+            <li>Java重启后可以查询原 executionCallId。</li>
+            <li>不同 tenant/workspace 无法复用 RuntimeBinding。</li>
+            <li>大输出通过 artifactRef 返回，不压垮 SSE 和 Java堆。</li>
+            <li>多 Session 共享 Harness 时没有 Context 与权限串扰。</li>
+            <li>
+              Session 固定 Agent revision，更新 Agent 不改变已有 Session。
+            </li>
+            <li>
+              客户端断线后可以通过 eventSequence 续传，并查询相同 Turn 和
+              Items。
+            </li>
+            <li>
+              公共 API 与 qwen/Harness 共用同一个 Session UUID，但不暴露 Runtime
+              endpoint、Pod、ACP attachment、Harness boot/instance 或 Runtime
+              Session ID。
+            </li>
+            <li>
+              事务回滚时 Hub 不发布事件；提交成功后同节点 SSE
+              无需等待数据库轮询。
+            </li>
+            <li>
+              Hub overflow、断线或跨节点丢通知后按公开 sequence
+              补齐，不重复或跳过事件。
+            </li>
+            <li>
+              两个 Java 实例共享真实 MySQL 时，命令幂等、单活
+              Turn、序号和终态保持一致。
+            </li>
+          </ol>
+          <div class="callout">
+            <strong>下一项可交付证明：</strong>把 P3 Kubernetes adapter 放入真实
+            测试集群，验证 Java 重启、API timeout、Pod 删除、同名不同 UID、延迟
+            ready、Pod IP 变化、条件清理和工具执行中崩溃；随后接入真实 Hosted
+            Harness，加入 15 秒 Runtime 延迟，分别记录首 token、首个工具等待和
+            完整 Turn 时延。P2 跨节点事件分发仍按独立切片验收。
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <div>
+              <div class="section-index">17 / CURRENT GAP</div>
+              <h2>现有基础与主要缺口（v1.11 代码快照）</h2>
+            </div>
+          </div>
+          <div class="grid-2">
+            <article class="card accent-green">
+              <h3>已有基础</h3>
+              <ul>
+                <li>qwen serve HTTP/SSE 与 Session API。</li>
+                <li>ACP Bridge 双执行引擎接缝。</li>
+                <li>进程内 Managed Agent Host。</li>
+                <li>ManagedRuntimeProvider 抽象。</li>
+                <li>Local/Remote Runtime Provider。</li>
+                <li>prepare/manifest/execute/cancel/release 协议。</li>
+                <li>Auto Local Runtime 激活。</li>
+                <li>Session engine owner 与部分恢复保护。</li>
+                <li>独立 Spring 服务与阶段性 Public Session/Event API。</li>
+                <li>
+                  Hosted Harness Java Client、提交/取消/Transcript/SSE 接线。
+                </li>
+                <li>
+                  Java 内嵌 Runtime Broker、HTTP 适配器与本地进程 Provisioner。
+                </li>
+                <li>
+                  Runtime Broker JDBC Repository、加密 seed、Execution Ledger、
+                  跨 JVM fencing 与恢复 gate。
+                </li>
+                <li>
+                  local-process 同主机接管，以及 bare Pod/Secret Kubernetes
+                  reference adapter。
+                </li>
+                <li>
+                  Tool Runtime 私有 attestation、endpoint/UID 校验和条件释放。
+                </li>
+                <li>
+                  统一 Session UUID、MySQL Session/Turn/Command/Event 状态。
+                </li>
+                <li>
+                  有界 Harness 事件批处理、原子状态推进与本机提交后 SSE 直推。
+                </li>
+                <li>
+                  私有 Managed Session Store 的 Flyway V4、Spring 内部 API、
+                  writer fencing、精确事务字节、幂等 CAS、64 KiB inline 资源、
+                  TypeScript adapter、共享 golden contract 与独立 JVM/MySQL
+                  接管证明，以及 settled Session 的真实 Java/Hosted Harness
+                  owner 故障接管证明。
+                </li>
+                <li>
+                  Tool intent 的两阶段执行边界：Broker 先预留 durable execution
+                  identity，Harness checkpoint 提交后再显式启动。
+                </li>
+                <li>
+                  单个已知 execution 的跨 owner 恢复：替代 Harness
+                  对账原执行、提交 results_ready，Java 在 continuation
+                  前持久安装替代 event 水位并用原 promptId 续跑。
+                </li>
+              </ul>
+            </article>
+            <article class="card accent-amber">
+              <h3>待补齐</h3>
+              <ul>
+                <li>
+                  Hosted Harness 安全 Profile 的生产化与多实例 owner 路由。
+                </li>
+                <li>完整 Public Agent API 与 AgentDefinition Repository。</li>
+                <li>
+                  公共 Item/Snapshot 的完整历史重建、容量、清理和兼容门禁。
+                </li>
+                <li>
+                  SQL 批次日志/Outbox、EventTransport、跨实例唤醒和保留清理。
+                </li>
+                <li>AgentBundle/Manifest 版本一致性。</li>
+                <li>Artifact Store 和 RuntimeTemplate。</li>
+                <li>
+                  Harness 私有 journal 的 D0、D1a、D1b 和 D2a inline Hosted
+                  路由及 settled owner failover 已完成；工具 intent
+                  身份、提交顺序 和单个已知 execution 的 results_ready 跨 owner
+                  continuation 已完成。 OSS
+                  资源闭包、物理保留/删除、多工具与恢复态取消、continuation 中途
+                  Harness 崩溃后的事件/checkpoint 重建和 D3
+                  其余生产证明尚待实现。
+                </li>
+                <li>
+                  真实 Kubernetes、真实 Harness/Runtime 的故障、网络、容量与
+                  TTFT 验证。
+                </li>
+                <li>Legacy → Managed continuation。</li>
+                <li>MCP、Hooks、Channels 等完整迁移。</li>
+                <li>删除旧 <code>/managed/sessions*</code> 实验控制面。</li>
+              </ul>
+            </article>
+          </div>
+          <div class="callout" style="margin-top: 18px">
+            <strong>2026-09-21 实现对齐：</strong>实验分支
+            <code>feature/managed-agents-p0-p8</code> 的
+            <code>fc32ab0c95</code> 统一 Session 身份；<code>c818c21910</code>
+            进一步加入
+            <code>AgentStateStore</code
+            >、有界事件批处理、事务内游标/序号/终态更新、
+            <code>afterCommit</code> 本机直推和 SQL 补发。P3 工作区继续实现
+            durable seed/handle、JDBC Spring 接线、local-process/Kubernetes
+            provisioner、恢复 attestation、真实 MySQL 双 JVM 证明，以及创建者
+            退出后的跨 JVM local-process 接管。fake API 与本地进程测试证明参考
+            实现，不代表真实集群或上表其余 A～H 能力已经完成生产验收。
+          </div>
+        </section>
+
+        <footer class="footer">
+          Managed Agent 双链路技术方案 · v1.11 · 2026-09-23 · 单文件展示<br />
+          核心原则：一个 Session 一个固定执行引擎；一个模型循环
+          owner；工具副作用结果不确定时不自动重放。
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

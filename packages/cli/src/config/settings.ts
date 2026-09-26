@@ -29,6 +29,7 @@ import {
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { readConfigFile } from './read-config-file.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
@@ -695,6 +696,7 @@ export class LoadedSettings {
     corruptedPath: string | undefined = undefined,
     wasRecovered: boolean = false,
     workspaceSettingsActive: boolean = true,
+    runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -706,6 +708,10 @@ export class LoadedSettings {
     this.corruptedPath = corruptedPath;
     this.wasRecovered = wasRecovered;
     this.workspaceSettingsActive = workspaceSettingsActive;
+    this.runtimeEnvironment =
+      runtimeEnvironment === undefined
+        ? undefined
+        : Object.freeze({ ...runtimeEnvironment });
     this._merged = this.computeMergedSettings();
   }
 
@@ -722,6 +728,7 @@ export class LoadedSettings {
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
+  private readonly runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
 
   get merged(): Settings {
     return this._merged;
@@ -854,7 +861,10 @@ export class LoadedSettings {
         }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
-          getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
+          this.runtimeEnvironment === undefined
+            ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
+            : undefined,
+          this.runtimeEnvironment,
         );
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
@@ -1029,6 +1039,7 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
  */
 export interface LoadSettingsOptions {
+  runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
@@ -1043,17 +1054,49 @@ export function loadSettings(
     typeof consumeCorruptionEnvVars === 'object'
       ? consumeCorruptionEnvVars
       : { consumeCorruptionEnvVars };
+  return loadSettingsInternal(workspaceDir, opts, false);
+}
+
+export function readSettingsSnapshot(
+  workspaceDir: string,
+  options: {
+    runtimeEnvironment: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted: boolean;
+  },
+): LoadedSettings {
+  return loadSettingsInternal(
+    workspaceDir,
+    {
+      ...options,
+      skipWorkspaceSettings: !options.workspaceTrusted,
+      skipLoadEnvironment: true,
+      consumeCorruptionEnvVars: false,
+    },
+    true,
+  );
+}
+
+function loadSettingsInternal(
+  workspaceDir: string,
+  opts: LoadSettingsOptions,
+  snapshotOnly: boolean,
+): LoadedSettings {
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
-  preResolveHomeEnvOverrides();
+  if (opts.runtimeEnvironment === undefined) preResolveHomeEnvOverrides();
   // A malformed operator file cannot silently reset a confinement policy.
   // Validate literals before environment substitution and corruption recovery.
-  const operatorSandbox = readOperatorSandboxSettings().tools?.executionSandbox;
+  const operatorSandbox =
+    opts.runtimeEnvironment === undefined
+      ? readOperatorSandboxSettings().tools?.executionSandbox
+      : undefined;
   const userSettingsPath = getUserSettingsPath();
   const qwenHomeRedirectWarning =
-    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+    opts.runtimeEnvironment === undefined
+      ? detectQwenHomeRedirectWithoutMigration(userSettingsPath)
+      : undefined;
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
@@ -1094,8 +1137,11 @@ export function loadSettings(
     wasRecovered?: boolean;
   } => {
     try {
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+      if (snapshotOnly || fs.existsSync(filePath)) {
+        const content = snapshotOnly
+          ? readConfigFile(filePath)
+          : fs.readFileSync(filePath, 'utf-8');
+        if (content === undefined) return { settings: {} };
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
@@ -1106,6 +1152,9 @@ export function loadSettings(
         try {
           rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
+          if (snapshotOnly) {
+            throw new Error('Settings file contains invalid JSON.');
+          }
           if (scope !== SettingScope.Workspace || operatorSandbox)
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
@@ -1166,6 +1215,7 @@ export function loadSettings(
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
+          opts.runtimeEnvironment === undefined &&
           (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
@@ -1201,9 +1251,22 @@ export function loadSettings(
           hasVersionKey && typeof versionValue !== 'number';
         const hasLegacyNumericVersion =
           typeof versionValue === 'number' && versionValue < SETTINGS_VERSION;
+        if (
+          snapshotOnly &&
+          hasVersionKey &&
+          (typeof versionValue !== 'number' ||
+            !Number.isInteger(versionValue) ||
+            versionValue < 1)
+        ) {
+          throw new Error('Settings file has an unsupported version.');
+        }
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (snapshotOnly) {
+            migratedInMemoryScopes.add(scope);
+            return;
+          }
           if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
@@ -1263,6 +1326,13 @@ export function loadSettings(
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
+        if (
+          snapshotOnly &&
+          settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
+        ) {
+          throw new Error('Settings file has an unsupported version.');
+        }
+
         // Attach corruption state propagated from the parent via env vars.
         const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
@@ -1320,21 +1390,29 @@ export function loadSettings(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
-  const homeEnvFallback = getHomeEnvFallbackVars((message) =>
-    debugLogger.warn(message),
-  );
+  const homeEnvFallback =
+    opts.runtimeEnvironment === undefined
+      ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
+      : undefined;
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,
+    opts.runtimeEnvironment,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
     homeEnvFallback,
+    opts.runtimeEnvironment,
   );
-  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(
+    userResult.settings,
+    homeEnvFallback,
+    opts.runtimeEnvironment,
+  );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
     homeEnvFallback,
+    opts.runtimeEnvironment,
   );
 
   // Support legacy theme names
@@ -1382,7 +1460,7 @@ export function loadSettings(
 
   // loadEnvironment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  if (!opts.skipLoadEnvironment) {
+  if (!opts.skipLoadEnvironment && opts.runtimeEnvironment === undefined) {
     loadEnvironment(tempMergedSettings, workspaceDir);
   }
 
@@ -1437,6 +1515,7 @@ export function loadSettings(
     userResult.corruptedPath,
     userResult.wasRecovered ?? false,
     workspaceSettingsActive,
+    opts.runtimeEnvironment,
   );
 }
 

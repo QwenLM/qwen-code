@@ -39,6 +39,7 @@ const mockGetSystemEncoding = vi.hoisted(() =>
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnSync = vi.hoisted(() => vi.fn());
+const mockExecFile = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
@@ -77,6 +78,7 @@ vi.mock('@lydell/node-pty', () => ({
   spawn: mockPtySpawn,
 }));
 vi.mock('child_process', () => ({
+  execFile: mockExecFile,
   spawn: mockCpSpawn,
   spawnSync: mockSpawnSync,
 }));
@@ -4706,5 +4708,276 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
 
   it("returns 'cancel' for the canonical cancel reason", () => {
     expect(getShellAbortReasonKind({ kind: 'cancel' })).toBe('cancel');
+  });
+});
+
+describe('owned foreground process groups', () => {
+  const pid = 45678;
+  const member = (
+    id: number,
+    group = pid,
+    start = 'Wed Sep 9 10:00:00 2026',
+    state = 'S',
+  ) => `${id} ${group} ${start} ${state}\n`;
+  let snapshot: string;
+  let snapshotError: Error | undefined;
+  let child: EventEmitter & {
+    pid: number;
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: Mock;
+  };
+  let pty: EventEmitter & {
+    pid: number;
+    onData: Mock;
+    onExit: Mock;
+    kill: Mock;
+  };
+  let pending: Array<Promise<unknown>>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    snapshot = member(pid) + member(pid + 1);
+    snapshotError = undefined;
+    pending = [];
+    mockPlatform.mockReturnValue('linux');
+    mockProcessKill.mockImplementation(() => true);
+    mockIsBinary.mockReturnValue(false);
+    mockSpawnSync.mockImplementation(() => ({ status: 0, stdout: snapshot }));
+    mockExecFile.mockImplementation(
+      (
+        _file,
+        _args,
+        _options,
+        callback: (error: Error | null, stdout: string) => void,
+      ) => callback(snapshotError ?? null, snapshot),
+    );
+    child = Object.assign(new EventEmitter(), {
+      pid,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn(),
+    });
+    pty = Object.assign(new EventEmitter(), {
+      pid,
+      onData: vi.fn(() => ({ dispose: vi.fn() })),
+      onExit: vi.fn(() => ({ dispose: vi.fn() })),
+      kill: vi.fn(),
+    });
+    mockCpSpawn.mockReturnValue(child);
+    mockPtySpawn.mockReturnValue(pty);
+    mockGetPty.mockResolvedValue({
+      module: { spawn: mockPtySpawn },
+      name: 'node-pty',
+    });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
+  });
+
+  afterEach(async () => {
+    snapshot = member(pid + 999, pid + 999);
+    snapshotError = undefined;
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all(pending);
+    vi.useRealTimers();
+    mockExecFile.mockReset();
+    mockSpawnSync.mockReset();
+    mockProcessKill.mockImplementation(() => true);
+  });
+
+  async function start(usePty: boolean) {
+    const abort = new AbortController();
+    const handle = await ShellExecutionService.execute(
+      'fixture-command',
+      '/test/dir',
+      vi.fn(),
+      abort.signal,
+      usePty,
+      { ...shellExecutionConfig, requireProcessGroupExit: true },
+    );
+    pending.push(handle.result);
+    const settled = vi.fn();
+    void handle.result.then(settled);
+    const leaderExit = () => {
+      snapshot = member(pid + 1);
+      if (usePty) pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+      else {
+        child.emit('exit', 0, null);
+        child.emit('close', 0, null);
+      }
+    };
+    return { abort, handle, settled, leaderExit };
+  }
+
+  it.each([false, true])(
+    'waits for a normal foreground descendant after leader exit, PTY=%s',
+    async (usePty) => {
+      const run = await start(usePty);
+      run.leaderExit();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(run.settled).not.toHaveBeenCalled();
+      expect(ShellExecutionService['ownedProcessGroups'].has(pid)).toBe(true);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      snapshot = member(pid + 999, pid + 999);
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await run.handle.result).exitCode).toBe(0);
+      expect(ShellExecutionService['ownedProcessGroups'].has(pid)).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    'escalates cancellation after leader exit and awaits verified group exit, PTY=%s',
+    async (usePty) => {
+      const run = await start(usePty);
+      run.leaderExit();
+      run.abort.abort();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockProcessKill).toHaveBeenCalledWith(-pid, 'SIGTERM');
+      expect(mockProcessKill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(run.settled).not.toHaveBeenCalled();
+      expect(ShellExecutionService['ownedProcessGroups'].has(pid)).toBe(true);
+      snapshot = member(pid + 999, pid + 999);
+      await vi.advanceTimersByTimeAsync(100);
+      await run.handle.result;
+      const calls = mockProcessKill.mock.calls.length;
+      snapshot = member(pid, pid, 'Wed Sep 9 11:00:00 2026');
+      ShellExecutionService.cleanup();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockProcessKill).toHaveBeenCalledTimes(calls);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps failed snapshots occupied and retries without blind signals, PTY=%s',
+    async (usePty) => {
+      const run = await start(usePty);
+      run.leaderExit();
+      snapshotError = new Error('ps unavailable');
+      run.abort.abort();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(run.settled).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      snapshotError = undefined;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockProcessKill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      snapshot = member(pid + 999, pid + 999);
+      await vi.advanceTimersByTimeAsync(100);
+      await run.handle.result;
+    },
+  );
+
+  it.each([false, true])(
+    'does not signal a reused group or release an observed escaped member, PTY=%s',
+    async (usePty) => {
+      const run = await start(usePty);
+      run.leaderExit();
+      snapshot = member(pid + 1, pid + 1);
+      run.abort.abort();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(run.settled).not.toHaveBeenCalled();
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      snapshot = member(pid, pid, 'Wed Sep 9 11:00:00 2026');
+      ShellExecutionService.cleanup();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockProcessKill).not.toHaveBeenCalled();
+      expect(run.settled).not.toHaveBeenCalled();
+      snapshot = member(pid + 999, pid + 999);
+      await vi.advanceTimersByTimeAsync(100);
+      await run.handle.result;
+    },
+  );
+
+  it.each([false, true])(
+    'refuses promotion and drains the original group, PTY=%s',
+    async (usePty) => {
+      const run = await start(usePty);
+      const reason = { kind: 'background' };
+      run.abort.abort(reason);
+      reason.kind = 'cancel';
+      await vi.advanceTimersByTimeAsync(500);
+      expect(run.settled).not.toHaveBeenCalled();
+      expect(mockProcessKill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      run.leaderExit();
+      snapshot = member(pid + 999, pid + 999);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await run.handle.result).toMatchObject({
+        promoted: false,
+        error: { code: 'SHELL_PROCESS_GROUP_PROMOTION_UNSUPPORTED' },
+      });
+    },
+  );
+
+  it('rejects unsupported Windows ownership before spawning', async () => {
+    mockPlatform.mockReturnValue('win32');
+    const handle = await ShellExecutionService.execute(
+      'fixture-command',
+      '/test/dir',
+      vi.fn(),
+      new AbortController().signal,
+      true,
+      { requireProcessGroupExit: true },
+    );
+    expect(await handle.result).toMatchObject({
+      executionMethod: 'none',
+      pid: undefined,
+      error: { code: 'SHELL_PROCESS_GROUP_EXIT_UNSUPPORTED' },
+    });
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an empty successful ps response as confirmed exit', async () => {
+    const run = await start(false);
+    run.leaderExit();
+    snapshot = '';
+    run.abort.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(run.settled).not.toHaveBeenCalled();
+    expect(mockProcessKill).not.toHaveBeenCalled();
+    snapshot = member(pid + 999, pid + 999);
+    await vi.advanceTimersByTimeAsync(100);
+    await run.handle.result;
+  });
+
+  it('does not acquire kill authority after losing the initial identity snapshot', async () => {
+    mockSpawnSync.mockReturnValueOnce({ status: 1, stdout: '' });
+    const run = await start(false);
+    run.leaderExit();
+    run.abort.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockProcessKill).not.toHaveBeenCalled();
+    expect(run.settled).not.toHaveBeenCalled();
+    snapshot = member(pid + 999, pid + 999);
+    await vi.advanceTimersByTimeAsync(100);
+    await run.handle.result;
+  });
+
+  it('does not signal a replacement group with the same numeric pid', async () => {
+    const run = await start(false);
+    run.leaderExit();
+    snapshot = member(pid, pid, 'Wed Sep 9 11:00:00 2026');
+    run.abort.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockProcessKill).not.toHaveBeenCalled();
+    expect(run.settled).not.toHaveBeenCalled();
+    snapshot = member(pid + 999, pid + 999);
+    await vi.advanceTimersByTimeAsync(100);
+    await run.handle.result;
+  });
+
+  it('checks escaped members after ESRCH without issuing later signals', async () => {
+    const run = await start(false);
+    run.leaderExit();
+    mockProcessKill.mockImplementationOnce(() => {
+      snapshot = member(pid + 1, pid + 1);
+      throw Object.assign(new Error('group is gone'), { code: 'ESRCH' });
+    });
+    run.abort.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockProcessKill).toHaveBeenCalledTimes(1);
+    expect(run.settled).not.toHaveBeenCalled();
+    snapshot = member(pid + 999, pid + 999);
+    await vi.advanceTimersByTimeAsync(100);
+    await run.handle.result;
   });
 });

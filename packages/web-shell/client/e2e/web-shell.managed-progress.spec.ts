@@ -1,8 +1,8 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import type {
-  JavaAgentEvent,
-  JavaAgentSession,
-} from '../components/managed/java-managed-agent-client';
+  DaemonManagedSessionEvent,
+  DaemonManagedSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -16,138 +16,141 @@ const LONG_ANSWER = Array.from(
 
 async function installManagedScenario(page: Page, testInfo: TestInfo) {
   const baseURL = String(testInfo.project.use.baseURL);
-  const scenario = createWebShellDaemonScenario({ sessions: [] });
+  const scenario = createWebShellDaemonScenario({
+    sessions: [],
+    capabilities: {
+      features: ['managed_sessions', 'managed_session_cancel'],
+    },
+  });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
-  const events: JavaAgentEvent[] = [];
+  const events: DaemonManagedSessionEvent[] = [];
   const prompts: Array<{ prompt: unknown; key?: string }> = [];
   const cancellations: unknown[] = [];
   const errors: string[] = [];
-  const streamCursors: number[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  let summary: JavaAgentSession = {
+  let summary: DaemonManagedSessionSummary = {
     sessionId: SESSION_ID,
+    promptId: 'p1',
     title: 'Managed progress regression',
-    status: 'active',
+    workspaceCwd: scenario.workspaceCwd,
     createdAt: Date.now() - 10_000,
+    admittedAt: Date.now() - 10_000,
     updatedAt: Date.now(),
-    activeTurn: {
-      turnId: 'p1',
-      sessionId: SESSION_ID,
-      status: 'completed',
-      submittedAt: Date.now() - 10_000,
-    },
-    environment: { state: 'ready' },
-    lastSequence: 0,
+    phase: 'completed',
+    runtimeState: 'ready',
+    runtimeReady: true,
+    capabilities: { canSend: true, canCancel: false },
   };
-  function append(type: string, data?: Record<string, unknown>) {
-    const sequence = events.length + 1;
-    events.push({
-      sequence,
-      eventId: `event-${sequence}`,
-      createdAt: Date.now(),
+  function append(type: DaemonManagedSessionEvent['type'], data?: unknown) {
+    const event: DaemonManagedSessionEvent = {
+      id: events.length + 1,
+      at: Date.now(),
       sessionId: SESSION_ID,
-      turnId: summary.activeTurn!.turnId,
+      promptId: summary.promptId,
       type,
       data,
-      terminal: ['turn.completed', 'turn.cancelled'].includes(type),
-    });
-    summary.lastSequence = sequence;
+    };
+    events.push(event);
+    return event;
   }
-  append('turn.accepted', {
-    input: [{ type: 'text', text: 'Previous inspection' }],
+  append('accepted', {
+    prompt: [{ type: 'text', text: 'Previous inspection' }],
   });
-  append('item.output_text.delta', { text: LONG_ANSWER });
-  append('turn.completed');
+  append('assistant_delta', { text: LONG_ANSWER });
+  append('completed');
 
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+  await page.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin !== new URL(baseURL).origin) return route.abort();
+    if (!url.pathname.startsWith('/managed/')) return route.fallback();
     const request = route.request();
-    expect(request.method()).toBe('POST');
-    expect(request.headers()['x-qwen-tenant-id']).toBe('local-java-demo');
-    const path = new URL(request.url()).pathname.replace(
-      '/api/agent/web-shell/v1',
-      '',
-    );
-    const body = request.postDataJSON();
+    const clientId = request.headers()['x-qwen-managed-client-id'];
+    expect(clientId).toBeTruthy();
     const respond = (json: unknown, status = 200) =>
       route.fulfill({ status, json });
-    if (path === '/sessions/query')
-      return respond({ data: [summary], hasMore: false });
-    if (path === '/sessions/get') return respond(summary);
-    if (path === '/transcript/query')
-      return respond({
-        events,
-        lastSequence: summary.lastSequence,
-        hasMore: false,
-      });
-    if (path === '/events/stream') {
-      streamCursors.push(body.afterSequence ?? 0);
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body: events
-          .filter((event) => event.sequence > (body.afterSequence ?? 0))
-          .map(
-            (event) =>
-              `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-          )
-          .join(''),
-      });
+    const sessionPath = `/managed/sessions/${SESSION_ID}`;
+    if (request.method() === 'GET') {
+      if (url.pathname === '/managed/sessions')
+        return respond({ sessions: [summary] });
+      if (url.pathname === sessionPath) return respond(summary);
+      if (url.pathname === `${sessionPath}/transcript`)
+        return respond({ events, lastEventId: events.at(-1)!.id });
     }
-    if (path === '/turns/submit') {
-      prompts.push({ prompt: body.input, key: body.idempotencyKey });
-      summary = {
-        ...summary,
-        updatedAt: Date.now(),
-        activeTurn: {
-          sessionId: SESSION_ID,
-          turnId: `p${prompts.length + 1}`,
-          status: 'running',
-          submittedAt: Date.now(),
-        },
-      };
-      append('turn.accepted', { input: body.input });
-      append('turn.started');
-      return respond(
-        {
-          sessionId: SESSION_ID,
-          turnId: summary.activeTurn!.turnId,
-          status: 'accepted',
-          replayed: false,
-        },
-        202,
-      );
+    if (request.method() === 'POST') {
+      if (url.pathname === `${sessionPath}/prompts`) {
+        const body = request.postDataJSON() as { prompt: unknown };
+        prompts.push({
+          prompt: body.prompt,
+          key: request.headers()['idempotency-key'],
+        });
+        summary = {
+          ...summary,
+          promptId: `p${prompts.length + 1}`,
+          admittedAt: Date.now(),
+          updatedAt: Date.now(),
+          phase: 'agent_running',
+          capabilities: { canSend: false, canCancel: true },
+        };
+        append('accepted', { prompt: body.prompt });
+        append('agent_started', { round: 0 });
+        return respond(
+          {
+            managed: true,
+            sessionId: SESSION_ID,
+            promptId: summary.promptId,
+            created: true,
+            state: 'processing',
+            activationReady: true,
+            eventStreamAvailable: true,
+            phase: summary.phase,
+          },
+          202,
+        );
+      }
+      if (url.pathname === `${sessionPath}/cancel`) {
+        cancellations.push(request.postDataJSON());
+        summary = {
+          ...summary,
+          phase: 'cancelling',
+          capabilities: { canSend: false, canCancel: false },
+        };
+        append('cancelling');
+        return respond({ accepted: true });
+      }
     }
-    if (path === '/turns/cancel') {
-      cancellations.push({ turnId: body.turnId });
-      summary.activeTurn!.status = 'cancelling';
-      append('turn.cancel.requested');
-      return respond(
-        {
-          sessionId: SESSION_ID,
-          turnId: body.turnId,
-          status: 'accepted',
-          replayed: false,
-        },
-        202,
-      );
-    }
-    return respond({ error: `Unexpected Managed request: ${path}` }, 500);
+    return respond(
+      { error: `Unexpected Managed request: ${url.pathname}` },
+      500,
+    );
   });
 
-  async function emit(type: string, data?: Record<string, unknown>) {
-    if (type === 'turn.completed' || type === 'turn.cancelled') {
-      summary.activeTurn!.status = type.slice('turn.'.length);
+  async function emit(type: DaemonManagedSessionEvent['type'], data?: unknown) {
+    if (type === 'completed' || type === 'cancelled') {
+      // This fixture has a committed first turn, so cancellation permits continuation.
+      summary = {
+        ...summary,
+        phase: type,
+        capabilities: { canSend: true, canCancel: false },
+      };
     }
-    append(type, data);
+    await daemon.sse.split(append(type, data));
+    if (type === 'completed' || type === 'cancelled') await daemon.sse.close();
   }
+
   async function waitForCurrentStream() {
     await expect
-      .poll(() => streamCursors.includes(summary.lastSequence))
+      .poll(async () =>
+        (await daemon.sse.connections()).some(
+          (connection) =>
+            connection.sessionId === SESSION_ID &&
+            connection.headers['last-event-id'] === String(events.at(-1)!.id),
+        ),
+      )
       .toBe(true);
   }
-  await page.goto(
-    `/?managed=1&managedProvider=java&managedSession=${SESSION_ID}`,
-  );
+
+  await page.goto(`/?managedSession=${SESSION_ID}`);
+  await page.getByRole('button', { name: 'Managed Agents' }).click();
   await expect(
     page.getByRole('textbox', { name: 'Message the managed agent' }),
   ).toBeEnabled();
@@ -203,7 +206,7 @@ test('Managed progress stays visible through a long transcript and live thought/
     /[1-9]\d*s elapsed/,
   );
 
-  await fixture.emit('item.reasoning.delta', {
+  await fixture.emit('assistant_thought', {
     text: 'Checking the requested file.',
   });
   const list = page
@@ -212,29 +215,25 @@ test('Managed progress stays visible through a long transcript and live thought/
   await expect(
     list.getByRole('button', { name: /^Thinking\b/ }),
   ).toBeInViewport();
-  await fixture.emit('item.tool_call.updated', {
+  await fixture.emit('tool_started', {
     toolCallId: 'read-marker',
-    status: 'in_progress',
     toolName: 'read_file',
     input: { file_path: 'marker.txt' },
   });
   await expect(list.getByText('marker.txt', { exact: true })).toBeInViewport();
-  await fixture.emit('item.tool_call.updated', {
+  await fixture.emit('tool_completed', {
     toolCallId: 'read-marker',
     toolName: 'read_file',
-    status: 'completed',
     failed: false,
     output: 'marker contents',
   });
-  await fixture.emit('item.output_text.delta', { text: `${LONG_ANSWER}\n\n` });
-  await fixture.emit('item.output_text.delta', {
-    text: 'Latest answer marker',
-  });
+  await fixture.emit('assistant_delta', { text: `${LONG_ANSWER}\n\n` });
+  await fixture.emit('assistant_delta', { text: 'Latest answer marker' });
   await expect(
     list.getByText('Latest answer marker', { exact: true }),
   ).toBeInViewport();
   await expectScrollableTranscript(page);
-  await fixture.emit('turn.completed');
+  await fixture.emit('completed');
   await expect(page.locator('[data-managed-progress]')).toHaveCount(0);
   await expect(composer).toBeEnabled();
   expect(fixture.prompts).toHaveLength(1);
@@ -256,22 +255,20 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await fixture.waitForCurrentStream();
   await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
   await fixture.waitForCurrentStream();
-  expect(fixture.cancellations).toEqual([{ turnId: 'p2' }]);
+  expect(fixture.cancellations).toEqual([{ promptId: 'p2' }]);
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
   await expect(composer).toBeDisabled();
   await expect(send).toBeDisabled();
-  await fixture.emit('turn.cancelled');
+  await fixture.emit('cancelled');
   await expect(page.locator('[data-managed-progress]')).toHaveCount(0);
   await expect(composer).toBeEnabled();
   await composer.fill('Continue after cancellation');
   await send.click();
   await fixture.waitForCurrentStream();
-  await fixture.emit('item.output_text.delta', {
-    text: 'Continuation succeeded',
-  });
-  await fixture.emit('turn.completed');
+  await fixture.emit('assistant_delta', { text: 'Continuation succeeded' });
+  await fixture.emit('completed');
   await expect(
     page.getByText('Continuation succeeded', { exact: true }),
   ).toBeInViewport();

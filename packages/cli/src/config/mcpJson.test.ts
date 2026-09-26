@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadProjectMcpServers, PROJECT_MCP_FILENAME } from './mcpJson.js';
+
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
+}));
 
 describe('loadProjectMcpServers', () => {
   let dir: string;
@@ -18,6 +22,7 @@ describe('loadProjectMcpServers', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -40,6 +45,61 @@ describe('loadProjectMcpServers', () => {
     expect(second.servers).toEqual({});
     expect(second.errors).toEqual([]);
     expect(second).not.toBe(first);
+  });
+
+  it.each(['directory', 'dangling symlink'])(
+    'reports a %s as unreadable configuration without changing it',
+    (kind) => {
+      const file = path.join(dir, PROJECT_MCP_FILENAME);
+      if (kind === 'directory') fs.mkdirSync(file);
+      else fs.symlinkSync(path.join(dir, 'absent-target'), file);
+      const before = fs.lstatSync(file);
+      const result = loadProjectMcpServers(dir);
+      expect(result.servers).toEqual({});
+      expect(result.path).toBe(file);
+      expect(result.errors).toEqual([
+        expect.stringContaining('Failed to read'),
+      ]);
+      expect(fs.lstatSync(file).ino).toBe(before.ino);
+      expect(fs.readdirSync(dir)).toEqual([PROJECT_MCP_FILENAME]);
+    },
+  );
+
+  it.each(['delete', 'replace'])(
+    'rejects a file changed by %s while it is read',
+    (operation) => {
+      const file = path.join(dir, PROJECT_MCP_FILENAME);
+      write('{"mcpServers":{"original":{"command":"original"}}}');
+      const readFile = fs.readFileSync;
+      vi.spyOn(fs, 'readFileSync').mockImplementation((...args) => {
+        const content = readFile(...args);
+        if (args[0] === file) {
+          fs.unlinkSync(file);
+          if (operation === 'replace') write('{"mcpServers":{}}');
+        }
+        return content;
+      });
+      const result = loadProjectMcpServers(dir);
+      expect(result.servers).toEqual({});
+      expect(result.path).toBe(file);
+      expect(result.errors).toEqual([
+        expect.stringContaining('Failed to read'),
+      ]);
+    },
+  );
+
+  it('reports a dangling project directory instead of absent MCP configuration', () => {
+    const project = path.join(dir, 'project');
+    const target = path.join(dir, 'absent-project');
+    fs.symlinkSync(target, project, 'dir');
+
+    const result = loadProjectMcpServers(project);
+
+    expect(result.servers).toEqual({});
+    expect(result.path).toBe(path.join(project, PROJECT_MCP_FILENAME));
+    expect(result.errors).toEqual([expect.stringContaining('ENOENT')]);
+    expect(fs.readlinkSync(project)).toBe(target);
+    expect(fs.existsSync(target)).toBe(false);
   });
 
   it('loads servers and tags each with scope: project', () => {
@@ -130,12 +190,17 @@ describe('loadProjectMcpServers', () => {
   });
 
   it('reports malformed JSON without throwing, and loads nothing', () => {
-    write('{ not valid json');
+    const content = '{ synthetic-configuration-secret invalid json';
+    write(content);
     const result = loadProjectMcpServers(dir);
     expect(result.servers).toEqual({});
     expect(result.path).toContain(PROJECT_MCP_FILENAME);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain('Failed to parse');
+    expect(result.errors[0]).not.toContain('synthetic-configuration-secret');
+    expect(fs.readFileSync(path.join(dir, PROJECT_MCP_FILENAME), 'utf8')).toBe(
+      content,
+    );
   });
 
   it('reports a missing mcpServers object', () => {

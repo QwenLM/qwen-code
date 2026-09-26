@@ -31,6 +31,7 @@ import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
   TurnResultRecordPayload,
+  SessionExecutionEngine,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -52,6 +53,10 @@ import {
   toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
+  parseManagedToolFileHistoryBinding,
+  parseManagedToolFileHistoryPromptId,
+  parseManagedToolFileHistoryState,
+  ManagedToolProtocolError,
   type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -107,6 +112,7 @@ import {
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -143,6 +149,7 @@ import {
 } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  isManagedGatewaySessionSourceType,
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
   parseSessionSource,
@@ -178,6 +185,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   MID_TURN_RECONCILIATION_RING_SIZE,
+  MANAGED_SESSION_STORE_META_KEY,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -187,6 +195,7 @@ import {
   activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
+  parseBridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import type {
   ChannelWorkExclusions,
@@ -235,9 +244,12 @@ import type {
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
   BridgePromptRequest,
+  BridgeManagedRuntimeToolExecuteResult,
+  BridgeManagedRuntimeToolManifest,
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
+  BridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -670,6 +682,8 @@ interface ChannelInfo {
 }
 
 interface SessionEntry {
+  readonly executionEngine?: SessionExecutionEngine;
+  readonly managedSessionStore?: BridgeManagedSessionStore;
   sessionId: string;
   workspaceCwd: string;
   effectiveCwd: string;
@@ -783,6 +797,33 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  continuationAdmissions: Map<
+    string,
+    {
+      recoveryKey: string | null;
+      result: {
+        accepted: true;
+        interruption: 'interrupted_prompt' | 'interrupted_turn';
+        promptId: string;
+        lastEventId: number;
+        eventEpoch: string;
+      };
+    }
+  >;
+  /**
+   * Admitted `promptId` → original `sendPrompt` result. A retry with the
+   * same fingerprint returns this promise and must not abort the original
+   * turn; a different payload is `PromptIdConflictError`.
+   */
+  promptAdmissions: Map<
+    string,
+    {
+      fingerprint: string;
+      result: Promise<PromptResponse>;
+      lastEventId: number;
+      eventEpoch: string;
+    }
+  >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /**
@@ -1025,6 +1066,28 @@ interface SessionEntry {
    * is pending. Cancelled by `clearPromptSettledClose` when a subscriber
    * reconnects or the session is explicitly closed / killed. */
   promptSettledCloseTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+function assertManagedSessionStoreBinding(
+  sessionId: string,
+  current: BridgeManagedSessionStore | undefined,
+  requested: BridgeManagedSessionStore | undefined,
+): void {
+  if (
+    (current === undefined && requested === undefined) ||
+    (current !== undefined &&
+      requested !== undefined &&
+      current.baseUrl === requested.baseUrl &&
+      current.tenantId === requested.tenantId &&
+      current.workspaceId === requested.workspaceId &&
+      current.writerId === requested.writerId)
+  ) {
+    return;
+  }
+  throw RequestError.invalidParams(
+    { errorKind: 'managed_session_store_conflict' },
+    `Session "${sessionId}" is already bound to another Managed Session store`,
+  );
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -2264,6 +2327,7 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
+const MANAGED_RUNTIME_TOOL_TIMEOUT_MS = 10 * 60_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
@@ -3882,6 +3946,7 @@ export function createSessionControlPlane(
     historyPageSize?: number;
     liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
+    managedSessionStore?: BridgeManagedSessionStore;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
     lifecycle: { phase: 'active' | 'abandoned'; channel?: ChannelInfo };
@@ -3902,6 +3967,38 @@ export function createSessionControlPlane(
   // context; running either twice for the same id at the same time can
   // duplicate history frames or race two entries into `byId`.
   const inFlightRestores = new Map<string, InFlightRestore>();
+  const quotaExemptReservations = new Set<symbol>();
+  const beginQuotaExemptReservation = (): (() => void) => {
+    const token = Symbol();
+    quotaExemptReservations.add(token);
+    return () => {
+      quotaExemptReservations.delete(token);
+    };
+  };
+  const userFacingLiveCount = (): number => {
+    let count = 0;
+    for (const entry of byId.values()) {
+      if (!isManagedGatewaySessionSourceType(entry.sourceType)) count++;
+    }
+    return count;
+  };
+  const userFacingQuotaOccupied = (): number =>
+    Math.max(
+      0,
+      userFacingLiveCount() +
+        inFlightSpawns.size +
+        inFlightRestores.size +
+        abandonedNewSessionSettlements.size -
+        quotaExemptReservations.size,
+    );
+  // Tool Runtime `managed-gateway` sessions are internal workers and do not
+  // occupy the user-facing maxSessions budget.
+  const assertSessionQuotaAvailable = (sourceType?: string): void => {
+    if (isManagedGatewaySessionSourceType(sourceType)) return;
+    if (userFacingQuotaOccupied() >= maxSessions) {
+      throw new SessionLimitExceededError(maxSessions);
+    }
+  };
 
   // Sessions whose worktree ownership is being transferred to a replacement
   // session (worktree reset). While an id is present, every writer that could
@@ -4048,6 +4145,21 @@ export function createSessionControlPlane(
       throw new InvalidClientIdError(entry.sessionId, clientId);
     }
     return clientId;
+  };
+
+  const assertSessionAcceptsModelWork = (entry: SessionEntry): void => {
+    if (entry.sourceType === 'managed-gateway') {
+      throw new SessionNotFoundError(entry.sessionId);
+    }
+  };
+
+  const assertManagedRuntimeToolSession = (entry: SessionEntry): void => {
+    if (
+      entry.sourceType !== 'managed-gateway' ||
+      entry.sourceId !== entry.sessionId
+    ) {
+      throw new SessionNotFoundError(entry.sessionId);
+    }
   };
 
   function constructChannelInfo(
@@ -4365,7 +4477,7 @@ export function createSessionControlPlane(
     const stoppedByRuntimeStop = runtimeStop?.channels.includes(info) === true;
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
-      if (!sessEntry) continue;
+      if (!sessEntry || sessEntry.channel !== info.channel) continue;
       cancelPendingForSession(sid);
       // DAEMON-002/005: every still-pending prompt owes its formal
       // terminal before the bus closes below.
@@ -4728,6 +4840,7 @@ export function createSessionControlPlane(
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
     requestedSessionId?: string,
+    managedSessionStore?: BridgeManagedSessionStore,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
@@ -4823,6 +4936,11 @@ export function createSessionControlPlane(
                 ...(requestedSessionId
                   ? {
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                    }
+                  : {}),
+                ...(managedSessionStore
+                  ? {
+                      [MANAGED_SESSION_STORE_META_KEY]: managedSessionStore,
                     }
                   : {}),
                 ...(engine !== undefined
@@ -5008,7 +5126,14 @@ export function createSessionControlPlane(
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch },
+        {
+          parentSessionId,
+          sourceType,
+          sourceId,
+          worktree,
+          branch,
+          ...(managedSessionStore ? { managedSessionStore } : {}),
+        },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -6547,6 +6672,7 @@ export function createSessionControlPlane(
       sourceId?: string;
       worktree?: { slug: string; path: string; branch: string };
       branch?: { name: string; baseBranch: string };
+      managedSessionStore?: BridgeManagedSessionStore;
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;
@@ -6563,7 +6689,13 @@ export function createSessionControlPlane(
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.managedSessionStore
+        ? { managedSessionStore: options.managedSessionStore }
+        : {}),
       channel: ci.channel,
+      ...(ci.harness.executionEngine
+        ? { executionEngine: ci.harness.executionEngine }
+        : {}),
       connection: ci.connection,
       events,
       artifacts: new SessionArtifactStore({
@@ -6592,6 +6724,8 @@ export function createSessionControlPlane(
       pendingAgentNotificationCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
+      promptAdmissions: new Map(),
+      continuationAdmissions: new Map(),
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
@@ -7434,6 +7568,10 @@ export function createSessionControlPlane(
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
+      /** Moves an admission the caller already holds into this restore. */
+      takeFreshSessionAdmission?: () =>
+        | BridgeFreshSessionReservation
+        | undefined;
       suppressRestorePrompt?: boolean;
       deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
@@ -7466,6 +7604,10 @@ export function createSessionControlPlane(
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
+      /** Moves an admission the caller already holds into this restore. */
+      takeFreshSessionAdmission?: () =>
+        | BridgeFreshSessionReservation
+        | undefined;
       suppressRestorePrompt?: boolean;
       deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
@@ -7497,7 +7639,29 @@ export function createSessionControlPlane(
         '`standalone` is reserved for daemon-owned session restore',
       );
     }
+    if (req.managedSessionStore !== undefined && action !== 'load') {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_load_only' },
+        'managedSessionStore is supported only for session/load',
+      );
+    }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    const source = parseSessionSource(req.sourceType, req.sourceId);
+    if ('error' in source) {
+      throw new InvalidSessionMetadataError('sourceType', source.error);
+    }
+    req = Object.freeze({
+      ...req,
+      workspaceCwd: workspaceKey,
+      ...source,
+      ...(req.managedSessionStore
+        ? {
+            managedSessionStore: parseBridgeManagedSessionStore(
+              req.managedSessionStore,
+            ),
+          }
+        : {}),
+    });
     if (
       req.approvalMode !== undefined &&
       !KNOWN_APPROVAL_MODES.has(req.approvalMode)
@@ -7543,6 +7707,11 @@ export function createSessionControlPlane(
         channelInfoForEntry(existing)?.harness.executionEngine,
       );
       assertAttachableSessionEntry(req.sessionId, existing);
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        existing.managedSessionStore,
+        req.managedSessionStore,
+      );
       const replayFields =
         historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(
@@ -7645,6 +7814,11 @@ export function createSessionControlPlane(
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        inFlight.managedSessionStore,
+        req.managedSessionStore,
+      );
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
@@ -7812,15 +7986,7 @@ export function createSessionControlPlane(
     }
 
     assertFreshSessionAdmissionOpen();
-    if (
-      byId.size +
-        inFlightSpawns.size +
-        inFlightRestores.size +
-        abandonedNewSessionSettlements.size >=
-      maxSessions
-    ) {
-      throw new SessionLimitExceededError(maxSessions);
-    }
+    assertSessionQuotaAvailable(source.sourceType);
 
     const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
@@ -7829,13 +7995,15 @@ export function createSessionControlPlane(
     // doc comment). Mutated synchronously by the coalesce branch above
     // and read once by the IIFE when seeding `entry.attachCount`.
     const coalesceState = { count: 0 };
-    const admission =
-      options.skipFreshSessionAdmission === true
+    const admission = options.takeFreshSessionAdmission
+      ? options.takeFreshSessionAdmission()
+      : options.skipFreshSessionAdmission === true
         ? undefined
         : reserveFreshSession({
             operation: action,
             workspaceCwd: workspaceKey,
             sessionId: req.sessionId,
+            ...(source.sourceType ? { sourceType: source.sourceType } : {}),
           });
     let admissionReleased = false;
     const releaseAdmissionOnce = () => {
@@ -8108,6 +8276,12 @@ export function createSessionControlPlane(
                   ...(hideInheritedHistory
                     ? { [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true }
                     : {}),
+                  ...(req.managedSessionStore
+                    ? {
+                        [MANAGED_SESSION_STORE_META_KEY]:
+                          req.managedSessionStore,
+                      }
+                    : {}),
                   ...(req.suppressWorktreeContextRestore
                     ? {
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
@@ -8292,6 +8466,11 @@ export function createSessionControlPlane(
       if (racedEntry) {
         restoreEvents.close();
         assertAttachableSessionEntry(req.sessionId, racedEntry);
+        assertManagedSessionStoreBinding(
+          req.sessionId,
+          racedEntry.managedSessionStore,
+          req.managedSessionStore,
+        );
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -8417,6 +8596,9 @@ export function createSessionControlPlane(
             : {}),
           ...(req.sourceType ? { sourceType: req.sourceType } : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.managedSessionStore
+            ? { managedSessionStore: req.managedSessionStore }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -8663,18 +8845,27 @@ export function createSessionControlPlane(
       },
     );
 
+    const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+      source.sourceType,
+    )
+      ? beginQuotaExemptReservation()
+      : undefined;
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
       liveReplayMode,
       hideInheritedHistory,
+      ...(req.managedSessionStore
+        ? { managedSessionStore: req.managedSessionStore }
+        : {}),
       publicPromise: promise,
       settlementPromise,
       lifecycle: restoreLifecycle,
       coalesceState,
     });
     void settlementPromise.finally(() => {
+      releaseQuotaExempt?.();
       const current = inFlightRestores.get(req.sessionId);
       if (current?.settlementPromise === settlementPromise) {
         inFlightRestores.delete(req.sessionId);
@@ -9381,6 +9572,10 @@ export function createSessionControlPlane(
       return byId.size;
     },
 
+    get userFacingSessionCount() {
+      return userFacingLiveCount();
+    },
+
     get pendingPromptTotal() {
       // Queue-depth gauge for the Daemon Status "Queued" chart: count only
       // prompts still waiting in the per-session FIFO (`state === 'queued'`),
@@ -9674,6 +9869,28 @@ export function createSessionControlPlane(
       };
       const daemonOwnedStandaloneCreation =
         trustedStandaloneSpawn !== undefined;
+      req = {
+        ...req,
+        ...(req.worktree
+          ? { worktree: Object.freeze({ ...req.worktree }) }
+          : {}),
+        ...(req.branch ? { branch: Object.freeze({ ...req.branch }) } : {}),
+        ...(req.managedSessionStore
+          ? {
+              managedSessionStore: parseBridgeManagedSessionStore(
+                req.managedSessionStore,
+              ),
+            }
+          : {}),
+      };
+      if (
+        req.managedSessionStore !== undefined &&
+        req.sessionId === undefined
+      ) {
+        throw new Error(
+          'managedSessionStore requires a caller-supplied sessionId',
+        );
+      }
 
       // Resolve the effective scope for THIS call. A per-request
       // `req.sessionScope` overrides the daemon-wide default; omitting
@@ -9696,6 +9913,12 @@ export function createSessionControlPlane(
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
       }
+      req = Object.freeze({
+        ...req,
+        workspaceCwd: workspaceKey,
+        sessionScope: effectiveScope,
+        ...source,
+      });
       if (
         isReservedStandaloneSessionSourceType(source.sourceType) &&
         !daemonOwnedStandaloneCreation
@@ -9940,20 +10163,14 @@ export function createSessionControlPlane(
           );
         }
       }
-      // Cap check: count both registered sessions and in-flight spawns
-      // (a fresh-spawn race that's about to register hasn't hit
+      // Cap check: count both registered user-facing sessions and in-flight
+      // spawns (a fresh-spawn race that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
+      // Tool Runtime `managed-gateway` sessions are internal workers and
+      // do not occupy the user-facing maxSessions budget.
       assertFreshSessionAdmissionOpen();
-      if (
-        byId.size +
-          inFlightSpawns.size +
-          inFlightRestores.size +
-          abandonedNewSessionSettlements.size >=
-        maxSessions
-      ) {
-        throw new SessionLimitExceededError(maxSessions);
-      }
+      assertSessionQuotaAvailable(source.sourceType);
 
       const requestedSessionRegistrationOwner =
         req.sessionId !== undefined ? Symbol(req.sessionId) : undefined;
@@ -9995,6 +10212,7 @@ export function createSessionControlPlane(
           operation: 'spawn',
           workspaceCwd: workspaceKey,
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
+          ...(source.sourceType ? { sourceType: source.sourceType } : {}),
         });
       } catch (error) {
         releaseRequestedSessionRegistration();
@@ -10019,6 +10237,7 @@ export function createSessionControlPlane(
         req.worktree,
         req.branch,
         req.sessionId,
+        req.managedSessionStore,
         daemonOwnedStandaloneCreation,
         trustedStandaloneSpawn
           ? () => {
@@ -10063,6 +10282,11 @@ export function createSessionControlPlane(
         effectiveScope === 'single'
           ? workspaceKey
           : `${workspaceKey}#${randomUUID()}`;
+      const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+        source.sourceType,
+      )
+        ? beginQuotaExemptReservation()
+        : undefined;
       inFlightSpawns.set(tracker, promise);
       try {
         return await promise;
@@ -10078,9 +10302,11 @@ export function createSessionControlPlane(
               releaseRequestedSessionRegistration();
             },
           );
+          void abandonedSettlement.finally(() => releaseQuotaExempt?.());
         } else {
           releaseAdmissionOnce();
           releaseRequestedSessionRegistration();
+          releaseQuotaExempt?.();
         }
         // Always clear the in-flight slot whether the spawn resolved
         // or rejected — leaving a rejected promise behind would
@@ -10112,6 +10338,25 @@ export function createSessionControlPlane(
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      if (entry.sourceType === 'managed-gateway') {
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (!Array.isArray(req.prompt)) {
+        return Promise.reject(
+          RequestError.invalidParams(undefined, 'Prompt must be an array'),
+        );
+      }
+      const promptId = context?.promptId ?? randomUUID();
+      const fingerprint = JSON.stringify(req.prompt);
+      const existingAdmission = entry.promptAdmissions.get(promptId);
+      if (existingAdmission) {
+        if (existingAdmission.fingerprint !== fingerprint) {
+          throw new PromptIdConflictError(sessionId, promptId);
+        }
+        return existingAdmission.result;
+      }
+      const admissionLastEventId = entry.events.lastEventId;
+      const admissionEventEpoch = entry.events.epoch;
       if (isClosingOrAuthorizingClose(entry)) {
         return Promise.reject(
           new SessionNotFoundError(
@@ -10134,11 +10379,6 @@ export function createSessionControlPlane(
         entry.managedConversationBinding?.released !== true
       ) {
         return Promise.reject(standaloneWorkingDirectoryMissingError());
-      }
-      if (!Array.isArray(req.prompt)) {
-        return Promise.reject(
-          RequestError.invalidParams(undefined, 'Prompt must be an array'),
-        );
       }
       const promotedMidTurn = context?.promotedMidTurn;
       const isPromotedMidTurn = promotedMidTurn !== undefined;
@@ -10185,7 +10425,6 @@ export function createSessionControlPlane(
       // genuinely queued (another prompt is already running/queued) —
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
-      const promptId = context?.promptId ?? randomUUID();
       const invocationContext: InvocationContextV1 = Object.freeze({
         version: 1,
         sessionId,
@@ -10894,6 +11133,12 @@ export function createSessionControlPlane(
           schedulePromptSettledClose(entry);
         })
         .catch(() => {});
+      entry.promptAdmissions.set(promptId, {
+        fingerprint,
+        result,
+        lastEventId: admissionLastEventId,
+        eventEpoch: admissionEventEpoch,
+      });
       return result;
     },
 
@@ -11066,6 +11311,17 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.epoch;
+    },
+
+    getPromptAdmissionWatermark(sessionId, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const admission = entry.promptAdmissions.get(promptId);
+      if (!admission) return undefined;
+      return {
+        lastEventId: admission.lastEventId,
+        eventEpoch: admission.eventEpoch,
+      };
     },
 
     getSessionCurrentCwd(sessionId) {
@@ -11273,19 +11529,12 @@ export function createSessionControlPlane(
         assertFreshSessionsAvailable(sourceCi.harness.executionEngine);
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
         if (restoreBranch) {
-          if (
-            byId.size +
-              inFlightSpawns.size +
-              inFlightRestores.size +
-              abandonedNewSessionSettlements.size >=
-            maxSessions
-          ) {
-            throw new SessionLimitExceededError(maxSessions);
-          }
+          assertSessionQuotaAvailable(source.sourceType);
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
             sourceSessionId: sessionId,
+            ...(source.sourceType ? { sourceType: source.sourceType } : {}),
           });
         }
         let admissionReleased = false;
@@ -11445,7 +11694,13 @@ export function createSessionControlPlane(
                 ...source,
               },
               {
-                skipFreshSessionAdmission: true,
+                // The restore owns the branch admission from here on, so a
+                // timed-out restore keeps it until its cleanup settles.
+                takeFreshSessionAdmission: () => {
+                  const transferred = admission;
+                  admission = undefined;
+                  return transferred;
+                },
                 expectedExecutionEngine: sourceCi.harness.executionEngine,
                 // A fork inherits the parent's dangling ask_user_question
                 // tail, but forks cannot run that tool — never fire a
@@ -11455,6 +11710,11 @@ export function createSessionControlPlane(
             );
             releaseAdmissionOnce();
           } catch (restoreErr) {
+            // A timed-out restore is still running; its own abandoned-restore
+            // cleanup closes the late session, so closing here would race it.
+            if (restoreErr instanceof SessionRestoreTimeoutError) {
+              throw restoreErr;
+            }
             writeStderrLine(
               `qwen serve: branchSession load failed for ${result.newSessionId}; closing partial live state while preserving the committed session...`,
             );
@@ -12155,6 +12415,48 @@ export function createSessionControlPlane(
       };
     },
 
+    async commitSessionTitle(sessionId, title, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        typeof title !== 'string' ||
+        title.trim() === '' ||
+        title.length > MAX_DISPLAY_NAME_LENGTH ||
+        hasControlCharacter(title)
+      ) {
+        throw new InvalidSessionMetadataError(
+          'displayName',
+          `must be a non-empty string of at most ${MAX_DISPLAY_NAME_LENGTH} characters without control characters`,
+        );
+      }
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      const result = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+            sessionId,
+            displayName: title,
+            titleSource: 'manual',
+          }),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'commitSessionTitle',
+      )) as { persisted?: unknown };
+      if (result?.persisted !== true) {
+        throw new Error(`Session '${sessionId}' title was not persisted`);
+      }
+      if (entry.displayName !== title) {
+        entry.displayName = title;
+        markSessionCatalogChanged();
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      };
+    },
+
     seedSessionPrs(sessionId, prs) {
       const entry = byId.get(sessionId);
       if (!entry || (entry.prs && entry.prs.length > 0)) return;
@@ -12799,6 +13101,7 @@ export function createSessionControlPlane(
     ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       resolveTrustedClientId(entry, context?.clientId);
 
       // A workflow action runs a saved workflow, a script the caller supplied,
@@ -12826,6 +13129,7 @@ export function createSessionControlPlane(
     async controlSessionGoal(sessionId, request, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -12863,7 +13167,22 @@ export function createSessionControlPlane(
       // is then silently dropped at admission.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       resolveTrustedClientId(entry, context?.clientId);
+      const promptId = context?.promptId;
+      const managedRuntimeContinuation = context?.managedRuntimeContinuation;
+      const recoveryKey = managedRuntimeContinuation
+        ? `${managedRuntimeContinuation.checkpointId}\u0000${managedRuntimeContinuation.activationId}`
+        : null;
+      if (promptId !== undefined) {
+        const existing = entry.continuationAdmissions.get(promptId);
+        if (existing !== undefined) {
+          if (existing.recoveryKey !== recoveryKey) {
+            throw new PromptIdConflictError(sessionId, promptId);
+          }
+          return existing.result;
+        }
+      }
       const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
@@ -12871,7 +13190,13 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+      }>(
+        sessionId,
+        managedRuntimeContinuation
+          ? SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+          : SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        managedRuntimeContinuation ?? {},
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -12903,8 +13228,6 @@ export function createSessionControlPlane(
       // envelope (DAEMON-001): without it a client that seeds its SSE resume
       // position from this response cannot detect a daemon restart.
       const eventEpoch = liveEntry.events.epoch;
-      const promptId = context?.promptId;
-
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
       // pre-aborted, so an admission failure propagates out of here and the
       // caller gets an error instead of a misleading accepted:true whose
@@ -12934,12 +13257,27 @@ export function createSessionControlPlane(
         );
       });
 
-      return {
+      const result = {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
         eventEpoch,
       };
+      if (promptId !== undefined) {
+        entry.continuationAdmissions.set(promptId, {
+          recoveryKey,
+          result: {
+            accepted: true,
+            interruption: decision.interruption as
+              | 'interrupted_prompt'
+              | 'interrupted_turn',
+            promptId,
+            lastEventId,
+            eventEpoch,
+          },
+        });
+      }
+      return result;
     },
 
     async getSessionStatsStatus(sessionId) {
@@ -13398,6 +13736,7 @@ export function createSessionControlPlane(
       // recap is informational-only today — no SSE broadcast.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -13428,6 +13767,7 @@ export function createSessionControlPlane(
     generateSessionContent(sessionId, prompt, signal, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -13511,6 +13851,196 @@ export function createSessionControlPlane(
         });
 
       return queue;
+    },
+
+    getManagedToolV2Client(sessionId, context) {
+      const owner = byId.get(sessionId);
+      if (!owner) throw new SessionNotFoundError(sessionId);
+      const assertOwner = () => {
+        if (byId.get(sessionId) !== owner) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        assertManagedRuntimeToolSession(owner);
+        if (!context?.clientId) throw new InvalidClientIdError(sessionId, '');
+        resolveTrustedClientId(owner, context.clientId);
+      };
+      assertOwner();
+      const call = <T>(
+        method: string,
+        params: Record<string, unknown> = {},
+      ): Promise<T> => {
+        assertOwner();
+        return requestSessionStatus<T>(
+          sessionId,
+          method,
+          params,
+          MANAGED_RUNTIME_TOOL_TIMEOUT_MS,
+        );
+      };
+      return {
+        fileHistory: {
+          bind: async (binding) => {
+            const parsed = parseManagedToolFileHistoryBinding(binding);
+            const state = parseManagedToolFileHistoryState(
+              await call(
+                SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BindHistory,
+                { binding: parsed },
+              ),
+            );
+            if (state.ownerSessionId !== parsed.ownerSessionId) {
+              throw new ManagedToolProtocolError(
+                'Managed file history owner changed.',
+              );
+            }
+            return state;
+          },
+          checkpoint: async (promptId) =>
+            parseManagedToolFileHistoryState(
+              await call(
+                SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Checkpoint,
+                {
+                  promptId: parseManagedToolFileHistoryPromptId(promptId),
+                },
+              ),
+            ),
+          snapshot: async () =>
+            parseManagedToolFileHistoryState(
+              await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2History),
+            ),
+        },
+        manifest: () =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Manifest),
+        beginTurn: async (identity) => {
+          await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BeginTurn, {
+            identity,
+          });
+        },
+        prepare: (identity, toolName, input, modification, mediaContext) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Prepare, {
+            identity,
+            toolName,
+            input,
+            ...(modification === undefined ? {} : { modification }),
+            ...(mediaContext === undefined ? {} : { mediaContext }),
+          }),
+        confirmation: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Confirmation, {
+            reference,
+          }),
+        confirm: async (reference, outcome, payload, phase) => {
+          await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Confirm, {
+            reference,
+            outcome,
+            ...(payload === undefined ? {} : { payload }),
+            ...(phase === undefined ? {} : { phase }),
+          });
+        },
+        preflight: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Preflight, {
+            reference,
+          }),
+        execute: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Execute, {
+            reference,
+          }),
+        status: (reference, afterSeq) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Status, {
+            reference,
+            ...(afterSeq === undefined ? {} : { afterSeq }),
+          }),
+        cancel: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Cancel, {
+            reference,
+          }),
+      };
+    },
+
+    async getManagedRuntimeToolManifest(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<BridgeManagedRuntimeToolManifest>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolManifest,
+      );
+    },
+
+    async executeManagedRuntimeTool(sessionId, request, signal, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      if (signal.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException(
+              'Managed Runtime Tool execution was aborted.',
+              'AbortError',
+            );
+      }
+      const pending =
+        requestSessionStatus<BridgeManagedRuntimeToolExecuteResult>(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute,
+          request as unknown as Record<string, unknown>,
+          MANAGED_RUNTIME_TOOL_TIMEOUT_MS,
+        );
+      return new Promise<BridgeManagedRuntimeToolExecuteResult>(
+        (resolve, reject) => {
+          let settled = false;
+          const cancel = () =>
+            requestSessionStatus<{ cancelled: boolean }>(
+              sessionId,
+              SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel,
+              { executionId: request.executionId },
+            ).catch(() => undefined);
+          const finish = (
+            result?: BridgeManagedRuntimeToolExecuteResult,
+            error?: unknown,
+          ) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', onAbort);
+            if (error !== undefined) reject(error);
+            else resolve(result!);
+          };
+          const onAbort = () => {
+            void cancel();
+            finish(
+              undefined,
+              signal.reason instanceof Error
+                ? signal.reason
+                : new DOMException(
+                    'Managed Runtime Tool execution was aborted.',
+                    'AbortError',
+                  ),
+            );
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          void pending.then(
+            (result) => finish(result),
+            (error: unknown) => {
+              if (settled) return;
+              void cancel();
+              finish(undefined, error);
+            },
+          );
+          if (signal.aborted) onAbort();
+        },
+      );
+    },
+
+    async cancelManagedRuntimeTool(sessionId, executionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<{ cancelled: boolean }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel,
+        { executionId },
+      );
     },
 
     getPendingPrompts(sessionId, context) {
@@ -13732,6 +14262,7 @@ export function createSessionControlPlane(
     ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       // Authorize the caller against THIS session before doing anything —
       // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
       // client-declared id isn't bound to the session, so a token-holding
@@ -13983,6 +14514,7 @@ export function createSessionControlPlane(
     async enqueueBackgroundNotification(sessionId, notification) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -14039,6 +14571,7 @@ export function createSessionControlPlane(
     async generateSessionBtw(sessionId, question, signal, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -14083,6 +14616,7 @@ export function createSessionControlPlane(
     async launchSessionForkAgent(sessionId, directive, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -15278,6 +15812,13 @@ export function createSessionControlPlane(
         const teardownFailures = teardownResults.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
+        // A startup whose teardown was never confirmed may still hold a live
+        // resource, so shutdown must not report success over it.
+        for (const failure of harness.teardownFailures) {
+          if (!teardownFailures.includes(failure)) {
+            teardownFailures.push(failure);
+          }
+        }
         if (teardownFailures.length === 1) throw teardownFailures[0];
         if (teardownFailures.length > 1) {
           throw new AggregateError(

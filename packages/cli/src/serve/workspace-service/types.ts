@@ -571,6 +571,7 @@ export interface DaemonWorkspaceServiceDeps {
   /** Force Voice settings writes into this scope for workspace-qualified ACP. */
   voiceSettingsScope?: SettingScope;
 
+  beforeReload?: () => Promise<void>;
   /** Reload daemon-side process.env from .env / settings.env. */
   reloadDaemonEnv?: (
     workspace: string,

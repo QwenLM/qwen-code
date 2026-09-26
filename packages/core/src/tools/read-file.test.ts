@@ -744,6 +744,97 @@ describe('ReadFileTool', () => {
         return invocation.execute(signalOverride);
       }
 
+      it('forwards owned PDF execution and the invocation signal through metadata and text extraction', async () => {
+        const pdfPath = path.join(tempRootDir, 'owned.pdf');
+        await fsp.writeFile(pdfPath, '%PDF-1.7');
+        pdfMocks.getPDFPageCount.mockResolvedValue(1);
+        pdfMocks.extractPDFText.mockResolvedValue({
+          success: true,
+          text: 'Native PDF text',
+        });
+        const signal = new AbortController().signal;
+        const invocation = createTextOnlyTool().build({ file_path: pdfPath });
+        const result = await invocation.execute(signal, undefined, {
+          terminalWidth: 80,
+          terminalHeight: 24,
+          showColor: false,
+          requireProcessGroupExit: true,
+        });
+        expect(result.llmContent).toBe('Native PDF text');
+        const processOptions = {
+          signal,
+          requireProcessGroupExit: true,
+          cwd: tempRootDir,
+        };
+        expect(pdfMocks.getPDFPageCount).toHaveBeenCalledWith(
+          pdfPath,
+          processOptions,
+        );
+        expect(pdfMocks.extractPDFText).toHaveBeenCalledWith(
+          pdfPath,
+          processOptions,
+        );
+      });
+
+      it.each(['metadata', 'text', 'render'] as const)(
+        'stops PDF cancellation after %s before fallback, inference or read caching',
+        async (stage) => {
+          const pdfPath = path.join(tempRootDir, 'cancel.pdf');
+          await fsp.writeFile(pdfPath, '%PDF-1.7');
+          const controller = new AbortController();
+          const stopped = new Error('PDF cancellation boundary');
+          const record = vi.spyOn(fileReadCache, 'recordRead');
+          pdfMocks.getPDFPageCount.mockImplementation(async () => {
+            if (stage === 'metadata') controller.abort(stopped);
+            return 1;
+          });
+          pdfMocks.extractPDFText.mockImplementation(async () => {
+            if (stage === 'text') controller.abort(stopped);
+            return { success: false, error: 'No extractable text layer.' };
+          });
+          pdfMocks.renderPDFPagesToImages.mockImplementation(async () => {
+            if (stage === 'render') controller.abort(stopped);
+            return {
+              success: true,
+              images: [{ data: 'AQ==', mimeType: 'image/jpeg' }],
+              bytesTruncated: false,
+            };
+          });
+          const invocation = createTextOnlyTool().build({ file_path: pdfPath });
+          await expect(invocation.execute(controller.signal)).rejects.toBe(
+            stopped,
+          );
+          if (stage === 'metadata')
+            expect(pdfMocks.extractPDFText).not.toHaveBeenCalled();
+          if (stage !== 'render')
+            expect(pdfMocks.renderPDFPagesToImages).not.toHaveBeenCalled();
+          expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
+          expect(record).not.toHaveBeenCalled();
+        },
+      );
+
+      it('stops a cancelled large-PDF availability probe before returning range guidance', async () => {
+        const pdfPath = path.join(tempRootDir, 'large.pdf');
+        await fsp.writeFile(pdfPath, '%PDF-1.7');
+        const controller = new AbortController();
+        const stopped = new Error('cancel PDF guidance probe');
+        pdfMocks.isPdftotextAvailable.mockImplementation(async () => {
+          controller.abort(stopped);
+          return false;
+        });
+        const record = vi.spyOn(fileReadCache, 'recordRead');
+        const invocation = createTextOnlyTool().build({ file_path: pdfPath });
+        await expect(invocation.execute(controller.signal)).rejects.toBe(
+          stopped,
+        );
+        expect(pdfMocks.isPdftotextAvailable).toHaveBeenCalledWith({
+          signal: controller.signal,
+        });
+        expect(pdfMocks.extractPDFText).not.toHaveBeenCalled();
+        expect(pdfMocks.renderPDFPagesToImages).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+      });
+
       function bridgeDisplay(result: ToolResult): VisionBridgeNoticeDisplay {
         expect(result.returnDisplay).toMatchObject({
           type: 'vision_bridge_notice',

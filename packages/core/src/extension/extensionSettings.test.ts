@@ -1025,6 +1025,61 @@ describe('extensionSettings', () => {
       expect(actualContent).toContain('VAR1=new-workspace-value');
     });
 
+    it('isolates explicit workspace files and sensitive namespaces from ambient cwd', async () => {
+      const ambientPath = path.join(tempWorkspaceDir, '.env');
+      await fsPromises.writeFile(ambientPath, 'VAR1=ambient\n');
+      const targets = ['one', 'two'].map((name) =>
+        path.join(tempWorkspaceDir, name),
+      );
+      await Promise.all(
+        targets.map(async (workspaceDir, index) => {
+          await fsPromises.mkdir(workspaceDir);
+          await updateSetting(
+            config,
+            '12345',
+            'VAR1',
+            async () => `value-${index}`,
+            ExtensionSettingScope.WORKSPACE,
+            workspaceDir,
+          );
+          await updateSetting(
+            config,
+            '12345',
+            'VAR2',
+            async () => `secret-${index}`,
+            ExtensionSettingScope.WORKSPACE,
+            workspaceDir,
+          );
+          const contents = await getScopedEnvContents(
+            config,
+            '12345',
+            ExtensionSettingScope.WORKSPACE,
+            workspaceDir,
+          );
+          expect(contents).toEqual({
+            VAR1: `value-${index}`,
+            VAR2: `secret-${index}`,
+          });
+          const onDisk = await fsPromises.readFile(
+            path.join(workspaceDir, '.env'),
+            'utf8',
+          );
+          expect(onDisk).toContain(`VAR1=value-${index}`);
+          expect(onDisk).not.toContain('secret');
+        }),
+      );
+      expect(await fsPromises.readFile(ambientPath, 'utf8')).toBe(
+        'VAR1=ambient\n',
+      );
+      expect(
+        await getScopedEnvContents(
+          config,
+          '12345',
+          ExtensionSettingScope.WORKSPACE,
+        ),
+      ).toEqual({ VAR1: 'ambient' });
+    });
+
     it('should update a sensitive setting in USER scope', async () => {
       mockRequestSetting.mockResolvedValue('new-value2');
 

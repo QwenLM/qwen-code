@@ -56,6 +56,7 @@ import type {
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import { serializeStatsMessage } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 
@@ -2003,6 +2004,13 @@ vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   return {
     ChannelsManagerPage: () =>
       React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+  };
+});
+vi.doMock('./components/managed/ManagedSessionsPage', async () => {
+  const React = await import('react');
+  return {
+    ManagedSessionsPage: () =>
+      React.createElement('div', { 'data-testid': 'managed-sessions-page' }),
   };
 });
 vi.doMock('./components/SplitView', async () => {
@@ -30036,6 +30044,84 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it.each(['shell', 'ask_user_question'])(
+    'reveals a pending %s approval while Managed Agents is open',
+    async (toolName) => {
+      window.history.replaceState(
+        null,
+        '',
+        '/?managed=1&managedSession=managed-one',
+      );
+      const { container, rerender } = renderApp();
+      await flush();
+      expect(
+        container.querySelector('[data-testid="managed-sessions-page"]'),
+      ).not.toBeNull();
+      await act(async () => {
+        testState.blocks = [makePendingPermissionBlock({ toolName })];
+        rerender();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(new URLSearchParams(window.location.search).has('managed')).toBe(
+        false,
+      );
+    },
+  );
+
+  it('keeps the Java Managed panel open without a daemon workspace context', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-one',
+    );
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = { workspaces: [] };
+
+    const { container } = renderApp({
+      managedAgentProvider: createJavaManagedAgentProvider({
+        baseUrl: 'https://java.example',
+      }),
+    });
+    await flush();
+
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '1',
+    );
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('managed-one');
+    expect(
+      container.querySelector('[data-testid="managed-sessions-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the daemon Managed panel behind the workspace gate', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-one',
+    );
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = { workspaces: [] };
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(new URLSearchParams(window.location.search).has('managed')).toBe(
+      false,
+    );
+    expect(
+      container.querySelector('[data-testid="managed-sessions-page"]'),
+    ).toBeNull();
   });
 
   it('does not open the extensions manager page with /extension manage', async () => {

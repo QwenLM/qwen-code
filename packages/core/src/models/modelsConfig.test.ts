@@ -11,6 +11,69 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
 
 describe('ModelsConfig', () => {
+  it.each([undefined, 'PROVIDER_KEY'])(
+    're-reads a general environment fallback when the registered envKey is %s',
+    (envKey) => {
+      let environment: Readonly<NodeJS.ProcessEnv> = {
+        OPENAI_API_KEY: 'workspace-key',
+      };
+      const models = new ModelsConfig({
+        getEnvironment: () => environment,
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: { openai: [{ id: 'one', envKey }] },
+        generationConfig: { model: 'one', apiKey: 'workspace-key' },
+        generationConfigSources: {
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+        },
+      });
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'one');
+      expect(models.getGenerationConfig().apiKey).toBe('workspace-key');
+      environment = { OPENAI_API_KEY: 'rotated-key' };
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'one');
+      expect(models.getGenerationConfig().apiKey).toBe('rotated-key');
+      environment = {};
+      models.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'one');
+      expect(models.getGenerationConfig().apiKey).toBeUndefined();
+    },
+  );
+
+  it('keeps explicit workspace credentials separate across selection and refresh', async () => {
+    vi.stubEnv('MANAGED_TEST_KEY', 'ambient');
+    let firstEnvironment: Readonly<NodeJS.ProcessEnv> = {
+      MANAGED_TEST_KEY: 'first',
+    };
+    const create = (getEnvironment: () => Readonly<NodeJS.ProcessEnv>) =>
+      new ModelsConfig({
+        getEnvironment,
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            { id: 'one', envKey: 'MANAGED_TEST_KEY' },
+            { id: 'two', envKey: 'MANAGED_TEST_KEY' },
+          ],
+        },
+      });
+    const first = create(() => firstEnvironment);
+    const second = create(() => ({ MANAGED_TEST_KEY: 'second' }));
+    try {
+      await Promise.all([
+        first.switchModel(AuthType.USE_OPENAI, 'one'),
+        second.switchModel(AuthType.USE_OPENAI, 'two'),
+      ]);
+      first.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'one');
+      second.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'two');
+      expect(first.getGenerationConfig().apiKey).toBe('first');
+      expect(second.getGenerationConfig().apiKey).toBe('second');
+      firstEnvironment = {};
+      first.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'one');
+      expect(first.getGenerationConfig().apiKey).toBeUndefined();
+      expect(second.getGenerationConfig().apiKey).toBe('second');
+      expect(process.env['MANAGED_TEST_KEY']).toBe('ambient');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   function deepClone<T>(value: T): T {
     if (value === null || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.map((v) => deepClone(v)) as T;

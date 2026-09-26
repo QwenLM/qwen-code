@@ -453,8 +453,6 @@ export interface HostedHarnessCapabilities {
 
 export interface CapabilitiesEnvelope {
   v: 1;
-  /** Private process generation and protocol for the Hosted Harness client. */
-  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.
@@ -467,6 +465,8 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
   sessionLiveStatePollIntervalMs?: number;
+  /** Private Hosted Harness handshake. Present only in that deployment profile. */
+  hostedHarness?: HostedHarnessCapabilities;
   mode: ServeMode;
   features: string[];
   /**

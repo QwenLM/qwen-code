@@ -353,36 +353,6 @@ describe('ManagedToolRuntime', () => {
     }
   });
 
-  it('excludes Shell and both Grep implementations even when registered', async () => {
-    const { ReadFileTool } = await import('./read-file.js');
-    const { ShellTool } = await import('./shell.js');
-    const { GrepTool } = await import('./grep.js');
-    const { RipGrepTool } = await import('./ripGrep.js');
-    config.isLsToolEnabled = () => false;
-    config.isTruncateToolOutputThresholdExplicit = () => false;
-    for (const Grep of [GrepTool, RipGrepTool]) {
-      const admitted = [
-        new ReadFileTool(config),
-        new ShellTool(config),
-        new Grep(config),
-      ];
-      config.getToolRegistry = () =>
-        ({
-          getTool: (name: string) =>
-            admitted.find((candidate) => candidate.name === name),
-          ensureTool: vi.fn(async () => undefined),
-        }) as unknown as ReturnType<Config['getToolRegistry']>;
-      const builtin = await createBuiltinManagedToolRuntime(config);
-      try {
-        expect(builtin.manifest().tools.map(({ name }) => name)).toEqual([
-          ReadFileTool.Name,
-        ]);
-      } finally {
-        await builtin.dispose();
-      }
-    }
-  });
-
   it('prepares once without execution and checkpoints at the explicit turn boundary', async () => {
     await runtime.beginTurn(identity);
     const prepared = await runtime.prepare(identity, tool.name, input);
@@ -803,6 +773,24 @@ describe('ManagedToolRuntime', () => {
     expect(disposed).toBe(true);
     expect(hooks.failure).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['cancelled', 'not_started'] as const)(
+    'preserves explicit Shell %s without inventing a tool error',
+    async (executionStatus) => {
+      tool.setup = (invocation) =>
+        invocation.execute.mockResolvedValue({ ...rawResult, executionStatus });
+      const ref = await prepare();
+      await runtime.preflight(ref);
+      expect(await runtime.execute(ref)).toMatchObject({
+        executionStatus,
+        result: rawResult,
+      });
+      expect(hooks.post).not.toHaveBeenCalled();
+      expect(hooks.failure).toHaveBeenCalledTimes(
+        executionStatus === 'cancelled' ? 1 : 0,
+      );
+    },
+  );
 
   it('does not fabricate cancellation when an already running write actually succeeds', async () => {
     const gate = deferred<ToolResult>();

@@ -22,6 +22,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
 
     // Mock config
     mockConfig = {
+      getRuntimeEnvironment: () => process.env,
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: 'openai',
         enableOpenAILogging: false,

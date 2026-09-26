@@ -310,6 +310,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   override buildClient(): OpenAI {
+    const environment = this.cliConfig.getRuntimeEnvironment();
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
@@ -323,10 +324,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
+      this.cliConfig.getRuntimeEnvironment(),
     );
     return new OpenAI({
-      apiKey,
+      apiKey: apiKey ?? '',
       baseURL: baseUrl,
+      organization: environment['OPENAI_ORG_ID']?.trim() ?? null,
+      project: environment['OPENAI_PROJECT_ID']?.trim() ?? null,
       timeout,
       maxRetries,
       defaultHeaders,

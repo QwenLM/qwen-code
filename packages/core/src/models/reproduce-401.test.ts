@@ -132,7 +132,7 @@ describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
     expect(gc.model).toBe('qwen3-coder-tp');
     expect(debugLoggerDebug).toHaveBeenCalledWith(
       expect.stringContaining(
-        `process.env["${ENV_KEY_TOKEN_PLAN}"] is not set`,
+        `Environment variable "${ENV_KEY_TOKEN_PLAN}" is not set`,
       ),
     );
   });
@@ -175,7 +175,7 @@ describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
     expect(gc.apiKey).toBeUndefined();
     expect(debugLoggerDebug).toHaveBeenCalledWith(
       expect.stringContaining(
-        `process.env["${ENV_KEY_DASHSCOPE}"] is empty string`,
+        `Environment variable "${ENV_KEY_DASHSCOPE}" is empty string`,
       ),
     );
   });

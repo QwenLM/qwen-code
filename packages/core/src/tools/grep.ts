@@ -8,9 +8,9 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { globStream } from 'glob';
-import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import type { ToolInvocation, ToolResult, ToolResultDisplay } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
+import { ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   resolveAndValidatePath,
@@ -20,14 +20,16 @@ import {
   unescapePath,
 } from '../utils/paths.js';
 
-import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository, NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
+import { runOwnedCommand } from '../utils/owned-command.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import { getGrepToolDefinition } from './builtin-tool-definitions.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 
 const debugLogger = createDebugLogger('GREP');
@@ -98,15 +100,21 @@ class GrepToolInvocation extends BaseToolInvocation<
     );
     if (
       workspaceContext.isPathWithinWorkspace(resolvedPath) ||
-      isSubpath(getMemoryBaseDir(), resolvedPath)
+      isSubpath(this.config.getMemoryBaseDir(), resolvedPath)
     ) {
       return 'allow';
     }
     return 'ask';
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute(
+    signal: AbortSignal,
+    _updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
+  ): Promise<ToolResult> {
     try {
+      if (shellExecutionConfig?.requireProcessGroupExit)
+        signal.throwIfAborted();
       // Determine which directories to search
       const searchDirs: string[] = [];
       let searchLocationDescription: string;
@@ -140,6 +148,8 @@ class GrepToolInvocation extends BaseToolInvocation<
           path: searchDir,
           glob: this.params.glob,
           signal,
+          requireProcessGroupExit:
+            shellExecutionConfig?.requireProcessGroupExit,
         });
         // When searching multiple directories, convert relative file paths
         // to absolute paths so results from different directories are
@@ -290,6 +300,14 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
+        executionStatus:
+          error instanceof Error &&
+          'code' in error &&
+          error.code === 'ERR_OWNED_COMMAND_UNSUPPORTED'
+            ? 'not_started'
+            : signal.aborted
+              ? 'cancelled'
+              : 'error',
         error: {
           message: errorMessage,
           type: ToolErrorType.GREP_EXECUTION_ERROR,
@@ -430,6 +448,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     path: string; // Expects absolute path
     glob?: string;
     signal: AbortSignal;
+    requireProcessGroupExit?: boolean;
   }): Promise<GrepMatch[]> {
     const { pattern, path: absolutePath, glob } = options;
     let strategyUsed = 'none';
@@ -437,7 +456,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     try {
       // --- Strategy 1: git grep ---
       const isGit = isGitRepository(absolutePath);
-      const gitAvailable = isGit && isCommandAvailable('git').available;
+      if (options.requireProcessGroupExit) options.signal.throwIfAborted();
+      const gitAvailable =
+        isGit &&
+        (options.requireProcessGroupExit ||
+          isCommandAvailable('git').available);
 
       if (gitAvailable) {
         strategyUsed = 'git grep';
@@ -465,6 +488,29 @@ class GrepToolInvocation extends BaseToolInvocation<
         }
 
         try {
+          if (options.requireProcessGroupExit) {
+            const result = await runOwnedCommand('git', gitArgs, {
+              cwd: absolutePath,
+              signal: options.signal,
+              maxBuffer: Number.POSITIVE_INFINITY,
+            });
+            options.signal.throwIfAborted();
+            if (
+              result.error &&
+              !(
+                result.code === 1 &&
+                'code' in result.error &&
+                result.error.code === 1
+              )
+            )
+              throw result.error;
+            if (result.code === 0)
+              return this.parseGrepOutput(result.stdout, absolutePath);
+            if (result.code === 1) return [];
+            throw new Error(
+              `git grep exited with code ${result.code}: ${result.stderr}`,
+            );
+          }
           const output = await new Promise<string>((resolve, reject) => {
             const child = spawn('git', gitArgs, {
               cwd: absolutePath,
@@ -492,6 +538,17 @@ class GrepToolInvocation extends BaseToolInvocation<
           });
           return this.parseGrepOutput(output, absolutePath);
         } catch (gitError: unknown) {
+          if (options.requireProcessGroupExit) {
+            options.signal.throwIfAborted();
+            if (
+              gitError instanceof Error &&
+              (gitError.name === 'AbortError' ||
+                ('code' in gitError &&
+                  (gitError.code === 'ABORT_ERR' ||
+                    gitError.code === 'ERR_OWNED_COMMAND_UNSUPPORTED')))
+            )
+              throw gitError;
+          }
           debugLogger.debug(
             `GrepLogic: git grep failed: ${getErrorMessage(
               gitError,
@@ -501,7 +558,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // --- Strategy 2: System grep ---
-      const { available: grepAvailable } = isCommandAvailable('grep');
+      if (options.requireProcessGroupExit) options.signal.throwIfAborted();
+      const grepAvailable =
+        options.requireProcessGroupExit || isCommandAvailable('grep').available;
       if (grepAvailable) {
         strategyUsed = 'system grep';
         const grepArgs = ['-r', '-n', '-H', '-E', '--null'];
@@ -539,6 +598,35 @@ class GrepToolInvocation extends BaseToolInvocation<
         grepArgs.push('.');
 
         try {
+          if (options.requireProcessGroupExit) {
+            const result = await runOwnedCommand('grep', grepArgs, {
+              cwd: absolutePath,
+              signal: options.signal,
+              maxBuffer: Number.POSITIVE_INFINITY,
+            });
+            options.signal.throwIfAborted();
+            if (
+              result.error &&
+              (typeof result.error.code !== 'number' || result.signal)
+            )
+              throw result.error;
+            if (result.code === 0)
+              return this.parseGrepOutput(result.stdout, absolutePath);
+            if (result.code === 1) return [];
+            const stderr = result.stderr
+              .split('\n')
+              .filter(
+                (line) =>
+                  !line.includes('Permission denied') &&
+                  !/grep:.*: Is a directory/i.test(line),
+              )
+              .join('\n')
+              .trim();
+            if (!stderr && !result.signal) return [];
+            throw new Error(
+              `System grep exited with code ${result.code}: ${stderr}`,
+            );
+          }
           const output = await new Promise<string>((resolve, reject) => {
             const child = spawn('grep', grepArgs, {
               cwd: absolutePath,
@@ -599,6 +687,17 @@ class GrepToolInvocation extends BaseToolInvocation<
           });
           return this.parseGrepOutput(output, absolutePath);
         } catch (grepError: unknown) {
+          if (options.requireProcessGroupExit) {
+            options.signal.throwIfAborted();
+            if (
+              grepError instanceof Error &&
+              (grepError.name === 'AbortError' ||
+                ('code' in grepError &&
+                  (grepError.code === 'ABORT_ERR' ||
+                    grepError.code === 'ERR_OWNED_COMMAND_UNSUPPORTED')))
+            )
+              throw grepError;
+          }
           debugLogger.debug(
             `GrepLogic: System grep failed: ${getErrorMessage(
               grepError,
@@ -615,6 +714,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const globPattern = glob ? glob : '**/*';
       const ignorePatterns = this.fileExclusions.getGlobExcludes();
 
+      if (options.requireProcessGroupExit) options.signal.throwIfAborted();
       const filesIterator = globStream(globPattern, {
         cwd: absolutePath,
         dot: true,
@@ -628,6 +728,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const allMatches: GrepMatch[] = [];
 
       for await (const filePath of filesIterator) {
+        if (options.requireProcessGroupExit) options.signal.throwIfAborted();
         const fileAbsolutePath = filePath as string;
         try {
           const content = await fsPromises.readFile(fileAbsolutePath, 'utf8');
@@ -656,6 +757,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         }
       }
 
+      if (options.requireProcessGroupExit) options.signal.throwIfAborted();
       return allMatches;
     } catch (error: unknown) {
       debugLogger.error(
@@ -681,38 +783,13 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   }
 
   constructor(private readonly config: Config) {
+    const definition = getGrepToolDefinition();
     super(
-      GrepTool.Name,
-      ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
-      Kind.Search,
-      {
-        properties: {
-          pattern: {
-            type: 'string',
-            description:
-              'The regular expression pattern to search for in file contents',
-          },
-          glob: {
-            type: 'string',
-            description:
-              'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")',
-          },
-          path: {
-            type: 'string',
-            description:
-              'File or directory to search in. Defaults to current working directory.',
-          },
-          limit: {
-            type: 'integer',
-            minimum: 1,
-            description:
-              'Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.',
-          },
-        },
-        required: ['pattern'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
     );
   }
 

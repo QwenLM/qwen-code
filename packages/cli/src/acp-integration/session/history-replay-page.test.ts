@@ -286,6 +286,50 @@ describe('history replay page', () => {
     ).toBe(false);
   });
 
+  it('skips finalize for a still-requested Managed approval wait', async () => {
+    const lastEntry = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'fc-wait-1',
+            name: 'run_shell_command',
+            args: { command: 'ls' },
+          },
+        },
+      ],
+    };
+    const config = {
+      readPendingManagedApprovalWait: async () => ({
+        requestId: 'fc-wait-1',
+        kind: 'execute',
+        source: 'tool_call',
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      }),
+      getLlmClient: () => ({
+        isInitialized: () => true,
+        getChat: () => ({ peekLastHistoryEntry: () => lastEntry }),
+      }),
+    } as unknown as Config;
+    const waitRecord: ChatRecord = {
+      ...toolCallRecord(),
+      message: lastEntry,
+    };
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      config,
+      records: [userRecord(), waitRecord],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
   it('finalizes a dangling tool call as failed by default', async () => {
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,

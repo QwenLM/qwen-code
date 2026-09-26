@@ -119,6 +119,7 @@ describe('Session.pendingWorktreeNotice', () => {
       switchModel: vi.fn(),
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      getSessionSourceType: vi.fn().mockReturnValue(undefined),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),

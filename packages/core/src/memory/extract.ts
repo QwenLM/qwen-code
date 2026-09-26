@@ -23,7 +23,6 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
-import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
@@ -50,8 +49,7 @@ function getSessionMismatchResult(
   expectedSessionId: string,
   now: Date,
 ): AutoMemoryExtractResult | null {
-  const cachedSessionId = getCacheSafeParamsSessionId();
-  if (cachedSessionId === undefined || cachedSessionId === expectedSessionId) {
+  if (sessionId === expectedSessionId) {
     return null;
   }
   debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
@@ -126,6 +124,7 @@ export async function runAutoMemoryExtract(params: {
   projectRoot: string;
   sessionId: string;
   history: Content[];
+  extractionHistory: Content[];
   now?: Date;
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
@@ -158,8 +157,8 @@ export async function runAutoMemoryExtract(params: {
 
   // Read the cursor first, then scan only the unprocessed slice. The old
   // code ran partToString().replace() over EVERY message but the resulting
-  // text was never read — fork agent context comes from the session-scoped
-  // cache-safe params lookup.
+  // text was never read — fork agent context comes from the captured recent
+  // history, while the complete history tracks the extraction cursor.
   const currentCursor = await readExtractCursor(params.projectRoot);
   const rawOffset =
     currentCursor.sessionId === params.sessionId
@@ -190,7 +189,7 @@ export async function runAutoMemoryExtract(params: {
 
   const lateMismatch = getSessionMismatchResult(
     params.sessionId,
-    expectedSessionId,
+    params.config.getSessionId(),
     now,
   );
   if (lateMismatch) return lateMismatch;
@@ -198,6 +197,7 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.extractionHistory,
   );
 
   if (agentResult.touchedTopics.length > 0) {

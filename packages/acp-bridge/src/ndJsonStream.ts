@@ -62,6 +62,14 @@ export interface NdJsonStreamLimits {
   queueSaturationGraceMs?: number;
 }
 
+/** Limits for the daemon's ACP channel to its child process. */
+export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
+  Object.freeze({
+    maxFrameBytes: 64 * 1024 * 1024,
+    maxQueuedMessages: 256,
+    maxQueuedBytes: 64 * 1024 * 1024,
+  });
+
 export type NdJsonInboundMessageValidator = (message: AnyMessage) => boolean;
 
 export class NdJsonFrameTooLargeError extends Error {

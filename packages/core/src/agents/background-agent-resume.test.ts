@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Content, FunctionDeclaration } from '@google/genai';
-import type { Config } from '../config/config.js';
+import { Config } from '../config/config.js';
 import {
   BackgroundTaskRegistry,
   MAX_RETAINED_TERMINAL_AGENTS,
@@ -166,6 +166,8 @@ describe('BackgroundAgentResumeService', () => {
       cancelRunningForOwner: vi.fn(),
     };
     const config = {
+      createManagedChildExecutionScope:
+        Config.prototype.createManagedChildExecutionScope,
       storage: {
         getProjectDir: () => tempDir,
       },

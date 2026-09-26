@@ -95,6 +95,7 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // execution time (packages/core/src/sandbox/bwrap-execution.ts).
   'sandboxBwrapRelay.js',
   'sandboxFileWorker.js',
+  'managed-runtime-worker.js',
   'chunks',
   'vendor',
   'bundled',

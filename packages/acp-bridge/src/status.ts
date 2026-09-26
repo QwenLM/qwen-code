@@ -6,7 +6,7 @@
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import type { HookEventName } from '@qwen-code/qwen-code-core';
-import { SkillError } from '@qwen-code/qwen-code-core';
+import { SkillError } from '@qwen-code/qwen-code-core/skills/types.js';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
@@ -164,6 +164,10 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
+export const PRIVATE_MANAGED_TOOL_RUNTIME_ENV =
+  'QWEN_CODE_PRIVATE_MANAGED_TOOL_RUNTIME';
+export const PRIVATE_MANAGED_TOOL_RUNTIME_VALUE = 'owned-v2';
+
 /**
  * Control-plane (mutation) ACP extMethods introduced in Mutation control.
  * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
@@ -185,6 +189,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
+  sessionManagedRuntimeContinue:
+    'qwen/control/session/managed-runtime/continue',
   sessionTitle: 'qwen/control/session/title',
   sessionParent: 'qwen/control/session/parent',
   sessionSource: 'qwen/control/session/source',
@@ -192,6 +198,36 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
+  sessionManagedRuntimeToolManifest:
+    'qwen/control/session/managed-runtime-tools/manifest',
+  sessionManagedRuntimeToolExecute:
+    'qwen/control/session/managed-runtime-tools/execute',
+  sessionManagedRuntimeToolCancel:
+    'qwen/control/session/managed-runtime-tools/cancel',
+  sessionManagedToolV2BindHistory:
+    'qwen/control/session/managed-runtime-tools/v2/bind-history',
+  sessionManagedToolV2Checkpoint:
+    'qwen/control/session/managed-runtime-tools/v2/checkpoint',
+  sessionManagedToolV2History:
+    'qwen/control/session/managed-runtime-tools/v2/history',
+  sessionManagedToolV2Manifest:
+    'qwen/control/session/managed-runtime-tools/v2/manifest',
+  sessionManagedToolV2BeginTurn:
+    'qwen/control/session/managed-runtime-tools/v2/begin-turn',
+  sessionManagedToolV2Prepare:
+    'qwen/control/session/managed-runtime-tools/v2/prepare',
+  sessionManagedToolV2Confirmation:
+    'qwen/control/session/managed-runtime-tools/v2/confirmation',
+  sessionManagedToolV2Confirm:
+    'qwen/control/session/managed-runtime-tools/v2/confirm',
+  sessionManagedToolV2Preflight:
+    'qwen/control/session/managed-runtime-tools/v2/preflight',
+  sessionManagedToolV2Execute:
+    'qwen/control/session/managed-runtime-tools/v2/execute',
+  sessionManagedToolV2Status:
+    'qwen/control/session/managed-runtime-tools/v2/status',
+  sessionManagedToolV2Cancel:
+    'qwen/control/session/managed-runtime-tools/v2/cancel',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',

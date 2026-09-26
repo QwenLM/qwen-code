@@ -2070,6 +2070,70 @@ export interface RepairOrphanedToolUseOptions {
   preserveCallIds?: ReadonlySet<string>;
 }
 
+function requestHasFunctionResponse(
+  contents: readonly Content[],
+  functionCallId: string,
+): boolean {
+  return contents.some((content) =>
+    (content.parts ?? []).some(
+      (part) => part.functionResponse?.id === functionCallId,
+    ),
+  );
+}
+
+/**
+ * Places original Runtime functionResponses next to their functionCall
+ * without inventing a model turn. Already-present receipts are left
+ * alone so a live same-handle path is a no-op inject.
+ */
+function injectOriginalFunctionResponses(
+  history: Content[],
+  parts: readonly Part[],
+): void {
+  for (const part of parts) {
+    const id = part.functionResponse?.id;
+    if (!id) continue;
+    if (
+      history.some((turn) =>
+        (turn.parts ?? []).some(
+          (existing) => existing.functionResponse?.id === id,
+        ),
+      )
+    ) {
+      continue;
+    }
+    const modelIdx = history.findIndex(
+      (turn) =>
+        turn.role === 'model' &&
+        (turn.parts ?? []).some((existing) => existing.functionCall?.id === id),
+    );
+    if (modelIdx === -1) continue;
+    let adjacentIdx = modelIdx + 1;
+    while (
+      adjacentIdx < history.length &&
+      history[adjacentIdx]?.role === 'model' &&
+      isDegradedPlaceholderTurn(history[adjacentIdx])
+    ) {
+      adjacentIdx++;
+    }
+    const next = history[adjacentIdx];
+    if (next?.role === 'user') {
+      const existing = next.parts ?? [];
+      const firstNonFr = existing.findIndex(
+        (existingPart) => !existingPart.functionResponse,
+      );
+      const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
+      next.parts = [
+        ...existing.slice(0, insertAt),
+        part,
+        ...existing.slice(insertAt),
+      ];
+      continue;
+    }
+    history.splice(adjacentIdx, 0, { role: 'user', parts: [part] });
+  }
+}
+
 /**
  * Forward-walk `history`, planning and applying the repair for each
  * `model[functionCall]` turn in turn. Iteration is index-based and the
@@ -2970,6 +3034,31 @@ export class LlmChat {
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
+
+    await this.sendPromise;
+
+    // ACP Session and LlmClient both send through this method. A Managed
+    // session must have a runnable Harness checkpoint before any model
+    // request: initial starts submit before_model here; blocked recovery
+    // fails closed instead of running the Agent. After A/D the successor
+    // chat is a new object rebuilt from the log; continue there instead of
+    // mutating this drained instance.
+    await this.config.ensureManagedHarnessRunnable?.();
+    const client = this.config.getLlmClient?.();
+    if (client?.isInitialized()) {
+      const successor = client.getChat();
+      if (successor !== this) {
+        return successor.sendMessageStream(
+          model,
+          params,
+          prompt_id,
+          goalContext,
+          options,
+        );
+      }
+    }
+    const runtimeReceipt = await this.config.readManagedRuntimeOutcomes?.();
+
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
       ? await this.config
@@ -2999,8 +3088,6 @@ export class LlmChat {
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
-
-    await this.sendPromise;
 
     let streamDoneResolver: () => void;
     const streamDonePromise = new Promise<void>((resolve) => {
@@ -3345,9 +3432,23 @@ export class LlmChat {
       // still close the pair — `model[functionCall] → user[text]` is
       // rejected by Anthropic-compatible providers. Restore itself sends
       // the real functionResponse, so this pass is a no-op on that path.
+      // Managed Runtime receipts are injected first so repair cannot
+      // synthesize a failed functionResponse for the original call.
+      const runtimeOutcomes = runtimeReceipt?.outcomes ?? [];
+      if (runtimeOutcomes.length > 0) {
+        injectOriginalFunctionResponses(
+          this.history,
+          runtimeOutcomes.map((outcome) => ({
+            functionResponse: outcome.part.functionResponse,
+          })),
+        );
+      }
       const inlineRepair = repairOrphanedToolUseTurns(
         this.history,
         ORPHAN_TOOL_USE_REPAIR_REASON,
+        runtimeReceipt && runtimeReceipt.preserveCallIds.length > 0
+          ? { preserveCallIds: new Set(runtimeReceipt.preserveCallIds) }
+          : undefined,
       );
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
@@ -3439,6 +3540,16 @@ export class LlmChat {
       }
       streamDoneResolver!();
       throw error;
+    }
+
+    if (
+      runtimeReceipt &&
+      runtimeReceipt.outcomes.length > 0 &&
+      runtimeReceipt.outcomes.every((outcome) =>
+        requestHasFunctionResponse(requestContents, outcome.functionCallId),
+      )
+    ) {
+      await this.config.consumeManagedRuntimeResults?.();
     }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias

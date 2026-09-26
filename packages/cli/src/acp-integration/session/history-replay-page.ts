@@ -9,6 +9,7 @@ import {
   parseGoalStateCause,
   lastHistoryContentFromRecords,
   restorableAskUserQuestionCallIds,
+  restorableManagedApprovalCallIds,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
@@ -295,18 +296,32 @@ export async function collectHistoryReplayUpdates({
     // — so fall back to the transcript tail instead of finalizing the
     // dangling question that load is about to re-hang.
     let skipFinalizeCallIds: Set<string> | undefined;
+    const replayClient = config?.getLlmClient?.();
+    const lastHistoryContent =
+      replayClient?.isInitialized?.() === true
+        ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
+          lastHistoryContentFromRecords(records))
+        : lastHistoryContentFromRecords(records);
     if (
       suppressRestoreAskUserQuestion !== true &&
       config?.getRestoreAskUserQuestion?.() === true
     ) {
-      const replayClient = config.getLlmClient?.();
-      const lastHistoryContent =
-        replayClient?.isInitialized?.() === true
-          ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
-            lastHistoryContentFromRecords(records))
-          : lastHistoryContentFromRecords(records);
       skipFinalizeCallIds =
         restorableAskUserQuestionCallIds(lastHistoryContent);
+    }
+    const pendingManagedApproval =
+      await config?.readPendingManagedApprovalWait?.();
+    if (pendingManagedApproval) {
+      const managedIds = restorableManagedApprovalCallIds(
+        lastHistoryContent,
+        pendingManagedApproval.requestId,
+      );
+      if (managedIds !== undefined) {
+        skipFinalizeCallIds = new Set([
+          ...(skipFinalizeCallIds ?? []),
+          ...managedIds,
+        ]);
+      }
     }
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config, limits),

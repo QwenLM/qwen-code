@@ -11,6 +11,10 @@
  * This enables Arena to work without tmux or any external terminal multiplexer.
  */
 
+import {
+  createManagedChildExecutionScope,
+  type ManagedChildExecutionScope,
+} from '../../tools/managed-tool-session.js';
 import path from 'node:path';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -73,6 +77,12 @@ export class InProcessBackend implements Backend {
   // subagent no longer exists.
   private readonly agentRegistries: Map<string, ToolRegistry> = new Map();
   private readonly agentApprovalCleanups = new Map<string, () => void>();
+  private readonly managedScopes = new Map<
+    string,
+    ManagedChildExecutionScope
+  >();
+  private readonly agentDisposals = new Map<string, Promise<void>>();
+  private readonly spawningAgents = new Map<string, Promise<void>>();
   // Ids whose agent was stopped via stopAgent. The handle stays in
   // `agents` so post-stop readers keep working (ArenaManager resolves
   // transcripts through getAgent after the arena timeout path stops
@@ -97,12 +107,27 @@ export class InProcessBackend implements Backend {
     debugLogger.info('InProcessBackend initialized');
   }
 
-  async spawnAgent(config: AgentSpawnConfig): Promise<void> {
+  spawnAgent(config: AgentSpawnConfig): Promise<void> {
     if (this.runtimeContext.getAgentExecutionBackend?.() === 'container') {
-      throw new Error(
-        'Container execution is required; team and Arena agents are unsupported.',
+      return Promise.reject(
+        new Error(
+          'Container execution is required; team and Arena agents are unsupported.',
+        ),
       );
     }
+    if (this.cleanedUp || this.spawningAgents.has(config.agentId)) {
+      return Promise.reject(
+        new Error(`Agent "${config.agentId}" cannot be started.`),
+      );
+    }
+    const pending = this.spawnAgentInternal(config);
+    this.spawningAgents.set(config.agentId, pending);
+    const forgetSpawn = () => this.spawningAgents.delete(config.agentId);
+    void pending.then(forgetSpawn, forgetSpawn);
+    return pending;
+  }
+
+  private async spawnAgentInternal(config: AgentSpawnConfig): Promise<void> {
     const inProcessConfig = config.inProcess;
     if (!inProcessConfig) {
       throw new Error(
@@ -116,6 +141,8 @@ export class InProcessBackend implements Backend {
     ) {
       throw new Error(`Agent "${config.agentId}" already exists.`);
     }
+    await this.releaseManagedAgentResources(config.agentId);
+    if (this.cleanedUp) throw new Error('In-process backend is closing.');
     // Respawn of a stopped id: the retained handle and per-agent
     // records belong to the dead agent. Drop the stale records before
     // the conditional sets below repopulate them (or leave them clear
@@ -150,9 +177,20 @@ export class InProcessBackend implements Backend {
           acquireAutoApprovalOverride: () => this.acquireAutoApprovalOverride(),
           releaseAutoApprovalOverride: () => this.releaseAutoApprovalOverride(),
         },
+        (scope) => {
+          if (scope.signal) this.managedScopes.set(config.agentId, scope);
+        },
       ),
     );
     const agentContext = perAgent.config;
+    if (this.cleanedUp) {
+      await perAgent.managedScope.close();
+      if (!perAgent.managedScope.signal) {
+        await agentContext.getToolRegistry().stop();
+        perAgent.cleanup();
+      }
+      throw new Error('In-process backend is closing.');
+    }
     if (perAgent.contentGenerator) {
       this.agentContentGenerators.set(
         config.agentId,
@@ -168,83 +206,114 @@ export class InProcessBackend implements Backend {
 
     this.agentRegistries.set(config.agentId, agentContext.getToolRegistry());
     this.agentApprovalCleanups.set(config.agentId, perAgent.cleanup);
-
-    const core = new AgentCore(
-      inProcessConfig.agentName,
-      agentContext,
-      promptConfig,
-      modelConfig,
-      runConfig,
-      toolConfig,
-      eventEmitter,
-      undefined,
-      perAgent.runtimeView,
-      inProcessConfig.initialTask,
-      config.agentId,
-    );
-
-    const interactive = new AgentInteractive(
-      {
-        agentId: config.agentId,
-        agentName: inProcessConfig.agentName,
-        initialTask: inProcessConfig.initialTask,
-        maxTurnsPerMessage: runConfig.max_turns,
-        maxTimeMinutesPerMessage: runConfig.max_time_minutes,
-        completeOnIdle: inProcessConfig.completeOnIdle,
-        chatHistory: inProcessConfig.chatHistory,
-        runInContext,
-      },
-      core,
-    );
-
-    if (isRespawnOfStoppedAgent) {
-      this.stoppedAgentIds.delete(config.agentId);
-    }
-    this.agents.set(config.agentId, interactive);
-    this.agentOrder.push(config.agentId);
-
-    // Route owned monitor notifications into this agent's message queue.
-    // AgentInteractive frames every tool body under the agent identity, so a
-    // `monitor` started by this agent is stamped with its ownerAgentId — and
-    // MonitorRegistry.dispatchNotification routes owned monitors ONLY
-    // through agentNotificationCallbacks, with no session fallback. Without
-    // this registration (the in-process analogue of AgentTool's
-    // registerOwnedMonitorNotifications) those notifications are silently
-    // dropped and a start-only Monitor can never report back to the agent.
-    // enqueueMessage self-wakes the message pump, so no lifecycle callback
-    // is needed. Unregistered in releaseAgentResources.
-    this.runtimeContext
-      .getMonitorRegistry()
-      .setAgentNotificationCallback(config.agentId, (_displayText, modelText) =>
-        interactive.enqueueMessage(modelText),
+    const scope = perAgent.managedScope;
+    let interactive: AgentInteractive | undefined;
+    try {
+      scope.onClose(() => {
+        if (this.managedScopes.get(config.agentId) !== scope) return;
+        const monitors = this.runtimeContext.getMonitorRegistry();
+        monitors.cancelRunningForOwner(config.agentId, { notify: false });
+        monitors.setAgentNotificationCallback(config.agentId, undefined);
+        this.agentRegistries.delete(config.agentId);
+        this.agentApprovalCleanups.delete(config.agentId);
+        this.managedScopes.delete(config.agentId);
+      });
+      const core = new AgentCore(
+        inProcessConfig.agentName,
+        agentContext,
+        promptConfig,
+        modelConfig,
+        runConfig,
+        toolConfig,
+        eventEmitter,
+        undefined,
+        perAgent.runtimeView,
+        inProcessConfig.initialTask,
+        config.agentId,
       );
 
-    // Set first agent as active
-    if (this.activeAgentId === null) {
-      this.activeAgentId = config.agentId;
-    }
+      if (scope.signal) {
+        const runReasoningLoop = core.runReasoningLoop.bind(core);
+        core.runReasoningLoop = (...args) =>
+          scope.run(() => runReasoningLoop(...args));
+      }
+      const activeAgent = new AgentInteractive(
+        {
+          agentId: config.agentId,
+          agentName: inProcessConfig.agentName,
+          initialTask: inProcessConfig.initialTask,
+          maxTurnsPerMessage: runConfig.max_turns,
+          maxTimeMinutesPerMessage: runConfig.max_time_minutes,
+          completeOnIdle: inProcessConfig.completeOnIdle,
+          chatHistory: inProcessConfig.chatHistory,
+          runInContext,
+        },
+        core,
+      );
 
-    try {
+      interactive = activeAgent;
+      const abortAgent = () => activeAgent.abort();
+      if (scope.signal?.aborted) abortAgent();
+      else scope.signal?.addEventListener('abort', abortAgent, { once: true });
+
+      if (isRespawnOfStoppedAgent) {
+        this.stoppedAgentIds.delete(config.agentId);
+      }
+      this.agents.set(config.agentId, activeAgent);
+      this.agentOrder.push(config.agentId);
+
+      // Route owned monitor notifications into this agent's message queue.
+      // AgentInteractive frames every tool body under the agent identity, so a
+      // `monitor` started by this agent is stamped with its ownerAgentId — and
+      // MonitorRegistry.dispatchNotification routes owned monitors ONLY
+      // through agentNotificationCallbacks, with no session fallback. Without
+      // this registration (the in-process analogue of AgentTool's
+      // registerOwnedMonitorNotifications) those notifications are silently
+      // dropped and a start-only Monitor can never report back to the agent.
+      // enqueueMessage self-wakes the message pump, so no lifecycle callback
+      // is needed. Unregistered in releaseAgentResources.
+      this.runtimeContext
+        .getMonitorRegistry()
+        .setAgentNotificationCallback(
+          config.agentId,
+          (_displayText, modelText) => activeAgent.enqueueMessage(modelText),
+        );
+
+      // Set first agent as active
+      if (this.activeAgentId === null) {
+        this.activeAgentId = config.agentId;
+      }
+
       const context = new ContextState();
-      await runWithContext(() => interactive.start(context));
+      await scope.run(() => runWithContext(() => activeAgent.start(context)));
 
       // Watch for completion and fire exit callback — but only for
       // truly terminal statuses. IDLE means the agent is still alive
       // and can accept follow-up messages.
-      void interactive.waitForCompletion().then(() => {
-        const status = interactive.getStatus();
-        if (!isTerminalStatus(status)) {
-          return;
-        }
-        const exitCode =
-          status === AgentStatus.COMPLETED
-            ? 0
-            : status === AgentStatus.FAILED
-              ? 1
-              : null;
-        this.releaseAgentResources(config.agentId);
-        this.exitCallback?.(config.agentId, exitCode, null);
-      });
+      void activeAgent
+        .waitForCompletion()
+        .then(async () => {
+          if (this.agents.get(config.agentId) !== activeAgent) return;
+          const status = activeAgent.getStatus();
+          if (!isTerminalStatus(status)) {
+            return;
+          }
+          const exitCode =
+            status === AgentStatus.COMPLETED
+              ? 0
+              : status === AgentStatus.FAILED
+                ? 1
+                : null;
+          await this.releaseAgentResources(config.agentId);
+          if (this.agents.get(config.agentId) !== activeAgent) return;
+          this.exitCallback?.(config.agentId, exitCode, null);
+        })
+        .catch((error) =>
+          debugLogger.error(
+            `Failed to dispose agent "${config.agentId}":`,
+            error,
+          ),
+        );
 
       debugLogger.info(`Spawned in-process agent: ${config.agentId}`);
     } catch (error) {
@@ -252,7 +321,8 @@ export class InProcessBackend implements Backend {
         `Failed to start in-process agent "${config.agentId}":`,
         error,
       );
-      this.releaseAgentResources(config.agentId);
+      interactive?.abort();
+      await this.releaseAgentResources(config.agentId);
       this.agents.delete(config.agentId);
       this.agentContentGenerators.delete(config.agentId);
       this.agentContentGeneratorErrors.delete(config.agentId);
@@ -305,6 +375,20 @@ export class InProcessBackend implements Backend {
     for (const agent of this.agents.values()) {
       agent.abort();
     }
+    const managedDisposals = Promise.allSettled(
+      [...this.managedScopes.keys()].map((agentId) =>
+        this.releaseManagedAgentResources(agentId),
+      ),
+    );
+    await Promise.allSettled([...this.spawningAgents.values()]);
+    const failures = (await managedDisposals).filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failures.length)
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        'Failed to drain managed Agents.',
+      );
     // Wait for loops to settle, but cap at 3s so CLI exit isn't blocked
     // if an agent's reasoning loop doesn't terminate promptly after abort.
     const CLEANUP_TIMEOUT_MS = 3000;
@@ -497,10 +581,39 @@ export class InProcessBackend implements Backend {
     }
   }
 
+  private releaseManagedAgentResources(agentId: string): Promise<void> {
+    const retained = this.agentDisposals.get(agentId);
+    if (retained) return retained;
+    const scope = this.managedScopes.get(agentId);
+    if (!scope) return Promise.resolve();
+    const pending = scope.close();
+    this.agentDisposals.set(agentId, pending);
+    void pending.then(
+      () => {
+        if (this.agentDisposals.get(agentId) === pending)
+          this.agentDisposals.delete(agentId);
+        if (this.managedScopes.get(agentId) === scope)
+          this.managedScopes.delete(agentId);
+      },
+      () => {
+        if (this.agentDisposals.get(agentId) === pending)
+          this.agentDisposals.delete(agentId);
+      },
+    );
+    return pending;
+  }
+
   private releaseAgentResources(
     agentId: string,
     registry = this.agentRegistries.get(agentId),
-  ): void {
+  ): void | Promise<void> {
+    if (this.managedScopes.has(agentId) || this.agentDisposals.has(agentId)) {
+      const pending = this.releaseManagedAgentResources(agentId);
+      void pending.catch((error) =>
+        debugLogger.error(`Failed to dispose agent "${agentId}":`, error),
+      );
+      return pending;
+    }
     // Tear down monitor routing registered in spawnAgent: stop any monitors
     // the agent left running and drop its notification callback. Safe to
     // run twice (the terminal watcher and stopAgent both funnel here).
@@ -575,12 +688,14 @@ async function createPerAgentConfig(
   authOverrides?: InProcessSpawnConfig['authOverrides'],
   approvalMode?: ApprovalMode,
   approvalModeHooks?: DerivedApprovalModeConfigHooks,
+  ownScope?: (scope: ManagedChildExecutionScope) => void,
 ): Promise<{
   config: Config;
   contentGenerator?: ContentGenerator;
   contentGeneratorError?: string;
   runtimeView?: RuntimeContentGeneratorView;
   cleanup: () => void;
+  managedScope: ManagedChildExecutionScope;
 }> {
   // Every per-agent config needs child-local approval state, not just the
   // ones spawned with an explicit mode: tools bind to this config, and
@@ -602,8 +717,15 @@ async function createPerAgentConfig(
       return path.join(base.getPlansDir(), `${sessionId}-${scopedAgentId}.md`);
     },
   });
-  const override = handle.config;
   const cleanup = approvalHandle.cleanup;
+  let managedScope: ManagedChildExecutionScope;
+  try {
+    managedScope = createManagedChildExecutionScope(handle.config);
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+  const override = managedScope.config;
   // Session Workflow plan-revision state is session-global on the root
   // Config; the registry rebuilt below binds TodoWriteTool to this
   // wrapper, so a divergent todo_write would shadow the revision here
@@ -614,6 +736,11 @@ async function createPerAgentConfig(
   let contentGeneratorError: string | undefined;
   let runtimeView: RuntimeContentGeneratorView | undefined;
   let agentRegistry: ToolRegistry | undefined;
+  managedScope.onClose(async () => {
+    await agentRegistry?.stop();
+    cleanup();
+  });
+  ownScope?.(managedScope);
 
   try {
     // Delegated rather than re-enacted. The three steps below used to be
@@ -631,18 +758,22 @@ async function createPerAgentConfig(
     // is the sole re-anchoring that lifts the subagent's tools above the
     // wrapper, and skipping it resolves relative paths against the parent's
     // working directory instead of the provisioned worktree.
-    await rebuildToolRegistryOnOverride(override as Config, base, {
-      markRebuilt: false,
-    });
+    await managedScope.run(() =>
+      rebuildToolRegistryOnOverride(override as Config, base, {
+        markRebuilt: false,
+      }),
+    );
     agentRegistry = override.getToolRegistry();
 
     if (authOverrides?.authType) {
       try {
-        runtimeView = await createRuntimeContentGeneratorView(
-          base,
-          override as Config,
-          modelId,
-          authOverrides,
+        runtimeView = await managedScope.run(() =>
+          createRuntimeContentGeneratorView(
+            base,
+            override as Config,
+            modelId,
+            authOverrides,
+          ),
         );
         dedicatedContentGenerator = runtimeView.contentGenerator;
 
@@ -671,10 +802,12 @@ async function createPerAgentConfig(
       contentGeneratorError,
       runtimeView,
       cleanup,
+      managedScope,
     };
   } catch (error) {
-    cleanup();
-    if (agentRegistry) {
+    await managedScope.close();
+    if (!managedScope.signal) cleanup();
+    if (agentRegistry && !managedScope.signal) {
       void agentRegistry.stop().catch((stopError) => {
         debugLogger.error(
           'Failed to stop partially created agent tool registry:',

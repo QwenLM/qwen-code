@@ -109,21 +109,28 @@ describe('Config session execution engine', () => {
       { experimentalZedIntegration: true, sessionWriterLeaseEnabled: true },
     ],
   ])(
-    'records a new session owner %s a writer lease before side effects',
+    'records a new session owner %s a writer lease ahead of its first record',
     async (_lease, params) => {
       const config = createConfig({
         ...params,
         sessionExecutionEngine: 'legacy',
       });
       try {
-        const { transcript } = await initializeUntilSideEffects(config);
+        // An unused session persists nothing, so it is never listed as an
+        // owner-only transcript that holds its ID.
+        await expect(initializeUntilSideEffects(config)).resolves.toEqual({
+          reached: true,
+          transcript: undefined,
+        });
+        await config
+          .getChatRecordingService()!
+          .recordParentSession('9b2f1c3a-1d2e-4f5a-8b6c-7d8e9f0a1b2c');
+        const records = (await readFile(config.getTranscriptPath(), 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
 
-        expect(
-          transcript
-            ?.trim()
-            .split('\n')
-            .map((line) => JSON.parse(line)),
-        ).toEqual([
+        expect(records).toEqual([
           expect.objectContaining({
             sessionId: SESSION_ID,
             parentUuid: null,
@@ -131,6 +138,7 @@ describe('Config session execution engine', () => {
             subtype: 'session_execution_engine',
             systemPayload: { version: 1, engine: 'legacy' },
           }),
+          expect.objectContaining({ subtype: 'parent_session' }),
         ]);
         await expect(
           readSessionTranscriptSnapshot(
@@ -219,25 +227,17 @@ describe('Config session execution engine', () => {
     'refuses a restore owned by %s before side effects',
     async (_name, executionEngine, reason) => {
       const projection = restoreProjection(executionEngine);
-      const config = createConfig({
-        sessionExecutionEngine: 'legacy',
-        sessionRestoreProjection: projection,
-        sessionRestoreProjectionSource: async () => projection,
-      });
-      const internal = vi.spyOn(
-        config as unknown as { initializeInternal(): Promise<void> },
-        'initializeInternal',
-      );
+      const create = () =>
+        createConfig({
+          sessionExecutionEngine: 'legacy',
+          sessionRestoreProjection: projection,
+          sessionRestoreProjectionSource: async () => projection,
+        });
 
-      const initialized = config.initialize();
-      await expect(initialized).rejects.toBeInstanceOf(
-        SessionExecutionEngineError,
-      );
-      await expect(initialized).rejects.toThrow(reason);
-      expect(internal).not.toHaveBeenCalled();
-      await expect(readFile(config.getTranscriptPath())).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
+      // Restored ownership is checked while the Config is built, before
+      // initialization can start any side effect.
+      expect(create).toThrow(SessionExecutionEngineError);
+      expect(create).toThrow(reason);
     },
   );
 });

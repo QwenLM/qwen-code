@@ -11,6 +11,7 @@ import type { ChildProcess } from 'node:child_process';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
+import { runOwnedCommand } from './owned-command.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
@@ -20,6 +21,12 @@ const RIPGREP_BUFFER_LIMIT = 20_000_000; // Keep buffers aligned with the origin
 const RIPGREP_TEST_TIMEOUT_MS = 5_000;
 const RIPGREP_RUN_TIMEOUT_MS = 10_000;
 const RIPGREP_WSL_TIMEOUT_MS = 60_000;
+
+export interface RipgrepExecutionOptions {
+  requireProcessGroupExit?: boolean;
+  signal?: AbortSignal;
+  cwd?: string;
+}
 
 export type RipgrepMode = 'builtin' | 'system';
 
@@ -62,6 +69,7 @@ export interface RipgrepRunResult {
    * Any error that occurred during execution (non-fatal errors like no matches won't populate this)
    */
   error?: Error;
+  canceled?: boolean;
   recovery: RipgrepRecoveryMetadata;
 }
 
@@ -330,6 +338,69 @@ async function resolveHealthyRipgrep(
   }
 }
 
+async function resolveOwnedHealthyRipgrep(
+  useBuiltin: boolean,
+  options: RipgrepExecutionOptions,
+): Promise<RipgrepSelection | null> {
+  const probe = async (selection: RipgrepSelection): Promise<void> => {
+    options.signal?.throwIfAborted();
+    const result = await runOwnedCommand(selection.command, ['--version'], {
+      cwd: options.cwd,
+      signal: options.signal,
+      timeout: RIPGREP_TEST_TIMEOUT_MS,
+    });
+    options.signal?.throwIfAborted();
+    if (result.error) throw result.error;
+    if (result.code !== 0 || !result.stdout.startsWith('ripgrep')) {
+      throw new Error(
+        `${selection.command} is not a working ripgrep binary (exit ${result.code}): ${result.stdout.trim() || '(no output)'}`,
+      );
+    }
+  };
+  let builtinError: unknown;
+  options.signal?.throwIfAborted();
+  if (useBuiltin) {
+    const command = getBuiltinRipgrep();
+    if (command && (await fileExists(command))) {
+      const selection: RipgrepSelection = { mode: 'builtin', command };
+      try {
+        await probe(selection);
+        return selection;
+      } catch (error) {
+        throwIfOwnedProbeStopped(error, options.signal);
+        builtinError = error;
+        debugLogger.warn(
+          `Bundled ripgrep at ${command} is unusable (${error}); trying system rg.`,
+        );
+      }
+    }
+  }
+  const selection: RipgrepSelection = {
+    mode: 'system',
+    command: RIPGREP_COMMAND,
+  };
+  try {
+    await probe(selection);
+    return selection;
+  } catch (error) {
+    throwIfOwnedProbeStopped(error, options.signal);
+    if (builtinError !== undefined) throw builtinError;
+    if (error instanceof Error && errorCodeOf(error) === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function throwIfOwnedProbeStopped(error: unknown, signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+  if (
+    error instanceof Error &&
+    (isCanceledRipgrepExecution(error) ||
+      errorCodeOf(error) === 'ERR_OWNED_COMMAND_UNSUPPORTED')
+  ) {
+    throw error;
+  }
+}
+
 /**
  * Checks if ripgrep binary is available
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
@@ -339,8 +410,11 @@ async function resolveHealthyRipgrep(
  */
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
+  options: RipgrepExecutionOptions = {},
 ): Promise<boolean> {
-  const selection = await resolveHealthyRipgrep(useBuiltin);
+  const selection = options.requireProcessGroupExit
+    ? await resolveOwnedHealthyRipgrep(useBuiltin, options)
+    : await resolveHealthyRipgrep(useBuiltin);
   return selection !== null;
 }
 
@@ -419,7 +493,7 @@ function classifyRipgrepError(
   if (errorCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
     return { failureKind: 'max_buffer', canceled: false };
   }
-  if (error.signal === 'SIGTERM') {
+  if (errorCode === 'ETIMEDOUT' || error.signal === 'SIGTERM') {
     return { failureKind: 'timeout', canceled: false };
   }
   if (typeof errorCode === 'string') {
@@ -466,10 +540,55 @@ function toRunResult(
     incomplete: attempt.incomplete,
     recovery,
   };
+  if (attempt.canceled) result.canceled = true;
   if (attempt.error !== undefined) {
     result.error = attempt.error;
   }
   return result;
+}
+
+async function runOwnedRipgrepOnce(
+  selection: RipgrepSelection,
+  args: string[],
+  options: RipgrepExecutionOptions,
+): Promise<RipgrepAttemptResult> {
+  const result = await runOwnedCommand(selection.command, args, {
+    cwd: options.cwd,
+    signal: options.signal,
+    maxBuffer: RIPGREP_BUFFER_LIMIT,
+    timeout: wslTimeout(),
+  });
+  if (!result.error && result.code === 0) {
+    return { stdout: result.stdout, incomplete: false, canceled: false };
+  }
+  if (
+    result.code === 1 &&
+    !result.signal &&
+    result.stderr.trim() === '' &&
+    (!result.error || errorCodeOf(result.error) === 1)
+  ) {
+    return { stdout: result.stdout, incomplete: false, canceled: false };
+  }
+  const error =
+    result.error ??
+    Object.assign(
+      new Error(`ripgrep exited with code ${result.code}: ${result.stderr}`),
+      { code: result.code, signal: result.signal },
+    );
+  const { failureKind, canceled } = classifyRipgrepError(
+    error,
+    result.stderr,
+    options.signal,
+  );
+  return {
+    stdout: shouldDropLastLine(failureKind, canceled)
+      ? dropPossiblyIncompleteLastLine(result.stdout)
+      : result.stdout,
+    incomplete: result.stdout.trim().length > 0,
+    canceled,
+    error,
+    ...(failureKind !== undefined ? { failureKind } : {}),
+  };
 }
 
 async function runRipgrepOnce(
@@ -592,13 +711,22 @@ export async function runRipgrep(
   args: string[],
   signal?: AbortSignal,
   useBuiltin: boolean = true,
+  options: RipgrepExecutionOptions = {},
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveHealthyRipgrep(useBuiltin);
+  const executionOptions = { ...options, signal: signal ?? options.signal };
+  signal = executionOptions.signal;
+  const selection = options.requireProcessGroupExit
+    ? await resolveOwnedHealthyRipgrep(useBuiltin, executionOptions)
+    : await resolveHealthyRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }
 
-  const firstAttempt = await runRipgrepOnce(selection, args, signal);
+  const runAttempt = (attemptArgs: string[]) =>
+    options.requireProcessGroupExit
+      ? runOwnedRipgrepOnce(selection, attemptArgs, executionOptions)
+      : runRipgrepOnce(selection, attemptArgs, signal);
+  const firstAttempt = await runAttempt(args);
   if (
     firstAttempt.failureKind === 'eagain' &&
     !firstAttempt.canceled &&
@@ -608,7 +736,7 @@ export async function runRipgrep(
     if (retryArgs !== null) {
       // A thread creation failure is scoped to this invocation, so retry once
       // without lowering concurrency for later searches.
-      const retryAttempt = await runRipgrepOnce(selection, retryArgs, signal);
+      const retryAttempt = await runAttempt(retryArgs);
       const retryRecoveryOptions: {
         retryTriggered: boolean;
         retrySucceeded: boolean;

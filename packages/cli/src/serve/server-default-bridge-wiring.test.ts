@@ -101,6 +101,14 @@ describe('createServeApp default bridge wiring', () => {
       delegateReadTextFileToClient: false,
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     });
+    expect(bridgeOptions).not.toHaveProperty('channelFactory');
+    expect(bridgeOptions!.executionEngines).toEqual(
+      expect.objectContaining({
+        legacy: expect.any(Function),
+        managed: expect.any(Function),
+        select: expect.any(Function),
+      }),
+    );
     await expect(
       bridgeOptions!.fileSystem!.writeText({
         path: '/var/tmp/qwen-default-embed-external.txt',

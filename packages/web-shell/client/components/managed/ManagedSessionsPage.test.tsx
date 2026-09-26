@@ -3,25 +3,30 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import type {
+  DaemonManagedSessionEvent,
+  DaemonManagedSessionSummary,
+  DaemonManagedSessionTranscript,
+} from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
-  ManagedAgentSessionEvent,
-  ManagedAgentSessionTranscript,
 } from './managed-agent-provider';
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   client: {
-    listSessions: vi.fn(),
-    getSession: vi.fn(),
-    getTranscript: vi.fn(),
-    subscribeEvents: vi.fn(),
+    listManagedSessions: vi.fn(),
+    getManagedSession: vi.fn(),
+    getManagedSessionTranscript: vi.fn(),
+    subscribeManagedSessionEvents: vi.fn(),
+    createManagedSession: vi.fn(),
+    sendManagedPrompt: vi.fn(),
+    cancelManagedPrompt: vi.fn(),
+    loadSession: vi.fn(),
     createSession: vi.fn(),
-    submitPrompt: vi.fn(),
-    cancel: vi.fn(),
   },
   features: ['managed_sessions', 'managed_session_cancel'],
 }));
@@ -52,11 +57,11 @@ import { ManagedSessionsPage } from './ManagedSessionsPage';
 
 function summary(
   sessionId = 's1',
-  extra: Partial<ManagedAgentSessionSummary> = {},
-): ManagedAgentSessionSummary {
+  extra: Partial<DaemonManagedSessionSummary> = {},
+): DaemonManagedSessionSummary {
   return {
     sessionId,
-    activeTurnId: 'p1',
+    promptId: 'p1',
     title: `Task ${sessionId}`,
     workspaceCwd: '/workspace',
     createdAt: 10,
@@ -70,15 +75,20 @@ function summary(
   };
 }
 
-function event(id: number, text: string): ManagedAgentSessionEvent {
+function event(id: number, text: string): DaemonManagedSessionEvent {
   return {
     id,
     at: id,
     type: 'assistant_delta',
     sessionId: 's1',
-    turnId: 'p1',
+    promptId: 'p1',
     data: { text },
   };
+}
+
+function providerSummary(sessionId = 's1'): ManagedAgentSessionSummary {
+  const { promptId, ...daemonSummary } = summary(sessionId);
+  return { ...daemonSummary, activeTurnId: promptId };
 }
 
 async function flush() {
@@ -89,17 +99,9 @@ describe('ManagedSessionsPage', () => {
   let container: HTMLDivElement;
   let root: Root;
   let onSelect: ReturnType<typeof vi.fn>;
-  let provider: ManagedAgentProvider;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    provider = {
-      kind: 'java',
-      storageKey: 'http://managed-test',
-      canCancel: true,
-      acceptsWorkspaceCwd: false,
-      ...mocks.client,
-    };
     sessionStorage.clear();
     mocks.features = ['managed_sessions', 'managed_session_cancel'];
     mocks.useWorkspace.mockImplementation(() => ({
@@ -107,41 +109,40 @@ describe('ManagedSessionsPage', () => {
       baseUrl: 'http://managed-test',
       capabilities: { features: mocks.features },
     }));
-    mocks.client.listSessions.mockResolvedValue({
+    mocks.client.listManagedSessions.mockResolvedValue({
       sessions: [summary()],
     });
-    mocks.client.getSession.mockImplementation(async (id: string) =>
+    mocks.client.getManagedSession.mockImplementation(async (id: string) =>
       summary(id),
     );
-    mocks.client.getTranscript.mockResolvedValue({
+    mocks.client.getManagedSessionTranscript.mockResolvedValue({
       events: [
         event(1, 'Persisted answer'),
         { ...event(2, ''), type: 'completed' },
       ],
       lastEventId: 2,
     });
-    mocks.client.subscribeEvents.mockImplementation(async function* (
-      _id: string,
-      opts: { signal: AbortSignal },
-    ) {
-      await new Promise<void>((resolve) => {
-        if (opts.signal.aborted) resolve();
-        else
-          opts.signal.addEventListener('abort', () => resolve(), {
-            once: true,
-          });
-      });
-      yield* [];
-    });
-    mocks.client.createSession.mockResolvedValue({
+    mocks.client.subscribeManagedSessionEvents.mockImplementation(
+      async function* (_id: string, opts: { signal: AbortSignal }) {
+        await new Promise<void>((resolve) => {
+          if (opts.signal.aborted) resolve();
+          else
+            opts.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+        yield* [];
+      },
+    );
+    mocks.client.createManagedSession.mockResolvedValue({
       sessionId: 'created',
-      turnId: 'p-new',
+      promptId: 'p-new',
     });
-    mocks.client.submitPrompt.mockResolvedValue({
+    mocks.client.sendManagedPrompt.mockResolvedValue({
       sessionId: 's1',
-      turnId: 'p-next',
+      promptId: 'p-next',
     });
-    mocks.client.cancel.mockResolvedValue({ accepted: true });
+    mocks.client.cancelManagedPrompt.mockResolvedValue({ accepted: true });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -157,7 +158,7 @@ describe('ManagedSessionsPage', () => {
   async function render(
     sessionId?: string,
     language: 'en' | 'zh-CN' = 'en',
-    managedAgentProvider: ManagedAgentProvider | null = provider,
+    managedAgentProvider?: ManagedAgentProvider,
   ) {
     await act(async () => {
       root.render(
@@ -166,7 +167,7 @@ describe('ManagedSessionsPage', () => {
             sessionId={sessionId}
             onSelectSession={onSelect}
             workspaceCwd="/workspace"
-            managedAgentProvider={managedAgentProvider ?? undefined}
+            managedAgentProvider={managedAgentProvider}
           />
         </I18nProvider>,
       );
@@ -177,7 +178,7 @@ describe('ManagedSessionsPage', () => {
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     mocks.features = [];
     const listSessions = vi.fn().mockResolvedValue({
-      sessions: [summary('java-session')],
+      sessions: [providerSummary('java-session')],
     });
     const provider: ManagedAgentProvider = {
       kind: 'java',
@@ -202,7 +203,7 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ workspaceCwd: undefined }),
     );
     expect(mocks.useWorkspace).not.toHaveBeenCalled();
-    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.listManagedSessions).not.toHaveBeenCalled();
   });
 
   async function click(label: string) {
@@ -230,16 +231,17 @@ describe('ManagedSessionsPage', () => {
   it('opens durable history without creating or restoring a Runtime and subscribes after its watermark', async () => {
     await render('s1');
     expect(container.textContent).toContain('Persisted answer');
-    expect(mocks.client.subscribeEvents).toHaveBeenCalledWith(
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({ lastEventId: 2 }),
     );
-    expect(mocks.client.getTranscript).toHaveBeenCalledWith(
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({ limit: 100 }),
     );
     expect(mocks.client.createSession).not.toHaveBeenCalled();
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.loadSession).not.toHaveBeenCalled();
+    expect(mocks.client.createManagedSession).not.toHaveBeenCalled();
   });
 
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
@@ -257,7 +259,7 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('keeps creation payload, correlation and idempotency key on an uncertain retry', async () => {
-    mocks.client.createSession.mockRejectedValueOnce(
+    mocks.client.createManagedSession.mockRejectedValueOnce(
       new TypeError('Network failed'),
     );
     await render();
@@ -266,10 +268,10 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).toContain('request outcome is unconfirmed');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await click('Retry the same request');
-    const [first, retry] = mocks.client.createSession.mock.calls;
+    const [first, retry] = mocks.client.createManagedSession.mock.calls;
     expect(first?.[0]).toEqual({
-      text: 'Do the work',
-      workspaceCwd: undefined,
+      prompt: [{ type: 'text', text: 'Do the work' }],
+      cwd: '/workspace',
     });
     expect(retry?.[0]).toEqual(first?.[0]);
     expect(retry?.[1].idempotencyKey).toBe(first?.[1].idempotencyKey);
@@ -278,7 +280,7 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {
-    mocks.client.getSession.mockResolvedValue(
+    mocks.client.getManagedSession.mockResolvedValue(
       summary('s1', {
         phase: 'tool_running',
         capabilities: { canSend: false, canCancel: true },
@@ -287,7 +289,7 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await click('Cancel turn');
-    expect(mocks.client.cancel).toHaveBeenCalledWith(
+    expect(mocks.client.cancelManagedPrompt).toHaveBeenCalledWith(
       's1',
       'p1',
       expect.objectContaining({ clientId: expect.any(String) }),
@@ -297,8 +299,8 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('shows submission and loading feedback before the first model event', async () => {
-    let accept!: (value: { sessionId: string; turnId: string }) => void;
-    mocks.client.createSession.mockImplementationOnce(
+    let accept!: (value: { sessionId: string; promptId: string }) => void;
+    mocks.client.createManagedSession.mockImplementationOnce(
       () => new Promise((resolve) => (accept = resolve)),
     );
     await render();
@@ -309,18 +311,18 @@ describe('ManagedSessionsPage', () => {
         ?.textContent,
     ).toBe('Submitting…');
 
-    let load!: (value: ManagedAgentSessionTranscript) => void;
-    mocks.client.getSession.mockResolvedValue(
+    let load!: (value: DaemonManagedSessionTranscript) => void;
+    mocks.client.getManagedSession.mockResolvedValue(
       summary('s1', {
         phase: 'admitted',
         capabilities: { canSend: false, canCancel: true },
       }),
     );
-    mocks.client.getTranscript.mockImplementationOnce(
+    mocks.client.getManagedSessionTranscript.mockImplementationOnce(
       () => new Promise((resolve) => (load = resolve)),
     );
     await act(async () => {
-      accept({ sessionId: 's1', turnId: 'p1' });
+      accept({ sessionId: 's1', promptId: 'p1' });
       await flush();
     });
     await render('s1');
@@ -348,7 +350,7 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-managed-progress]')?.textContent,
     ).toContain('This turn is running');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
-    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.createManagedSession).toHaveBeenCalledTimes(1);
   });
 
   it.each(['completed', 'failed', 'cancelled'] as const)(
@@ -356,14 +358,14 @@ describe('ManagedSessionsPage', () => {
     async (phase) => {
       vi.useFakeTimers();
       vi.setSystemTime(10_000);
-      mocks.client.getSession.mockResolvedValue(
+      mocks.client.getManagedSession.mockResolvedValue(
         summary('s1', {
           admittedAt: 8000,
           phase: 'agent_running',
           capabilities: { canSend: false, canCancel: true },
         }),
       );
-      mocks.client.getTranscript.mockResolvedValue({
+      mocks.client.getManagedSessionTranscript.mockResolvedValue({
         events: [],
         lastEventId: 0,
       });
@@ -380,7 +382,7 @@ describe('ManagedSessionsPage', () => {
       expect(
         container.querySelector('[data-managed-progress]')?.textContent,
       ).toContain('本轮执行中');
-      mocks.client.getSession.mockResolvedValue(
+      mocks.client.getManagedSession.mockResolvedValue(
         summary('s1', {
           phase,
           runtimeState: 'starting',
@@ -396,48 +398,49 @@ describe('ManagedSessionsPage', () => {
   );
 
   it('preserves an uncertain attempt across a remount and restores its text after a definitive rejection', async () => {
-    mocks.client.createSession.mockRejectedValueOnce(
+    mocks.client.createManagedSession.mockRejectedValueOnce(
       new TypeError('Network failed'),
     );
     await render();
     await input('Keep this prompt');
     await click('Send');
     const originalKey =
-      mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
+      mocks.client.createManagedSession.mock.calls[0]?.[1].idempotencyKey;
     await act(async () => root.unmount());
     root = createRoot(container);
-    mocks.client.createSession.mockRejectedValueOnce(
-      new JavaManagedAgentHttpError(400, 'invalid_request', 'Invalid request'),
+    mocks.client.createManagedSession.mockRejectedValueOnce(
+      new DaemonHttpError(400, {}, 'Invalid request'),
     );
     await render();
     expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
     await click('Retry the same request');
-    expect(mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey).toBe(
-      originalKey,
-    );
+    expect(
+      mocks.client.createManagedSession.mock.calls[1]?.[1].idempotencyKey,
+    ).toBe(originalKey);
     expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
     expect(container.querySelector('textarea')?.disabled).toBe(false);
   });
 
   it('does not fetch Managed endpoints when the feature is unavailable', async () => {
-    await render('s1', 'en', null);
+    mocks.features = [];
+    await render('s1');
     expect(container.textContent).toContain('unavailable');
-    expect(mocks.client.getSession).not.toHaveBeenCalled();
-    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.getManagedSession).not.toHaveBeenCalled();
+    expect(mocks.client.listManagedSessions).not.toHaveBeenCalled();
   });
 
   it.each(['accepted', 'rejected'] as const)(
     'does not apply an old submission to the new selection when it is %s',
     async (outcome) => {
-      mocks.client.listSessions.mockResolvedValue({
+      mocks.client.listManagedSessions.mockResolvedValue({
         sessions: [summary('s1'), summary('s2')],
       });
       let resolveSubmission!: (value: {
         sessionId: string;
-        turnId: string;
+        promptId: string;
       }) => void;
       let rejectSubmission!: (error: Error) => void;
-      mocks.client.submitPrompt.mockImplementationOnce(
+      mocks.client.sendManagedPrompt.mockImplementationOnce(
         () =>
           new Promise((resolve, reject) => {
             resolveSubmission = resolve;
@@ -452,14 +455,10 @@ describe('ManagedSessionsPage', () => {
       expect(container.querySelector('[data-managed-progress]')).toBeNull();
       await act(async () => {
         if (outcome === 'accepted')
-          resolveSubmission({ sessionId: 's1', turnId: 'p2' });
+          resolveSubmission({ sessionId: 's1', promptId: 'p2' });
         else
           rejectSubmission(
-            new JavaManagedAgentHttpError(
-              400,
-              'invalid_request',
-              'Old session rejection',
-            ),
+            new DaemonHttpError(400, {}, 'Old session rejection'),
           );
         await flush();
       });
@@ -472,12 +471,12 @@ describe('ManagedSessionsPage', () => {
 
   it('updates late Runtime failure after a completed turn through detail polling', async () => {
     vi.useFakeTimers();
-    mocks.client.getSession.mockResolvedValue(
+    mocks.client.getManagedSession.mockResolvedValue(
       summary('s1', { runtimeState: 'starting', runtimeReady: false }),
     );
     await render('s1');
     expect(container.textContent).toContain('Environment: Preparing');
-    mocks.client.getSession.mockResolvedValue(
+    mocks.client.getManagedSession.mockResolvedValue(
       summary('s1', {
         updatedAt: 30,
         runtimeState: 'failed',
@@ -494,7 +493,7 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('prepends older transcript pages without losing current messages', async () => {
-    mocks.client.getTranscript
+    mocks.client.getManagedSessionTranscript
       .mockResolvedValueOnce({
         events: [event(3, 'Recent')],
         olderCursor: '3',
@@ -515,22 +514,22 @@ describe('ManagedSessionsPage', () => {
     await click('Older history');
     expect(container.textContent).toContain('Original question');
     expect(container.textContent).toContain('Earlier Recent');
-    expect(mocks.client.getTranscript).toHaveBeenLastCalledWith(
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenLastCalledWith(
       's1',
       expect.objectContaining({ before: '3', limit: 100 }),
     );
   });
 
   it('ignores delayed snapshot responses after selection switches', async () => {
-    let resolveFirst!: (value: ManagedAgentSessionTranscript) => void;
-    mocks.client.getTranscript.mockImplementationOnce(
+    let resolveFirst!: (value: DaemonManagedSessionTranscript) => void;
+    mocks.client.getManagedSessionTranscript.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           resolveFirst = resolve;
         }),
     );
     await render('s1');
-    mocks.client.getTranscript.mockResolvedValue({
+    mocks.client.getManagedSessionTranscript.mockResolvedValue({
       events: [{ ...event(1, 'Second answer'), sessionId: 's2' }],
       lastEventId: 1,
     });
@@ -548,30 +547,30 @@ describe('ManagedSessionsPage', () => {
 
   it('retries a transient initial history failure before subscribing without resubmitting a prompt', async () => {
     vi.useFakeTimers();
-    mocks.client.getTranscript.mockRejectedValueOnce(
+    mocks.client.getManagedSessionTranscript.mockRejectedValueOnce(
       new TypeError('Temporary history failure'),
     );
     await render('s1');
     expect(container.textContent).toContain('Temporary history failure');
-    expect(mocks.client.subscribeEvents).not.toHaveBeenCalled();
+    expect(mocks.client.subscribeManagedSessionEvents).not.toHaveBeenCalled();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
       await flush();
     });
     expect(container.textContent).toContain('Persisted answer');
     expect(container.textContent).not.toContain('Temporary history failure');
-    expect(mocks.client.getTranscript).toHaveBeenCalledTimes(2);
-    expect(mocks.client.subscribeEvents).toHaveBeenCalledWith(
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenCalledTimes(2);
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenCalledWith(
       's1',
       expect.objectContaining({ lastEventId: 2 }),
     );
-    expect(mocks.client.createSession).not.toHaveBeenCalled();
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.createManagedSession).not.toHaveBeenCalled();
+    expect(mocks.client.sendManagedPrompt).not.toHaveBeenCalled();
   });
 
   it('aborts a waiting initial snapshot retry when the selection changes', async () => {
     vi.useFakeTimers();
-    mocks.client.getTranscript.mockRejectedValueOnce(
+    mocks.client.getManagedSessionTranscript.mockRejectedValueOnce(
       new TypeError('Temporary history failure'),
     );
     await render('s1');
@@ -580,12 +579,11 @@ describe('ManagedSessionsPage', () => {
       await vi.advanceTimersByTimeAsync(3000);
       await flush();
     });
-    expect(mocks.client.getTranscript.mock.calls.map(([id]) => id)).toEqual([
-      's1',
-      's2',
-    ]);
-    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
-    expect(mocks.client.subscribeEvents).toHaveBeenCalledWith(
+    expect(
+      mocks.client.getManagedSessionTranscript.mock.calls.map(([id]) => id),
+    ).toEqual(['s1', 's2']);
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenCalledWith(
       's2',
       expect.objectContaining({ lastEventId: 2 }),
     );
@@ -593,7 +591,7 @@ describe('ManagedSessionsPage', () => {
 
   it('backs off when gap recovery fails instead of repeatedly requesting the same missing range', async () => {
     vi.useFakeTimers();
-    mocks.client.getTranscript
+    mocks.client.getManagedSessionTranscript
       .mockResolvedValueOnce({
         events: [event(1, 'Before gap')],
         lastEventId: 1,
@@ -606,7 +604,7 @@ describe('ManagedSessionsPage', () => {
     const gapStream = async function* () {
       yield { ...event(2, ''), type: 'stream_gap' };
     };
-    mocks.client.subscribeEvents
+    mocks.client.subscribeManagedSessionEvents
       .mockImplementationOnce(gapStream)
       .mockImplementationOnce(gapStream);
     await render('s1');
@@ -615,29 +613,31 @@ describe('ManagedSessionsPage', () => {
       await vi.advanceTimersByTimeAsync(2999);
       await flush();
     });
-    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
-    expect(mocks.client.getTranscript).toHaveBeenCalledTimes(2);
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenCalledTimes(1);
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenCalledTimes(2);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
       await flush();
     });
     expect(container.textContent).toContain('Restored history');
-    expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenCalledTimes(3);
   });
 
   it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
     vi.useFakeTimers();
-    mocks.client.getTranscript
+    mocks.client.getManagedSessionTranscript
       .mockResolvedValueOnce({ events: [event(1, 'First')], lastEventId: 1 })
       .mockResolvedValue({
         events: [event(1, 'First'), event(2, ' second'), event(3, ' restored')],
         lastEventId: 3,
       });
-    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
-      yield event(1, 'First');
-      yield event(2, ' second');
-      yield { ...event(3, ''), type: 'stream_gap' };
-    });
+    mocks.client.subscribeManagedSessionEvents.mockImplementationOnce(
+      async function* () {
+        yield event(1, 'First');
+        yield event(2, ' second');
+        yield { ...event(3, ''), type: 'stream_gap' };
+      },
+    );
     await render('s1');
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
@@ -647,14 +647,15 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="messages"]')?.textContent,
     ).toContain('First second restored');
     expect(container.textContent).not.toContain('FirstFirst');
-    expect(mocks.client.getTranscript).toHaveBeenCalledTimes(2);
-    for (const [, options] of mocks.client.getTranscript.mock.calls) {
+    expect(mocks.client.getManagedSessionTranscript).toHaveBeenCalledTimes(2);
+    for (const [, options] of mocks.client.getManagedSessionTranscript.mock
+      .calls) {
       expect(options.limit).toBe(100);
     }
-    expect(mocks.client.subscribeEvents).toHaveBeenLastCalledWith(
+    expect(mocks.client.subscribeManagedSessionEvents).toHaveBeenLastCalledWith(
       's1',
       expect.objectContaining({ lastEventId: 3 }),
     );
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.sendManagedPrompt).not.toHaveBeenCalled();
   });
 });

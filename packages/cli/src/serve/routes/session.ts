@@ -54,9 +54,13 @@ import {
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CHANNEL_PROMPT_META_KEY,
+  DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY,
+  DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
+  parseBridgeManagedSessionStore,
+  type BridgeManagedSessionStore,
   type BridgeBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -99,6 +103,7 @@ import {
   InvalidClientIdError,
   InvalidSessionMetadataError,
   PromptQueueFullError,
+  PromptIdConflictError,
   SessionArtifactValidationError,
   SessionArchivedError,
   SessionConflictError,
@@ -121,6 +126,8 @@ import {
 } from '../server/worktree-reset-errors.js';
 import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
 import {
+  CLIENT_ID_RE,
+  MAX_CLIENT_ID_LENGTH,
   parseClientIdHeader,
   parseOptionalWorkspaceCwd,
   requireSessionId,
@@ -182,6 +189,7 @@ import {
   writeGenerationSseChunk,
 } from '../generation-sse.js';
 import {
+  rejectManagedGatewayRuntimeSession,
   requirePrimarySessionRuntime,
   requireSessionRuntime,
 } from './session-runtime.js';
@@ -231,6 +239,12 @@ import {
   type RequestedSessionIdAdmission,
   type RequestedSessionIdReservation,
 } from '../session-id-admission.js';
+import {
+  ManagedPromptServiceError,
+  type ManagedGatewayPromptRequest,
+  type ManagedPromptService,
+} from '../managed-prompt-types.js';
+import type { ManagedGatewaySessionEvents } from '../managed-gateway-session-events.js';
 
 // `HEAD` is the most prominent ref name git rejects as a branch name.
 // The surrounding predicate covers the remaining reserved forms (`@`, `-`,
@@ -256,6 +270,24 @@ function redactSdkSurfaceReplay<
 >(session: T, workspaceTrusted: boolean): T {
   const shaped = omitSkillDetailsFromReplayArrays(session);
   return workspaceTrusted ? shaped : redactWorkflowsFromReplayArrays(shaped);
+}
+
+function exposeHostedManagedRuntimeRecovery<
+  T extends {
+    state?: { _meta?: Record<string, unknown> | null };
+    _meta?: Record<string, unknown>;
+  },
+>(session: T): T {
+  const recovery =
+    session.state?._meta?.[DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY];
+  if (recovery === undefined) return session;
+  return {
+    ...session,
+    _meta: {
+      ...session._meta,
+      [DAEMON_MANAGED_RUNTIME_RECOVERY_META_KEY]: recovery,
+    },
+  };
 }
 
 // Byte-length caps for branch names. git creates loose refs as files under
@@ -292,6 +324,10 @@ interface RegisterSessionRoutesDeps {
     StandaloneSessionService,
     'restoreLegacyForCompatibility' | 'dispatchPrompt' | 'continueSession'
   >;
+  managedPromptService?: ManagedPromptService;
+  managedGatewaySessionEvents?: ManagedGatewaySessionEvents;
+  hostedHarness?: boolean;
+  hostedHarnessBootId?: string;
 }
 
 // Chosen cap for one serialized transcript response, kept proportional to
@@ -313,6 +349,13 @@ const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 // repeated reference resolves to the same 8 MiB image once per occurrence).
 // Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
+const MANAGED_PROMPT_MAX_CONTENT_BLOCKS = MEDIA_CONTENT_MAX_BLOCKS + 1;
+const MANAGED_PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+const MANAGED_PROMPT_IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]+$/;
+const MANAGED_GATEWAY_UUID_NAMESPACE = Buffer.from(
+  '8d65f3c482f4547aac17202c7894eb14',
+  'hex',
+);
 
 // SVG is allowed as an ordinary file resource but never as an inline image.
 // Compare the normalized media type so spelling variants cannot bypass the
@@ -391,6 +434,166 @@ function mediaBlockParseError(
     return 'SVG images are not supported';
   }
   return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
+}
+
+function parseManagedPromptContent(
+  value: unknown,
+  res: Response,
+): BridgePromptContentBlock[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    res.status(400).json({
+      error:
+        '`prompt` is required and must be a non-empty array of content blocks',
+      code: 'managed_prompt_invalid',
+    });
+    return undefined;
+  }
+  if (value.length > MANAGED_PROMPT_MAX_CONTENT_BLOCKS) {
+    res.status(400).json({
+      error: `\`prompt\` must carry at most ${MANAGED_PROMPT_MAX_CONTENT_BLOCKS} content blocks`,
+      code: 'managed_prompt_invalid',
+    });
+    return undefined;
+  }
+  const prompt: BridgePromptContentBlock[] = [];
+  let mediaBlockCount = 0;
+  for (const block of value) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      res.status(400).json({
+        error: 'each `prompt` element must be an object (content block)',
+        code: 'managed_prompt_invalid',
+      });
+      return undefined;
+    }
+    const record = block as Record<string, unknown>;
+    if (record['type'] === 'text') {
+      if (
+        typeof record['text'] !== 'string' ||
+        Object.keys(record).some((key) => key !== 'type' && key !== 'text')
+      ) {
+        res.status(400).json({
+          error: 'managed text blocks may contain only `type` and `text`',
+          code: 'managed_prompt_invalid',
+        });
+        return undefined;
+      }
+      prompt.push({ type: 'text', text: record['text'] });
+      continue;
+    }
+    mediaBlockCount += 1;
+    if (mediaBlockCount > MEDIA_CONTENT_MAX_BLOCKS) {
+      res.status(400).json({
+        error: `\`prompt\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+        code: 'managed_prompt_invalid',
+      });
+      return undefined;
+    }
+    const parsed = parseMediaContentBlock(block);
+    if (
+      !parsed.valid ||
+      parsed.block.type !== 'image' ||
+      !('data' in parsed.block)
+    ) {
+      res.status(400).json({
+        error:
+          parsed.valid && parsed.block.type !== 'image'
+            ? 'managed prompts support text and inline raster images only'
+            : parsed.valid
+              ? 'managed prompts do not support attachment references'
+              : mediaBlockParseError(parsed.code, '`prompt` image block'),
+        code: 'managed_prompt_invalid',
+      });
+      return undefined;
+    }
+    prompt.push(parsed.block);
+  }
+  return prompt;
+}
+
+function sendManagedPromptServiceError(
+  res: Response,
+  error: ManagedPromptServiceError,
+): void {
+  let status = 400;
+  if (
+    error.code === 'managed_prompt_inbox_full' ||
+    error.code === 'managed_prompt_tenant_inbox_full'
+  ) {
+    status = 429;
+  } else if (error.code === 'managed_prompt_idempotency_conflict') {
+    status = 409;
+  } else if (error.code === 'managed_gateway_turn_active') {
+    status = 409;
+  } else if (error.code === 'managed_prompt_deadline_exceeded') {
+    status = 408;
+  }
+  if (error.retryable) res.setHeader('Retry-After', '1');
+  res.status(status).json({
+    error: error.message,
+    code: error.code,
+    retryable: error.retryable,
+  });
+}
+
+function managedGatewaySessionId(
+  workspaceId: string,
+  managedClientId: string,
+  idempotencyKey: string,
+): string {
+  const bytes = crypto
+    .createHash('sha1')
+    .update(MANAGED_GATEWAY_UUID_NAMESPACE)
+    .update(JSON.stringify([workspaceId, managedClientId, idempotencyKey]))
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function parseManagedGatewayClientId(
+  req: Request,
+  res: Response,
+): string | undefined {
+  const clientId = req.get('X-Qwen-Managed-Client-Id');
+  if (
+    !clientId ||
+    clientId.length > MAX_CLIENT_ID_LENGTH ||
+    !CLIENT_ID_RE.test(clientId)
+  ) {
+    res.status(400).json({
+      error:
+        '`X-Qwen-Managed-Client-Id` must be a non-empty token of 128 characters or fewer',
+      code: 'managed_gateway_client_id_invalid',
+    });
+    return undefined;
+  }
+  return clientId;
+}
+
+function parseManagedGatewayLastEventId(
+  req: Request,
+  res: Response,
+): number | null | undefined {
+  const raw = req.get('Last-Event-ID');
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) {
+    res.status(400).json({
+      error: '`Last-Event-ID` must be a non-negative safe integer',
+      code: 'managed_gateway_last_event_id_invalid',
+    });
+    return null;
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    res.status(400).json({
+      error: '`Last-Event-ID` must be a non-negative safe integer',
+      code: 'managed_gateway_last_event_id_invalid',
+    });
+    return null;
+  }
+  return value;
 }
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
@@ -768,6 +971,14 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
+  if (body['sourceType'] === 'managed-gateway') {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned Managed Gateway Runtimes.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
   if (
     isReservedStandaloneSessionSource({
       sourceType:
@@ -878,12 +1089,36 @@ export function registerSessionRoutes(
         : runtime.generationGuard;
     return guard ? () => guard.assertOpen() : undefined;
   };
+  const rejectManagedGatewaySession = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    res: Response,
+  ): Promise<boolean> => {
+    if (rejectManagedGatewayRuntimeSession(runtime, sessionId, res)) {
+      return true;
+    }
+    if (!isValidSessionId(sessionId)) return false;
+    const service = createWorkspaceRuntimeSessionService(runtime);
+    const metadata = await service.readCreationMetadata(sessionId);
+    if (metadata.sourceType !== 'managed-gateway') return false;
+    res.status(404).json({
+      error: `No session with id "${sessionId}"`,
+      code: 'session_not_found',
+      sessionId,
+    });
+    return true;
+  };
   const LANGUAGE_CODES = deps.languageCodes;
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
     string,
     SessionTranscriptCursorCodec
   >();
+  const managedRuntimeCancellationReceipts = new Map<
+    string,
+    { lastEventId: number; eventEpoch: string }
+  >();
+  const maxManagedRuntimeCancellationReceipts = 1024;
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD. The
   // POST /session branch block additionally rejects branch creation while any
@@ -975,6 +1210,169 @@ export function registerSessionRoutes(
     transcriptCursorCodecs.set(cacheKey, codec);
     return codec;
   };
+
+  const isLiveBridgeSession = (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+  ): boolean => {
+    try {
+      bridge.getSessionSummary(sessionId);
+      return true;
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return false;
+      throw error;
+    }
+  };
+
+  const isVerifiedManagedOwner = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<boolean> => {
+    const state =
+      await createWorkspaceRuntimeSessionService(runtime).readExecutionEngine(
+        sessionId,
+      );
+    return state?.status === 'verified' && state.engine === 'managed';
+  };
+
+  const readPersistedWorkspaceTranscriptPage = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    query: {
+      limit?: number;
+      cursor?: string;
+      direction?: 'backward';
+      beforeRecordId?: string;
+      atRecordId?: string;
+      snapshot?: string;
+    },
+  ) =>
+    runWithWorkspaceRuntimeStorage(runtime, async () => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      if (query.cursor === undefined) {
+        await assertSessionLoadable(
+          runtime.workspaceCwd,
+          sessionId,
+          runtime.sessionRuntimeBaseDir,
+          { allowActiveConflict: true },
+        );
+      }
+      const codec = getTranscriptCursorCodec(runtime);
+      const reader = new SessionTranscriptReader(runtime.workspaceCwd, codec);
+      let page;
+      try {
+        page = await reader.readPage(sessionId, {
+          ...(query.limit !== undefined ? { limit: query.limit } : {}),
+          ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+          ...(query.direction !== undefined
+            ? { direction: query.direction }
+            : {}),
+          ...(query.beforeRecordId !== undefined
+            ? { beforeRecordId: query.beforeRecordId }
+            : {}),
+          ...(query.atRecordId !== undefined
+            ? { atRecordId: query.atRecordId }
+            : {}),
+          ...(query.snapshot !== undefined ? { snapshot: query.snapshot } : {}),
+          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (query.cursor !== undefined || query.snapshot !== undefined) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const location = await service.getSessionLocation(sessionId);
+        if (location === 'archived') {
+          throw new SessionArchivedError(sessionId);
+        }
+        if (location === 'conflict') {
+          throw new SessionConflictError(sessionId);
+        }
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (page.records.some((record) => record.sessionId !== sessionId)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      const replay = await replayTranscriptRecordPage({
+        sessionId,
+        page,
+        finalizeDangling: true,
+        encodeCursor: (state) => codec.encode(state),
+      });
+      const cursorTooLarge =
+        replay.nextCursor !== undefined &&
+        Buffer.byteLength(replay.nextCursor) >
+          WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES;
+      return {
+        v: 1 as const,
+        sessionId,
+        events: replay.updates.map((update) => ({
+          v: 1 as const,
+          type: 'session_update' as const,
+          data: update,
+        })),
+        ...(replay.nextCursor && !cursorTooLarge
+          ? { nextCursor: replay.nextCursor }
+          : {}),
+        hasMore: cursorTooLarge ? false : replay.hasMore,
+        startTime: replay.startTime,
+        lastUpdated: replay.lastUpdated,
+        ...(replay.partial || cursorTooLarge
+          ? {
+              partial: true as const,
+              replayError: cursorTooLarge
+                ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
+                : replay.replayError,
+            }
+          : {}),
+        ...(page.targetRecordId ? { targetRecordId: page.targetRecordId } : {}),
+        ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
+      };
+    });
+
+  const readPersistedWorkspaceTurnIndexPage = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    query: { snapshot?: string; start?: number; limit?: number },
+  ) =>
+    runWithWorkspaceRuntimeStorage(runtime, async () => {
+      if (query.snapshot === undefined) {
+        await assertSessionLoadable(
+          runtime.workspaceCwd,
+          sessionId,
+          runtime.sessionRuntimeBaseDir,
+          { allowActiveConflict: true },
+        );
+      }
+      try {
+        return await new SessionTranscriptReader(
+          runtime.workspaceCwd,
+          getTranscriptCursorCodec(runtime),
+        ).readTurnIndexPage(sessionId, {
+          ...(query.snapshot !== undefined ? { snapshot: query.snapshot } : {}),
+          ...(query.start !== undefined ? { start: query.start } : {}),
+          ...(query.limit !== undefined ? { limit: query.limit } : {}),
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (query.snapshot !== undefined) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        const location = await service.getSessionLocation(sessionId);
+        if (location === 'archived') {
+          throw new SessionArchivedError(sessionId);
+        }
+        if (location === 'conflict') {
+          throw new SessionConflictError(sessionId);
+        }
+        throw new SessionNotFoundError(sessionId);
+      }
+    });
 
   const logSessionRoutingFailure = (
     route: string,
@@ -1400,7 +1798,14 @@ export function registerSessionRoutes(
   ): Promise<WorkspaceRuntime | undefined> => {
     const target = resolveQualifiedSessionTarget(req, res);
     if (!target) return undefined;
-    if (target.kind === 'ordinary') return target.runtime;
+    if (target.kind === 'ordinary') {
+      for (const sessionId of sessionIds) {
+        if (await rejectManagedGatewaySession(target.runtime, sessionId, res)) {
+          return undefined;
+        }
+      }
+      return target.runtime;
+    }
     const internalEntry = target.entry;
     const generation =
       internalEntry.state === 'active' ? internalEntry.current : undefined;
@@ -1544,6 +1949,12 @@ export function registerSessionRoutes(
       if (qualifiedTarget.kind === 'ordinary') {
         preResolvedRuntime = qualifiedTarget.runtime;
       }
+    }
+    if (
+      preResolvedRuntime &&
+      (await rejectManagedGatewaySession(preResolvedRuntime, sessionId, res))
+    ) {
+      return;
     }
     const rawFormat = req.query['format'];
     const format = parseSessionExportFormat(rawFormat);
@@ -2129,6 +2540,9 @@ export function registerSessionRoutes(
 
     if (legacyPrimaryFallback) {
       const runtime = workspaceRegistry.primary;
+      if (await rejectManagedGatewaySession(runtime, sessionId, res)) {
+        return undefined;
+      }
       if (loadError === undefined) return runtime;
       try {
         if (await activeInRuntime(runtime, true)) return runtime;
@@ -2148,6 +2562,11 @@ export function registerSessionRoutes(
       return undefined;
     }
     if (liveOwner.kind === 'found') {
+      if (
+        await rejectManagedGatewaySession(liveOwner.runtime, sessionId, res)
+      ) {
+        return undefined;
+      }
       const internalEntry = isInternalWorkspaceRuntime(liveOwner.runtime)
         ? workspaceRegistry.getManagedEntryByWorkspaceCwd(
             liveOwner.runtime.workspaceCwd,
@@ -2227,6 +2646,9 @@ export function registerSessionRoutes(
     if (workspaceRegistry.listEntries().length === 1) {
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
+      if (await rejectManagedGatewaySession(runtime, sessionId, res)) {
+        return undefined;
+      }
       try {
         if (await activeInRuntime(runtime, true)) {
           return runtime;
@@ -2250,6 +2672,9 @@ export function registerSessionRoutes(
     }
     if (activeRuntimes.length === 1) {
       const runtime = activeRuntimes[0]!;
+      if (await rejectManagedGatewaySession(runtime, sessionId, res)) {
+        return undefined;
+      }
       setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
         return undefined;
@@ -2292,6 +2717,12 @@ export function registerSessionRoutes(
     }
     if (owner.kind === 'ambiguous') {
       sendAmbiguousSessionOwner(res, route, sessionId, owner.runtimes);
+      return undefined;
+    }
+    if (
+      owner.kind === 'found' &&
+      (await rejectManagedGatewaySession(owner.runtime, sessionId, res))
+    ) {
       return undefined;
     }
     const matches = new Set<WorkspaceRuntime>();
@@ -2338,6 +2769,9 @@ export function registerSessionRoutes(
         code: 'session_not_found',
         sessionId,
       });
+      return undefined;
+    }
+    if (await rejectManagedGatewaySession(runtime, sessionId, res)) {
       return undefined;
     }
     if (!assertTrustedSessionOwner(res, route, sessionId, runtime)) {
@@ -2416,6 +2850,9 @@ export function registerSessionRoutes(
         return undefined;
       }
       if (owner.kind === 'found') {
+        if (await rejectManagedGatewaySession(owner.runtime, sessionId, res)) {
+          return undefined;
+        }
         if (isInternalWorkspaceRuntime(owner.runtime)) {
           candidates.add(owner.runtime);
         } else {
@@ -2488,6 +2925,11 @@ export function registerSessionRoutes(
     }
     if (!internalRuntime) {
       const runtime = workspaceRegistry.primary;
+      for (const sessionId of sessionIds) {
+        if (await rejectManagedGatewaySession(runtime, sessionId, res)) {
+          return undefined;
+        }
+      }
       setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
       return runtime;
     }
@@ -2502,6 +2944,9 @@ export function registerSessionRoutes(
           return undefined;
         }
         throw new SessionNotFoundError(sessionId);
+      }
+      if (await rejectManagedGatewaySession(internalRuntime, sessionId, res)) {
+        return undefined;
       }
     }
     const internalEntry = workspaceRegistry.getManagedEntryByWorkspaceCwd(
@@ -2928,6 +3373,43 @@ export function registerSessionRoutes(
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    let managedSessionStore: BridgeManagedSessionStore | undefined;
+    if (body['managedSessionStore'] !== undefined) {
+      if (deps.hostedHarness !== true) {
+        res.status(400).json({
+          error:
+            '`managedSessionStore` is available only on the private Hosted Harness profile',
+          code: 'managed_session_store_forbidden',
+        });
+        return;
+      }
+      if (requestedSessionId === undefined) {
+        res.status(400).json({
+          error: '`managedSessionStore` requires a caller-supplied sessionId',
+          code: 'managed_session_store_requires_session_id',
+        });
+        return;
+      }
+      try {
+        managedSessionStore = parseBridgeManagedSessionStore(
+          body['managedSessionStore'],
+        );
+        if (managedSessionStore.writerId !== deps.hostedHarnessBootId) {
+          res.status(400).json({
+            error:
+              '`managedSessionStore.writerId` must match the current Hosted Harness generation',
+            code: 'managed_session_store_writer_mismatch',
+          });
+          return;
+        }
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_managed_session_store',
+        });
+        return;
+      }
+    }
     let sessionIdReservation: RequestedSessionIdReservation | undefined;
     if (requestedSessionId !== undefined) {
       try {
@@ -3262,6 +3744,7 @@ export function registerSessionRoutes(
         ...(requestedSessionId !== undefined
           ? { sessionId: requestedSessionId }
           : {}),
+        ...(managedSessionStore !== undefined ? { managedSessionStore } : {}),
       });
       spawnCompleted = true;
       // Defensive: the bridge/agent must honor a caller-supplied id. If it was
@@ -3759,6 +4242,53 @@ export function registerSessionRoutes(
       }
       const body = safeBody(req);
       const route = `POST /session/:id/${action}`;
+      const passiveManagedRuntimeRecovery =
+        action === 'load' && body['passiveManagedRuntimeRecovery'] === true;
+      let managedSessionStore: BridgeManagedSessionStore | undefined;
+      if (body['managedSessionStore'] !== undefined) {
+        if (action !== 'load') {
+          res.status(400).json({
+            error: '`managedSessionStore` is supported only for session/load',
+            code: 'managed_session_store_load_only',
+          });
+          return;
+        }
+        if (deps.hostedHarness !== true) {
+          res.status(400).json({
+            error:
+              '`managedSessionStore` is available only on the private Hosted Harness profile',
+            code: 'managed_session_store_forbidden',
+          });
+          return;
+        }
+        if (parseCallerSuppliedSessionId(sessionId).kind !== 'valid') {
+          res.status(400).json({
+            error:
+              '`managedSessionStore` requires an RFC UUID v1-v5 session id',
+            code: 'managed_session_store_requires_session_id',
+          });
+          return;
+        }
+        try {
+          managedSessionStore = parseBridgeManagedSessionStore(
+            body['managedSessionStore'],
+          );
+          if (managedSessionStore.writerId !== deps.hostedHarnessBootId) {
+            res.status(400).json({
+              error:
+                '`managedSessionStore.writerId` must match the current Hosted Harness generation',
+              code: 'managed_session_store_writer_mismatch',
+            });
+            return;
+          }
+        } catch (error) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : String(error),
+            code: 'invalid_managed_session_store',
+          });
+          return;
+        }
+      }
       let resolvedRuntime:
         | { runtime: WorkspaceRuntime; workspaceCwd: string }
         | undefined;
@@ -3776,6 +4306,12 @@ export function registerSessionRoutes(
       }
       if (resolvedRuntime === undefined) return;
       const { runtime, workspaceCwd } = resolvedRuntime;
+      if (
+        managedSessionStore === undefined &&
+        (await rejectManagedGatewaySession(runtime, sessionId, res))
+      ) {
+        return;
+      }
       const assertRuntimeGenerationOpen =
         captureRuntimeGenerationAssertion(runtime);
       const approvalMode = parseOptionalApprovalMode(body, res);
@@ -3801,6 +4337,7 @@ export function registerSessionRoutes(
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
+        managedSessionStore === undefined &&
         isInternalWorkspaceRuntime(runtime) &&
         deps.standaloneSessionService &&
         parseCallerSuppliedSessionId(sessionId).kind === 'valid'
@@ -3932,36 +4469,43 @@ export function registerSessionRoutes(
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            const persistedSessionId = await resolveSessionIdForRestore(
-              sessionService,
-              sessionId,
-            );
-            if (persistedSessionId) {
-              restoredStorageSessionId = persistedSessionId;
-            } else if (isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const location = await assertSessionRestorable(
-              workspaceCwd,
-              restoredStorageSessionId,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-            );
-            if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
+            if (managedSessionStore === undefined) {
+              const persistedSessionId = await resolveSessionIdForRestore(
+                sessionService,
+                sessionId,
+              );
+              if (persistedSessionId) {
+                restoredStorageSessionId = persistedSessionId;
+              } else if (isInternalWorkspaceRuntime(runtime)) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              const location = await assertSessionRestorable(
+                workspaceCwd,
+                restoredStorageSessionId,
+                sessionId,
+                runtime.sessionRuntimeBaseDir,
+              );
+              if (
+                location === undefined &&
+                isInternalWorkspaceRuntime(runtime)
+              ) {
+                throw new SessionNotFoundError(sessionId);
+              }
             }
             // Recover the persisted parent lineage so the restored live entry
             // reports it (the bridge otherwise creates the entry without it, and
             // status calls would show a restored sub-session as top-level).
             const metadata =
-              runtime.provenance === 'live-conversation'
-                ? await readLoadableLiveConversationMetadata(
-                    restoredStorageSessionId,
-                    sessionService,
-                  )
-                : await sessionService.readCreationMetadata(
-                    restoredStorageSessionId,
-                  );
+              managedSessionStore !== undefined
+                ? restoreSource
+                : runtime.provenance === 'live-conversation'
+                  ? await readLoadableLiveConversationMetadata(
+                      restoredStorageSessionId,
+                      sessionService,
+                    )
+                  : await sessionService.readCreationMetadata(
+                      restoredStorageSessionId,
+                    );
             // The reserved standalone source is hidden only on the internal
             // Conversations runtime. Ordinary workspace restores keep
             // loading legacy transcripts that happen to carry the reserved
@@ -3970,8 +4514,10 @@ export function registerSessionRoutes(
             // gate and must not become unreachable.
             if (
               metadata === undefined ||
-              (isInternalWorkspaceRuntime(runtime) &&
-                isReservedStandaloneSessionSource(metadata))
+              (managedSessionStore === undefined &&
+                (metadata.sourceType === 'managed-gateway' ||
+                  (isInternalWorkspaceRuntime(runtime) &&
+                    isReservedStandaloneSessionSource(metadata))))
             ) {
               throw new SessionNotFoundError(sessionId);
             }
@@ -3998,7 +4544,10 @@ export function registerSessionRoutes(
               restoreRequestMetadata.sourceType === 'channel';
             let isPart4AWorktreeRestore = false;
             let part4AWorktreeKey: string | undefined;
-            if (runtime.provenance !== 'live-conversation') {
+            if (
+              managedSessionStore === undefined &&
+              runtime.provenance !== 'live-conversation'
+            ) {
               const sidecarBeforeRestore = await readWorktreeSessionStrict(
                 sessionService.getWorktreeSessionPath(restoredStorageSessionId),
               );
@@ -4038,7 +4587,7 @@ export function registerSessionRoutes(
                   part4AWorktreeKey = recordedPath;
                 }
               }
-            } else {
+            } else if (managedSessionStore === undefined) {
               suppressWorktreeContextRestore = isChannelRestore;
             }
             deferRestoreAskUserQuestionPrompt =
@@ -4086,7 +4635,10 @@ export function registerSessionRoutes(
               setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
             }
             let liveConversationCwd: string | undefined;
-            if (runtime.provenance === 'live-conversation') {
+            if (
+              managedSessionStore === undefined &&
+              runtime.provenance === 'live-conversation'
+            ) {
               const materialize = deps.materializeLiveConversationDirectory;
               if (!materialize) {
                 throw new Error('Live conversation workspace is unavailable.');
@@ -4121,7 +4673,17 @@ export function registerSessionRoutes(
                       : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...(managedSessionStore !== undefined
+                      ? { managedSessionStore }
+                      : {}),
                     ...restoreRequestMetadata,
+                    ...(passiveManagedRuntimeRecovery
+                      ? {
+                          _meta: {
+                            [DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY]: true,
+                          },
+                        }
+                      : {}),
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
@@ -4209,6 +4771,7 @@ export function registerSessionRoutes(
               !restored.attached &&
               !restored.hasActivePrompt &&
               !deferRestoreAskUserQuestionPrompt &&
+              managedSessionStore === undefined &&
               runtime.provenance !== 'live-conversation'
             ) {
               try {
@@ -4259,7 +4822,10 @@ export function registerSessionRoutes(
           void cleanupRestoredSession();
           return;
         }
-        if (runtime.provenance !== 'live-conversation') {
+        if (
+          managedSessionStore === undefined &&
+          runtime.provenance !== 'live-conversation'
+        ) {
           const sidecarPath = createWorkspaceRuntimeSessionService(
             runtime,
           ).getWorktreeSessionPath(restoredStorageSessionId);
@@ -4569,6 +5135,7 @@ export function registerSessionRoutes(
           action === 'load' &&
           !session.attached &&
           !session.hasActivePrompt &&
+          managedSessionStore === undefined &&
           runtime.provenance !== 'live-conversation'
         ) {
           try {
@@ -4593,15 +5160,18 @@ export function registerSessionRoutes(
         );
         // The load response embeds the replay snapshot inline; redact the
         // skill bodies there just like the SSE egress does (#9234).
-        const responseSession = withPromptTerminals(
+        let responseSession = withPromptTerminals(
           session,
-          action === 'load'
+          action === 'load' && managedSessionStore === undefined
             ? readRecentPromptTerminals(
                 createWorkspaceRuntimeSessionService(runtime),
                 sessionId,
               )
             : undefined,
         );
+        if (managedSessionStore !== undefined) {
+          responseSession = exposeHostedManagedRuntimeRecovery(responseSession);
+        }
         res
           .status(200)
           .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
@@ -5753,15 +6323,28 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTranscriptPage({
-            sessionId,
+          const query = {
             ...(limit !== undefined ? { limit } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
             ...(direction !== undefined ? { direction } : {}),
             ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
             ...(atRecordId !== undefined ? { atRecordId } : {}),
             ...(snapshot !== undefined ? { snapshot } : {}),
-          });
+          };
+          // Cold Managed history is already on disk. Paging it through the
+          // workspace control slot would spawn a second, legacy ACP child.
+          const page =
+            !isLiveBridgeSession(runtime.bridge, sessionId) &&
+            (await isVerifiedManagedOwner(runtime, sessionId))
+              ? await readPersistedWorkspaceTranscriptPage(
+                  runtime,
+                  sessionId,
+                  query,
+                )
+              : await runtime.bridge.getSessionTranscriptPage({
+                  sessionId,
+                  ...query,
+                });
           assertRuntimeGenerationOpen?.();
           return page;
         },
@@ -5794,18 +6377,24 @@ export function registerSessionRoutes(
     const route = 'GET /workspaces/:workspace/session/:id/transcript';
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
-    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
-      allowUntrustedSecondary: true,
-    });
-    if (!qualifiedTarget) return;
-    const preResolvedRuntime =
-      qualifiedTarget.kind === 'ordinary' ? qualifiedTarget.runtime : undefined;
     const compactedReplayMode = parseReplayMode(
       req.query,
       res,
       'compactedReplayMode',
     );
     if (compactedReplayMode === null) return;
+    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
+      allowUntrustedSecondary: true,
+    });
+    if (!qualifiedTarget) return;
+    const preResolvedRuntime =
+      qualifiedTarget.kind === 'ordinary' ? qualifiedTarget.runtime : undefined;
+    if (
+      preResolvedRuntime &&
+      (await rejectManagedGatewaySession(preResolvedRuntime, sessionId, res))
+    ) {
+      return;
+    }
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
@@ -6199,12 +6788,24 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTurnIndexPage({
-            sessionId,
+          const query = {
             ...(snapshot !== undefined ? { snapshot } : {}),
             ...(start !== undefined ? { start } : {}),
             ...(limit !== undefined ? { limit } : {}),
-          });
+          };
+          // Same cold-Managed disk path as GET /session/:id/transcript.
+          const page =
+            !isLiveBridgeSession(runtime.bridge, sessionId) &&
+            (await isVerifiedManagedOwner(runtime, sessionId))
+              ? await readPersistedWorkspaceTurnIndexPage(
+                  runtime,
+                  sessionId,
+                  query,
+                )
+              : await runtime.bridge.getSessionTurnIndexPage({
+                  sessionId,
+                  ...query,
+                });
           assertRuntimeGenerationOpen?.();
           return page;
         },
@@ -6970,6 +7571,163 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/managed-runtime/continue',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/managed-runtime/continue',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route not found',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const body = safeBody(req);
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        const checkpointId = body['checkpointId'];
+        const activationId = body['activationId'];
+        if (
+          parsedPromptId.kind !== 'valid' ||
+          typeof checkpointId !== 'string' ||
+          checkpointId.length === 0 ||
+          Buffer.byteLength(checkpointId, 'utf8') > 512 ||
+          checkpointId.includes('\0') ||
+          typeof activationId !== 'string' ||
+          activationId.length === 0 ||
+          Buffer.byteLength(activationId, 'utf8') > 512 ||
+          activationId.includes('\0')
+        ) {
+          res.status(400).json({
+            error: 'Invalid managed Runtime continuation identity',
+            code: 'invalid_managed_runtime_continuation',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId: parsedPromptId.sessionId,
+          managedRuntimeContinuation: { checkpointId, activationId },
+        });
+        if (!result.accepted) {
+          res.status(409).json({
+            ...result,
+            code: 'managed_runtime_continuation_not_ready',
+          });
+          return;
+        }
+        res.status(200).json(result);
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  app.post(
+    '/session/:id/managed-runtime/cancel',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/managed-runtime/cancel',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route not found',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const body = safeBody(req);
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        const checkpointId = body['checkpointId'];
+        const activationId = body['activationId'];
+        if (
+          parsedPromptId.kind !== 'valid' ||
+          typeof checkpointId !== 'string' ||
+          checkpointId.length === 0 ||
+          Buffer.byteLength(checkpointId, 'utf8') > 512 ||
+          checkpointId.includes('\0') ||
+          typeof activationId !== 'string' ||
+          activationId.length === 0 ||
+          Buffer.byteLength(activationId, 'utf8') > 512 ||
+          activationId.includes('\0')
+        ) {
+          res.status(400).json({
+            error: 'Invalid managed Runtime cancellation identity',
+            code: 'invalid_managed_runtime_cancellation',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const receiptKey = JSON.stringify([
+          sessionId,
+          parsedPromptId.sessionId,
+          checkpointId,
+          activationId,
+        ]);
+        const previousReceipt =
+          managedRuntimeCancellationReceipts.get(receiptKey);
+        if (previousReceipt !== undefined) {
+          res.status(200).json({
+            accepted: true,
+            promptId: parsedPromptId.sessionId,
+            ...previousReceipt,
+          });
+          return;
+        }
+        const lastEventId = runtime.bridge.getSessionLastEventId(sessionId);
+        const eventEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+        try {
+          await runtime.bridge.cancelSession(
+            sessionId,
+            {
+              sessionId,
+              _meta: {
+                managedRuntimePromptId: parsedPromptId.sessionId,
+                managedRuntimeCheckpointId: checkpointId,
+                managedRuntimeActivationId: activationId,
+              },
+            },
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message.includes(
+              'Managed Runtime cancellation identity is not current',
+            )
+          ) {
+            res.status(409).json({
+              accepted: false,
+              promptId: parsedPromptId.sessionId,
+              code: 'managed_runtime_cancellation_not_ready',
+            });
+            return;
+          }
+          throw error;
+        }
+        const receipt = { lastEventId, eventEpoch };
+        managedRuntimeCancellationReceipts.set(receiptKey, receipt);
+        while (
+          managedRuntimeCancellationReceipts.size >
+          maxManagedRuntimeCancellationReceipts
+        ) {
+          const oldest = managedRuntimeCancellationReceipts.keys().next();
+          if (oldest.done) break;
+          managedRuntimeCancellationReceipts.delete(oldest.value);
+        }
+        res.status(200).json({
+          accepted: true,
+          promptId: parsedPromptId.sessionId,
+          ...receipt,
+        });
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  app.post(
     '/session/:id/attachments',
     mutate(),
     express.raw({ type: '*/*', limit: '8mb' }),
@@ -7113,6 +7871,593 @@ export function registerSessionRoutes(
     ),
   );
 
+  if (deps.managedPromptService && deps.managedGatewaySessionEvents) {
+    const managedService = deps.managedPromptService;
+    const managedEvents = deps.managedGatewaySessionEvents;
+    const managedSummary = (sessionId: string, clientId: string) => {
+      const status = managedEvents.authorize(sessionId, clientId);
+      if (!status) return undefined;
+      const binding = managedService.getGatewayBinding?.(sessionId);
+      const runtime = binding
+        ? workspaceRegistry.getByWorkspaceId(binding.workspaceId)
+        : undefined;
+      const available =
+        runtime?.trusted === true &&
+        runtime.workspaceCwd === binding?.workspaceCwd &&
+        !isInternalWorkspaceRuntime(runtime);
+      const finished = ['completed', 'failed', 'cancelled'].includes(
+        status.phase,
+      );
+      return {
+        ...status,
+        capabilities: {
+          canSend:
+            available &&
+            finished &&
+            (managedService.canContinue?.(sessionId) ??
+              status.phase === 'completed'),
+          canCancel:
+            available &&
+            !finished &&
+            status.phase !== 'cancelling' &&
+            managedService.cancel !== undefined,
+        },
+      };
+    };
+    const managedReadIdentity = (req: Request, res: Response) => {
+      const clientId = parseManagedGatewayClientId(req, res);
+      if (!clientId) return undefined;
+      const rawId = req.params['id'];
+      const sessionId = rawId ? normalizeSessionIdForLookup(rawId) : undefined;
+      if (!sessionId || !managedEvents.authorize(sessionId, clientId)) {
+        res.status(404).json({
+          error: 'Managed Gateway Session not found',
+          code: 'managed_gateway_session_not_found',
+        });
+        return undefined;
+      }
+      return { sessionId, clientId };
+    };
+    const managedLimit = (req: Request, res: Response) => {
+      const raw = req.query['limit'];
+      if (raw === undefined) return 50;
+      if (
+        typeof raw !== 'string' ||
+        !/^\d+$/.test(raw) ||
+        Number(raw) < 1 ||
+        Number(raw) > 100
+      ) {
+        res.status(400).json({
+          error: 'limit must be an integer between 1 and 100',
+          code: 'managed_gateway_page_invalid',
+        });
+        return undefined;
+      }
+      return Number(raw);
+    };
+    app.get('/managed/sessions', async (req, res) => {
+      const clientId = parseManagedGatewayClientId(req, res);
+      if (!clientId) return;
+      const limit = managedLimit(req, res);
+      if (!limit) return;
+      const cwd = req.query['cwd'];
+      if (
+        cwd !== undefined &&
+        (typeof cwd !== 'string' || !path.isAbsolute(cwd))
+      ) {
+        res.status(400).json({
+          error: 'cwd must be an absolute workspace path',
+          code: 'managed_gateway_page_invalid',
+        });
+        return;
+      }
+      const workspaceCwd =
+        typeof cwd === 'string' ? path.resolve(cwd) : undefined;
+      let cursor: { at: number; id: string } | undefined;
+      if (req.query['cursor'] !== undefined) {
+        try {
+          const raw = req.query['cursor'];
+          if (typeof raw !== 'string' || raw.length > 2048) throw new Error();
+          const parsed = JSON.parse(
+            Buffer.from(raw, 'base64url').toString('utf8'),
+          );
+          if (
+            !Number.isSafeInteger(parsed.at) ||
+            typeof parsed.id !== 'string' ||
+            parsed.clientId !== clientId ||
+            parsed.cwd !== (workspaceCwd ?? null)
+          )
+            throw new Error();
+          cursor = parsed;
+        } catch {
+          res.status(400).json({
+            error: 'Invalid Managed catalog cursor',
+            code: 'managed_gateway_page_invalid',
+          });
+          return;
+        }
+      }
+      await managedEvents.flush();
+      const rows = managedEvents
+        .list(clientId)
+        .filter(
+          (status) =>
+            workspaceCwd === undefined || status.workspaceCwd === workspaceCwd,
+        )
+        .sort(
+          (a, b) =>
+            b.createdAt - a.createdAt || a.sessionId.localeCompare(b.sessionId),
+        )
+        .filter(
+          (status) =>
+            !cursor ||
+            status.createdAt < cursor.at ||
+            (status.createdAt === cursor.at &&
+              status.sessionId.localeCompare(cursor.id) > 0),
+        );
+      const page = rows.slice(0, limit);
+      const last = page.at(-1);
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .json({
+          sessions: page.map((status) =>
+            managedSummary(status.sessionId, clientId),
+          ),
+          ...(rows.length > limit && last
+            ? {
+                nextCursor: Buffer.from(
+                  JSON.stringify({
+                    at: last.createdAt,
+                    id: last.sessionId,
+                    clientId,
+                    cwd: workspaceCwd ?? null,
+                  }),
+                ).toString('base64url'),
+              }
+            : {}),
+        });
+    });
+    app.get('/managed/sessions/:id/transcript', async (req, res) => {
+      const identity = managedReadIdentity(req, res);
+      if (!identity) return;
+      const limit = managedLimit(req, res);
+      if (!limit) return;
+      const rawBefore = req.query['before'];
+      if (
+        rawBefore !== undefined &&
+        (typeof rawBefore !== 'string' ||
+          !/^\d+$/.test(rawBefore) ||
+          !Number.isSafeInteger(Number(rawBefore)) ||
+          Number(rawBefore) < 1)
+      ) {
+        res.status(400).json({
+          error: 'Invalid Managed transcript cursor',
+          code: 'managed_gateway_page_invalid',
+        });
+        return;
+      }
+      const page = await managedEvents.transcript(
+        identity.sessionId,
+        identity.clientId,
+        rawBefore === undefined ? undefined : Number(rawBefore),
+        limit,
+      );
+      res.status(200).set('Cache-Control', 'no-store').json(page);
+    });
+    app.post('/managed/sessions/:id/cancel', mutate(), async (req, res) => {
+      const identity = managedReadIdentity(req, res);
+      if (!identity) return;
+      const body = safeBody(req);
+      const promptId = body['promptId'];
+      if (
+        Object.keys(body).some((field) => field !== 'promptId') ||
+        typeof promptId !== 'string' ||
+        !MANAGED_PROMPT_IDEMPOTENCY_KEY_RE.test(promptId) ||
+        promptId.length > MANAGED_PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH
+      ) {
+        res.status(400).json({
+          error: 'An exact promptId is required',
+          code: 'managed_gateway_invalid',
+        });
+        return;
+      }
+      const binding = managedService.getGatewayBinding?.(identity.sessionId);
+      const runtime = binding
+        ? workspaceRegistry.getByWorkspaceId(binding.workspaceId)
+        : undefined;
+      if (
+        !runtime ||
+        !runtime.trusted ||
+        runtime.workspaceCwd !== binding?.workspaceCwd ||
+        isInternalWorkspaceRuntime(runtime)
+      ) {
+        res.status(409).json({
+          error: 'Managed workspace is unavailable',
+          code: 'managed_gateway_runtime_unavailable',
+        });
+        return;
+      }
+      if (!managedService.cancel) {
+        res.status(501).json({
+          error: 'Managed cancellation is unavailable',
+          code: 'managed_gateway_cancel_unavailable',
+        });
+        return;
+      }
+      const accepted = await managedService.cancel(
+        identity.sessionId,
+        promptId,
+      );
+      await managedEvents.flush();
+      res.status(200).json({ accepted });
+    });
+    app.post('/managed/sessions', mutate(), async (req, res) => {
+      const body = safeBody(req);
+      const unknownField = Object.keys(body).find(
+        (field) =>
+          field !== 'prompt' && field !== 'cwd' && field !== 'deadlineMs',
+      );
+      if (unknownField !== undefined) {
+        res.status(400).json({
+          error: `unsupported Managed Gateway field: ${unknownField}`,
+          code: 'managed_gateway_invalid',
+        });
+        return;
+      }
+      const idempotencyKey = req.get('Idempotency-Key');
+      if (
+        !idempotencyKey ||
+        idempotencyKey.length > MANAGED_PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH ||
+        !MANAGED_PROMPT_IDEMPOTENCY_KEY_RE.test(idempotencyKey)
+      ) {
+        res.status(400).json({
+          error:
+            '`Idempotency-Key` must be a non-empty token of 128 characters or fewer',
+          code: 'managed_prompt_idempotency_key_invalid',
+        });
+        return;
+      }
+      const managedClientId = parseManagedGatewayClientId(req, res);
+      if (!managedClientId) return;
+      const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
+      if (!resolvedRuntime) return;
+      const { runtime } = resolvedRuntime;
+      if (resolvedRuntime.workspaceCwd !== runtime.workspaceCwd) {
+        sendWorkspaceMismatch(res, resolvedRuntime.workspaceCwd);
+        return;
+      }
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
+      if (isInternalWorkspaceRuntime(runtime)) {
+        res.status(400).json({
+          error:
+            'Managed Gateway Sessions are not supported in the internal Conversations workspace.',
+          code: 'managed_gateway_session_not_supported',
+        });
+        return;
+      }
+      if (!runtime.trusted) {
+        sendUntrustedWorkspaceResponse(res, {
+          workspaceCwd: runtime.workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        });
+        return;
+      }
+      const prompt = parseManagedPromptContent(body['prompt'], res);
+      if (!prompt) return;
+      const rawRequestDeadline = body['deadlineMs'];
+      let requestDeadlineMs: number | undefined;
+      if (rawRequestDeadline !== undefined) {
+        if (
+          typeof rawRequestDeadline !== 'number' ||
+          !Number.isSafeInteger(rawRequestDeadline) ||
+          rawRequestDeadline <= 0
+        ) {
+          res.status(400).json({
+            error: '`deadlineMs` must be a positive safe integer',
+            code: 'invalid_deadline_ms',
+          });
+          return;
+        }
+        requestDeadlineMs = rawRequestDeadline;
+      }
+      const effectiveDeadlineMs = resolvePromptDeadlineMs(
+        promptDeadlineMs,
+        requestDeadlineMs,
+      );
+      const deadlineAt =
+        effectiveDeadlineMs === undefined
+          ? undefined
+          : Date.now() + effectiveDeadlineMs;
+      if (deadlineAt !== undefined && !Number.isSafeInteger(deadlineAt)) {
+        res.status(400).json({
+          error: '`deadlineMs` exceeds the supported range',
+          code: 'invalid_deadline_ms',
+        });
+        return;
+      }
+      const sessionId = managedGatewaySessionId(
+        runtime.workspaceId,
+        managedClientId,
+        idempotencyKey,
+      );
+      const request: ManagedGatewayPromptRequest = {
+        mode: 'gateway',
+        turnKind: 'bootstrap',
+        tenantId: runtime.workspaceId,
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+        sessionId,
+        messageId: idempotencyKey,
+        managedClientId,
+        prompt,
+        ...(deadlineAt === undefined ? {} : { deadlineAt }),
+      };
+      addDaemonRequestAttribute('qwen-code.prompt_id', idempotencyKey);
+      try {
+        const admission = await deps.managedPromptService!.admit(request);
+        let status = deps.managedGatewaySessionEvents!.authorize(
+          sessionId,
+          managedClientId,
+        );
+        if (
+          admission.state !== 'finished' ||
+          status?.promptId === idempotencyKey
+        ) {
+          status = deps.managedGatewaySessionEvents!.ensure(request);
+        }
+        const durableStatus = deps.managedPromptService!.getStatus(
+          runtime.workspaceId,
+          sessionId,
+          idempotencyKey,
+        );
+        await managedEvents.flush();
+        res.status(202).json({
+          managed: true,
+          sessionId,
+          promptId: idempotencyKey,
+          ...(status?.promptId === idempotencyKey
+            ? {
+                eventPath: `/managed/sessions/${sessionId}/events`,
+                statusPath: `/managed/sessions/${sessionId}`,
+              }
+            : {}),
+          ...admission,
+          eventStreamAvailable: status?.promptId === idempotencyKey,
+          phase:
+            status?.promptId === idempotencyKey
+              ? status.phase
+              : (durableStatus?.outcome ?? 'failed'),
+        });
+      } catch (error) {
+        if (error instanceof ManagedPromptServiceError) {
+          sendManagedPromptServiceError(res, error);
+          return;
+        }
+        throw error;
+      }
+    });
+
+    app.post('/managed/sessions/:id/prompts', mutate(), async (req, res) => {
+      const rawSessionId = req.params['id'];
+      const sessionId = rawSessionId
+        ? normalizeSessionIdForLookup(rawSessionId)
+        : undefined;
+      const managedClientId = parseManagedGatewayClientId(req, res);
+      if (!managedClientId) return;
+      const binding =
+        sessionId && isValidSessionId(sessionId)
+          ? deps.managedPromptService!.getGatewayBinding?.(sessionId)
+          : undefined;
+      if (
+        !binding ||
+        binding.sessionId !== sessionId ||
+        binding.managedClientId !== managedClientId
+      ) {
+        res.status(404).json({
+          error: 'Managed Gateway Session not found',
+          code: 'managed_gateway_session_not_found',
+        });
+        return;
+      }
+      const boundSessionId = binding.sessionId;
+      const runtime = workspaceRegistry.getByWorkspaceId(binding.workspaceId);
+      if (
+        !runtime ||
+        runtime.workspaceCwd !== binding.workspaceCwd ||
+        !runtime.trusted ||
+        isInternalWorkspaceRuntime(runtime)
+      ) {
+        res.status(404).json({
+          error: 'Managed Gateway Session runtime is unavailable',
+          code: 'managed_gateway_runtime_unavailable',
+        });
+        return;
+      }
+      setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
+      const body = safeBody(req);
+      const unknownField = Object.keys(body).find(
+        (field) => field !== 'prompt' && field !== 'deadlineMs',
+      );
+      if (unknownField !== undefined) {
+        res.status(400).json({
+          error: `unsupported Managed Gateway follow-up field: ${unknownField}`,
+          code: 'managed_gateway_invalid',
+        });
+        return;
+      }
+      const idempotencyKey = req.get('Idempotency-Key');
+      if (
+        !idempotencyKey ||
+        idempotencyKey.length > MANAGED_PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH ||
+        !MANAGED_PROMPT_IDEMPOTENCY_KEY_RE.test(idempotencyKey)
+      ) {
+        res.status(400).json({
+          error:
+            '`Idempotency-Key` must be a non-empty token of 128 characters or fewer',
+          code: 'managed_prompt_idempotency_key_invalid',
+        });
+        return;
+      }
+      const prompt = parseManagedPromptContent(body['prompt'], res);
+      if (!prompt) return;
+      const rawRequestDeadline = body['deadlineMs'];
+      let requestDeadlineMs: number | undefined;
+      if (rawRequestDeadline !== undefined) {
+        if (
+          typeof rawRequestDeadline !== 'number' ||
+          !Number.isSafeInteger(rawRequestDeadline) ||
+          rawRequestDeadline <= 0
+        ) {
+          res.status(400).json({
+            error: '`deadlineMs` must be a positive safe integer',
+            code: 'invalid_deadline_ms',
+          });
+          return;
+        }
+        requestDeadlineMs = rawRequestDeadline;
+      }
+      const effectiveDeadlineMs = resolvePromptDeadlineMs(
+        promptDeadlineMs,
+        requestDeadlineMs,
+      );
+      const deadlineAt =
+        effectiveDeadlineMs === undefined
+          ? undefined
+          : Date.now() + effectiveDeadlineMs;
+      if (deadlineAt !== undefined && !Number.isSafeInteger(deadlineAt)) {
+        res.status(400).json({
+          error: '`deadlineMs` exceeds the supported range',
+          code: 'invalid_deadline_ms',
+        });
+        return;
+      }
+      const request: ManagedGatewayPromptRequest = {
+        mode: 'gateway',
+        turnKind: 'continuation',
+        tenantId: binding.tenantId,
+        workspaceId: binding.workspaceId,
+        workspaceCwd: binding.workspaceCwd,
+        sessionId: binding.sessionId,
+        messageId: idempotencyKey,
+        managedClientId: binding.managedClientId,
+        prompt,
+        ...(deadlineAt === undefined ? {} : { deadlineAt }),
+      };
+      addDaemonRequestAttribute('qwen-code.prompt_id', idempotencyKey);
+      try {
+        const admission = await deps.managedPromptService!.admit(request);
+        let status = deps.managedGatewaySessionEvents!.authorize(
+          boundSessionId,
+          managedClientId,
+        );
+        if (
+          admission.state !== 'finished' ||
+          status?.promptId === idempotencyKey
+        ) {
+          status = deps.managedGatewaySessionEvents!.ensure(request);
+        }
+        const durableStatus = deps.managedPromptService!.getStatus(
+          binding.tenantId,
+          boundSessionId,
+          idempotencyKey,
+        );
+        await managedEvents.flush();
+        res.status(202).json({
+          managed: true,
+          sessionId: boundSessionId,
+          promptId: idempotencyKey,
+          ...(status?.promptId === idempotencyKey
+            ? {
+                eventPath: `/managed/sessions/${boundSessionId}/events`,
+                statusPath: `/managed/sessions/${boundSessionId}`,
+              }
+            : {}),
+          ...admission,
+          eventStreamAvailable: status?.promptId === idempotencyKey,
+          phase:
+            status?.promptId === idempotencyKey
+              ? status.phase
+              : (durableStatus?.outcome ?? 'failed'),
+        });
+      } catch (error) {
+        if (error instanceof ManagedPromptServiceError) {
+          sendManagedPromptServiceError(res, error);
+          return;
+        }
+        throw error;
+      }
+    });
+
+    app.get('/managed/sessions/:id/events', async (req, res) => {
+      const managedClientId = parseManagedGatewayClientId(req, res);
+      if (!managedClientId) return;
+      const sessionId = req.params['id'];
+      if (
+        !sessionId ||
+        !deps.managedGatewaySessionEvents!.authorize(sessionId, managedClientId)
+      ) {
+        res.status(404).json({
+          error: 'Managed Gateway Session not found',
+          code: 'managed_gateway_session_not_found',
+        });
+        return;
+      }
+      const afterEventId = parseManagedGatewayLastEventId(req, res);
+      if (afterEventId === null) return;
+      const abort = new AbortController();
+      res.once('close', () => abort.abort());
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+      let writeChain = Promise.resolve();
+      const write = (chunk: string): Promise<void> => {
+        writeChain = writeChain.then(() => writeGenerationSseChunk(res, chunk));
+        return writeChain;
+      };
+      await write('retry: 1000\n\n');
+      const heartbeat = setInterval(() => {
+        void write(': heartbeat\n\n').catch(() => abort.abort());
+      }, GENERATION_HEARTBEAT_MS);
+      heartbeat.unref();
+      try {
+        for await (const event of deps.managedGatewaySessionEvents!.subscribe(
+          sessionId,
+          managedClientId,
+          afterEventId,
+          abort.signal,
+        )) {
+          await write(
+            `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          );
+        }
+      } catch (error) {
+        if (!abort.signal.aborted) {
+          daemonLog?.warn('managed gateway event stream failed', {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        clearInterval(heartbeat);
+        if (!res.destroyed) res.end();
+      }
+    });
+
+    app.get('/managed/sessions/:id', async (req, res) => {
+      const identity = managedReadIdentity(req, res);
+      if (!identity) return;
+      await managedEvents.flush();
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .json(managedSummary(identity.sessionId, identity.clientId));
+    });
+  }
+
   app.post(
     '/session/:id/prompt',
     mutate(),
@@ -7167,6 +8512,24 @@ export function registerSessionRoutes(
             return;
           }
         }
+        const rawPayloadDigest = body['payloadDigest'];
+        if (rawPayloadDigest !== undefined) {
+          const expectedPayloadDigest = `sha256:${crypto
+            .createHash('sha256')
+            .update(JSON.stringify(prompt), 'utf8')
+            .digest('hex')}`;
+          if (
+            typeof rawPayloadDigest !== 'string' ||
+            !/^sha256:[0-9a-f]{64}$/u.test(rawPayloadDigest) ||
+            rawPayloadDigest !== expectedPayloadDigest
+          ) {
+            res.status(400).json({
+              error: '`payloadDigest` does not match `prompt`',
+              code: 'invalid_prompt_payload_digest',
+            });
+            return;
+          }
+        }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
         if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
@@ -7184,6 +8547,14 @@ export function registerSessionRoutes(
           }
           requestDeadlineMs = rawRequestDeadline;
         }
+        const parsedPromptId = parseCallerSuppliedSessionId(body['promptId']);
+        if (parsedPromptId.kind === 'invalid') {
+          res.status(400).json({
+            error: '`promptId` must be a UUID',
+            code: 'invalid_prompt_id',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
@@ -7198,7 +8569,10 @@ export function registerSessionRoutes(
           }
         }
 
-        const promptId = crypto.randomUUID();
+        const promptId =
+          parsedPromptId.kind === 'valid'
+            ? parsedPromptId.sessionId
+            : crypto.randomUUID();
         if (delivery && deps.channelDeliveryAuthorizations) {
           deps.channelDeliveryAuthorizations.authorizePrompt(
             runtime.workspaceCwd,
@@ -7212,6 +8586,8 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        delete forwardedBody['payloadDigest'];
+        delete forwardedBody['promptId'];
         const forwardedMeta =
           typeof forwardedBody['_meta'] === 'object' &&
           forwardedBody['_meta'] !== null &&
@@ -7251,11 +8627,12 @@ export function registerSessionRoutes(
         const trustedChannelPrompt =
           channelWorkerAuthorized && channelPrompt === true;
 
-        const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
+        const fallbackLastEventId =
+          ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
         // SSE resume position from this 202 must also learn the bus epoch so
         // a daemon restart in between is detected (DAEMON-001).
-        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
+        const fallbackEventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -7334,6 +8711,13 @@ export function registerSessionRoutes(
               pendingCount: err.pendingCount,
             });
           }
+          if (daemonLog && err instanceof PromptIdConflictError) {
+            daemonLog.warn('prompt admission rejected: prompt id conflict', {
+              sessionId,
+              promptId,
+              ...(clientId !== undefined ? { clientId } : {}),
+            });
+          }
           if (daemonLog && err instanceof InvalidClientIdError) {
             daemonLog.warn('prompt admission rejected: invalid client id', {
               sessionId,
@@ -7347,6 +8731,13 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const admissionWatermark = ownerBridge.getPromptAdmissionWatermark?.(
+          sessionId,
+          promptId,
+        );
+        const lastEventId =
+          admissionWatermark?.lastEventId ?? fallbackLastEventId;
+        const eventEpoch = admissionWatermark?.eventEpoch ?? fallbackEventEpoch;
         res.off('close', onResClose);
 
         promptPromise
@@ -7600,6 +8991,60 @@ export function registerSessionRoutes(
           daemonLog.info('cancel sent', { sessionId, clientId });
         }
         res.status(204).end();
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/title',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/title',
+      async (req, res, sessionId, runtime) => {
+        if (deps.hostedHarness !== true) {
+          res.status(404).json({
+            error: 'Hosted Harness route is unavailable.',
+            code: 'hosted_harness_route_not_found',
+          });
+          return;
+        }
+        const commit = runtime.bridge.commitSessionTitle;
+        if (!commit) {
+          res.status(501).json({
+            error: 'Hosted Harness title commits are unavailable.',
+            code: 'hosted_harness_title_unsupported',
+          });
+          return;
+        }
+        const title = safeBody(req)['title'];
+        if (typeof title !== 'string') {
+          res.status(400).json({
+            error: '`title` must be a string.',
+            code: 'invalid_metadata',
+            field: 'title',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const metadata = await commit.call(
+            runtime.bridge,
+            sessionId,
+            title,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json({
+            sessionId,
+            displayName: metadata.displayName,
+            persisted: true,
+          });
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/title',
+            sessionId,
+          });
+        }
       },
     ),
   );
@@ -7934,6 +9379,7 @@ export function registerSessionRoutes(
         });
         return;
       }
+      if (await rejectManagedGatewaySession(runtime, sessionId, res)) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       const rawDisplayName = safeBody(req)['displayName'];
@@ -8657,7 +10103,9 @@ export function registerSessionRoutes(
           controller.signal.throwIfAborted();
           if (res.destroyed) return;
           res.status(200).json({
-            sessions: result.sessions,
+            sessions: result.sessions.filter(
+              (session) => session.sourceType !== 'managed-gateway',
+            ),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
               : {}),
@@ -8882,6 +10330,7 @@ export function registerSessionRoutes(
       }
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter((session) => session.sourceType !== 'managed-gateway')
         .map((session) => ({
           sessionId: session.sessionId,
           clientCount: session.clientCount,

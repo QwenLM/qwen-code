@@ -6,8 +6,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type { ToolInvocation, ToolResult, ToolResultDisplay } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
@@ -27,6 +28,8 @@ import {
   getQwenIgnoreFileNames,
   QwenIgnoreParser,
 } from '../utils/qwenIgnoreParser.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import { getGrepToolDefinition } from './builtin-tool-definitions.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
@@ -197,8 +200,14 @@ class GrepToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute(
+    signal: AbortSignal,
+    _updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
+  ): Promise<ToolResult> {
     try {
+      if (shellExecutionConfig?.requireProcessGroupExit)
+        signal.throwIfAborted();
       // Determine which paths to search
       const searchPaths: string[] = [];
       let searchDirDisplay: string;
@@ -227,8 +236,24 @@ class GrepToolInvocation extends BaseToolInvocation<
         paths: searchPaths,
         glob: this.params.glob,
         signal,
+        requireProcessGroupExit: shellExecutionConfig?.requireProcessGroupExit,
       });
       const rawOutput = searchResult.stdout;
+      const failed =
+        searchResult.error !== undefined ||
+        searchResult.incomplete ||
+        searchResult.canceled;
+      const failure: Partial<ToolResult> = failed
+        ? {
+            executionStatus: searchResult.canceled ? 'cancelled' : 'error',
+            error: {
+              message: searchResult.error
+                ? getErrorMessage(searchResult.error)
+                : RIPGREP_INCOMPLETE_NOTICE,
+              type: ToolErrorType.GREP_EXECUTION_ERROR,
+            },
+          }
+        : {};
 
       // Build search description
       const searchLocationDescription = this.params.path
@@ -243,7 +268,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Check if we have any matches
       if (!rawOutput.trim()) {
-        if (searchResult.incomplete) {
+        if (failed) {
           const incompleteMsg = this.buildIncompleteSearchMessage(
             searchLocationDescription,
             filterDescription,
@@ -252,6 +277,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           return {
             llmContent: incompleteMsg,
             returnDisplay: 'Error: Search incomplete',
+            ...failure,
           };
         }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
@@ -335,7 +361,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       const totalMatches = allLines.length;
       if (totalMatches === 0) {
-        if (searchResult.incomplete) {
+        if (failed) {
           const incompleteMsg = this.buildIncompleteSearchMessage(
             searchLocationDescription,
             filterDescription,
@@ -344,6 +370,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           return {
             llmContent: incompleteMsg,
             returnDisplay: 'Error: Search incomplete',
+            ...failure,
           };
         }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
@@ -411,7 +438,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
 
-      if (searchResult.incomplete) {
+      if (failed) {
         llmContent += `\n---\n[${RIPGREP_INCOMPLETE_NOTICE}]`;
       }
 
@@ -421,7 +448,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayTags.push('truncated');
       }
-      if (searchResult.incomplete) {
+      if (failed) {
         displayTags.push('incomplete');
       }
       if (displayTags.length > 0) {
@@ -441,6 +468,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        ...failure,
       };
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
@@ -448,6 +476,19 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
+        executionStatus:
+          error instanceof Error &&
+          'code' in error &&
+          error.code === 'ERR_OWNED_COMMAND_UNSUPPORTED'
+            ? 'not_started'
+            : signal.aborted ||
+                (error instanceof Error && error.name === 'AbortError')
+              ? 'cancelled'
+              : 'error',
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        },
       };
     }
   }
@@ -485,6 +526,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     paths: string[]; // Can be files or directories
     glob?: string;
     signal: AbortSignal;
+    requireProcessGroupExit?: boolean;
   }): Promise<RipgrepRunResult> {
     const { pattern, paths, glob } = options;
 
@@ -562,9 +604,17 @@ class GrepToolInvocation extends BaseToolInvocation<
       rgArgs,
       options.signal,
       this.config.getUseBuiltinRipgrep(),
+      ...(options.requireProcessGroupExit
+        ? [{ requireProcessGroupExit: true, cwd: this.config.getTargetDir() }]
+        : []),
     );
     this.logRipgrepRuntimeRecovery(result);
-    if (result.error && !result.stdout.trim()) {
+    if (
+      result.error &&
+      !result.stdout.trim() &&
+      !result.incomplete &&
+      !result.canceled
+    ) {
       throw result.error;
     }
 
@@ -682,38 +732,13 @@ export class RipGrepTool extends BaseDeclarativeTool<
   }
 
   constructor(private readonly config: Config) {
+    const definition = getGrepToolDefinition();
     super(
-      RipGrepTool.Name,
-      'Grep',
-      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Use Agent tool for open-ended searches requiring multiple rounds\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
-      Kind.Search,
-      {
-        properties: {
-          pattern: {
-            type: 'string',
-            description:
-              'The regular expression pattern to search for in file contents',
-          },
-          glob: {
-            type: 'string',
-            description:
-              'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg --glob',
-          },
-          path: {
-            type: 'string',
-            description:
-              'File or directory to search in (rg PATH). Defaults to current working directory.',
-          },
-          limit: {
-            type: 'integer',
-            minimum: 1,
-            description:
-              'Limit output to first N lines/entries. Must be a positive integer. Optional - shows all matches if not specified.',
-          },
-        },
-        required: ['pattern'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
     );
   }
 

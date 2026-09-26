@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
+import * as settingsRuntime from '../config/settings.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
@@ -97,6 +98,45 @@ describe('serve command args', () => {
   it('accepts --experimental-lsp in strict parser mode', () => {
     const parsed = buildParser().strict().parseSync('--experimental-lsp');
     expect(parsed['experimentalLsp']).toBe(true);
+  });
+
+  it('parses Managed Agents as an explicit opt-in', () => {
+    expect(
+      buildParser().strict().parseSync('--experimental-managed-agents')[
+        'experimental-managed-agents'
+      ],
+    ).toBe(true);
+    expect(buildParser().parseSync('')['experimental-managed-agents']).toBe(
+      false,
+    );
+  });
+
+  it('parses the experimental remote Runtime process options', () => {
+    const parsed = buildParser()
+      .strict()
+      .parseSync(
+        '--experimental-managed-runtime-worker ' +
+          '--experimental-managed-runtime-url http://127.0.0.1:4181 ' +
+          '--experimental-managed-runtime-token runtime-secret',
+      );
+    expect(parsed['experimental-managed-runtime-worker']).toBe(true);
+    expect(parsed['experimental-managed-runtime-url']).toBe(
+      'http://127.0.0.1:4181',
+    );
+    expect(parsed['experimental-managed-runtime-token']).toBe('runtime-secret');
+  });
+
+  it('parses the Hosted Harness profile and Runtime Broker options', () => {
+    const parsed = buildParser()
+      .strict()
+      .parseSync(
+        '--profile hosted-harness ' +
+          '--managed-runtime-broker-url http://127.0.0.1:8080 ' +
+          '--managed-runtime-broker-token broker-secret',
+      );
+    expect(parsed['profile']).toBe('hosted-harness');
+    expect(parsed['managed-runtime-broker-url']).toBe('http://127.0.0.1:8080');
+    expect(parsed['managed-runtime-broker-token']).toBe('broker-secret');
   });
 
   it('parses --permission-response-timeout-ms as a number', () => {
@@ -413,6 +453,31 @@ describe('serve rate limit env parsing', () => {
       }),
       expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
+  });
+
+  it('captures the runtime baseline before loading daemon startup settings', async () => {
+    delete process.env['OPENAI_API_KEY'];
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(() => {
+      process.env['OPENAI_API_KEY'] = 'primary-key';
+      process.env['QWEN_SERVER_TOKEN'] = 'startup-token';
+      process.env['QWEN_SERVE_RATE_LIMIT'] = '1';
+      return { merged: {} } as ReturnType<typeof settingsRuntime.loadSettings>;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:12345/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--experimental-managed-agents --no-web');
+
+    const options = mockRunQwenServe.mock.calls[0][0];
+    expect(options.rateLimit).toBe(true);
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('startup-token');
+    expect(options.runtimeBaseEnvironment['OPENAI_API_KEY']).toBeUndefined();
+    expect(options.runtimeBaseEnvironment['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(Object.isFrozen(options.runtimeBaseEnvironment)).toBe(true);
   });
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {
@@ -741,6 +806,66 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({
         compactedReplayMaxBytes: 1024 * 1024,
+      }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('passes the experimental Managed Agents opt-in to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --experimental-managed-agents');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ experimentalManagedAgents: true }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('passes the remote Managed Runtime options to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --experimental-managed-agents ' +
+        '--experimental-managed-runtime-worker ' +
+        '--experimental-managed-runtime-url http://127.0.0.1:4181 ' +
+        '--experimental-managed-runtime-token runtime-secret',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        experimentalManagedAgents: true,
+        experimentalManagedRuntimeWorker: true,
+        experimentalManagedRuntimeUrl: 'http://127.0.0.1:4181',
+        experimentalManagedRuntimeToken: 'runtime-secret',
+      }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('passes the Hosted Harness profile and Runtime Broker options to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --profile hosted-harness ' +
+        '--managed-runtime-broker-url http://127.0.0.1:8080 ' +
+        '--managed-runtime-broker-token broker-secret',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profile: 'hosted-harness',
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
       }),
       expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );

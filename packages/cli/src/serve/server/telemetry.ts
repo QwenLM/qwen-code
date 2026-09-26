@@ -332,6 +332,18 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/cancel',
   },
   {
+    method: 'POST',
+    path: '/session/:id/managed-runtime/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/managed-runtime/continue',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/managed-runtime/cancel',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/managed-runtime/cancel',
+  },
+  {
     method: 'DELETE',
     path: '/session/:id',
     attribution: 'handler_resolved',
@@ -360,6 +372,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/metadata',
     attribution: 'handler_resolved',
     route: 'PATCH /session/:id/metadata',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/title',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/title',
   },
   {
     method: 'PATCH',

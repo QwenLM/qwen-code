@@ -6,6 +6,14 @@
 
 import type { Stream } from '@agentclientprotocol/sdk';
 
+/** Factory startup failed with owned resources whose cleanup was not confirmed. */
+export class AcpChannelTeardownError extends Error {
+  constructor(cause: unknown) {
+    super('ACP channel resource teardown could not be confirmed.', { cause });
+    this.name = 'AcpChannelTeardownError';
+  }
+}
+
 export interface AcpChannelTransportGuard {
   maxActiveHandlers: number;
   maxActiveHandlerBytes: number;

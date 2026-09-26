@@ -26,12 +26,15 @@ import {
   InputFormat,
   OutputFormat,
   SessionService,
+  assertSessionExecutionEngine,
   ideContextStore,
   type ResumedSessionData,
+  type SessionExecutionEngineState,
   type SessionRestoreProjection,
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
+  type ManagedToolSessionFactory,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -131,8 +134,11 @@ import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
-function resolveLocaleForExtensions(settings: Settings): string {
-  const envLang = process.env['QWEN_CODE_LANG'];
+function resolveLocaleForExtensions(
+  settings: Settings,
+  environment: Readonly<NodeJS.ProcessEnv>,
+): string {
+  const envLang = environment['QWEN_CODE_LANG'];
   if (envLang) return envLang;
   const settingsLang = settings.general?.language as string | undefined;
   if (settingsLang && settingsLang !== 'auto') return settingsLang;
@@ -1086,36 +1092,35 @@ function resolveModelFallbacks(
  */
 function resolveWebSearchSettings(
   settings: Settings,
+  environment: Readonly<NodeJS.ProcessEnv>,
 ): WebSearchSettings | undefined {
   const webSearch = settings.tools?.webSearch;
   // A set-but-empty env var is "unset", not an override: dotenv templates and
   // CI wrappers export empty values, which must not clobber a valid
   // settings.json config (same rule as WEB_SEARCH_BASE_URL below).
-  const envEnabled = process.env['ENABLE_WEB_SEARCH']?.trim() || undefined;
+  const envEnabled = environment['ENABLE_WEB_SEARCH']?.trim() || undefined;
   const enabled =
     envEnabled !== undefined ? isTruthy(envEnabled) : webSearch?.enabled;
-  const model = process.env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
-  const envExtractor = process.env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
+  const model = environment['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
+  const envExtractor = environment['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
   const webExtractor =
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
-  // A non-numeric or non-positive override is ignored rather than zeroing the
-  // budget; the core resolver applies the default and the cap.
   const envTimeoutMs = parsePositiveIntegerEnv(
-    process.env['WEB_SEARCH_TIMEOUT_MS'],
+    environment['WEB_SEARCH_TIMEOUT_MS'],
     0,
   );
   const timeoutMs = envTimeoutMs > 0 ? envTimeoutMs : webSearch?.timeoutMs;
   const envMaxPerSession = parsePositiveIntegerEnv(
-    process.env['WEB_SEARCH_MAX_PER_SESSION'],
+    environment['WEB_SEARCH_MAX_PER_SESSION'],
     0,
   );
   const maxPerSession =
     envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
-  const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
+  const baseUrl = environment['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
-    ? process.env['WEB_SEARCH_API_KEY']?.trim()
+    ? environment['WEB_SEARCH_API_KEY']?.trim()
       ? 'WEB_SEARCH_API_KEY'
       : 'DASHSCOPE_API_KEY'
     : undefined;
@@ -1311,10 +1316,13 @@ function validateCliAdvisorModel(
   }
 }
 
-export function isDebugMode(argv: CliArgs): boolean {
+export function isDebugMode(
+  argv: CliArgs,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
   if (argv.debug) return true;
-  const debugVal = process.env['DEBUG'];
-  const debugModeVal = process.env['DEBUG_MODE'];
+  const debugVal = environment['DEBUG'];
+  const debugModeVal = environment['DEBUG_MODE'];
   return (
     debugVal === 'true' ||
     debugVal === '1' ||
@@ -1709,7 +1717,12 @@ export async function loadCliConfig(
    * construction may install the executor-boundary callback.
    */
   hostPolicy?: {
+    runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted?: boolean;
+    processNetworkOwner?: true;
     toolInvocationGuard?: ToolInvocationGuard;
+    managedToolSessionFactory?: ManagedToolSessionFactory;
+    managedSessionStore?: ConfigParameters['managedSessionStore'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
@@ -1717,6 +1730,7 @@ export async function loadCliConfig(
       projectionSource: (
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
+      executionEngine?: SessionExecutionEngineState;
     };
     /** Engine a paired host selected; the Config persists or verifies it. */
     executionEngine?: SessionExecutionEngine;
@@ -1724,13 +1738,29 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
+  const runtimeEnvironment: Readonly<NodeJS.ProcessEnv> | undefined =
+    hostPolicy?.runtimeEnvironment === undefined
+      ? undefined
+      : Object.freeze({
+          ...hostPolicy.runtimeEnvironment,
+          ...(argv.insecure ? { QWEN_TLS_INSECURE: '1' } : {}),
+        });
+  const environment = runtimeEnvironment ?? process.env;
+  const workspaceTrusted = hostPolicy?.workspaceTrusted;
+  const processNetworkOwner =
+    runtimeEnvironment === undefined ||
+    hostPolicy?.processNetworkOwner === true;
   const sshWorkspace = readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
-  const debugMode = isDebugMode(argv);
-  if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
+  const debugMode = isDebugMode(argv, environment);
+  if (
+    runtimeEnvironment === undefined &&
+    debugMode &&
+    process.env['QWEN_DEBUG_LOG_FILE'] === undefined
+  ) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
-  const bareMode = isBareMode(argv.bare);
+  const bareMode = isBareMode(argv.bare, environment);
   const executionSandboxSettings = validateExecutionSandboxSelection(
     settings,
     argv,
@@ -1763,13 +1793,13 @@ export async function loadCliConfig(
     );
   }
   const safeMode =
-    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv(environment);
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
   // every content generator and the preconnect path. Resolution there ORs this
   // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
-  if (argv.insecure) {
+  if (processNetworkOwner && argv.insecure) {
     process.env['QWEN_TLS_INSECURE'] = '1';
   }
   // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
@@ -1779,7 +1809,8 @@ export async function loadCliConfig(
   // surfaces a single explicit warning. Skipped when the user already set it,
   // since Node emits its own warning in that case.
   if (
-    isTlsVerificationDisabled() &&
+    processNetworkOwner &&
+    isTlsVerificationDisabled(environment) &&
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
   ) {
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
@@ -1810,7 +1841,8 @@ export async function loadCliConfig(
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
+  const trustedFolder =
+    workspaceTrusted ?? isWorkspaceTrusted(settings)?.isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1932,7 +1964,7 @@ export async function loadCliConfig(
   try {
     telemetrySettings = await resolveTelemetrySettings({
       argv,
-      env: process.env as unknown as Record<string, string | undefined>,
+      env: environment,
       settings: settings.telemetry,
     });
   } catch (err) {
@@ -2038,7 +2070,7 @@ export async function loadCliConfig(
       addDisabled(name);
   }
   for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
-  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
+  for (const name of (environment['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
     ',',
   )) {
     addDisabled(name);
@@ -2193,7 +2225,7 @@ export async function loadCliConfig(
     (argv.authType as AuthType | undefined) ||
     (bareMode ? undefined : settings.security?.auth?.selectedType) ||
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
-    getAuthTypeFromEnv();
+    getAuthTypeFromEnv(environment);
 
   // Validate provider protocols and per-model `wireApi` fields up front. The
   // registry resolver throws a bare Error, and every startup shape passes
@@ -2226,7 +2258,7 @@ export async function loadCliConfig(
     },
     settings,
     selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
+    env: environment,
   });
 
   const { model: resolvedModel } = resolvedCliConfig;
@@ -2309,7 +2341,9 @@ export async function loadCliConfig(
       }
     }
 
-    if (sessionId) {
+    // A Managed host restores through its own engine check below; only a
+    // legacy host must refuse a Managed transcript before touching it.
+    if (sessionId && !hostPolicy?.managedToolSessionFactory) {
       sessionService.assertLegacySessionExecution(sessionId);
     }
 
@@ -2343,8 +2377,23 @@ export async function loadCliConfig(
         }
       }
     }
+
+    if (sessionId) {
+      const executionEngine =
+        sessionRestoreProjection?.executionEngine ??
+        sessionData?.executionEngine ??
+        hostPolicy?.sessionRestore?.executionEngine ??
+        (deferProjectionUntilWriterLease
+          ? await sessionService.readExecutionEngine(sessionId)
+          : undefined);
+      assertSessionExecutionEngine(
+        executionEngine,
+        sessionId,
+        hostPolicy?.managedToolSessionFactory ? 'managed' : 'legacy',
+      );
+    }
   } else if (argv.sandboxSessionId) {
-    if (!process.env['SANDBOX']) {
+    if (!environment['SANDBOX']) {
       writeStderrLine('--sandbox-session-id is for internal sandbox use only.');
       process.exit(1);
     }
@@ -2415,7 +2464,10 @@ export async function loadCliConfig(
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
-      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers, {
+          rejectProjectConfigErrors:
+            hostPolicy?.managedToolSessionFactory !== undefined,
+        });
   // Top-tier servers are never gated (#4615, see the comment above), so this
   // is a no-op for them either way today. Skipped under safe mode anyway
   // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
@@ -2440,6 +2492,8 @@ export async function loadCliConfig(
     inputFormat !== InputFormat.STREAM_JSON;
 
   const configParams: ConfigParameters = {
+    runtimeEnvironment,
+    processNetworkOwner: hostPolicy?.processNetworkOwner,
     sessionId,
     sessionData,
     sessionRestoreProjection,
@@ -2526,10 +2580,16 @@ export async function loadCliConfig(
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    managedToolSessionFactory: hostPolicy?.managedToolSessionFactory,
+    managedSessionStore: hostPolicy?.managedSessionStore,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+      const currentSettings = loadSettings(cwd, {
+        runtimeEnvironment,
+        workspaceTrusted,
+        skipWorkspaceSettings: workspaceTrusted === false,
+      });
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
       const key = `permissions.${ruleType}`;
@@ -2577,7 +2637,7 @@ export async function loadCliConfig(
     deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled:
-      parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+      parseBooleanEnvFlag(environment['QWEN_USAGE_STATISTICS_ENABLED']) ??
       settings.privacy?.usageStatisticsEnabled ??
       true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
@@ -2586,10 +2646,10 @@ export async function loadCliConfig(
     proxy:
       argv.proxy ||
       settings.proxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+      environment['HTTPS_PROXY'] ||
+      environment['https_proxy'] ||
+      environment['HTTP_PROXY'] ||
+      environment['http_proxy'],
     cwd,
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,
@@ -2615,6 +2675,12 @@ export async function loadCliConfig(
       argv.restoreAskUserQuestion === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
+    // The engine a host declares comes from this same fact, so deriving the
+    // log from it too keeps the declaration and the physical format in step —
+    // otherwise a Managed host stamps a `managed` engine record on a legacy
+    // transcript that no Managed reader can then interpret.
+    managedSessionLogEnabled:
+      hostPolicy?.managedToolSessionFactory !== undefined,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
@@ -2672,9 +2738,9 @@ export async function loadCliConfig(
     omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
-    locale: resolveLocaleForExtensions(settings),
+    locale: resolveLocaleForExtensions(settings, environment),
     overrideExtensions: overrideExtensions || argv.extensions,
-    noBrowser: !!process.env['NO_BROWSER'],
+    noBrowser: !!environment['NO_BROWSER'],
     authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
@@ -2763,7 +2829,7 @@ export async function loadCliConfig(
     webSearch:
       bareMode || safeMode
         ? { enabled: false }
-        : resolveWebSearchSettings(settings),
+        : resolveWebSearchSettings(settings, environment),
     visionModel: settings.visionModel || undefined,
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,

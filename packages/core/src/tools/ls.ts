@@ -7,7 +7,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import {
   makeRelative,
   shortenPath,
@@ -19,10 +19,10 @@ import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
 import { ToolErrorType } from './tool-error.js';
-import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { ToolNames } from './tool-names.js';
+import { getLSToolDefinition } from './builtin-tool-definitions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
-import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -139,7 +139,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
       isSubpath(userExtensionsDir, dirPath) ||
-      isSubpath(getMemoryBaseDir(), dirPath)
+      isSubpath(this.config.getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';
     }
@@ -309,46 +309,15 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   static readonly Name = ToolNames.LS;
 
   constructor(private config: Config) {
+    const definition = getLSToolDefinition();
     super(
-      LSTool.Name,
-      ToolDisplayNames.LS,
-      'Lists the names of files and subdirectories directly within a specified directory path. Can optionally ignore entries matching provided glob patterns.',
-      Kind.Search,
-      {
-        properties: {
-          path: {
-            description:
-              'The absolute path to the directory to list (must be absolute, not relative)',
-            type: 'string',
-          },
-          ignore: {
-            description: 'List of glob patterns to ignore',
-            items: {
-              type: 'string',
-            },
-            type: 'array',
-          },
-          file_filtering_options: {
-            description:
-              'Optional: Whether to respect ignore patterns from .gitignore, .qwenignore, and configured custom Qwen ignore files',
-            type: 'object',
-            properties: {
-              respect_git_ignore: {
-                description:
-                  'Optional: Whether to respect .gitignore patterns when listing files. Only available in git repositories. Defaults to true.',
-                type: 'boolean',
-              },
-              respect_qwen_ignore: {
-                description:
-                  'Optional: Whether to respect .qwenignore and configured custom Qwen ignore file patterns when listing files. Defaults to true.',
-                type: 'boolean',
-              },
-            },
-          },
-        },
-        required: ['path'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 

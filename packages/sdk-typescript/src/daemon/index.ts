@@ -890,3 +890,17 @@ export type { DaemonBackgroundTurn } from './types.js';
 
 export { isShellResultDisplay } from './shellResult.js';
 export type { ShellResultDisplay } from './shellResult.js';
+
+export type {
+  DaemonManagedSessionPhase,
+  DaemonManagedRuntimeState,
+  DaemonManagedSessionSummary,
+  DaemonManagedSessionList,
+  DaemonManagedSessionEventType,
+  DaemonManagedSessionEvent,
+  DaemonManagedSessionTranscript,
+  DaemonManagedPromptRequest,
+  DaemonManagedSessionCreateRequest,
+  DaemonManagedPromptAdmission,
+  DaemonManagedRequestOptions,
+} from './managed-sessions.js';

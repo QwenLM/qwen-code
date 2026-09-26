@@ -121,10 +121,8 @@ export class ToolCallEmitter extends BaseEmitter {
       return false;
     }
 
-    const { title, locations, kind } = this.resolveToolMetadata(
-      params.toolName,
-      params.args,
-    );
+    const { title, locations, kind } =
+      params.metadata ?? this.resolveToolMetadata(params.toolName, params.args);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,

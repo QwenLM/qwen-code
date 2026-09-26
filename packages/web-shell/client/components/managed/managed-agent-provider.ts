@@ -1,3 +1,9 @@
+import type {
+  DaemonClient,
+  DaemonManagedSessionEvent,
+  DaemonManagedSessionSummary,
+} from '@qwen-code/sdk/daemon';
+
 export type ManagedAgentSessionPhase =
   | 'admitted'
   | 'runtime_starting'
@@ -121,4 +127,89 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions & { lastEventId?: number },
   ): AsyncIterable<ManagedAgentSessionEvent>;
+}
+
+export function createDaemonManagedAgentProvider(
+  client: DaemonClient,
+  baseUrl: string,
+): ManagedAgentProvider {
+  return {
+    kind: 'daemon',
+    storageKey: baseUrl,
+    canCancel: true,
+    acceptsWorkspaceCwd: true,
+    async listSessions(options) {
+      const page = await client.listManagedSessions({
+        clientId: options.clientId,
+        cwd: options.workspaceCwd,
+        limit: options.limit,
+        cursor: options.cursor,
+        signal: options.signal,
+      });
+      return {
+        sessions: page.sessions.map(toSessionSummary),
+        nextCursor: page.nextCursor,
+      };
+    },
+    async getSession(sessionId, options) {
+      return toSessionSummary(
+        await client.getManagedSession(sessionId, options),
+      );
+    },
+    async getTranscript(sessionId, options) {
+      const transcript = await client.getManagedSessionTranscript(sessionId, {
+        ...options,
+        before: options.before,
+        limit: options.limit,
+      });
+      return {
+        events: transcript.events.map(toSessionEvent),
+        olderCursor: transcript.olderCursor,
+        lastEventId: transcript.lastEventId,
+      };
+    },
+    async createSession(request, options) {
+      const result = await client.createManagedSession(
+        {
+          prompt: [{ type: 'text', text: request.text }],
+          cwd: request.workspaceCwd,
+        },
+        options,
+      );
+      return { sessionId: result.sessionId, turnId: result.promptId };
+    },
+    async submitPrompt(sessionId, request, options) {
+      const result = await client.sendManagedPrompt(
+        sessionId,
+        { prompt: [{ type: 'text', text: request.text }] },
+        options,
+      );
+      return { sessionId: result.sessionId, turnId: result.promptId };
+    },
+    async cancel(sessionId, turnId, options) {
+      await client.cancelManagedPrompt(sessionId, turnId, options);
+    },
+    async *subscribeEvents(sessionId, options) {
+      for await (const event of client.subscribeManagedSessionEvents(
+        sessionId,
+        options,
+      )) {
+        yield toSessionEvent(event);
+      }
+    },
+  };
+}
+
+function toSessionSummary(
+  session: DaemonManagedSessionSummary,
+): ManagedAgentSessionSummary {
+  const { promptId, ...summary } = session;
+  return { ...summary, activeTurnId: promptId };
+}
+
+function toSessionEvent(
+  event: DaemonManagedSessionEvent,
+): ManagedAgentSessionEvent {
+  const { promptId, ...mapped } = event;
+  return { ...mapped, turnId: promptId };
 }

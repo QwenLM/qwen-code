@@ -463,7 +463,7 @@ export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
  */
 export interface ResidentBackgroundAgent {
   continue(message: string): boolean;
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 type MessageWaiter = () => void;
@@ -518,6 +518,14 @@ const BACKGROUND_SLOT_WAIT_CANCELLED =
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
+  private readonly residentDisposals = new Map<
+    string,
+    {
+      resident: ResidentBackgroundAgent;
+      pending: Promise<void>;
+      failed: boolean;
+    }
+  >();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private readonly finishingAgents = new Set<string>();
   private readonly finishingWaiters = new Map<
@@ -791,8 +799,14 @@ export class BackgroundTaskRegistry {
   ): void {
     const existing = this.residentAgents.get(agentId);
     if (existing === resident) return;
+    if (this.residentDisposals.has(agentId)) {
+      throw new Error(`Background agent "${agentId}" is still disposing.`);
+    }
     if (existing) {
       this.disposeResidentAgent(agentId, existing);
+      if (this.residentDisposals.has(agentId)) {
+        throw new Error(`Background agent "${agentId}" is still disposing.`);
+      }
     }
     this.residentAgents.set(agentId, resident);
   }
@@ -817,18 +831,46 @@ export class BackgroundTaskRegistry {
     agentId: string,
     resident?: ResidentBackgroundAgent,
   ): boolean {
-    const current = this.residentAgents.get(agentId);
+    const retained = this.residentDisposals.get(agentId);
+    const current = this.residentAgents.get(agentId) ?? retained?.resident;
     if (!current || (resident && current !== resident)) return false;
+    if (retained && !retained.failed) return true;
     this.residentAgents.delete(agentId);
+    let result: void | Promise<void>;
     try {
-      current.dispose();
+      result = current.dispose();
     } catch (error) {
-      debugLogger.error(
-        `Failed to dispose resident background agent ${agentId}:`,
-        error,
-      );
+      result = Promise.reject(error);
     }
+    if (result === undefined) {
+      this.residentDisposals.delete(agentId);
+      return true;
+    }
+    const entry = {
+      resident: current,
+      pending: Promise.resolve(result),
+      failed: false,
+    };
+    this.residentDisposals.set(agentId, entry);
+    void entry.pending.then(
+      () => {
+        if (this.residentDisposals.get(agentId) === entry)
+          this.residentDisposals.delete(agentId);
+      },
+      (error) => {
+        entry.failed = true;
+        debugLogger.error(
+          `Failed to dispose resident background agent ${agentId}:`,
+          error,
+        );
+      },
+    );
     return true;
+  }
+
+  awaitResidentDisposal(agentId: string): Promise<void> | undefined {
+    this.disposeResidentAgent(agentId);
+    return this.residentDisposals.get(agentId)?.pending;
   }
 
   disposeResidentAgents(): void {
@@ -1880,7 +1922,10 @@ export class BackgroundTaskRegistry {
   }
 
   private disposeAllResidentAgents(): void {
-    for (const agentId of Array.from(this.residentAgents.keys())) {
+    for (const agentId of new Set([
+      ...this.residentAgents.keys(),
+      ...this.residentDisposals.keys(),
+    ])) {
       this.disposeResidentAgent(agentId);
     }
   }

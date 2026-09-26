@@ -5,12 +5,54 @@
  */
 
 import type { ServeOptions } from './types.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './broker-managed-runtime-provider.js';
 import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
 export function validateHostedHarnessProfile(
   opts: Omit<ServeOptions, 'workspace'>,
+  environment: {
+    readonly serverToken: string;
+    readonly brokerUrl: string;
+    readonly brokerToken: string;
+    readonly capabilityDigest: string;
+  },
 ): void {
+  if (opts.profile !== 'hosted-harness') return;
+  if (!isLoopbackBind(opts.hostname)) {
+    throw new Error('--profile hosted-harness requires a loopback --hostname.');
+  }
+  if (opts.mode !== 'http-bridge') {
+    throw new Error('--profile hosted-harness requires --http-bridge.');
+  }
+  if (!opts.token?.trim()) {
+    throw new Error(
+      `--profile hosted-harness requires a Harness bearer token. Set ` +
+        `${environment.serverToken} or pass --token.`,
+    );
+  }
+  if (opts.serveWebShell !== false) {
+    throw new Error('--profile hosted-harness requires --no-web.');
+  }
+  if (opts.enableSessionShell === true) {
+    throw new Error(
+      '--profile hosted-harness conflicts with --enable-session-shell.',
+    );
+  }
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    throw new Error(
+      '--profile hosted-harness does not accept browser origins.',
+    );
+  }
+  if (
+    opts.clientMcpOverWs === true ||
+    opts.cdpTunnelOverWs === true ||
+    opts.channelSelection !== undefined
+  ) {
+    throw new Error(
+      '--profile hosted-harness conflicts with client MCP, CDP tunnel, and channel hosting.',
+    );
+  }
   if (
     opts.experimentalManagedAgents ||
     opts.experimentalManagedRuntimeWorker ||
@@ -19,60 +61,26 @@ export function validateHostedHarnessProfile(
     opts.experimentalManagedRuntimeToken !== undefined
   ) {
     throw new Error(
-      'Experimental Managed Gateway and Runtime worker modes are not implemented.',
+      '--profile hosted-harness conflicts with the experimental Managed Gateway and Runtime worker options.',
     );
   }
-  if (opts.profile !== 'hosted-harness') {
-    if (
-      opts.managedRuntimeBrokerUrl === undefined &&
-      opts.managedRuntimeBrokerToken === undefined &&
-      opts.hostedHarnessCapabilityDigest === undefined
-    ) {
-      return;
-    }
-    throw new Error('Hosted Harness options require --profile hosted-harness.');
-  }
-  if (!isLoopbackBind(opts.hostname)) {
-    throw new Error('--profile hosted-harness requires a loopback --hostname.');
-  }
-  if (opts.mode !== 'http-bridge') {
-    throw new Error('--profile hosted-harness requires --http-bridge.');
-  }
-  if (!opts.token?.trim()) {
-    throw new Error('--profile hosted-harness requires a bearer token.');
-  }
-  if (opts.serveWebShell !== false) {
-    throw new Error('--profile hosted-harness requires --no-web.');
-  }
-  if (
-    opts.enableSessionShell ||
-    opts.channelSelection !== undefined ||
-    opts.clientMcpOverWs ||
-    opts.cdpTunnelOverWs
-  ) {
+  if (!opts.managedRuntimeBrokerUrl?.trim()) {
     throw new Error(
-      '--profile hosted-harness does not serve shells, channels, or WebSocket tunnels.',
+      `--profile hosted-harness requires --managed-runtime-broker-url or ${environment.brokerUrl}.`,
     );
   }
-  if (opts.allowOrigins?.length) {
+  if (!opts.managedRuntimeBrokerToken?.trim()) {
     throw new Error(
-      '--profile hosted-harness does not accept browser origins.',
+      `--profile hosted-harness requires --managed-runtime-broker-token or ${environment.brokerToken}.`,
     );
   }
-  if (
-    opts.managedRuntimeBrokerUrl !== undefined ||
-    opts.managedRuntimeBrokerToken !== undefined
-  ) {
-    throw new Error(
-      '--profile hosted-harness does not enable Runtime Broker tools in this slice.',
-    );
-  }
+  resolveManagedRuntimeBrokerBaseUrl(opts.managedRuntimeBrokerUrl);
   if (
     !opts.hostedHarnessCapabilityDigest ||
     !isHostedHarnessCapabilityDigest(opts.hostedHarnessCapabilityDigest)
   ) {
     throw new Error(
-      '--profile hosted-harness requires a sha256 capability digest.',
+      `--profile hosted-harness requires ${environment.capabilityDigest}=sha256:<64 lowercase hex characters>.`,
     );
   }
 }

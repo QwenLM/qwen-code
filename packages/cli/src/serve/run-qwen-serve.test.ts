@@ -112,8 +112,17 @@ import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
+import type { ManagedPromptService } from './managed-prompt-types.js';
+import { ManagedGatewaySessionEvents } from './managed-gateway-session-events.js';
+import type { ManagedGatewayModelRunner } from './managed-gateway-model-runtime.js';
+import type { ManagedRuntimeProvider } from './managed-runtime-provider.js';
+import {
+  MANAGED_RUNTIME_PROTOCOL_VERSION,
+  MANAGED_RUNTIME_ROUTE_PREFIX,
+} from './managed-runtime-protocol.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const HOSTED_HARNESS_CAPABILITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 const isolatedTestRuntimeDir = fs.realpathSync(
   fs.mkdtempSync(path.join(os.tmpdir(), 'qws-run-serve-tests-')),
 );
@@ -533,6 +542,870 @@ function makeRuntimeBridge(): HttpAcpBridge {
   } as unknown as HttpAcpBridge;
 }
 
+it('wires the opt-in Managed Prompt service into the runtime app', async () => {
+  const workspace = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-managed-prompt-')),
+  );
+  const managedPromptService: ManagedPromptService = {
+    admit: vi.fn(),
+    getStatus: vi.fn(),
+    dispose: vi.fn(),
+  };
+  const originalCreateServeApp = serverModule.createServeApp;
+  let injected: ManagedPromptService | undefined;
+  vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+    injected = args[2]?.managedPromptService;
+    return originalCreateServeApp(...args);
+  });
+  let handle: RunHandle | undefined;
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        serveWebShell: false,
+        experimentalManagedAgents: true,
+      },
+      { bridge: makeRuntimeBridge(), managedPromptService },
+    );
+    await handle.runtimeReady;
+    expect(injected).toBe(managedPromptService);
+  } finally {
+    await handle?.close();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  }
+});
+
+it.each([false, true])(
+  'mounts the authenticated Managed Runtime worker protocol with owned=%s',
+  async (owned) => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-managed-runtime-worker-')),
+    );
+    const body = {
+      protocolVersion: MANAGED_RUNTIME_PROTOCOL_VERSION,
+      tenantId: 'tenant-worker',
+      workspaceId: 'workspace-worker',
+      workspaceCwd: workspace,
+      sessionId: '550e8400-e29b-41d4-a716-446655440109',
+      turnKind: 'bootstrap',
+    };
+    const headers = {
+      authorization: 'Bearer runtime-worker-secret',
+      'content-type': 'application/json',
+      'X-Qwen-Managed-Lease-Id': 'test-lease',
+      'X-Qwen-Managed-Lease-Epoch': '1',
+    };
+    const ownedManagedRuntime = {
+      type: 'boot' as const,
+      version: 1 as const,
+      runtimeInstanceId: 'test-runtime',
+      provisionRequestId: 'test-provision',
+      gatewayIncarnation: 'test-gateway',
+      leaseId: 'test-lease',
+      epoch: 1,
+      tenantId: body.tenantId,
+      workspaceId: body.workspaceId,
+      workspaceGeneration: 'test-workspace-generation',
+      workspaceCwd: workspace,
+      capabilityDigest: 'sha256:test-capability',
+      isolationClass: 'session' as const,
+      token: 'runtime-worker-secret',
+      outputRoot: workspace,
+      cliEntry: '/test/cli.js',
+    };
+    const trackedFileBackups = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [
+        `${'directory/'.repeat(5)}file-${i}.txt`,
+        {
+          backupFileName: '0123456789abcdef@v1',
+          version: 1,
+          backupTime: '2026-09-09T00:00:00.000Z',
+        },
+      ]),
+    );
+    const snapshots = owned
+      ? Array.from({ length: 100 }, (_, i) => ({
+          promptId: `turn-${i}`,
+          timestamp: '2026-09-09T00:00:00.000Z',
+          trackedFileBackups,
+        }))
+      : [];
+    const historyState = {
+      ownerSessionId: body.sessionId,
+      revision: 0,
+      snapshots,
+    };
+    if (owned)
+      expect(Buffer.byteLength(JSON.stringify(historyState))).toBeGreaterThan(
+        1024 * 1024,
+      );
+    const fileHistory = {
+      bind: vi.fn().mockResolvedValue(historyState),
+      checkpoint: vi.fn().mockResolvedValue(historyState),
+      snapshot: vi.fn().mockResolvedValue(historyState),
+    };
+    const provider: ManagedRuntimeProvider = {
+      getToolV2Client: vi.fn().mockResolvedValue({ fileHistory }),
+      prepare: vi.fn(() => ({
+        ready: Promise.resolve(),
+        finish: vi.fn(),
+        getManifest: vi.fn(),
+        execute: vi.fn(),
+      })),
+      cancel: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(true),
+      dispose: vi.fn(),
+    };
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          token: 'runtime-worker-secret',
+          workspace,
+          maxSessions: 1,
+          serveWebShell: false,
+          experimentalManagedRuntimeWorker: true,
+          ...(owned ? { requireAuth: true } : {}),
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          managedRuntimeWorkerProvider: provider,
+          ...(owned
+            ? {
+                ownedManagedRuntime,
+              }
+            : {}),
+          preheatBridge: false,
+        },
+      );
+      await handle.runtimeReady;
+      if (owned) {
+        expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+        const health = await fetch(`${handle.url}/health`, {
+          headers: { authorization: 'Bearer runtime-worker-secret' },
+        });
+        expect(health.status).toBe(200);
+        await expect(health.json()).resolves.toEqual({ status: 'ok' });
+        expect(
+          (
+            await fetch(`${handle.url}/health?deep=1`, {
+              headers: { authorization: 'Bearer runtime-worker-secret' },
+            })
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await fetch(`${handle.url}/capabilities`, {
+              headers: { authorization: 'Bearer runtime-worker-secret' },
+            })
+          ).status,
+        ).toBe(404);
+        const attestation = await fetch(
+          `${handle.url}/internal/managed-runtime/v2/attest`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              protocolVersion: 2,
+              provisionRequestId: 'test-provision',
+              tenantId: body.tenantId,
+              workspaceId: body.workspaceId,
+              workspaceGeneration: 'test-workspace-generation',
+              workspaceCwd: workspace,
+              capabilityDigest: 'sha256:test-capability',
+              isolationClass: 'session',
+            }),
+          },
+        );
+        expect(attestation.status).toBe(200);
+        // The Java Broker rejects an attestation it could have cached.
+        expect(attestation.headers.get('cache-control')).toBe('no-store');
+        await expect(attestation.json()).resolves.toMatchObject({
+          protocolVersion: 2,
+          runtimeInstanceId: 'test-runtime',
+          runtimeIncarnation: 'test-gateway',
+          leaseId: 'test-lease',
+          epoch: 1,
+          provisionRequestId: 'test-provision',
+        });
+      }
+      await fetch(`${handle.url}${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then((response) => expect(response.status).toBe(401));
+      const response = await fetch(
+        `${handle.url}${MANAGED_RUNTIME_ROUTE_PREFIX}/prepare`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        },
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        protocolVersion: MANAGED_RUNTIME_PROTOCOL_VERSION,
+        ready: true,
+      });
+      expect(provider.prepare).toHaveBeenCalledWith(body);
+      const binding = {
+        ownerSessionId: body.sessionId,
+        ownerRuntimeSessionId: body.sessionId,
+        executionCwd: workspace,
+        snapshots,
+      };
+      for (const [operation, params] of [
+        ['bind-history', { binding }],
+        ['checkpoint', { promptId: 'parent-turn' }],
+        ['history', {}],
+      ] as const) {
+        const url = `${handle.url}/internal/managed-runtime/v2/${operation}`;
+        const requestBody = JSON.stringify({
+          ...body,
+          protocolVersion: 2,
+          ...params,
+        });
+        const result = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: requestBody,
+        });
+        expect(result.status).toBe(owned ? 200 : 404);
+        if (owned) {
+          await expect(result.json()).resolves.toEqual({
+            protocolVersion: 2,
+            result: historyState,
+          });
+          const unauthorized = await fetch(url, {
+            method: 'POST',
+            headers: { ...headers, authorization: '' },
+            body: requestBody,
+          });
+          expect(unauthorized.status).toBe(401);
+          const conflict = await fetch(url, {
+            method: 'POST',
+            headers: { ...headers, 'X-Qwen-Managed-Lease-Id': 'other' },
+            body: requestBody,
+          });
+          expect(conflict.status).toBe(409);
+          const foreign = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              ...body,
+              protocolVersion: 2,
+              ...params,
+              tenantId: 'foreign',
+            }),
+          });
+          expect(foreign.status).toBe(409);
+        }
+      }
+      if (owned) {
+        expect(fileHistory.bind).toHaveBeenCalledExactlyOnceWith(binding);
+        expect(fileHistory.checkpoint).toHaveBeenCalledExactlyOnceWith(
+          'parent-turn',
+        );
+        expect(fileHistory.snapshot).toHaveBeenCalledExactlyOnceWith();
+      } else expect(provider.getToolV2Client).not.toHaveBeenCalled();
+      const releaseUrl = `${handle.url}/internal/managed-runtime/v2/release`;
+      const releaseBody = JSON.stringify({ ...body, protocolVersion: 2 });
+      const released = await fetch(releaseUrl, {
+        method: 'POST',
+        headers,
+        body: releaseBody,
+      });
+      expect(released.status).toBe(owned ? 200 : 404);
+      if (owned) {
+        await expect(released.json()).resolves.toEqual({
+          protocolVersion: 2,
+          released: true,
+        });
+        expect(provider.release).toHaveBeenCalledWith(body.sessionId, body, {
+          terminal: true,
+        });
+        const conflict = await fetch(releaseUrl, {
+          method: 'POST',
+          headers: { ...headers, 'X-Qwen-Managed-Lease-Id': 'other' },
+          body: releaseBody,
+        });
+        expect(conflict.status).toBe(409);
+        expect((await fetch(releaseUrl, { headers })).status).toBe(404);
+        expect(
+          (
+            await fetch(`${releaseUrl}?extra=1`, {
+              method: 'POST',
+              headers,
+              body: releaseBody,
+            })
+          ).status,
+        ).toBe(404);
+        expect(provider.release).toHaveBeenCalledOnce();
+      } else expect(provider.release).not.toHaveBeenCalled();
+    } finally {
+      await handle?.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+it('refuses to expose a Managed Runtime worker without a bearer token', async () => {
+  await expect(
+    runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+        serveWebShell: false,
+        experimentalManagedRuntimeWorker: true,
+      },
+      { bridge: makeRuntimeBridge(), preheatBridge: false },
+    ),
+  ).rejects.toThrow('without a bearer token');
+});
+
+it('keeps the model in the Gateway and uses a delayed Runtime only for Tools', async () => {
+  const workspace = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-managed-gateway-')),
+  );
+  const events = new ManagedGatewaySessionEvents();
+  const modelRunner: ManagedGatewayModelRunner = {
+    start: vi.fn().mockResolvedValue(undefined),
+    runTurn: vi.fn(async (request, runtime, sink, signal) => {
+      await sink.onModelStarted({
+        round: 0,
+        agentDefinitionId: 'test-definition-v1',
+      });
+      await sink.onDelta('authoritative gateway start');
+      if (request.messageId.startsWith('gateway-no-tool')) {
+        return 'authoritative no-Tool answer';
+      }
+      await sink.onToolRequested({
+        toolCallId: `call-${request.messageId}`,
+        toolName: 'read_file',
+      });
+      const manifest = await runtime.getManifest(signal);
+      const tool = manifest.tools[0];
+      if (!tool?.name) throw new Error('missing test Tool');
+      await sink.onToolStarted?.({
+        toolCallId: `call-${request.messageId}`,
+        toolName: tool.name,
+        input: { path: 'README.md' },
+      });
+      const result = await runtime.execute(
+        {
+          executionId: `execution-${request.messageId}`,
+          turnId: request.messageId,
+          toolCallId: `call-${request.messageId}`,
+          capabilityDigest: manifest.capabilityDigest,
+          toolName: tool.name,
+          input: { path: 'README.md' },
+        },
+        signal,
+      );
+      await sink.onToolCompleted({
+        toolCallId: `call-${request.messageId}`,
+        toolName: tool.name,
+        failed: result.error !== undefined,
+      });
+      await sink.onDelta('authoritative gateway answer');
+      return 'authoritative gateway answer';
+    }),
+    dispose: vi.fn().mockResolvedValue(undefined),
+  };
+  let releaseRuntime!: () => void;
+  const runtimeReadyGate = new Promise<void>((resolve) => {
+    releaseRuntime = resolve;
+  });
+  const bridge = {
+    ...makeRuntimeBridge(),
+    spawnOrAttach: vi.fn(async (req: { sessionId?: string }) => {
+      await runtimeReadyGate;
+      return {
+        sessionId: req.sessionId!,
+        workspaceCwd: workspace,
+        attached: false,
+        clientId: 'runtime-client',
+        hasActivePrompt: false,
+        sourceType: 'managed-gateway',
+        sourceId: req.sessionId!,
+        sourcePersisted: true,
+      };
+    }),
+    getSessionSummary: vi.fn((sessionId: string) => ({
+      sessionId,
+      workspaceCwd: workspace,
+      createdAt: new Date().toISOString(),
+      sourceType: 'managed-gateway',
+      sourceId: sessionId,
+      clientCount: 1,
+      hasActivePrompt: false,
+    })),
+    recordHeartbeat: vi.fn(),
+    resumeSession: vi.fn(),
+    getManagedRuntimeToolManifest: vi.fn().mockResolvedValue({
+      capabilityDigest: 'a'.repeat(64),
+      tools: [{ name: 'read_file', description: 'Read one file' }],
+    }),
+    executeManagedRuntimeTool: vi.fn().mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'call-result',
+            name: 'read_file',
+            response: { output: 'workspace evidence' },
+          },
+        },
+      ],
+      executionStatus: 'success',
+    }),
+    sendPrompt: vi
+      .fn()
+      .mockRejectedValue(
+        new Error('Managed Gateway must not send a Prompt to its Runtime.'),
+      ),
+    closeSession: vi.fn().mockResolvedValue(undefined),
+    detachClient: vi.fn().mockResolvedValue(undefined),
+  } as unknown as HttpAcpBridge;
+  let handle: RunHandle | undefined;
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        memoryBudgetMb: 4096,
+        promptDeadlineMs: 10_000,
+        serveWebShell: false,
+        experimentalManagedAgents: true,
+      },
+      {
+        bridge,
+        managedGatewaySessionEvents: events,
+        managedGatewayModelRunner: modelRunner,
+        preheatBridge: false,
+      },
+    );
+    await handle.runtimeReady;
+    const response = await fetch(`${handle.url}/managed/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'gateway-test-message',
+        'x-qwen-managed-client-id': 'gateway-test-client',
+      },
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: 'inspect the workspace' }],
+      }),
+    });
+    const admitted = (await response.json()) as { sessionId: string };
+    expect(response.status).toBe(202);
+    expect(
+      events.authorize(admitted.sessionId, 'gateway-test-client'),
+    ).toMatchObject({ phase: 'admitted', runtimeReady: false });
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(admitted.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'waiting_runtime', runtimeReady: false });
+    });
+    expect(bridge.getManagedRuntimeToolManifest).not.toHaveBeenCalled();
+    releaseRuntime();
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(admitted.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'completed', runtimeReady: true });
+    });
+
+    const streamed = [];
+    for await (const event of events.subscribe(
+      admitted.sessionId,
+      'gateway-test-client',
+      undefined,
+      new AbortController().signal,
+    )) {
+      streamed.push(event.type);
+    }
+    expect(streamed.indexOf('tool_started')).toBeGreaterThan(
+      streamed.indexOf('runtime_ready'),
+    );
+    expect(streamed.indexOf('agent_started')).toBeLessThan(
+      streamed.indexOf('runtime_ready'),
+    );
+    expect(streamed.indexOf('assistant_delta')).toBeLessThan(
+      streamed.indexOf('runtime_ready'),
+    );
+    expect(bridge.getManagedRuntimeToolManifest).toHaveBeenCalledWith(
+      admitted.sessionId,
+      { clientId: 'runtime-client' },
+    );
+    expect(bridge.executeManagedRuntimeTool).toHaveBeenCalledWith(
+      admitted.sessionId,
+      expect.objectContaining({
+        turnId: 'gateway-test-message',
+        toolName: 'read_file',
+      }),
+      expect.any(AbortSignal),
+      { clientId: 'runtime-client' },
+    );
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+
+    const retryResponse = await fetch(`${handle.url}/managed/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'gateway-test-message',
+        'x-qwen-managed-client-id': 'gateway-test-client',
+      },
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: 'inspect the workspace' }],
+      }),
+    });
+    expect(retryResponse.status).toBe(202);
+    await expect(retryResponse.json()).resolves.toMatchObject({
+      sessionId: admitted.sessionId,
+      created: false,
+      state: 'finished',
+    });
+    expect(modelRunner.runTurn).toHaveBeenCalledTimes(1);
+    expect(bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+
+    const followUpResponse = await fetch(
+      `${handle.url}/managed/sessions/${admitted.sessionId}/prompts`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'gateway-follow-up-message',
+          'x-qwen-managed-client-id': 'gateway-test-client',
+        },
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'what did you find?' }],
+        }),
+      },
+    );
+    expect(followUpResponse.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(admitted.sessionId, 'gateway-test-client'),
+      ).toMatchObject({
+        promptId: 'gateway-follow-up-message',
+        phase: 'completed',
+        runtimeReady: true,
+      });
+    });
+    expect(bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    expect(bridge.resumeSession).not.toHaveBeenCalled();
+    expect(bridge.recordHeartbeat).toHaveBeenCalledWith(admitted.sessionId, {
+      clientId: 'runtime-client',
+    });
+    expect(bridge.getManagedRuntimeToolManifest).toHaveBeenLastCalledWith(
+      admitted.sessionId,
+      { clientId: 'runtime-client' },
+    );
+    const followUpRetry = await fetch(
+      `${handle.url}/managed/sessions/${admitted.sessionId}/prompts`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'gateway-follow-up-message',
+          'x-qwen-managed-client-id': 'gateway-test-client',
+        },
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'what did you find?' }],
+        }),
+      },
+    );
+    expect(followUpRetry.status).toBe(202);
+    await expect(followUpRetry.json()).resolves.toMatchObject({
+      sessionId: admitted.sessionId,
+      created: false,
+      state: 'finished',
+    });
+    expect(modelRunner.runTurn).toHaveBeenCalledTimes(2);
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+
+    vi.mocked(bridge.getSessionSummary).mockImplementationOnce(() => {
+      throw new Error('cached Runtime client is stale');
+    });
+    vi.mocked(bridge.resumeSession).mockResolvedValueOnce({
+      sessionId: admitted.sessionId,
+      workspaceCwd: workspace,
+      attached: true,
+      clientId: 'restored-runtime-client',
+      hasActivePrompt: false,
+      sourceType: 'managed-gateway',
+      sourceId: admitted.sessionId,
+      sourcePersisted: true,
+      state: {} as never,
+    });
+    const restoredFollowUp = await fetch(
+      `${handle.url}/managed/sessions/${admitted.sessionId}/prompts`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'gateway-restored-follow-up',
+          'x-qwen-managed-client-id': 'gateway-test-client',
+        },
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'continue after restart' }],
+        }),
+      },
+    );
+    expect(restoredFollowUp.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(admitted.sessionId, 'gateway-test-client'),
+      ).toMatchObject({
+        promptId: 'gateway-restored-follow-up',
+        phase: 'completed',
+      });
+    });
+    expect(bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId: admitted.sessionId,
+      workspaceCwd: workspace,
+      sourceType: 'managed-gateway',
+      sourceId: admitted.sessionId,
+    });
+    expect(bridge.getManagedRuntimeToolManifest).toHaveBeenLastCalledWith(
+      admitted.sessionId,
+      { clientId: 'restored-runtime-client' },
+    );
+    expect(modelRunner.runTurn).toHaveBeenCalledTimes(3);
+    expect(bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+
+    let releaseNoToolRuntime!: () => void;
+    vi.mocked(bridge.spawnOrAttach).mockImplementationOnce(
+      (req) =>
+        new Promise((resolve) => {
+          releaseNoToolRuntime = () =>
+            resolve({
+              sessionId: req.sessionId!,
+              workspaceCwd: workspace,
+              attached: false,
+              clientId: 'no-tool-runtime-client',
+              hasActivePrompt: false,
+              sourceType: 'managed-gateway',
+              sourceId: req.sessionId!,
+            });
+        }),
+    );
+    const manifestCallsBeforeNoTool = vi.mocked(
+      bridge.getManagedRuntimeToolManifest,
+    ).mock.calls.length;
+    const noToolResponse = await fetch(`${handle.url}/managed/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'gateway-no-tool-message',
+        'x-qwen-managed-client-id': 'gateway-test-client',
+      },
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: 'answer without workspace evidence' }],
+      }),
+    });
+    const noTool = (await noToolResponse.json()) as { sessionId: string };
+    expect(noToolResponse.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(noTool.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'completed', runtimeReady: false });
+    });
+    expect(bridge.getManagedRuntimeToolManifest).toHaveBeenCalledTimes(
+      manifestCallsBeforeNoTool,
+    );
+    expect(modelRunner.runTurn).toHaveBeenCalledTimes(4);
+    const spawnCallsWhileWarming = vi.mocked(bridge.spawnOrAttach).mock.calls
+      .length;
+    const noToolFollowUpResponse = await fetch(
+      `${handle.url}/managed/sessions/${noTool.sessionId}/prompts`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'gateway-no-tool-follow-up',
+          'x-qwen-managed-client-id': 'gateway-test-client',
+        },
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'another answer without tools' }],
+        }),
+      },
+    );
+    expect(noToolFollowUpResponse.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(noTool.sessionId, 'gateway-test-client'),
+      ).toMatchObject({
+        promptId: 'gateway-no-tool-follow-up',
+        phase: 'completed',
+        runtimeReady: false,
+      });
+    });
+    expect(bridge.spawnOrAttach).toHaveBeenCalledTimes(spawnCallsWhileWarming);
+    expect(bridge.getManagedRuntimeToolManifest).toHaveBeenCalledTimes(
+      manifestCallsBeforeNoTool,
+    );
+    releaseNoToolRuntime();
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(noTool.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'completed', runtimeReady: true });
+    });
+
+    vi.mocked(bridge.spawnOrAttach).mockImplementationOnce(async (req) => ({
+      sessionId: req.sessionId!,
+      workspaceCwd: workspace,
+      attached: true,
+      clientId: 'attached-client',
+      hasActivePrompt: false,
+      sourceType: 'managed-gateway',
+      sourceId: req.sessionId!,
+    }));
+    const collisionResponse = await fetch(`${handle.url}/managed/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'gateway-collision-message',
+        'x-qwen-managed-client-id': 'gateway-test-client',
+      },
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: 'must not enter an existing Session' }],
+      }),
+    });
+    const collision = (await collisionResponse.json()) as {
+      sessionId: string;
+    };
+    expect(collisionResponse.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(collision.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'failed', runtimeReady: false });
+    });
+    expect(bridge.detachClient).toHaveBeenCalledWith(
+      collision.sessionId,
+      'attached-client',
+    );
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+
+    let settleLateSpawn!: () => void;
+    vi.mocked(bridge.spawnOrAttach).mockImplementationOnce(
+      (req) =>
+        new Promise((resolve) => {
+          settleLateSpawn = () =>
+            resolve({
+              sessionId: req.sessionId!,
+              workspaceCwd: workspace,
+              attached: false,
+              clientId: 'late-client',
+              hasActivePrompt: false,
+              sourceType: 'managed-gateway',
+              sourceId: req.sessionId!,
+            });
+        }),
+    );
+    const deadlineResponse = await fetch(`${handle.url}/managed/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'gateway-deadline-message',
+        'x-qwen-managed-client-id': 'gateway-test-client',
+      },
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: 'deadline test' }],
+        deadlineMs: 250,
+      }),
+    });
+    const deadline = (await deadlineResponse.json()) as { sessionId: string };
+    expect(deadlineResponse.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(settleLateSpawn).toBeTypeOf('function');
+    });
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(deadline.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'failed', runtimeReady: false });
+    });
+    settleLateSpawn();
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(deadline.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'failed', runtimeReady: false });
+    });
+    await vi.waitFor(() => {
+      expect(bridge.closeSession).toHaveBeenCalledWith(deadline.sessionId, {
+        clientId: 'late-client',
+      });
+    });
+    expect(bridge.sendPrompt).not.toHaveBeenCalled();
+
+    vi.mocked(bridge.spawnOrAttach).mockImplementationOnce(async (req) => ({
+      sessionId: req.sessionId!,
+      workspaceCwd: workspace,
+      attached: false,
+      clientId: 'manifest-timeout-client',
+      hasActivePrompt: false,
+      sourceType: 'managed-gateway',
+      sourceId: req.sessionId!,
+    }));
+    let manifestRequested = false;
+    vi.mocked(bridge.getManagedRuntimeToolManifest).mockImplementationOnce(
+      () => {
+        manifestRequested = true;
+        return new Promise(() => undefined);
+      },
+    );
+    const manifestDeadlineResponse = await fetch(
+      `${handle.url}/managed/sessions`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'gateway-manifest-deadline-message',
+          'x-qwen-managed-client-id': 'gateway-test-client',
+        },
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'manifest deadline test' }],
+          deadlineMs: 250,
+        }),
+      },
+    );
+    const manifestDeadline = (await manifestDeadlineResponse.json()) as {
+      sessionId: string;
+    };
+    expect(manifestDeadlineResponse.status).toBe(202);
+    await vi.waitFor(() => expect(manifestRequested).toBe(true));
+    await vi.waitFor(() => {
+      expect(
+        events.authorize(manifestDeadline.sessionId, 'gateway-test-client'),
+      ).toMatchObject({ phase: 'failed', runtimeReady: true });
+    });
+    expect(bridge.executeManagedRuntimeTool).not.toHaveBeenCalledWith(
+      manifestDeadline.sessionId,
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+  } finally {
+    releaseRuntime();
+    await handle?.close();
+    expect(modelRunner.dispose).not.toHaveBeenCalled();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
 function makeLifecycleRuntimeBridge(): HttpAcpBridge {
   return {
     ...makeRuntimeBridge(),
@@ -5254,6 +6127,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      for (const [options] of createBridge.mock.calls.slice(0, 2)) {
+        expect(options).not.toHaveProperty('channelFactory');
+        expect(options.executionEngines).toEqual(
+          expect.objectContaining({
+            legacy: expect.any(Function),
+            managed: expect.any(Function),
+            select: expect.any(Function),
+          }),
+        );
+      }
       const firstDynamicEpochSource =
         createBridge.mock.calls[1]?.[0].runtimeEpochSource;
       expect(firstDynamicEpochSource?.allocate()).toBe(1);
@@ -5759,6 +6642,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         channelIdleTimeoutMs: 0,
       });
+      expect(createBridge.mock.calls[0]?.[0]).not.toHaveProperty(
+        'channelFactory',
+      );
+      expect(createBridge.mock.calls[0]?.[0].executionEngines).toEqual(
+        expect.objectContaining({
+          legacy: expect.any(Function),
+          managed: expect.any(Function),
+          select: expect.any(Function),
+        }),
+      );
     } finally {
       await handle.close();
     }
@@ -5834,6 +6727,16 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
       });
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).not.toHaveProperty('channelFactory');
+        expect(options.executionEngines).toEqual(
+          expect.objectContaining({
+            legacy: expect.any(Function),
+            managed: expect.any(Function),
+            select: expect.any(Function),
+          }),
+        );
+      }
     } finally {
       await handle.close();
     }
@@ -5977,9 +6880,10 @@ describe('runQwenServe deployment profiles', () => {
           token: 'hosted-secret',
           serveWebShell: false,
           hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+          managedRuntimeBrokerToken: 'broker-secret',
         },
         {
-          bridge: makeRuntimeBridge(),
           daemonLogBaseDir: path.join(workspace, 'debug'),
         },
       );
@@ -5994,20 +6898,27 @@ describe('runQwenServe deployment profiles', () => {
     }
   });
 
-  it('keeps the Hosted Harness bootstrap private until its runtime is ready', async () => {
+  it('keeps the Hosted Harness surface private', async () => {
     const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
       serveOptions: {
         profile: 'hosted-harness',
         serveWebShell: false,
         hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
       },
     });
     try {
       expect((await fetch(`${handle.url}/health`)).status).toBe(401);
       const headers = { Authorization: 'Bearer secret-token' };
-      expect(
-        (await fetch(`${handle.url}/capabilities`, { headers })).status,
-      ).toBe(503);
+      const capabilities = await fetch(`${handle.url}/capabilities`, {
+        headers,
+      });
+      expect(capabilities.status).toBe(200);
+      expect(await capabilities.json()).toMatchObject({
+        features: ['hosted_harness_private_v1'],
+        hostedHarness: { bootId: expect.any(String) },
+      });
       expect(
         (await fetch(`${handle.url}/daemon/status`, { headers })).status,
       ).toBe(404);
@@ -6016,38 +6927,6 @@ describe('runQwenServe deployment profiles', () => {
       );
     } finally {
       await handle.close();
-    }
-  });
-
-  it.each([
-    { experimentalManagedAgents: true },
-    { experimentalManagedRuntimeWorker: true },
-    { experimentalManagedRuntimeAutoLocal: true },
-    { experimentalManagedRuntimeUrl: 'http://127.0.0.1:8080' },
-    { experimentalManagedRuntimeToken: 'test-token' },
-    { managedRuntimeBrokerUrl: 'http://127.0.0.1:8080' },
-    { managedRuntimeBrokerToken: 'test-token' },
-  ])('rejects before listening: %j', async (option) => {
-    const listen = vi
-      .spyOn(net.Server.prototype, 'listen')
-      .mockImplementation(() => {
-        throw new Error('Unexpected listener for an unavailable mode.');
-      });
-    try {
-      await expect(
-        runQwenServe({
-          port: 0,
-          hostname: '127.0.0.1',
-          mode: 'http-bridge',
-          workspace: isolatedTestRuntimeDir,
-          ...option,
-        }),
-      ).rejects.toThrow(
-        /not (available|implemented)|require --profile hosted-harness/,
-      );
-      expect(listen).not.toHaveBeenCalled();
-    } finally {
-      listen.mockRestore();
     }
   });
 
@@ -6065,6 +6944,8 @@ describe('runQwenServe deployment profiles', () => {
             token: 'hosted-secret',
             serveWebShell: false,
             hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+            managedRuntimeBrokerToken: 'broker-secret',
           },
           {
             bindHostnameLookup: async () => ({
@@ -7565,6 +8446,197 @@ describe('runQwenServe pre-listen bridge option validation', () => {
   );
 
   it.each([
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: undefined,
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires a Harness bearer token/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: true,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires --no-web/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires --managed-runtime-broker-url/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+      },
+      /requires --managed-runtime-broker-token/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        experimentalManagedRuntimeAutoLocal: true,
+      },
+      /conflicts with the experimental Managed Gateway/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        clientMcpOverWs: true,
+      },
+      /conflicts with client MCP, CDP tunnel, and channel hosting/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://broker.example.com',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /must use HTTPS/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: undefined,
+      },
+      /QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: 'sha256:invalid',
+      },
+      /QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST/,
+    ],
+  ])(
+    'rejects invalid Hosted Harness configuration %# before listening',
+    async (overrides, message) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-opt-')),
+      );
+      vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+      vi.stubEnv('QWEN_RUNTIME_BROKER_URL', undefined);
+      vi.stubEnv('QWEN_RUNTIME_BROKER_TOKEN', undefined);
+      vi.stubEnv('QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST', undefined);
+      try {
+        await expect(
+          runQwenServe({
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+            ...overrides,
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('rejects a non-loopback Hosted Harness bind before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-bind-')),
+    );
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        profile: 'hosted-harness',
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'https://broker.example.com',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+      }),
+    ).rejects.toThrow(/requires a loopback --hostname/);
+  });
+
+  it('rejects an injected Runtime provider that could bypass the Hosted Harness Broker', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-deps-')),
+    );
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          profile: 'hosted-harness',
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+          managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+        },
+        {
+          managedRuntimeProvider: {
+            prepare: vi.fn(),
+            cancel: vi.fn(),
+            release: vi.fn(),
+            dispose: vi.fn(),
+          },
+        },
+      ),
+    ).rejects.toThrow(/does not accept injected bridge or Runtime ownership/);
+  });
+
+  it('does not activate Broker environment configuration outside the Hosted Harness profile', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-broker-env-profile-')),
+    );
+    vi.stubEnv('QWEN_RUNTIME_BROKER_URL', 'http://127.0.0.1:8080');
+    vi.stubEnv('QWEN_RUNTIME_BROKER_TOKEN', 'broker-secret');
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        }),
+      ).rejects.toThrow(/require --profile hosted-harness/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
     ['rateLimitPrompt', 0, /rateLimitPrompt/],
     ['rateLimitMutation', -1, /rateLimitMutation/],
     ['rateLimitRead', 1.5, /rateLimitRead/],
@@ -8032,82 +9104,95 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('disposes ACP routing when runtime containment fails', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-acp-cleanup-')),
-    );
-    const trustedSnapshot = {
-      revision: 'trusted',
-      folderTrustEnabled: false,
-      ideTrust: undefined,
-      trustedFolders: {},
-    } as Awaited<
-      ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
-    >;
-    const untrustedSnapshot = {
-      revision: 'untrusted',
-      folderTrustEnabled: true,
-      ideTrust: undefined,
-      trustedFolders: {},
-    } as Awaited<
-      ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
-    >;
-    let currentSnapshot = trustedSnapshot;
-    vi.spyOn(
-      trustPolicyRuntime,
-      'readDaemonTrustPolicySnapshot',
-    ).mockImplementation(async () => currentSnapshot);
-    const bootBridge = makeRuntimeBridge();
-    vi.mocked(bootBridge.shutdown)
-      .mockRejectedValueOnce(new Error('shutdown failed'))
-      .mockResolvedValue(undefined);
-    vi.mocked(bootBridge.killAllSync).mockImplementationOnce(() => {
-      throw new Error('kill failed');
-    });
-    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
-      bootBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-    );
-    let disposeWorkspace:
-      | ReturnType<typeof vi.fn<(workspaceId: string) => void>>
-      | undefined;
-    const originalCreateServeApp = serverModule.createServeApp;
-    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
-      const app = originalCreateServeApp(...args);
-      const acpHandle = app.locals['acpHandle'] as
-        | { disposeWorkspace?: (workspaceId: string) => void }
-        | undefined;
-      if (acpHandle?.disposeWorkspace) {
-        disposeWorkspace = vi.fn(acpHandle.disposeWorkspace);
-        acpHandle.disposeWorkspace = disposeWorkspace;
-      }
-      return app;
-    });
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        serveWebShell: false,
-      },
-      { resolveOnListen: true },
-    );
-
-    try {
-      await handle.runtimeReady;
-      expect(disposeWorkspace).toBeDefined();
-      currentSnapshot = untrustedSnapshot;
-      qwenCore.ideContextStore.set({
-        workspaceState: { isTrusted: false },
+  it.each([false, true])(
+    'keeps failed runtime teardown blocked when synchronous kill throws=%s',
+    async (killThrows) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-acp-cleanup-')),
+      );
+      const trustedSnapshot = {
+        revision: 'trusted',
+        folderTrustEnabled: false,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >;
+      const untrustedSnapshot = {
+        revision: 'untrusted',
+        folderTrustEnabled: true,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >;
+      let currentSnapshot = trustedSnapshot;
+      vi.spyOn(
+        trustPolicyRuntime,
+        'readDaemonTrustPolicySnapshot',
+      ).mockImplementation(async () => currentSnapshot);
+      const bootBridge = makeRuntimeBridge();
+      vi.mocked(bootBridge.shutdown)
+        .mockRejectedValueOnce(new Error('shutdown failed'))
+        .mockResolvedValue(undefined);
+      vi.mocked(bootBridge.killAllSync).mockImplementationOnce(() => {
+        if (killThrows) throw new Error('kill failed');
       });
-      await vi.waitFor(() => expect(disposeWorkspace).toHaveBeenCalledOnce());
-    } finally {
-      qwenCore.ideContextStore.clear();
-      await handle.close();
-    }
-  });
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+        bootBridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+      let disposeWorkspace:
+        | ReturnType<typeof vi.fn<(workspaceId: string) => void>>
+        | undefined;
+      let workspaceRegistry:
+        | import('./workspace-registry.js').WorkspaceRegistry
+        | undefined;
+      const originalCreateServeApp = serverModule.createServeApp;
+      vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+        workspaceRegistry = args[2]?.workspaceRegistry;
+        const app = originalCreateServeApp(...args);
+        const acpHandle = app.locals['acpHandle'] as
+          | { disposeWorkspace?: (workspaceId: string) => void }
+          | undefined;
+        if (acpHandle?.disposeWorkspace) {
+          disposeWorkspace = vi.fn(acpHandle.disposeWorkspace);
+          acpHandle.disposeWorkspace = disposeWorkspace;
+        }
+        return app;
+      });
+
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+
+      try {
+        await handle.runtimeReady;
+        expect(disposeWorkspace).toBeDefined();
+        currentSnapshot = untrustedSnapshot;
+        qwenCore.ideContextStore.set({
+          workspaceState: { isTrusted: false },
+        });
+        await vi.waitFor(() => expect(disposeWorkspace).toHaveBeenCalledOnce());
+        await vi.waitFor(() =>
+          expect(workspaceRegistry?.getEntryByWorkspaceCwd(tmpDir)?.state).toBe(
+            'blocked',
+          ),
+        );
+        expect(acpBridge.createAcpSessionBridge).toHaveBeenCalledOnce();
+      } finally {
+        qwenCore.ideContextStore.clear();
+        await handle.close();
+      }
+    },
+  );
 
   it('rejects the embedded run handle by default when the runtime fails to mount', async () => {
     tmpDir = fs.realpathSync(
@@ -14932,6 +16017,56 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('keeps runtime credentials separate from daemon startup policy', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-clean-runtime-env-')),
+    );
+    vi.stubEnv('OPENAI_API_KEY', 'primary-key');
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'startup-token');
+    vi.stubEnv('QWEN_SERVE_ACP_HTTP', '0');
+    const runtimeBaseEnvironment = { ...process.env };
+    delete runtimeBaseEnvironment['OPENAI_API_KEY'];
+    delete runtimeBaseEnvironment['QWEN_SERVER_TOKEN'];
+    delete runtimeBaseEnvironment['QWEN_SERVE_ACP_HTTP'];
+    runtimeBaseEnvironment['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] =
+      'private-guard';
+    let capturedDeps: Parameters<typeof serverModule.createServeApp>[2];
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          runtimeBaseEnvironment,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(handle.resolvedToken).toBe('startup-token');
+      expect(capturedDeps?.daemonEnv?.['OPENAI_API_KEY']).toBeUndefined();
+      expect(capturedDeps?.daemonEnv?.['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(
+        capturedDeps?.daemonEnv?.['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+      ).toBeUndefined();
+      expect(capturedDeps?.acpHttpEnabled).toBe(false);
+      const response = await fetch(new URL('/acp', handle.url), {
+        method: 'POST',
+        headers: { Authorization: 'Bearer startup-token' },
+      });
+      expect(response.status).toBe(404);
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('starts a TLS channel worker after the daemon runtime is ready', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-lazy-')),
@@ -19552,13 +20687,13 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     expect(worker.stop).toHaveBeenCalledTimes(1);
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
-    expect(bridge.killAllSync).toHaveBeenCalledTimes(1);
+    expect(bridge.killAllSync).toHaveBeenCalledTimes(2);
     expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();
 
     await expect(handle.close()).resolves.toBeUndefined();
     expect(worker.stop).toHaveBeenCalledTimes(2);
-    expect(bridge.shutdown).toHaveBeenCalledTimes(1);
-    expect(bridge.killAllSync).toHaveBeenCalledTimes(1);
+    expect(bridge.shutdown).toHaveBeenCalledTimes(2);
+    expect(bridge.killAllSync).toHaveBeenCalledTimes(2);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
@@ -21612,6 +22747,195 @@ describe('runQwenServe startup observability', () => {
       });
     } finally {
       await handle.close();
+    }
+  });
+
+  it('skips local ACP preheat for a remote Managed Runtime Gateway', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-remote-runtime-preheat-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+    const managedPromptService: ManagedPromptService = {
+      admit: vi.fn(),
+      getStatus: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        token: 'gateway-token',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        experimentalManagedAgents: true,
+        experimentalManagedRuntimeUrl: 'http://127.0.0.1:4181',
+        experimentalManagedRuntimeToken: 'runtime-token',
+      },
+      {
+        managedPromptService,
+        preheatBridge: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridge.preheat).not.toHaveBeenCalled();
+      expect((await readStartup(handle))?.preheat).toMatchObject({
+        status: 'not_scheduled',
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('boots Hosted Harness without contacting or preheating a local Runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-preheat-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+    const brokerFetch = vi.spyOn(globalThis, 'fetch');
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        token: 'harness-secret',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        profile: 'hosted-harness',
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+      },
+      {
+        preheatBridge: true,
+        bootSettings: { serve: { channels: ['hosted-must-ignore'] } },
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridge.preheat).not.toHaveBeenCalled();
+      expect(brokerFetch).not.toHaveBeenCalled();
+      const capabilitiesResponse = await fetch(`${handle.url}/capabilities`, {
+        headers: { Authorization: 'Bearer harness-secret' },
+      });
+      expect(capabilitiesResponse.status).toBe(200);
+      expect(await capabilitiesResponse.json()).toMatchObject({
+        features: expect.arrayContaining(['hosted_harness_private_v1']),
+        hostedHarness: {
+          protocolVersions: { current: 1, supported: [1] },
+          bootId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+          ),
+          capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps one Hosted Harness boot generation across bootstrap and runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-boot-id-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      new Promise((resolve) => {
+        resolveTelemetry = resolve;
+      }),
+    );
+    const originalCapabilityDigest =
+      process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'];
+    process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'] =
+      HOSTED_HARNESS_CAPABILITY_DIGEST;
+    let handle: RunHandle | undefined;
+    const authorization = { Authorization: 'Bearer harness-secret' };
+
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          token: 'harness-secret',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+          profile: 'hosted-harness',
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          resolveOnListen: true,
+          runtimeStartupTimeoutMs: 0,
+          bootSettings: {},
+          daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        },
+      );
+      const bootstrapCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`, { headers: authorization })
+      ).json()) as { hostedHarness: { bootId: string } };
+      const bootId = bootstrapCapabilities.hostedHarness.bootId;
+
+      const missingHandshake = await fetch(`${handle.url}/session/example`, {
+        headers: authorization,
+      });
+      expect(missingHandshake.status).toBe(426);
+      expect(missingHandshake.headers.get('x-qwen-harness-boot-id')).toBe(
+        bootId,
+      );
+      // A Session route must answer "retry" while the runtime starts: a 404
+      // would tell the connector the Session does not exist.
+      const duringStartup = await fetch(`${handle.url}/session/example/load`, {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'X-Qwen-Harness-Protocol-Version': '1',
+          'X-Qwen-Harness-Boot-Id': bootId,
+        },
+      });
+      expect(duringStartup.status).toBe(503);
+
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.runtimeReady;
+
+      const runtimeCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`, { headers: authorization })
+      ).json()) as { hostedHarness: { bootId: string } };
+      expect(runtimeCapabilities.hostedHarness.bootId).toBe(bootId);
+
+      const admitted = await fetch(`${handle.url}/session/example`, {
+        headers: {
+          ...authorization,
+          'X-Qwen-Harness-Protocol-Version': '1',
+          'X-Qwen-Harness-Boot-Id': bootId,
+        },
+      });
+      expect(admitted.status).not.toBe(426);
+      expect(admitted.status).not.toBe(409);
+      expect(admitted.headers.get('x-qwen-harness-boot-id')).toBe(bootId);
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle?.close();
+      if (originalCapabilityDigest === undefined) {
+        delete process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'];
+      } else {
+        process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'] =
+          originalCapabilityDigest;
+      }
     }
   });
 

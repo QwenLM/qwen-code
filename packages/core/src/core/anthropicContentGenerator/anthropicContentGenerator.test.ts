@@ -110,6 +110,7 @@ describe('AnthropicContentGenerator', () => {
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getRuntimeEnvironment: () => process.env,
       getTelemetryEnabled: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
@@ -117,6 +118,7 @@ describe('AnthropicContentGenerator', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (savedMaxOutputTokensEnv === undefined) {
       delete process.env[MAX_OUTPUT_TOKENS_ENV];
     } else {
@@ -336,6 +338,7 @@ describe('AnthropicContentGenerator', () => {
   });
 
   it('treats unset baseURL as Anthropic-native (SDK default targets api.anthropic.com)', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', undefined);
     const { AnthropicContentGenerator } = await importGenerator();
     void new AnthropicContentGenerator(
       {
@@ -3008,38 +3011,45 @@ describe('AnthropicContentGenerator', () => {
         }
       });
 
-      it('respects a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', async () => {
-        const { AnthropicContentGenerator } = await importGenerator();
-        process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
-        anthropicState.createImpl.mockResolvedValue({
-          id: 'anthropic-1',
-          model: 'claude-sonnet-4',
-          content: [{ type: 'text', text: 'hi' }],
-        });
-
-        const generator = new AnthropicContentGenerator(
-          {
+      it.each([false, true])(
+        'respects a valid QWEN_CODE_MAX_OUTPUT_TOKENS value with snapshot %s',
+        async (snapshot) => {
+          const { AnthropicContentGenerator } = await importGenerator();
+          process.env[MAX_OUTPUT_TOKENS_ENV] = snapshot ? '3000' : '9000';
+          if (snapshot)
+            mockConfig.getRuntimeEnvironment = () => ({
+              QWEN_CODE_MAX_OUTPUT_TOKENS: '9000',
+            });
+          anthropicState.createImpl.mockResolvedValue({
+            id: 'anthropic-1',
             model: 'claude-sonnet-4',
-            apiKey: 'test-key',
-            timeout: 10_000,
-            maxRetries: 2,
-            samplingParams: {},
-            schemaCompliance: 'auto',
-          },
-          mockConfig,
-        );
+            content: [{ type: 'text', text: 'hi' }],
+          });
 
-        await generator.generateContent({
-          model: 'models/ignored',
-          contents: 'Hello',
-        } as unknown as GenerateContentParameters);
+          const generator = new AnthropicContentGenerator(
+            {
+              model: 'claude-sonnet-4',
+              apiKey: 'test-key',
+              timeout: 10_000,
+              maxRetries: 2,
+              samplingParams: {},
+              schemaCompliance: 'auto',
+            },
+            mockConfig,
+          );
 
-        const [anthropicRequest] =
-          anthropicState.lastCreateArgs as AnthropicCreateArgs;
-        expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 9000 }),
-        );
-      });
+          await generator.generateContent({
+            model: 'models/ignored',
+            contents: 'Hello',
+          } as unknown as GenerateContentParameters);
+
+          const [anthropicRequest] =
+            anthropicState.lastCreateArgs as AnthropicCreateArgs;
+          expect(anthropicRequest).toEqual(
+            expect.objectContaining({ max_tokens: 9000 }),
+          );
+        },
+      );
 
       it('respects configured max_tokens for unknown models', async () => {
         const { AnthropicContentGenerator } = await importGenerator();

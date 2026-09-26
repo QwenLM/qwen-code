@@ -40,6 +40,7 @@ import {
   type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
+import { buildHostBootstrapEnvironment } from '../config/environment.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 
 /**
@@ -286,7 +287,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: ['default', 'hosted-harness'] as const,
         default: 'default' as const,
         description:
-          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+          'Deployment profile. hosted-harness runs the resident model loop and delegates every Managed Tool operation through a Java Runtime Broker.',
       })
       .option('hosted-harness-capability-digest', {
         type: 'string',
@@ -611,43 +612,43 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Reserved experimental mode; not implemented and rejects startup.',
+          'Enable the experimental resident Managed Gateway with durable admission and Tool-only workspace Runtimes.',
       })
       .option('experimental-managed-runtime-worker', {
         type: 'boolean',
         default: false,
         description:
-          'Reserved experimental mode; not implemented and rejects startup.',
+          'Expose the private authenticated Managed Runtime worker protocol. Requires a daemon bearer token.',
       })
       .option('experimental-managed-runtime-auto-local', {
         type: 'boolean',
         default: false,
         description:
-          'Reserved experimental mode; not implemented and rejects startup.',
+          'Automatically start and manage local Tool-only Runtimes. Requires --experimental-managed-agents.',
       })
       .option('experimental-managed-runtime-url', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved experimental Runtime URL; not implemented and rejects startup.',
+          'Use a separate Managed Runtime worker at this HTTP(S) origin. Requires --experimental-managed-agents.',
       })
       .option('experimental-managed-runtime-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved experimental Runtime credential; not implemented and rejects startup.',
+          'Bearer token for the separate Managed Runtime worker. Falls back to QWEN_MANAGED_RUNTIME_TOKEN, then the daemon token.',
       })
       .option('managed-runtime-broker-url', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker URL for --profile hosted-harness; not implemented and rejects startup.',
+          'Java Runtime Broker HTTP(S) origin for --profile hosted-harness. Falls back to QWEN_RUNTIME_BROKER_URL.',
       })
       .option('managed-runtime-broker-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Reserved Broker credential for --profile hosted-harness; not implemented and rejects startup.',
+          'Harness-to-Broker bearer credential. Falls back to QWEN_RUNTIME_BROKER_TOKEN.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
@@ -833,6 +834,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       );
     }
 
+    const runtimeBaseEnvironment = buildHostBootstrapEnvironment(process.env);
+
     // Emit the headless-YOLO safety warning at daemon startup if
     // settings.json statically configures yolo + no sandbox. We can't
     // use `getHeadlessYoloSafetyWarning(config)` here because the daemon
@@ -929,6 +932,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
+        runtimeBaseEnvironment,
         port: argv.port,
         hostname: argv.hostname,
         profile: argv.profile,

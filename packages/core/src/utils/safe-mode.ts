@@ -8,6 +8,8 @@ import { isTruthy } from './bareMode.js';
 
 const SAFE_MODE_ENV_VAR = 'QWEN_CODE_SAFE_MODE';
 
-export function isSafeModeEnv(): boolean {
-  return isTruthy(process.env[SAFE_MODE_ENV_VAR]);
+export function isSafeModeEnv(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return isTruthy(environment[SAFE_MODE_ENV_VAR]);
 }

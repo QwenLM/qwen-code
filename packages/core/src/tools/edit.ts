@@ -15,8 +15,9 @@ import type {
   ToolResult,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
+import { BaseDeclarativeTool, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { createManagedToolEditParams } from './managed-tool-edit-params.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
@@ -36,9 +37,12 @@ import {
 import type { LineEnding } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
-import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { ToolNames } from './tool-names.js';
+import {
+  getEditToolDefinition,
+  projectEditToolClassifierInput,
+} from './builtin-tool-definitions.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
@@ -309,7 +313,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       } else if (occurrences === 0) {
         error = {
           display: `Failed to edit, could not find the string to replace.`,
-          raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use ${ReadFileTool.Name} tool to verify.`,
+          raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use ${ToolNames.READ_FILE} tool to verify.`,
           type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
         };
       } else if (!replaceAll && occurrences > 1) {
@@ -786,47 +790,15 @@ export class EditTool
 {
   static readonly Name = ToolNames.EDIT;
   constructor(private readonly config: Config) {
+    const definition = getEditToolDefinition();
     super(
-      EditTool.Name,
-      ToolDisplayNames.EDIT,
-      `Replaces text within a file. By default, replaces a single occurrence. Set \`replace_all\` to true when you intend to modify every instance of \`old_string\`. This tool requires providing significant context around the change to ensure precise targeting. Always use the ${ReadFileTool.Name} tool to examine the file's current content before attempting a text replacement.
-
-      The user has the ability to modify the \`new_string\` content. If modified, this will be stated in the response.
-
-Expectation for required parameters:
-1. \`file_path\` MUST be an absolute path; otherwise an error will be thrown.
-2. \`old_string\` MUST be the exact literal text to replace (including all whitespace, indentation, newlines, and surrounding code etc.).
-3. \`new_string\` MUST be the exact literal text to replace \`old_string\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.
-4. NEVER escape \`old_string\` or \`new_string\`, that would break the exact literal text requirement.
-**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.
-**Multiple replacements:** Set \`replace_all\` to true when you want to replace every occurrence that matches \`old_string\`.`,
-      Kind.Edit,
-      {
-        properties: {
-          file_path: {
-            description:
-              "The absolute path to the file to modify. Must start with '/'.",
-            type: 'string',
-          },
-          old_string: {
-            description:
-              'The exact literal text to replace, preferably unescaped. For single replacements (default), include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.',
-            type: 'string',
-          },
-          new_string: {
-            description:
-              'The exact literal text to replace `old_string` with, preferably unescaped. Provide the EXACT text. Ensure the resulting code is correct and idiomatic.',
-            type: 'string',
-          },
-          replace_all: {
-            type: 'boolean',
-            description:
-              'Replace all occurrences of old_string (default false).',
-          },
-        },
-        required: ['file_path', 'old_string', 'new_string'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 
@@ -871,24 +843,7 @@ Expectation for required parameters:
   override toAutoClassifierInput(
     params: EditToolParams,
   ): Record<string, unknown> {
-    const oldStr = params.old_string ?? '';
-    const newStr = params.new_string ?? '';
-    // 300 chars is enough headroom for the classifier to spot a malicious
-    // registry / shell / env line that hides behind a benign-looking
-    // prefix (~80 chars). In-workspace edits take the acceptEdits fast-
-    // path and never reach this projection; the preview is therefore
-    // only consulted for the smaller set of out-of-workspace writes
-    // (~/.npmrc, /etc/hosts, etc.) — exactly the case where the
-    // classifier needs the longer window.
-    return {
-      file_path: params.file_path,
-      old_string_preview: oldStr.slice(0, 300),
-      new_string_preview: newStr.slice(0, 300),
-      old_string_truncated: oldStr.length > 300,
-      new_string_truncated: newStr.length > 300,
-      lines_changed:
-        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
-    };
+    return projectEditToolClassifierInput(params);
   }
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
@@ -934,13 +889,13 @@ Expectation for required parameters:
         oldContent: string,
         modifiedProposedContent: string,
         originalParams: EditToolParams,
-      ): EditToolParams => ({
-        ...originalParams,
-        ai_proposed_content: oldContent,
-        old_string: oldContent,
-        new_string: modifiedProposedContent,
-        modified_by_user: true,
-      }),
+      ): EditToolParams =>
+        createManagedToolEditParams(
+          EditTool.Name,
+          originalParams,
+          oldContent,
+          modifiedProposedContent,
+        ),
     };
   }
 }

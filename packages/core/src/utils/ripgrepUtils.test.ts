@@ -16,6 +16,9 @@ import {
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import path from 'node:path';
+import { runOwnedCommand } from './owned-command.js';
+
+vi.mock('./owned-command.js', () => ({ runOwnedCommand: vi.fn() }));
 
 const childProcessMock = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -90,11 +93,123 @@ describe('ripgrepUtils', () => {
     vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
     childProcessMock.execFile.mockReset();
+    vi.mocked(runOwnedCommand).mockReset();
     vi.mocked(execCommand).mockResolvedValue({
       stdout: 'ripgrep 14.1.0\n',
       stderr: '',
       code: 0,
     });
+  });
+
+  describe('owned execution', () => {
+    const options = { requireProcessGroupExit: true, cwd: '/workspace' };
+    const health = {
+      stdout: 'ripgrep 14.1.0\n',
+      stderr: '',
+      code: 0,
+      signal: null,
+    } as const;
+
+    it('probes and executes directly without shell command discovery', async () => {
+      vi.mocked(runOwnedCommand)
+        .mockResolvedValueOnce(health)
+        .mockResolvedValueOnce({ ...health, stdout: 'match\n' });
+      const result = await runRipgrep(
+        ['--json', 'needle'],
+        undefined,
+        false,
+        options,
+      );
+      expect(result.stdout).toBe('match\n');
+      expect(result.error).toBeUndefined();
+      expect(runOwnedCommand).toHaveBeenNthCalledWith(1, 'rg', ['--version'], {
+        cwd: '/workspace',
+        signal: undefined,
+        timeout: 5000,
+      });
+      expect(runOwnedCommand).toHaveBeenNthCalledWith(
+        2,
+        'rg',
+        ['--json', 'needle'],
+        expect.objectContaining({ cwd: '/workspace', maxBuffer: 20000000 }),
+      );
+      expect(isCommandAvailable).not.toHaveBeenCalled();
+      expect(execCommand).not.toHaveBeenCalled();
+      expect(childProcessMock.execFile).not.toHaveBeenCalled();
+    });
+
+    it('waits for the owned attempt before retrying EAGAIN once with one thread', async () => {
+      let finish!: (value: Awaited<ReturnType<typeof runOwnedCommand>>) => void;
+      vi.mocked(runOwnedCommand)
+        .mockResolvedValueOnce(health)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValueOnce({ ...health, stdout: 'retry\n' });
+      const pending = runRipgrep(
+        ['--json', '--threads', '4', 'needle'],
+        undefined,
+        false,
+        options,
+      );
+      await vi.waitFor(() => expect(runOwnedCommand).toHaveBeenCalledTimes(2));
+      finish({
+        stdout: '',
+        stderr: 'failed to create worker thread (os error 11)',
+        code: 2,
+        signal: null,
+        error: createExecError('thread failed', { code: 2 }),
+      });
+      const result = await pending;
+      expect(result.recovery.retrySucceeded).toBe(true);
+      expect(runOwnedCommand).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(runOwnedCommand).mock.calls[2][1]).toContain(
+        '--threads',
+      );
+      expect(vi.mocked(runOwnedCommand).mock.calls[2][1]).toContain('1');
+    });
+
+    it('does not fall back after a canceled bundled version probe', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      const error = Object.assign(new Error('aborted'), {
+        name: 'AbortError',
+        code: 'ABORT_ERR',
+      });
+      vi.mocked(runOwnedCommand).mockResolvedValue({
+        stdout: '',
+        stderr: '',
+        code: null,
+        signal: 'SIGKILL',
+        error,
+      });
+      await expect(canUseRipgrep(true, options)).rejects.toBe(error);
+      expect(runOwnedCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['ETIMEDOUT', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ABORT_ERR'])(
+      'preserves partial output and typed owned failure %s',
+      async (code) => {
+        const error = createExecError('stopped', { code });
+        vi.mocked(runOwnedCommand)
+          .mockResolvedValueOnce(health)
+          .mockResolvedValueOnce({
+            stdout: 'complete\npartial',
+            stderr: '',
+            code: null,
+            signal: 'SIGKILL',
+            error,
+          });
+        const result = await runRipgrep(['needle'], undefined, false, options);
+        expect(result.stdout).toBe('complete');
+        expect(result.incomplete).toBe(true);
+        expect(result.error).toBe(error);
+        expect(result.canceled === true).toBe(code === 'ABORT_ERR');
+        expect(runOwnedCommand).toHaveBeenCalledTimes(2);
+      },
+    );
   });
 
   describe('getBuiltinRipgrep', () => {

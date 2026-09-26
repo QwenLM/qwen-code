@@ -1977,19 +1977,19 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<PromptResponse>;
 
   /** Private owned-worker transport; the caller must hold the Runtime client id. */
-  getManagedToolV2Client?(
+  getManagedToolV2Client(
     sessionId: string,
     context: BridgeClientRequestContext,
   ): ManagedToolV2Client;
 
   /** Read the safe Tool-only capability set pinned by a Managed Runtime. */
-  getManagedRuntimeToolManifest?(
+  getManagedRuntimeToolManifest(
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): Promise<BridgeManagedRuntimeToolManifest>;
 
   /** Execute one safe Tool Call in the Runtime without invoking its model. */
-  executeManagedRuntimeTool?(
+  executeManagedRuntimeTool(
     sessionId: string,
     request: BridgeManagedRuntimeToolExecuteRequest,
     signal: AbortSignal,
@@ -1997,7 +1997,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<BridgeManagedRuntimeToolExecuteResult>;
 
   /** Cancel one matching Tool-only Runtime execution best-effort. */
-  cancelManagedRuntimeTool?(
+  cancelManagedRuntimeTool(
     sessionId: string,
     executionId: string,
     context?: BridgeClientRequestContext,
@@ -2892,6 +2892,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
+
+  /**
+   * User-facing live sessions. Internal Tool Runtime (`managed-gateway`)
+   * workers are omitted so they do not occupy `maxSessions`.
+   */
+  readonly userFacingSessionCount: number;
 
   /**
    * Whether an ACP channel of any engine is currently live (spawned and not

@@ -115,7 +115,6 @@ import {
 } from '../tools/tool-call.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
-import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -675,6 +674,7 @@ describe('Gemini Client (client.ts)', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      makeFileHistorySnapshot: vi.fn().mockResolvedValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getSessionRestoreRuntime: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
@@ -1420,6 +1420,33 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         controller.signal,
       );
+    });
+  });
+
+  describe('rebuildChatFromDurableHistory', () => {
+    it('replaces LlmChat from durable history without SessionStart or /clear', async () => {
+      const first = client.getChat();
+      first.setLastPromptTokenCount(42);
+      const startChat = vi.spyOn(client, 'startChat');
+      const clear = mockConfig.getFileReadCache().clear as ReturnType<
+        typeof vi.fn
+      >;
+
+      await client.rebuildChatFromDurableHistory([
+        { role: 'user', parts: [{ text: 'durable turn' }] },
+      ]);
+
+      const second = client.getChat();
+      expect(second).not.toBe(first);
+      expect(second.getHistory()).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'durable turn' }],
+        },
+      ]);
+      expect(second.getLastPromptTokenCount()).toBe(42);
+      expect(startChat).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
     });
   });
 
@@ -10059,12 +10086,19 @@ hello
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
+      const history: Content[] = [
+        ...Array.from({ length: 50 }, (_, index) => ({
+          role: index % 2 === 0 ? 'user' : 'model',
+          parts: [{ text: `Earlier message ${index}` }],
+        })),
+        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+        { role: 'model', parts: [{ text: 'Done' }] },
+      ];
+      const recentHistory = history.slice(-40);
       const mockChat: Partial<LlmChat> = {
         addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([
-          { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
-          { role: 'model', parts: [{ text: 'Done' }] },
-        ]),
+        getHistory: vi.fn().mockReturnValue(history),
+        getHistoryTailShallow: vi.fn().mockReturnValue(recentHistory),
       };
       client['chat'] = mockChat as LlmChat;
 
@@ -10082,8 +10116,15 @@ hello
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
         history: recordedHistory,
+        extractionHistory: recentHistory,
         config: mockConfig,
       });
+      expect(mockChat.getHistoryTailShallow).toHaveBeenCalledWith(40, true);
+      recentHistory[0].parts![0].text = 'A later turn';
+      expect(
+        mockMemoryManager.scheduleExtract.mock.calls[0][0].extractionHistory[0]
+          .parts[0].text,
+      ).toBe('Earlier message 12');
       expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
@@ -15154,31 +15195,8 @@ Other open files:
       });
     });
 
-    describe('file history snapshot persistence', () => {
-      let recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
-      const latestSnapshot: FileHistorySnapshot = {
-        promptId: 'prompt-uq',
-        timestamp: new Date('2026-06-13T00:00:00.000Z'),
-        trackedFileBackups: {
-          'a.txt': {
-            backupFileName: 'backup-a',
-            version: 1,
-            backupTime: new Date('2026-06-13T00:00:01.000Z'),
-          },
-        },
-      };
-
+    describe('file history checkpoint delegation', () => {
       beforeEach(() => {
-        recordFileHistorySnapshot = vi.fn();
-        mockFileHistoryService.makeSnapshot.mockResolvedValue(undefined);
-        mockFileHistoryService.getSnapshots.mockReturnValue([latestSnapshot]);
-        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
-          recordAttributionSnapshot: vi.fn(),
-          recordFileHistorySnapshot,
-          recordUserMessage: vi.fn(),
-          recordCronPrompt: vi.fn(),
-        } as unknown as ReturnType<Config['getChatRecordingService']>);
-
         mockTurnRunFn.mockReturnValue(
           (async function* () {
             yield { type: LlmEventType.Content, value: 'ok' };
@@ -15203,44 +15221,27 @@ Other open files:
         return chunks;
       }
 
-      it('calls makeSnapshot for UserQuery turns', async () => {
+      it('calls the Config checkpoint for UserQuery turns', async () => {
         await collectStream(SendMessageType.UserQuery, 'prompt-file-history');
 
-        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledWith(
-          'prompt-file-history',
-        );
+        expect(
+          vi.mocked(mockConfig.makeFileHistorySnapshot),
+        ).toHaveBeenCalledWith('prompt-file-history');
       });
 
-      it('records the latest snapshot after a UserQuery snapshot', async () => {
-        await collectStream(SendMessageType.UserQuery);
-
-        expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
-      });
-
-      it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
+      it('does not call the Config checkpoint for ToolResult and Retry turns', async () => {
         await collectStream(SendMessageType.ToolResult, 'prompt-tool-result');
         await collectStream(SendMessageType.Retry, 'prompt-retry');
 
-        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(mockConfig.makeFileHistorySnapshot),
+        ).not.toHaveBeenCalled();
       });
 
-      it('swallows makeSnapshot rejection and still yields content', async () => {
-        mockFileHistoryService.makeSnapshot.mockRejectedValueOnce(
+      it('swallows the Config checkpoint rejection and still yields content', async () => {
+        vi.mocked(mockConfig.makeFileHistorySnapshot).mockRejectedValueOnce(
           new Error('snapshot failed'),
         );
-
-        const chunks = await collectStream(SendMessageType.UserQuery);
-
-        expect(chunks).toContainEqual({
-          type: LlmEventType.Content,
-          value: 'ok',
-        });
-      });
-
-      it('swallows recordFileHistorySnapshot errors and still yields content', async () => {
-        recordFileHistorySnapshot.mockImplementationOnce(() => {
-          throw new Error('record failed');
-        });
 
         const chunks = await collectStream(SendMessageType.UserQuery);
 
@@ -16566,10 +16567,10 @@ Other open files:
       };
 
       const client = new LlmClient(makeMockConfigForShutdown(mgr));
-      // Avoid needing a real chat — the method calls getHistoryShallow().
-      (
-        client as unknown as { getHistoryShallow: () => unknown[] }
-      ).getHistoryShallow = () => [];
+      client['chat'] = {
+        getHistory: () => [],
+        getHistoryTailShallow: () => [],
+      } as unknown as LlmChat;
 
       const runBgTasks = (
         client as unknown as {
@@ -16824,6 +16825,7 @@ function makeMockConfigForShutdown(
     getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
     getAutoSkillEnabled: vi.fn().mockReturnValue(false),
     getModel: vi.fn().mockReturnValue('test-model'),
+    getEffectiveInputModalities: vi.fn().mockReturnValue({}),
     getBaseLlmClient: vi.fn().mockReturnValue({
       generateContent: vi.fn(),
     }),

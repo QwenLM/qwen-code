@@ -8,8 +8,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { globStream, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
+import { ToolNames } from './tool-names.js';
+import { getGlobToolDefinition } from './builtin-tool-definitions.js';
 import {
   resolveAndValidatePath,
   formatDisplayPath,
@@ -17,7 +18,6 @@ import {
   isSubpath,
   unescapePath,
 } from '../utils/paths.js';
-import { getMemoryBaseDir } from '../memory/paths.js';
 import { type Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -132,7 +132,7 @@ class GlobToolInvocation extends BaseToolInvocation<
     );
     if (
       workspaceContext.isPathWithinWorkspace(resolvedPath) ||
-      isSubpath(getMemoryBaseDir(), resolvedPath)
+      isSubpath(this.config.getMemoryBaseDir(), resolvedPath)
     ) {
       return 'allow';
     }
@@ -388,26 +388,15 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   static readonly Name = ToolNames.GLOB;
 
   constructor(private config: Config) {
+    const definition = getGlobToolDefinition();
     super(
-      GlobTool.Name,
-      ToolDisplayNames.GLOB,
-      'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.',
-      Kind.Search,
-      {
-        properties: {
-          pattern: {
-            description: 'The glob pattern to match files against',
-            type: 'string',
-          },
-          path: {
-            description:
-              'The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter "undefined" or "null" - simply omit it for the default behavior. Must be a valid directory path if provided.',
-            type: 'string',
-          },
-        },
-        required: ['pattern'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 

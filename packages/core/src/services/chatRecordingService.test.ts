@@ -2003,6 +2003,105 @@ describe('ChatRecordingService', () => {
       },
     };
 
+    it('acknowledges a strict history batch only after the writer appends its JSONL record', async () => {
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      vi.mocked(mockLease.appendJsonLine).mockImplementationOnce(
+        async (record: unknown) => {
+          markStarted();
+          await writeGate;
+          await jsonl.writeLine('/test/session.jsonl', record);
+        },
+      );
+      let acknowledged = false;
+      const pending = chatRecordingService
+        .recordFileHistorySnapshotBatchStrict([oldSnapshot, failedSnapshot])
+        .then(() => {
+          acknowledged = true;
+        });
+      await started;
+      expect(acknowledged).toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      releaseWrite();
+      await pending;
+      expect(acknowledged).toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        provenance: 'system',
+        subtype: 'file_history_snapshot',
+        sessionId: 'test-session-id',
+        parentUuid: null,
+      });
+      const stored = JSON.parse(JSON.stringify(record.systemPayload));
+      expect(
+        stored.snapshots.map(
+          (snapshot: { promptId: string }) => snapshot.promptId,
+        ),
+      ).toEqual(['p1', 'p2']);
+      expect(stored.snapshots[0]).toEqual({
+        promptId: 'p1',
+        timestamp: '2026-06-13T00:00:00.000Z',
+        trackedFileBackups: {
+          'a.txt': {
+            backupFileName: 'backup-a-v1',
+            version: 1,
+            backupTime: '2026-06-13T00:00:01.000Z',
+          },
+        },
+      });
+      expect(stored.snapshots[1].trackedFileBackups['failed.txt'].failed).toBe(
+        true,
+      );
+      expect(
+        stored.snapshots[1].trackedFileBackups['deleted.txt'].backupFileName,
+      ).toBeNull();
+    });
+
+    it('rejects failed strict history writes and never acknowledges later batches', async () => {
+      const failure = new Error('file history disk full');
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(failure);
+      await expect(
+        chatRecordingService.recordFileHistorySnapshotBatchStrict([
+          oldSnapshot,
+        ]),
+      ).rejects.toBe(failure);
+      await expect(
+        chatRecordingService.recordFileHistorySnapshotBatchStrict([
+          updatedSnapshot,
+        ]),
+      ).rejects.toBe(failure);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      await expect(
+        chatRecordingService.assertCanStartTurn(),
+      ).rejects.toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: failure,
+      });
+    });
+
+    it.each(['inactive', 'closing'] as const)(
+      'rejects strict history batches when the recorder is %s',
+      async (state) => {
+        const recorder =
+          state === 'inactive'
+            ? new ChatRecordingService(mockConfig)
+            : chatRecordingService;
+        if (state === 'closing') recorder.beginClose();
+        await expect(
+          recorder.recordFileHistorySnapshotBatchStrict([oldSnapshot]),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+        expect(jsonl.writeLine).not.toHaveBeenCalled();
+      },
+    );
+
     it('writes a system record with the serialized snapshot payload', async () => {
       chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
       await chatRecordingService.flush();
@@ -3768,6 +3867,38 @@ describe('ChatRecordingService', () => {
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
+  describe('managed session sink binding', () => {
+    it('routes records to the sink and never to the transcript', async () => {
+      const carried: Array<{ type?: string }> = [];
+      chatRecordingService.bindManagedSink({
+        write: async (record) => {
+          carried.push(record);
+        },
+      });
+      vi.mocked(mockLease.appendJsonLine).mockClear();
+
+      chatRecordingService.recordUserMessage([{ text: 'managed hello' }]);
+      await chatRecordingService.flush();
+
+      expect(carried).toHaveLength(1);
+      expect(carried[0].type).toBe('user');
+      // The authoritative log is the only copy, so the lease must stay unused.
+      expect(mockLease.appendJsonLine).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to the transcript when the sink refuses', async () => {
+      chatRecordingService.bindManagedSink({
+        write: () => Promise.reject(new Error('unmapped record shape')),
+      });
+      vi.mocked(mockLease.appendJsonLine).mockClear();
+
+      chatRecordingService.recordUserMessage([{ text: 'refused' }]);
+      await expect(chatRecordingService.flush()).rejects.toThrow(
+        /unmapped record shape/,
+      );
+      expect(mockLease.appendJsonLine).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('Goal turn token ledger', () => {

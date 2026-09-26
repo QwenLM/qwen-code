@@ -37,6 +37,7 @@ function makeSwapSlotConfig(llmClient: SwapSlotClient) {
     getTargetDir: () => '/tmp',
     getLlmClient: () => llmClient,
     startNewSession: vi.fn(),
+    assertCanRestoreSession: vi.fn(),
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
     getBackgroundTaskRegistry: () => ({
       hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -159,6 +160,45 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  it('rejects incompatible ownership before resetting background state or swapping the UI', async () => {
+    resumeMocks.reset();
+    const llmClient = makeSwapSlotClient();
+    const config = makeSwapSlotConfig(llmClient);
+    const background = config.getBackgroundTaskRegistry();
+    vi.spyOn(config, 'getBackgroundTaskRegistry').mockReturnValue(background);
+    vi.mocked(config.assertCanRestoreSession).mockImplementation(() => {
+      throw new Error('session belongs to managed');
+    });
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+    expect(background.reset).not.toHaveBeenCalled();
+    expect(config.startNewSession).not.toHaveBeenCalled();
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledOnce();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('session belongs to managed'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -301,6 +341,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -405,6 +446,7 @@ describe('useResumeCommand', () => {
         initialize: vi.fn().mockResolvedValue(undefined),
       }),
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -486,6 +528,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -572,6 +615,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -670,6 +714,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
@@ -893,6 +938,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
+      assertCanRestoreSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),

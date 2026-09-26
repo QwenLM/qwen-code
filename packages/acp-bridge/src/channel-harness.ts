@@ -15,7 +15,7 @@ import {
   type ChangeSessionCwdRequest,
   type AcpSessionBridge,
 } from './bridgeTypes.js';
-import type { AcpChannelExitInfo } from './channel.js';
+import { AcpChannelTeardownError, type AcpChannelExitInfo } from './channel.js';
 import {
   createChannelLifecycle,
   type HarnessChannel,
@@ -79,6 +79,12 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
   const idleTimers = new Map<HarnessChannel, ReturnType<typeof setTimeout>>();
   const pendingIdleTimers = new Set<HarnessChannel>();
+  // A startup whose resource teardown could not be confirmed permanently
+  // quarantines its engine: a retry could run beside a live orphan.
+  const teardownFailures = new Map<
+    BridgeExecutionEngine | undefined,
+    AcpChannelTeardownError
+  >();
 
   function liveHarnessChannel(
     engine: BridgeExecutionEngine | undefined = defaultEngine,
@@ -320,6 +326,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (isShuttingDown()) {
       throw new Error('AcpSessionBridge is shutting down');
     }
+    const teardownFailure = teardownFailures.get(engine);
+    if (teardownFailure) throw teardownFailure;
     // Skip a channel that's marked dying — its underlying transport is
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
@@ -331,7 +339,13 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (starting) return await starting;
 
     const promise = channelLifecycle.startSpawn(
-      () => channelStartup.start(engine),
+      () =>
+        channelStartup.start(engine).catch((error: unknown) => {
+          if (error instanceof AcpChannelTeardownError) {
+            teardownFailures.set(engine, error);
+          }
+          throw error;
+        }),
       engine,
     );
     try {
@@ -426,6 +440,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     },
     get pendingKeepAliveCount() {
       return pendingKeepAliveDeadlines.size;
+    },
+    get teardownFailures(): readonly AcpChannelTeardownError[] {
+      return [...teardownFailures.values()];
     },
     createConnection: createHarnessConnection,
     withWorktreeInitialization(

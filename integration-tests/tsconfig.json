@@ -158,6 +158,9 @@
       "@qwen-code/acp-bridge/sessionArtifacts": [
         "../packages/acp-bridge/src/sessionArtifacts.ts"
       ],
+      "@qwen-code/acp-bridge/processRegistry": [
+        "../packages/acp-bridge/src/process-registry.ts"
+      ],
       "@qwen-code/acp-bridge/spawnChannel": [
         "../packages/acp-bridge/src/spawnChannel.ts"
       ],

@@ -5321,6 +5321,44 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
+    '%s hides persisted Managed Gateway Runtimes on the generic ACP surface',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          method === 'session/load'
+            ? '550e8400-e29b-41d4-a716-446655440135'
+            : '550e8400-e29b-41d4-a716-446655440136';
+        await writeStoredSession(
+          sessionId,
+          'active',
+          undefined,
+          'managed-gateway',
+        );
+        const loadCount = bridge.loadRequests.length;
+        const resumeCount = bridge.resumeRequests.length;
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 229,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 229,
+          error: expect.any(Object),
+        });
+        reader.close();
+
+        expect(bridge.loadRequests).toHaveLength(loadCount);
+        expect(bridge.resumeRequests).toHaveLength(resumeCount);
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
     '%s rejects ordinary case conflicts before bridge dispatch',
     async (method) => {
       await withRuntimeDir(async () => {

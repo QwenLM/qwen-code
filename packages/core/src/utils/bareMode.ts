@@ -14,6 +14,9 @@ export function isTruthy(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase().trim());
 }
 
-export function isBareMode(cliFlag?: boolean): boolean {
-  return cliFlag === true || isTruthy(process.env[QWEN_CODE_SIMPLE_ENV_VAR]);
+export function isBareMode(
+  cliFlag?: boolean,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return cliFlag === true || isTruthy(environment[QWEN_CODE_SIMPLE_ENV_VAR]);
 }

@@ -42,6 +42,7 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  PromptIdConflictError,
   RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
@@ -956,6 +957,15 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof PromptIdConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'prompt_id_conflict',
+      sessionId: err.sessionId,
+      promptId: err.promptId,
+    });
+    return;
+  }
   if (err instanceof RestoreInProgressError) {
     // An ordinary in-flight restore matches `SessionLimitExceededError`'s 5s
     // hint (above). A fence left behind by a timed-out restore carries a much
@@ -1015,6 +1025,20 @@ export function sendBridgeError(
           errorKind: kind,
           retryable: true,
           ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
+      if (kind === 'managed_session_already_exists') {
+        res.status(409).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
+      if (kind === 'managed_session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
         });
         return;
       }

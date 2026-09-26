@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as fsPromises from 'node:fs/promises';
 import {
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
@@ -37,6 +38,25 @@ import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 
+function executionEngineProof(
+  sessionId: string,
+  engine: ServerConfig.SessionExecutionEngine = 'legacy',
+): ServerConfig.SessionExecutionEngineState {
+  return {
+    status: 'verified',
+    sessionId,
+    engine,
+    recorded: true,
+    snapshot: {
+      filePath: `/mock/${sessionId}.jsonl`,
+      dev: 1,
+      ino: 1,
+      size: 1,
+      lastUpdated: new Date(0).toISOString(),
+    },
+  };
+}
+
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
@@ -49,6 +69,7 @@ const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
+  readExecutionEngine: vi.fn(),
   forkSession: vi.fn(),
   assertLegacySessionExecution: vi.fn(),
   sessionExists: vi.fn(),
@@ -1534,6 +1555,70 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
   });
 
+  it('resolves host model configuration from its frozen environment', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_MODEL', 'ambient-model');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.invalid');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const runtimeEnvironment = {
+      OPENAI_API_KEY: 'workspace-key',
+      OPENAI_MODEL: 'workspace-model',
+      OPENAI_BASE_URL: 'https://workspace.invalid',
+    };
+    const config = await loadCliConfig(
+      {},
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { runtimeEnvironment },
+    );
+    const generation = config.getModelsConfig().getGenerationConfig();
+    expect(generation.apiKey).toBe('workspace-key');
+    expect(generation.model).toBe('workspace-model');
+    expect(generation.baseUrl).toBe('https://workspace.invalid');
+    runtimeEnvironment.OPENAI_API_KEY = 'changed';
+    expect(config.getRuntimeEnvironment()['OPENAI_API_KEY']).toBe(
+      'workspace-key',
+    );
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
+  it.each([true, false])(
+    'uses host workspace trust %s for approval policy instead of ambient trust',
+    async (workspaceTrusted) => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: !workspaceTrusted,
+        source: 'file',
+      });
+      process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        {},
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { runtimeEnvironment: {}, workspaceTrusted },
+      );
+      expect(config.isTrustedFolder()).toBe(workspaceTrusted);
+      expect(config.getApprovalMode()).toBe(
+        workspaceTrusted
+          ? ServerConfig.ApprovalMode.YOLO
+          : ServerConfig.ApprovalMode.DEFAULT,
+      );
+    },
+  );
+
   it('maps --restore-ask-user-question only in ACP mode', async () => {
     process.argv = [
       'node',
@@ -2038,6 +2123,38 @@ describe('loadCliConfig', () => {
       expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBeUndefined();
       expect(errorSpy).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])(
+      'limits process TLS changes to the network owner (%s)',
+      async (processNetworkOwner) => {
+        process.argv = ['node', 'script.js', '--insecure'];
+        const argv = await parseArguments();
+        const config = await loadCliConfig(
+          {},
+          argv,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          {
+            runtimeEnvironment: {},
+            ...(processNetworkOwner
+              ? { processNetworkOwner: true as const }
+              : {}),
+          },
+        );
+        expect(config.getRuntimeEnvironment()['QWEN_TLS_INSECURE']).toBe('1');
+        expect(process.env['QWEN_TLS_INSECURE']).toBe(
+          processNetworkOwner ? '1' : undefined,
+        );
+        expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe(
+          processNetworkOwner ? '0' : undefined,
+        );
+      },
+    );
 
     it('propagates a pre-set QWEN_TLS_INSECURE to NODE_TLS_REJECT_UNAUTHORIZED=0', async () => {
       process.env['QWEN_TLS_INSECURE'] = '1';
@@ -2796,6 +2913,85 @@ describe('loadCliConfig', () => {
     expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
   });
 
+  it.each([false, true])(
+    'rejects managed history before Config construction with recording=%s',
+    async (chatRecording) => {
+      const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+      mockSessionServiceInstance.loadSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+        executionEngine: executionEngineProof(sessionId, 'managed'),
+      });
+      mockConfigConstructorParams.mockClear();
+      await expect(
+        loadCliConfig({}, { resume: sessionId, chatRecording } as CliArgs),
+      ).rejects.toThrow(/belongs to managed/);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+    },
+  );
+
+  it('prechecks a deferred projection owner before constructing Config', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn();
+    mockSessionServiceInstance.readExecutionEngine.mockResolvedValue(
+      executionEngineProof(sessionId, 'managed'),
+    );
+    mockConfigConstructorParams.mockClear();
+    await expect(
+      loadCliConfig(
+        { experimental: { sessionWriterLease: true } },
+        { resume: sessionId, acp: true } as CliArgs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { sessionRestore: { projectionSource } },
+      ),
+    ).rejects.toThrow(/belongs to managed/);
+    expect(mockSessionServiceInstance.readExecutionEngine).toHaveBeenCalledWith(
+      sessionId,
+    );
+    expect(projectionSource).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+  });
+
+  it('uses host-provided ownership for a remote deferred projection', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn();
+    const executionEngine = executionEngineProof(sessionId, 'managed');
+    mockConfigConstructorParams.mockClear();
+
+    const config = await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      { resume: sessionId, acp: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      {
+        managedToolSessionFactory: vi.fn(),
+        sessionRestore: { projectionSource, executionEngine },
+      },
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.readExecutionEngine,
+    ).not.toHaveBeenCalled();
+    expect(projectionSource).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId,
+        sessionRestoreProjectionSource: expect.any(Function),
+      }),
+    );
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
@@ -2808,8 +3004,12 @@ describe('loadCliConfig', () => {
     };
     mockSessionServiceInstance.loadSession.mockImplementation(
       async (sessionId: string) => {
-        if (sessionId === sourceSessionId) return sourceData;
-        return forkedData;
+        const data = sessionId === sourceSessionId ? sourceData : forkedData;
+        return {
+          ...data,
+          conversation: { ...data.conversation, sessionId },
+          executionEngine: executionEngineProof(sessionId),
+        };
       },
     );
 
@@ -2863,6 +3063,7 @@ describe('loadCliConfig', () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
       sessionId,
+      executionEngine: executionEngineProof(sessionId),
       filePath: `/mock/${sessionId}.jsonl`,
       startTime: '2026-08-13T00:00:00.000Z',
       lastUpdated: '2026-08-13T00:00:00.000Z',
@@ -2921,6 +3122,7 @@ describe('loadCliConfig', () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
       sessionId,
+      executionEngine: executionEngineProof(sessionId),
       filePath: `/mock/${sessionId}.jsonl`,
       startTime: '2026-08-13T00:00:00.000Z',
       lastUpdated: '2026-08-13T00:00:00.000Z',
@@ -4668,6 +4870,138 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(config.getMcpServers()).toEqual({
       'settings-server': { url: 'http://localhost:9000' },
     });
+  });
+});
+
+describe('loadCliConfig Managed project configuration', () => {
+  let cwd: string;
+  const originalArgv = process.argv;
+  const managedToolSessionFactory = vi.fn(() => {
+    throw new Error('A configuration read must not create a tool session.');
+  });
+
+  beforeEach(async () => {
+    cwd = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'managed-config-'));
+    process.argv = ['node', 'script.js', '--acp'];
+    mockConfigConstructorParams.mockClear();
+    managedToolSessionFactory.mockClear();
+  });
+
+  afterEach(async () => {
+    process.argv = originalArgv;
+    await fsPromises.rm(cwd, { recursive: true, force: true });
+  });
+
+  it.each(['invalid JSON', 'invalid entry', 'directory'])(
+    'rejects %s before constructing the actual Managed Config',
+    async (kind) => {
+      const file = path.join(cwd, '.mcp.json');
+      if (kind === 'directory') await fsPromises.mkdir(file);
+      else {
+        await fsPromises.writeFile(
+          file,
+          kind === 'invalid JSON'
+            ? '{ invalid'
+            : '{"mcpServers":{"good":{"command":"good"},"bad":null}}',
+        );
+      }
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          {},
+          argv,
+          cwd,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          {
+            managedToolSessionFactory,
+          },
+        ),
+      ).rejects.toThrow(file);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+      expect(managedToolSessionFactory).not.toHaveBeenCalled();
+      expect(await fsPromises.readdir(cwd)).toEqual(['.mcp.json']);
+    },
+  );
+
+  it('retains the legacy warning and valid servers for a partial project file', async () => {
+    await fsPromises.writeFile(
+      path.join(cwd, '.mcp.json'),
+      '{"mcpServers":{"good":{"command":"good"},"bad":null}}',
+    );
+    const config = await loadCliConfig({}, await parseArguments(), cwd);
+    expect(config.getMcpServers()).toEqual({
+      good: { command: 'good', scope: 'project' },
+    });
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('server "bad"'),
+    );
+    expect(managedToolSessionFactory).not.toHaveBeenCalled();
+  });
+
+  it.each(['bare', 'safeMode'] as const)(
+    'keeps %s mode ambient MCP exclusion while preserving explicit session input',
+    async (mode) => {
+      await fsPromises.mkdir(path.join(cwd, '.mcp.json'));
+      const argv = { ...(await parseArguments()), [mode]: true };
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        [],
+        undefined,
+        undefined,
+        { session: { command: 'session-command' } },
+        undefined,
+        true,
+        { managedToolSessionFactory },
+      );
+      expect(config.getMcpServers()).toEqual({
+        session: { command: 'session-command' },
+      });
+      expect(managedToolSessionFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('puts a host that owns the Managed tool factory on the Managed log', async () => {
+    const argv = await parseArguments();
+    await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      argv,
+      cwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { managedToolSessionFactory },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionWriterLeaseEnabled: true,
+        managedSessionLogEnabled: true,
+      }),
+    );
+  });
+
+  it('leaves a host without the Managed tool factory on the legacy log', async () => {
+    const argv = await parseArguments();
+    await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      argv,
+      cwd,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionWriterLeaseEnabled: true,
+        managedSessionLogEnabled: false,
+      }),
+    );
   });
 });
 

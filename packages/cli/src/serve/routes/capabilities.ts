@@ -8,6 +8,7 @@ import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import type { HostedHarnessContract } from '../hosted-harness-contract.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
   advertisedMaxPendingPromptsPerSession,
@@ -16,7 +17,6 @@ import {
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
-  type HostedHarnessCapabilities,
   type ServeOptions,
 } from '../types.js';
 import type {
@@ -39,7 +39,7 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
-  hostedHarness?: HostedHarnessCapabilities;
+  hostedHarnessContract?: HostedHarnessContract;
 }
 
 function workflowsEnabledForRuntime(
@@ -88,7 +88,7 @@ export function registerCapabilitiesRoutes(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
-    const features = deps.hostedHarness
+    const features = deps.hostedHarnessContract
       ? (['hosted_harness_private_v1'] as ReturnType<
           typeof getAdvertisedServeFeatures
         >)
@@ -96,10 +96,12 @@ export function registerCapabilitiesRoutes(
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
-      ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),
       protocolVersions: getServeProtocolVersions(),
       ...(deps.qwenCodeVersion
         ? { qwenCodeVersion: deps.qwenCodeVersion }
+        : {}),
+      ...(deps.hostedHarnessContract
+        ? { hostedHarness: deps.hostedHarnessContract }
         : {}),
       mode: deps.mode,
       features,

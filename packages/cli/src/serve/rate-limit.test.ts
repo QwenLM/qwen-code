@@ -227,6 +227,29 @@ describe('rateLimit', () => {
       expect(res.body).toMatchObject({ tier: 'prompt' });
     });
 
+    it('classifies POST /managed/sessions as prompt tier', () => {
+      const next = vi.fn();
+      limiter.middleware(
+        mockReq({ path: '/managed/sessions' }),
+        mockRes(),
+        next,
+      );
+      expect(next).toHaveBeenCalled();
+      const res = mockRes();
+      limiter.middleware(mockReq({ path: '/managed/sessions' }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'prompt' });
+    });
+
+    it('classifies Managed Gateway follow-ups as prompt tier', () => {
+      const path = '/managed/sessions/session-a/prompts';
+      const next = vi.fn();
+      limiter.middleware(mockReq({ path }), mockRes(), next);
+      expect(next).toHaveBeenCalled();
+      const res = mockRes();
+      limiter.middleware(mockReq({ path }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'prompt' });
+    });
+
     it('classifies POST /session as mutation tier', () => {
       const next = vi.fn();
       limiter.middleware(
@@ -418,6 +441,31 @@ describe('rateLimit', () => {
           ),
       });
       expect(extractor(req)).toBe('cid:my-client');
+    });
+
+    it('isolates Managed Gateway clients by their managed client id', () => {
+      const extractor = createKeyExtractor('127.0.0.1');
+      const req = mockReq({
+        path: '/managed/sessions/session-a/prompts',
+        get: vi
+          .fn()
+          .mockImplementation((h: string) =>
+            h === 'x-qwen-managed-client-id' ? 'managed-client-a' : undefined,
+          ),
+      });
+      expect(extractor(req)).toBe('cid:managed-client-a');
+    });
+
+    it('does not let a managed client id select an ordinary Session bucket', () => {
+      const extractor = createKeyExtractor('127.0.0.1');
+      const req = mockReq({
+        get: vi
+          .fn()
+          .mockImplementation((h: string) =>
+            h === 'x-qwen-managed-client-id' ? 'managed-client-a' : undefined,
+          ),
+      });
+      expect(extractor(req)).toBe('anonymous');
     });
 
     it('falls back to anonymous on loopback without client-id', () => {

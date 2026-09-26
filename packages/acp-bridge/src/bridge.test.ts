@@ -37,6 +37,7 @@ import {
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   PromptDeadlineExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionShellClientRequiredError,
@@ -72,7 +73,7 @@ import {
   EXTERNAL_TOOL_GUARD_READY_META_KEY,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
 } from './externalToolGuard.js';
-import type { ChannelFactory } from './channel.js';
+import { AcpChannelTeardownError, type ChannelFactory } from './channel.js';
 import type {
   BridgeOptions,
   BridgeFreshSessionAdmissionContext,
@@ -180,6 +181,441 @@ describe('sessionCloseDrainBudgetMs', () => {
     for (const outer of [2, 3, 7, 100, 1_000, 30_000]) {
       expect(sessionCloseDrainBudgetMs(outer)).toBeGreaterThanOrEqual(1);
       expect(sessionCloseDrainBudgetMs(outer)).toBeLessThan(outer);
+    }
+  });
+});
+
+describe('managed runtime tool bridge', () => {
+  it('binds every v2 operation to the issued Runtime client and live Session instance', async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> =
+      [];
+    const runtimeSessionId = '550e8400-e29b-41d4-a716-446655440109';
+    const handle = makeChannel({
+      newSessionImpl: () => ({ sessionId: runtimeSessionId }),
+      extMethodImpl: async (method, params) => {
+        calls.push({ method, params });
+        if (
+          [
+            SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BindHistory,
+            SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Checkpoint,
+            SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2History,
+          ].some((candidate) => candidate === method)
+        )
+          return {
+            ownerSessionId: '550e8400-e29b-41d4-a716-446655440108',
+            revision: 0,
+            snapshots: [],
+          };
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'managed-gateway',
+        sourceId: runtimeSessionId,
+      });
+      expect(() =>
+        bridge.getManagedToolV2Client(session.sessionId, {}),
+      ).toThrow(InvalidClientIdError);
+      expect(() =>
+        bridge.getManagedToolV2Client(session.sessionId, {
+          clientId: 'foreign',
+        }),
+      ).toThrow(InvalidClientIdError);
+      const context = { clientId: session.clientId };
+      const client = bridge.getManagedToolV2Client(session.sessionId, context);
+      const identity = {
+        sessionId: session.sessionId,
+        promptId: 'prompt-1',
+        callId: 'call-1',
+        capabilityDigest: 'a'.repeat(64),
+        policyRevision: 'revision-1',
+      };
+      const reference = {
+        ...identity,
+        invocationId: 'invocation-1',
+        argsDigest: 'b'.repeat(64),
+      };
+      const binding = {
+        ownerSessionId: '550e8400-e29b-41d4-a716-446655440108',
+        ownerRuntimeSessionId: session.sessionId,
+        executionCwd: WS_A,
+        snapshots: [],
+      };
+      await client.fileHistory!.bind(binding);
+      await client.fileHistory!.checkpoint('parent-turn');
+      await client.fileHistory!.snapshot();
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BindHistory,
+        params: { sessionId: session.sessionId, binding },
+      });
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Checkpoint,
+        params: { sessionId: session.sessionId, promptId: 'parent-turn' },
+      });
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2History,
+        params: { sessionId: session.sessionId },
+      });
+      await client.manifest();
+      await client.beginTurn(identity);
+      const mediaContext = { inputModalities: { image: true, pdf: false } };
+      await client.prepare(
+        identity,
+        'read_file',
+        { file_path: '/runtime/image.png' },
+        undefined,
+        mediaContext,
+      );
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Prepare,
+        params: {
+          sessionId: session.sessionId,
+          identity,
+          toolName: 'read_file',
+          input: { file_path: '/runtime/image.png' },
+          mediaContext,
+        },
+      });
+      await client.prepare(identity, 'write_file', {
+        file_path: '/scratch/proof',
+        content: 'proof',
+      });
+      const notebookInput = {
+        notebook_path: '/scratch/test.ipynb',
+        cell_id: 'a',
+        new_source: 'proposal',
+      };
+      const modification = { source: reference, newContent: '{"cells":[]}' };
+      await client.prepare(
+        identity,
+        'notebook_edit',
+        notebookInput,
+        modification,
+      );
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Prepare,
+        params: {
+          sessionId: session.sessionId,
+          identity,
+          toolName: 'notebook_edit',
+          input: notebookInput,
+          modification,
+        },
+      });
+      await client.preflight(reference);
+      await client.execute(reference);
+      await client.status(reference, 4);
+      await client.cancel(reference);
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Execute,
+        params: { sessionId: session.sessionId, reference },
+      });
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Status,
+        params: { sessionId: session.sessionId, reference, afterSeq: 4 },
+      });
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      const authorizedCalls = calls.length;
+      context.clientId = 'foreign';
+      await expect(client.fileHistory!.bind(binding)).rejects.toThrow(
+        InvalidClientIdError,
+      );
+      await expect(
+        client.fileHistory!.checkpoint('parent-turn'),
+      ).rejects.toThrow(InvalidClientIdError);
+      await expect(client.fileHistory!.snapshot()).rejects.toThrow(
+        InvalidClientIdError,
+      );
+      expect(calls).toHaveLength(authorizedCalls);
+      context.clientId = session.clientId;
+      await bridge.closeSession(session.sessionId, {
+        clientId: session.clientId,
+      });
+      expect(() => client.execute(reference)).toThrow(SessionNotFoundError);
+      await expect(client.fileHistory!.snapshot()).rejects.toThrow(
+        SessionNotFoundError,
+      );
+      await expect(client.fileHistory!.checkpoint('late')).rejects.toThrow(
+        SessionNotFoundError,
+      );
+      await expect(client.fileHistory!.bind(binding)).rejects.toThrow(
+        SessionNotFoundError,
+      );
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('hides a Managed Runtime Session from the generic Prompt surface', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'managed-gateway',
+        sourceId: SESS_A,
+      });
+
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'must not reach Runtime' }],
+          },
+          new AbortController().signal,
+        ),
+      ).toThrow(SessionNotFoundError);
+      await expect(
+        bridge.continueSession(session.sessionId),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        bridge.generateSessionRecap(session.sessionId),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(() =>
+        bridge.generateSessionContent!(
+          session.sessionId,
+          'must not generate in Runtime',
+          new AbortController().signal,
+        ),
+      ).toThrow(SessionNotFoundError);
+      expect(() =>
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          'must not promote into a Runtime turn',
+        ),
+      ).toThrow(SessionNotFoundError);
+      await expect(
+        bridge.enqueueBackgroundNotification(session.sessionId, {
+          displayText: 'done',
+          modelText: 'must not trigger a Runtime follow-up',
+          taskId: 'task-1',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        bridge.generateSessionBtw(
+          session.sessionId,
+          'must not generate a side answer',
+        ),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        bridge.launchSessionForkAgent(
+          session.sessionId,
+          'must not launch a Runtime agent',
+        ),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        bridge.controlSessionGoal(session.sessionId, {
+          action: 'create',
+          objective: 'must not start a Runtime Goal turn',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await expect(
+        bridge.controlSessionWorkflowTask(session.sessionId, 'task-1', 'rerun'),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('forwards the pinned manifest and Tool execution without a Prompt', async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> =
+      [];
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        calls.push({ method, params });
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolManifest
+        ) {
+          return {
+            capabilityDigest: 'a'.repeat(64),
+            tools: [{ name: 'read_file', description: 'Read a file' }],
+          };
+        }
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute
+        ) {
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: params['toolCallId'],
+                  name: params['toolName'],
+                  response: { output: 'proof' },
+                },
+              },
+            ],
+            executionStatus: 'success',
+          };
+        }
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel
+        ) {
+          return { cancelled: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'managed-gateway',
+        sourceId: SESS_A,
+      });
+      const context = { clientId: session.clientId };
+      await expect(
+        bridge.getManagedRuntimeToolManifest(session.sessionId, context),
+      ).resolves.toMatchObject({
+        capabilityDigest: 'a'.repeat(64),
+        tools: [{ name: 'read_file' }],
+      });
+      const request = {
+        executionId: 'execution-1',
+        turnId: 'turn-1',
+        toolCallId: 'call-1',
+        capabilityDigest: 'a'.repeat(64),
+        toolName: 'read_file',
+        input: { file_path: 'proof.txt' },
+      };
+      await expect(
+        bridge.executeManagedRuntimeTool(
+          session.sessionId,
+          request,
+          new AbortController().signal,
+          context,
+        ),
+      ).resolves.toMatchObject({ executionStatus: 'success' });
+      await expect(
+        bridge.cancelManagedRuntimeTool(
+          session.sessionId,
+          request.executionId,
+          context,
+        ),
+      ).resolves.toEqual({ cancelled: true });
+
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute,
+        params: { ...request, sessionId: session.sessionId },
+      });
+      expect(calls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel,
+        params: {
+          executionId: request.executionId,
+          sessionId: session.sessionId,
+        },
+      });
+      expect(handle.agent.promptCalls).toHaveLength(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('sends a matching cancellation when the Gateway aborts execution', async () => {
+    const execution = deferred<Record<string, unknown>>();
+    const cancelled = deferred<void>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute
+        ) {
+          return execution.promise;
+        }
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel
+        ) {
+          expect(params['executionId']).toBe('execution-cancel');
+          execution.resolve({
+            responseParts: [],
+            executionStatus: 'cancelled',
+          });
+          cancelled.resolve();
+          return { cancelled: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'managed-gateway',
+        sourceId: SESS_A,
+      });
+      const controller = new AbortController();
+      const pending = bridge.executeManagedRuntimeTool(
+        session.sessionId,
+        {
+          executionId: 'execution-cancel',
+          turnId: 'turn-1',
+          toolCallId: 'call-1',
+          capabilityDigest: 'a'.repeat(64),
+          toolName: 'read_file',
+          input: { file_path: 'proof.txt' },
+        },
+        controller.signal,
+        { clientId: session.clientId },
+      );
+      controller.abort(new Error('deadline'));
+
+      await expect(pending).rejects.toThrow('deadline');
+      await cancelled.promise;
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('cancels best-effort when the Tool execution request fails', async () => {
+    const cancelled = deferred<void>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute
+        ) {
+          throw new Error('execution transport timed out');
+        }
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel
+        ) {
+          expect(params['executionId']).toBe('execution-timeout');
+          cancelled.resolve();
+          return { cancelled: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'managed-gateway',
+        sourceId: SESS_A,
+      });
+
+      await expect(
+        bridge.executeManagedRuntimeTool(
+          session.sessionId,
+          {
+            executionId: 'execution-timeout',
+            turnId: 'turn-1',
+            toolCallId: 'call-1',
+            capabilityDigest: 'a'.repeat(64),
+            toolName: 'read_file',
+            input: { file_path: 'proof.txt' },
+          },
+          new AbortController().signal,
+          { clientId: session.clientId },
+        ),
+      ).rejects.toThrow('Internal error');
+      await cancelled.promise;
+    } finally {
+      await bridge.shutdown();
     }
   });
 });
@@ -13833,11 +14269,12 @@ describe('createAcpSessionBridge', () => {
       .spawnOrAttach({ workspaceCwd: WS_A })
       .catch((reason: unknown) => reason);
 
-    expect(error).toBeInstanceOf(AggregateError);
-    expect((error as AggregateError).errors).toEqual([
-      constructionError,
-      teardownError,
-    ]);
+    expect(error).toBeInstanceOf(AcpChannelTeardownError);
+    expect(
+      ((error as AcpChannelTeardownError).cause as AggregateError).errors,
+    ).toEqual([constructionError, teardownError]);
+    await expect(bridge.preheat()).rejects.toBe(error);
+    await expect(bridge.shutdown()).rejects.toBe(error);
     await handle.channel.kill();
   });
 
@@ -16304,6 +16741,54 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('deduplicates a managed Runtime continuation by prompt and checkpoint identity', async () => {
+      const prompt = deferred<PromptResponse>();
+      const extMethod = vi.fn((method: string, params: unknown) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+        ) {
+          expect(params).toMatchObject({
+            checkpointId: 'checkpoint-2',
+            activationId: 'activation-2',
+          });
+          return { accepted: true, interruption: 'interrupted_turn' };
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      });
+      const handle = makeChannel({
+        promptImpl: () => prompt.promise,
+        extMethodImpl: extMethod,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const context = {
+        promptId: 'managed-cont-1',
+        managedRuntimeContinuation: {
+          checkpointId: 'checkpoint-2',
+          activationId: 'activation-2',
+        },
+      };
+
+      const first = await bridge.continueSession(session.sessionId, context);
+      const retry = await bridge.continueSession(session.sessionId, context);
+
+      expect(retry).toEqual(first);
+      expect(extMethod).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await expect(
+        bridge.continueSession(session.sessionId, {
+          ...context,
+          managedRuntimeContinuation: {
+            checkpointId: 'checkpoint-other',
+            activationId: 'activation-2',
+          },
+        }),
+      ).rejects.toBeInstanceOf(PromptIdConflictError);
+
+      prompt.resolve({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
     it('admits only one continuation when concurrent pre-checks both accept', async () => {
       const preChecks = deferred<Record<string, unknown>>();
       const prompt = deferred<PromptResponse>();
@@ -17967,6 +18452,100 @@ describe('createAcpSessionBridge', () => {
         'end:second',
       ]);
 
+      await bridge.shutdown();
+    });
+
+    it('returns the original sendPrompt result for the same promptId', async () => {
+      let calls = 0;
+      let release: (() => void) | undefined;
+      const firstAdmitted = vi.fn();
+      const retryAdmitted = vi.fn();
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            calls += 1;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text' as const, text: 'same' }],
+      };
+
+      const first = bridge.sendPrompt(session.sessionId, req, undefined, {
+        promptId: 'prompt-dup',
+        onPromptAdmitted: firstAdmitted,
+      });
+      const retryAbort = new AbortController();
+      const retry = bridge.sendPrompt(
+        session.sessionId,
+        req,
+        retryAbort.signal,
+        {
+          promptId: 'prompt-dup',
+          onPromptAdmitted: retryAdmitted,
+        },
+      );
+      expect(retry).toBe(first);
+      expect(firstAdmitted).toHaveBeenCalledOnce();
+      expect(retryAdmitted).not.toHaveBeenCalled();
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+
+      retryAbort.abort();
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect(calls).toBe(1);
+      release!();
+      await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(retry).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(calls).toBe(1);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects a reused promptId with a different payload', async () => {
+      let release: (() => void) | undefined;
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'original' }],
+        },
+        undefined,
+        { promptId: 'prompt-dup' },
+      );
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'other' }],
+          },
+          undefined,
+          { promptId: 'prompt-dup' },
+        ),
+      ).toThrow(PromptIdConflictError);
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release!();
+      await first;
       await bridge.shutdown();
     });
 
@@ -25931,6 +26510,7 @@ describe('createAcpSessionBridge', () => {
             operation: 'branch',
             workspaceCwd: WS_A,
             sourceSessionId: parent.sessionId,
+            sourceType: 'side_task',
           },
         ]);
         expect(releases).toEqual(contexts);
@@ -30519,6 +31099,44 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not count managed-gateway Tool Runtime sessions toward maxSessions', async () => {
+      let n = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxSessions: 1,
+        sessionScope: 'thread',
+      });
+
+      try {
+        const user = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(user.attached).toBe(false);
+        expect(bridge.sessionCount).toBe(1);
+
+        const runtime = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sourceType: 'managed-gateway',
+          sourceId: user.sessionId,
+        });
+        expect(runtime.attached).toBe(false);
+        expect(runtime.sourceType).toBe('managed-gateway');
+        expect(bridge.sessionCount).toBe(2);
+        expect(bridge.userFacingSessionCount).toBe(1);
+
+        await expect(
+          bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ).rejects.toMatchObject({
+          name: 'SessionLimitExceededError',
+          limit: 1,
+        });
+        expect(bridge.sessionCount).toBe(2);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('attach to an existing session under single scope is NOT counted toward the cap', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({
@@ -31770,6 +32388,48 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('updateSessionMetadata', () => {
+    it('acknowledges a Hosted title only after the child persists it', async () => {
+      const persisted = deferred<{ persisted: boolean }>();
+      const calls: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                calls.push(params);
+                return persisted.promise;
+              }
+              return {};
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const committing = bridge.commitSessionTitle!(
+        session.sessionId,
+        'Durable title',
+      );
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      persisted.resolve({ persisted: true });
+      await expect(committing).resolves.toMatchObject({
+        displayName: 'Durable title',
+      });
+      expect(calls[0]).toMatchObject({
+        sessionId: session.sessionId,
+        displayName: 'Durable title',
+        titleSource: 'manual',
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        displayName: 'Durable title',
+      });
+
+      await bridge.shutdown();
+    });
+
     it('publishes session_metadata_updated event', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

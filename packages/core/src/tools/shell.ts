@@ -11,7 +11,12 @@ import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { ToolNames } from './tool-names.js';
+import {
+  DEFAULT_SHELL_OUTPUT_THRESHOLD,
+  getShellToolDefinition,
+  projectShellToolClassifierInput,
+} from './builtin-tool-definitions.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   FileDiff,
@@ -31,7 +36,6 @@ import {
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
-  Kind,
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
@@ -84,10 +88,9 @@ import {
   getShellConfiguration,
   hasShellSubstitution,
   SHELL_SELF_KILL_REJECTION,
-  type ShellConfiguration,
-  type ShellType,
   splitCommands,
   stripShellWrapper,
+  type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { parse, type ControlOperator } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -108,10 +111,6 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
-const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
-// Separator between the formatted body and each appended metadata string
-// (long-run advisory, attribution warning). The reservation math and the
-// append loop share it so the two cannot drift.
 const APPENDED_METADATA_SEPARATOR = '\n\n';
 
 function getShellOutputThreshold(config: Config): number {
@@ -1961,46 +1960,27 @@ export class ShellToolInvocation extends BaseToolInvocation<
       };
     }
     return {
+      executionStatus: 'cancelled',
       llmContent: 'Command was cancelled by user before it could complete.',
       returnDisplay: 'Command cancelled by user.',
     };
   }
 
-  private waitForSedOperation<T>(
+  private async waitForSedOperation<T>(
     operation: () => Promise<T>,
     signal: AbortSignal,
   ): Promise<T> {
-    if (signal.aborted) {
-      return Promise.reject(new SedEditCancelledError());
+    if (signal.aborted) throw new SedEditCancelledError();
+    try {
+      // Filesystem reads and checkpoint writes cannot be aborted. Retain their
+      // ownership until they finish, then honor cancellation before target I/O.
+      const result = await operation();
+      if (signal.aborted) throw new SedEditCancelledError();
+      return result;
+    } catch (error) {
+      if (signal.aborted) throw new SedEditCancelledError();
+      throw error;
     }
-
-    return new Promise<T>((resolve, reject) => {
-      const onAbort = () => {
-        reject(new SedEditCancelledError());
-      };
-      const removeAbortListener = () => {
-        signal.removeEventListener('abort', onAbort);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      let operationPromise: Promise<T>;
-      try {
-        operationPromise = operation();
-      } catch (err) {
-        removeAbortListener();
-        reject(err);
-        return;
-      }
-      operationPromise.then(
-        (value) => {
-          removeAbortListener();
-          resolve(value);
-        },
-        (err: unknown) => {
-          removeAbortListener();
-          reject(err);
-        },
-      );
-    });
   }
 
   private async executeSedEdit(
@@ -2378,6 +2358,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     if (signal.aborted) {
       return {
+        executionStatus: 'not_started',
         llmContent: 'Command was cancelled by user before it could start.',
         returnDisplay: 'Command cancelled by user.',
       };
@@ -3336,6 +3317,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
+      ...(result.executionMethod === 'none'
+        ? { executionStatus: 'not_started' as const }
+        : result.aborted && !timeoutSummary
+          ? { executionStatus: 'cancelled' as const }
+          : {}),
     };
   }
 
@@ -5527,188 +5513,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
-function getExecutableBasename(executable: string): string {
-  return path.basename(path.win32.basename(executable));
-}
-
-function getShellDisplayName({
-  executable,
-  shell,
-}: ShellConfiguration): string {
-  switch (shell) {
-    case 'cmd':
-      return 'cmd.exe';
-    case 'powershell': {
-      const basename = getExecutableBasename(executable).toLowerCase();
-      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
-    }
-    case 'bash':
-      return 'bash';
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
-function getShellExecutionWrapper(
-  shellConfiguration = getShellConfiguration(),
-): string {
-  const executable = getShellDisplayName(shellConfiguration);
-  return `${executable} ${shellConfiguration.argsPrefix.join(' ')} <command>`;
-}
-
-function getShellQuotingGuidance(shell: ShellType): string {
-  switch (shell) {
-    case 'bash':
-      return `- **Shell argument quoting and special characters**: The active shell is Bash. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent Bash from misinterpreting them as shell syntax:
-  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
-  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
-  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
-    \`\`\`bash
-    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
-    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
-    HEREDOC
-    )"
-    \`\`\`
-  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
-  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.`;
-    case 'powershell':
-      return `- **Shell argument quoting and special characters**: The active shell is PowerShell. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent PowerShell from misinterpreting them as shell syntax:
-  - **Single quotes** \`'...'\` pass everything literally. To include a literal single quote, double it (e.g. \`'it''s'\`).
-  - **Double quotes** \`"..."\` expand variables and subexpressions; use them only when that expansion is intended.
-  - Escape PowerShell metacharacters with the backtick escape character when they must be literal.
-  - For large, multi-line text, prefer a single-quoted here-string (\`@' ... '@\`) so content is not interpolated.
-  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
-    case 'cmd':
-      return `- **Shell argument quoting and special characters**: The active shell is cmd.exe. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent cmd.exe from misinterpreting them as shell syntax:
-  - Use double quotes around arguments that contain spaces or metacharacters.
-  - Escape literal cmd.exe metacharacters such as \`&\`, \`|\`, \`<\`, \`>\`, and \`^\` with caret (\`^\`).
-  - Single quotes do not quote arguments in cmd.exe.
-  - Be careful with \`%VAR%\` environment-variable expansion; avoid literal \`%...%\` unless expansion is intended.
-  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
-function getShellCommandSequencingGuidance({
-  executable,
-  shell,
-}: ShellConfiguration): string {
-  const independentGuidance =
-    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
-
-  switch (shell) {
-    case 'bash':
-      return `- When issuing multiple commands:
-  ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
-  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
-  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
-    case 'cmd':
-      return `- When issuing multiple commands:
-  ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
-  - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
-  - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
-    case 'powershell': {
-      const executableBasename =
-        getExecutableBasename(executable).toLowerCase();
-      if (executableBasename === 'pwsh.exe') {
-        return `- When issuing multiple commands:
-  ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
-  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
-  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
-      }
-
-      return `- When issuing multiple commands:
-  ${independentGuidance}
-  - Windows PowerShell does not support '&&'. If commands must run sequentially and stop on failure, use explicit PowerShell control flow (for example, check \`$LASTEXITCODE\` before running the next external command) or run the next command only after seeing the previous run_shell_command result.
-  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
-  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
-    }
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
-function getShellToolDescription(
-  shellConfiguration: ShellConfiguration,
-): string {
-  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
-  const isWindows = os.platform() === 'win32';
-  const processGroupNote = isWindows
-    ? ''
-    : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
-  const processStopNote =
-    '\n  - To stop a background command started by this tool, use `task_stop` when a task id is available. Do not use broad process-name kills such as `kill $(pgrep node)`, `pkill node`, or `killall node`; use a specific PID or process group id where supported.';
-
-  return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
-
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
-
-**Usage notes**:
-- The command argument is required.
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
-- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-
-- Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-  - File search: Use ${ToolNames.GLOB} (NOT find or ls)
-  - Content search: Use ${ToolNames.GREP} (NOT grep or rg)
-  - Read files: Use ${ToolNames.READ_FILE} (NOT cat/head/tail)
-  - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
-  - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
-  - Communication: Output text directly (NOT echo/printf)
-${getShellQuotingGuidance(shellConfiguration.shell)}
-${getShellCommandSequencingGuidance(shellConfiguration)}
-- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of \`cd\`. You may use \`cd\` if the User explicitly requests it.
-  <good-example>
-  pytest /foo/bar/tests
-  </good-example>
-  <bad-example>
-  cd /foo/bar && pytest tests
-  </bad-example>
-
-**Background vs Foreground Execution:**
-- You should decide whether commands should run in background or foreground based on their nature:
-- Use background execution (is_background: true) for:
-  - Long-running development servers: \`npm run start\`, \`npm run dev\`, \`yarn dev\`, \`bun run start\`
-  - Build watchers: \`npm run watch\`, \`webpack --watch\`
-  - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
-  - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
-  - Any command expected to run indefinitely until manually stopped
-${processGroupNote}${processStopNote}
-- Use foreground execution (is_background: false) for:
-  - One-time commands: \`ls\`, \`cat\`, \`grep\`
-  - Build commands: \`npm run build\`, \`make\`
-  - Installation commands: \`npm install\`, \`pip install\`
-  - Git operations: \`git commit\`, \`git push\`
-  - Test runs: \`npm test\`, \`pytest\`
-`;
-}
-
-function getCommandDescription(shellConfiguration: ShellConfiguration): string {
-  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
-  switch (shellConfiguration.shell) {
-    case 'cmd':
-      return `Exact cmd.exe command to execute as \`${executionWrapper}\``;
-    case 'powershell':
-      return `Exact PowerShell command to execute as \`${executionWrapper}\``;
-    case 'bash':
-      return `Exact bash command to execute as \`${executionWrapper}\``;
-    default: {
-      const _exhaustive: never = shellConfiguration.shell;
-      return _exhaustive;
-    }
-  }
-}
-
 export class ShellTool extends BaseDeclarativeTool<
   ShellToolParams,
   ToolResult
@@ -5724,44 +5528,18 @@ export class ShellTool extends BaseDeclarativeTool<
       config.getExecutionEnvironment?.() instanceof SshExecutionEnvironment
         ? { executable: 'bash', argsPrefix: ['-c'], shell: 'bash' }
         : getShellConfiguration();
+    const definition = getShellToolDefinition({
+      shellConfiguration,
+      platform: os.platform(),
+    });
     super(
-      ShellTool.Name,
-      ToolDisplayNames.SHELL,
-      getShellToolDescription(shellConfiguration),
-      Kind.Execute,
-      {
-        type: 'object',
-        properties: {
-          command: {
-            type: 'string',
-            description: getCommandDescription(shellConfiguration),
-          },
-          is_background: {
-            type: 'boolean',
-            description:
-              'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
-          },
-          timeout: {
-            type: 'integer',
-            minimum: 1,
-            maximum: 600000,
-            description: 'Optional timeout in milliseconds (max 600000)',
-          },
-          description: {
-            type: 'string',
-            description:
-              'Brief description of the command for the user. Be specific and concise. Ideally a single sentence. Can be up to 3 sentences for clarity. No line breaks.',
-          },
-          directory: {
-            type: 'string',
-            description:
-              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
-          },
-        },
-        required: ['command'],
-      },
-      false, // output is not markdown
-      true, // output can be updated
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 
@@ -5856,10 +5634,6 @@ export class ShellTool extends BaseDeclarativeTool<
   override toAutoClassifierInput(
     params: ShellToolParams,
   ): Record<string, unknown> {
-    // The full command is required for safety classification — do not redact.
-    return {
-      command: params.command,
-      cwd: params.directory ?? this.config.getTargetDir(),
-    };
+    return projectShellToolClassifierInput(params, this.config.getTargetDir());
   }
 }

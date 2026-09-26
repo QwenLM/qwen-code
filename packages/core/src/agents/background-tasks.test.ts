@@ -353,6 +353,53 @@ describe('BackgroundTaskRegistry', () => {
       };
     }
 
+    it('waits for retired cleanup and refuses a replacement until it settles', async () => {
+      let finish!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const first = { continue: vi.fn(() => true), dispose: vi.fn(() => gate) };
+      registry.registerResidentAgent('resident-1', first);
+      registry.disposeResidentAgent('resident-1');
+      let drained = false;
+      const pending = registry.awaitResidentDisposal('resident-1')!.then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      expect(() =>
+        registry.registerResidentAgent('resident-1', makeResident()),
+      ).toThrow('still disposing');
+      expect(first.dispose).toHaveBeenCalledOnce();
+      finish();
+      await pending;
+      expect(() =>
+        registry.registerResidentAgent('resident-1', makeResident()),
+      ).not.toThrow();
+    });
+
+    it('retains rejected cleanup so cold resume can retry the same resident', async () => {
+      const resident = {
+        continue: vi.fn(() => true),
+        dispose: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('not drained'))
+          .mockResolvedValue(undefined),
+      };
+      registry.registerResidentAgent('resident-1', resident);
+      await expect(
+        registry.awaitResidentDisposal('resident-1'),
+      ).rejects.toThrow('not drained');
+      expect(() =>
+        registry.registerResidentAgent('resident-1', makeResident()),
+      ).toThrow('still disposing');
+      await registry.awaitResidentDisposal('resident-1');
+      expect(resident.dispose).toHaveBeenCalledTimes(2);
+      expect(() =>
+        registry.registerResidentAgent('resident-1', makeResident()),
+      ).not.toThrow();
+    });
+
     it('continues only completed resident agents and supports guarded unregister', async () => {
       registry.register(makeRegistration('resident-1'));
       const resident = makeResident();

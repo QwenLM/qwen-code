@@ -138,6 +138,14 @@ export default defineConfig({
           __dirname,
           '../acp-bridge/src/bridge.ts',
         ),
+        // Must stay source-resolved alongside `/bridge`: a dist copy would
+        // give `AcpChannelTeardownError` a second class identity, and the
+        // bridge's `instanceof` checks on a factory-raised teardown error
+        // would quietly stop matching.
+        '@qwen-code/acp-bridge/channel': path.resolve(
+          __dirname,
+          '../acp-bridge/src/channel.ts',
+        ),
         '@qwen-code/acp-bridge/spawnChannel': path.resolve(
           __dirname,
           '../acp-bridge/src/spawnChannel.ts',
