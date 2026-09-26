@@ -766,7 +766,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       {
         type: 'error',
         text: t(
-          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          process.platform === 'linux'
+            ? 'Clipboard image paste is unavailable on Linux because no clipboard tool (wl-clipboard or xclip) was found. Install one (e.g. `sudo apt install wl-clipboard`) or export DISPLAY/WAYLAND_DISPLAY.'
+            : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
         ),
       },
       Date.now(),
