@@ -311,6 +311,50 @@ describe('modelCommand', () => {
     expect(recordSessionModel).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['configured model ID', 'coder-model(qwen-oauth)'],
+    ['runtime snapshot ID', '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)'],
+  ])(
+    'blocks typed selections of discontinued qwen-oauth %s',
+    async (_description, modelId) => {
+      const setValue = vi.fn();
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      const getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([{ id: 'coder-model', label: 'coder-model' }]);
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: `/model ${modelId}`,
+          name: 'model',
+          args: modelId,
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAvailableModelsForAuthType,
+            switchModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, modelId);
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+      });
+      expect(getAvailableModelsForAuthType).not.toHaveBeenCalled();
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(setValue).not.toHaveBeenCalled();
+    },
+  );
+
   it('records the session model in ACP mode after switching', async () => {
     const setValue = vi.fn();
     let currentModel = 'old-model';
