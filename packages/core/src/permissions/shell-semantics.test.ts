@@ -755,6 +755,124 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  // Only the escape-everywhere reading sees a `;` between the two quote
+  // fragments; bash concatenates them into one word, so the ` & ` is the real
+  // terminator and the backgrounded `cd` never moves the parent shell. Neither
+  // reading owns that decision, so the write is attributed to both cwds and the
+  // protected path stays covered (#12246).
+  it('keeps both cwds when one reading alone ends the `cd`', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/x/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  // bash opens a `cd`'s redirections before it runs, in the cwd it starts
+  // from, whether the `cd` succeeds, fails, or runs in a subshell.
+  it.each([
+    [`echo 'a\\' ; cd sub > protected.txt`],
+    ['cd sub > protected.txt & echo done'],
+    ['cd sub > protected.txt && echo done'],
+  ])("reports the `cd` segment's own redirect in %s", (command) => {
+    expect(
+      extractShellOperationsAcrossCommand(command, '/repo'),
+    ).toContainEqual(
+      expect.objectContaining({
+        virtualTool: 'write_file',
+        filePath: '/repo/protected.txt',
+      }),
+    );
+  });
+
+  // Past a boundary only one reading found, the split can cut through a
+  // wrapper body bash reads as one word, so its inner `cd` is lost; the write
+  // must escalate instead of resolving to a confident wrong path.
+  it.each([
+    [`echo 'a\\' ; bash -lc 'cd sub && echo {} > settings.json'`],
+    [`echo 'a\\' ; bash -lc 'echo {} > settings.json'`],
+    [`echo done # note 'a\\''\nbash -lc 'cd sub && echo {} > settings.json'`],
+  ])(
+    'marks paths after a one-reading boundary cwd-unknown in %j',
+    (command) => {
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        {
+          virtualTool: 'write_file',
+          filePath: '/repo/settings.json',
+          cwdUnknown: true,
+          pathMayDependOnCwd: true,
+        },
+      ]);
+    },
+  );
+
+  describe('candidate cwds after an undecided `cd`', () => {
+    const undecidedCd = (dir: string) => `cd '${dir}\\'';echo ' & `;
+    const paths = (command: string) =>
+      extractShellOperationsAcrossCommand(command, '/repo')
+        .map((op) => op.filePath)
+        .sort();
+
+    it('reports a wrapped write under every candidate', () => {
+      expect(
+        paths(
+          `cd .qwen ; ${undecidedCd('x')}bash -lc 'echo {} > settings.json'`,
+        ),
+      ).toEqual(['/repo/.qwen/settings.json', '/repo/.qwen/x/settings.json']);
+    });
+
+    it('keeps mixed outcomes, not only the two extremes', () => {
+      // bash moves into `a\` twice and backgrounds the last `cd`: neither the
+      // face-value cwd nor the undecided-skipped one is where the write lands.
+      expect(
+        paths(`cd 'a\\' ; cd 'a\\' ; ${undecidedCd('b')}echo {} > f`),
+      ).toContain('/repo/a/a/f');
+    });
+
+    it('dedupes candidates and operations that coincide', () => {
+      // Only every other unit splits undecided, and each undecided `cd x`
+      // re-reaches a directory an earlier one already did; those collapse.
+      expect(paths(`cd /r ; ${undecidedCd('x').repeat(7)}echo {} > f`)).toEqual(
+        ['/r/f', '/r/x/f', '/r/x/x/f', '/r/x/x/x/f', '/r/x/x/x/x/f'],
+      );
+      expect(paths(`cd /r ; ${undecidedCd('x')}echo {} > /abs/f`)).toEqual([
+        '/abs/f',
+      ]);
+    });
+
+    // Padding with undecided `cd`s overflows the cap; the cwd bash really
+    // ends up in must survive it. Either every padding `cd` ran in a subshell
+    // or the operators mean what they say.
+    it.each([
+      [
+        `cd .qwen ; ${[...'abcdefgh'].map(undecidedCd).join('')}echo {} > settings.json`,
+      ],
+      [
+        `${[...'0123456'].map((i) => `cd 'd${i}\\' & `).join('')}cd .qwen ; echo {} > settings.json`,
+      ],
+    ])('keeps the load-bearing cwd past the cap in %j', (command) => {
+      const ops = extractShellOperationsAcrossCommand(command, '/repo');
+      expect(ops.length).toBeLessThanOrEqual(8);
+      expect(ops.map((op) => op.filePath)).toContain(
+        '/repo/.qwen/settings.json',
+      );
+    });
+  });
+
   it('does not mark later paths uncertain for a backgrounded dynamic `cd`', () => {
     // The foreground form below cannot know where it landed; the backgrounded
     // one can, because it did not move the cwd at all.
