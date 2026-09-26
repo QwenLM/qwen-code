@@ -402,6 +402,35 @@ describe('cache-commit', () => {
     }
   });
 
+  it('promotes an unanchorable local round as its ledger, and says why (#12657)', () => {
+    // The capture's shape when it could not anchor its round at all (the
+    // tree moved mid-capture, a visibility bit, a path dropped out while on
+    // disk): subject fields, a `ledger-` state id, and the reason.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'local',
+        stateId: 'ledger-abc',
+        ledgerOnly:
+          'the working tree changed while the capture was being hashed',
+        lastModelId: undefined,
+      },
+      { round: 3, findings: [{ id: 'R3-1', severity: 'Critical' }] },
+    );
+    argv['out'] = join(dir, 'cache/local.json');
+    run({ ...argv, stateId: 'ledger-abc' });
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['findings']).toEqual([{ id: 'R3-1', severity: 'Critical' }]);
+    expect('ledgerOnly' in cache).toBe(false);
+    expect('stateId' in cache).toBe(false);
+    expect(stdoutLines.join('\n')).toContain(
+      'the findings ledger only: the working tree changed',
+    );
+  });
+
   it('promotes the LEDGER alone from a candidate with no identity (R24-1)', () => {
     // A capture under a runtime that published no identity omits the key.
     // A local or file round posts no marker, so this promotion is the ONLY

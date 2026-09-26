@@ -41,6 +41,7 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.TODO_WRITE]: 'deny',
   [ToolNames.MEMORY]: 'deny',
   [ToolNames.AGENT]: 'deny',
+  [ToolNames.ADVISOR]: 'deny',
   [ToolNames.SKILL]: 'allow',
   [ToolNames.EXIT_PLAN_MODE]: 'deny',
   [ToolNames.ENTER_PLAN_MODE]: 'deny',

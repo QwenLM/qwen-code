@@ -602,19 +602,19 @@ mechanism, and it is why the guards are not optional.
 
 ### Admission table (under the workspace mutation lock)
 
-| Outcome                        | When                                                                            | Why it exists                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `skip: agent_unknown`          | an explicit `@token` resolved to no roster identity, or an assignee disappeared | a typo must be visible and must not fall back to the assignee                    |
-| `skip: agent_disabled`         | agent exists but is off                                                         | keeps identity and history without taking work                                   |
-| `skip: thread_done`            | thread is finished                                                              | a late post must not silently restart spend                                      |
-| `skip: self_trigger`           | the target wrote the post                                                       | otherwise one "I'm done" becomes an infinite self-conversation                   |
-| `skip: no_target`              | no explicit mention and no assignee                                             | an accepted-looking post must not disappear silently                             |
-| `skip: turn_budget_exhausted`  | agent-caused trigger, this thread's turn budget is spent                        | the local loop breaker; only a human post on this thread resets it               |
-| `skip: token_budget_exhausted` | the root tree's accounted token budget is spent                                 | money gate for human and agent triggers; never reset; in-flight policy is §9.5   |
-| `skip: queue_full`             | the agent's backlog is at its limit                                             | makes real throughput visible instead of accruing a stale queue                  |
-| `coalesce (queued)`            | the agent has an unstarted run here                                             | one run answers both posts instead of two racing                                 |
-| `coalesce (running)`           | the agent is executing **this** thread                                          | records intent to attempt mid-run delivery; agent-caused delivery charges a turn |
-| `dispatch`                     | none of the above                                                               | book a queued run                                                                |
+| Outcome                        | When                                                                            | Why it exists                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `skip: agent_unknown`          | an explicit `@token` resolved to no roster identity, or an assignee disappeared | a typo must be visible and must not fall back to the assignee                                            |
+| `skip: agent_disabled`         | agent exists but is off                                                         | keeps identity and history without taking work                                                           |
+| `skip: thread_done`            | thread is finished                                                              | a late post must not silently restart spend                                                              |
+| `skip: self_trigger`           | the target wrote the post                                                       | otherwise one "I'm done" becomes an infinite self-conversation                                           |
+| `skip: no_target`              | no explicit mention and no assignee                                             | an accepted-looking post must not disappear silently                                                     |
+| `skip: turn_budget_exhausted`  | agent-caused trigger, this thread's turn budget is spent                        | the local loop breaker; only a human post on this thread resets it                                       |
+| `skip: token_budget_exhausted` | agent-caused trigger, the root tree's accounted token budget is spent           | blocks new agent-triggered work; human posts bypass it without resetting usage; in-flight policy is §9.5 |
+| `skip: queue_full`             | the agent's backlog is at its limit                                             | makes real throughput visible instead of accruing a stale queue                                          |
+| `coalesce (queued)`            | the agent has an unstarted run here                                             | one run answers both posts instead of two racing                                                         |
+| `coalesce (running)`           | the agent is executing **this** thread                                          | records intent to attempt mid-run delivery; agent-caused delivery charges a turn                         |
+| `dispatch`                     | none of the above                                                               | book a queued run                                                                                        |
 
 Explicit routing is a target-resolution rule, not a synthetic skip outcome: the
 presence of any `@token`, including an unknown one, suppresses assignee fallback.

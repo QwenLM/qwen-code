@@ -2036,7 +2036,7 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(7);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });

@@ -148,6 +148,8 @@ export function routeDialogToOpenTui(
         mode: 'primary',
         ...(result.persistScope ? { persistScope: result.persistScope } : {}),
       };
+    case 'advisor-model':
+      return { dialog: 'model', mode: 'advisor' };
     case 'fast-model':
       return {
         dialog: 'model',
@@ -242,7 +244,11 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     results: ['dialog', 'message'],
     dialogs: ['approval-mode'],
   },
-  { name: 'advisor', results: ['message'] },
+  {
+    name: 'advisor',
+    results: ['dialog', 'message'],
+    dialogs: ['advisor-model'],
+  },
   {
     name: 'auth',
     altNames: ['connect', 'login'],
