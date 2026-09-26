@@ -210,6 +210,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
+  ToolRegistryMock.prototype.stop = vi.fn().mockResolvedValue(undefined);
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
@@ -1288,6 +1289,71 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('memory change listener registration', () => {
+    it('releases its memory listener after ordinary shutdown', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const hooks = config.getHookSystem()!;
+      vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+      const fire = vi.fn().mockResolvedValue({});
+      hooks.fireMemoryChangedEvent = fire;
+      const notify = () =>
+        notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+      try {
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+        await config.shutdown({ shutdownTelemetry: false });
+        await notify();
+        expect(fire).toHaveBeenCalledOnce();
+      } finally {
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+      }
+    });
+
+    it('does not register a memory listener after shutdown during hook initialization', async () => {
+      const config = new Config({ ...baseParams });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(HookSystem.prototype.initialize).mockReturnValueOnce(gate);
+      const internal = config as unknown as {
+        shutdownResourcesOnce: () => Promise<void>;
+      };
+      const cleanup = vi.spyOn(internal, 'shutdownResourcesOnce');
+      const initialize = config.initialize();
+      try {
+        await vi.waitFor(() => expect(config.getHookSystem()).toBeDefined());
+        await config.shutdown({ shutdownTelemetry: false });
+        release();
+        await initialize;
+        await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+        await cleanup.mock.results[0].value;
+
+        const hooks = config.getHookSystem()!;
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+        const fire = vi.fn().mockResolvedValue({});
+        hooks.fireMemoryChangedEvent = fire;
+        expect(config.getMemoryHookDeliveryId()).toBeDefined();
+        await notifyMemoryEnabledChange(
+          config.getProjectRoot(),
+          true,
+          config.getMemoryHookDeliveryId(),
+        );
+        expect(fire).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await initialize;
+        await config.shutdown({ shutdownTelemetry: false });
+        vi.mocked(HookSystem.prototype.hasHooksForEvent).mockReturnValue(false);
+        cleanup.mockRestore();
+      }
+    });
+
     it('assigns a hooks-disabled Config a delivery id that matches no registration', async () => {
       const config = new Config({ ...baseParams, disableAllHooks: true });
       await config.initialize();

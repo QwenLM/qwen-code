@@ -3927,19 +3927,22 @@ export class Config {
     if (!options?.skipHooks && !this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
-      this.unregisterMemoryChanged?.();
-      const memoryHookRegistration = registerMemoryChangedListener(
-        this.getProjectRoot(),
-        async (change, signal) => {
-          const hookSystem = this.hookSystem;
-          if (!hookSystem?.hasHooksForEvent('MemoryChanged')) {
-            return;
-          }
-          await hookSystem.fireMemoryChangedEvent(change, signal);
-        },
-      );
-      this.memoryHookDeliveryId = memoryHookRegistration.id;
-      this.unregisterMemoryChanged = memoryHookRegistration;
+      // Best-effort shutdown can finish while hook initialization is pending.
+      if (!this.shutdownRequested) {
+        this.unregisterMemoryChanged?.();
+        const memoryHookRegistration = registerMemoryChangedListener(
+          this.getProjectRoot(),
+          async (change, signal) => {
+            const hookSystem = this.hookSystem;
+            if (!hookSystem?.hasHooksForEvent('MemoryChanged')) {
+              return;
+            }
+            await hookSystem.fireMemoryChangedEvent(change, signal);
+          },
+        );
+        this.memoryHookDeliveryId = memoryHookRegistration.id;
+        this.unregisterMemoryChanged = memoryHookRegistration;
+      }
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
