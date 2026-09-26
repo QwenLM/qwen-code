@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -833,8 +834,30 @@ class HttpRuntimeTransportTest {
                 json(200, JSON.writeValueAsBytes(fractionalProtocol)));
         replies.put("rounded version",
                 json(200, JSON.writeValueAsBytes(roundedProtocol)));
+        replies.put("rounded-up version", json(200,
+                successBodyWith("protocolVersion", "2.0000000000000001")));
+        replies.put("exponent rounded-up version", json(200,
+                successBodyWith("protocolVersion", "0.20000000000000001E+1")));
+        replies.put("long-mantissa version", json(200,
+                successBodyWith("protocolVersion", "0.020000000000000000000E1")));
+        replies.put("suffixed version", json(200,
+                successBodyWith("protocolVersion", "2.0000000000000001D")));
+        replies.put("wrapped version", json(200,
+                successBodyWith("protocolVersion", "258B")));
         replies.put("epoch",
                 json(200, JSON.writeValueAsBytes(fractionalEpoch)));
+        replies.put("rounded-up epoch", json(200,
+                successBodyWith("epoch", "4.0000000000000001")));
+        replies.put("exponent rounded-up epoch", json(200,
+                successBodyWith("epoch", "40000000000000001E-16")));
+        replies.put("overflowing epoch", json(200,
+                successBodyWith("epoch", "1e400")));
+        replies.put("suffixed epoch", json(200,
+                successBodyWith("epoch", "4.0000001F")));
+        replies.put("wrapped epoch", json(200,
+                successBodyWith("epoch", "65540S")));
+        replies.put("unsupported epoch", json(200,
+                successBodyWith("epoch", "Set[4]")));
         for (Map.Entry<String, Reply> planned : replies.entrySet()) {
             reply.set(planned.getValue());
 
@@ -845,6 +868,56 @@ class HttpRuntimeTransportTest {
                     failure.getCode(), planned.getKey());
             assertFalse(failure.isRetryable(), planned.getKey());
         }
+    }
+
+    @Test
+    void acceptsIntegralSpellingsOfTheAttestationNumbers() throws Exception {
+        long epoch = successBody().required("epoch").longValue();
+        String[][] spellings = {
+            {"protocolVersion", "2.0"},
+            {"protocolVersion", "2E+0"},
+            {"epoch", "4.0"},
+            {"epoch", "4.00000000000000000000"},
+        };
+        for (String[] spelling : spellings) {
+            reply.set(json(200, successBodyWith(spelling[0], spelling[1])));
+
+            RuntimeAttestation proof = attest().toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+
+            assertEquals(epoch, proof.getEpoch(), spelling[1]);
+        }
+    }
+
+    @Test
+    void acceptsAnEpochBeyondTheIntRange() throws Exception {
+        long epoch = 4_294_967_296L;
+        JsonNode identity = suite.required("identity");
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                identity.required("leaseId").textValue(), epoch,
+                identity.required("token").textValue());
+        reply.set(json(200, successBodyWith("epoch", Long.toString(epoch))));
+
+        RuntimeAttestation proof = transport.attest(
+                lease(server.getAddress().getPort(), epoch),
+                new RuntimeProvisionRequest(scope(), "session-1"), seed)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(epoch, proof.getEpoch());
+    }
+
+    @Test
+    void keepsTheParseFailureAsTheCauseOfAnInvalidAttestation()
+            throws IOException {
+        reply.set(json(200, successBodyWith("epoch", "Set[4]")));
+
+        RuntimeBrokerException failure = awaitFailure();
+
+        assertEquals("managed_runtime_attestation_invalid", failure.getCode());
+        assertInstanceOf(IllegalArgumentException.class, failure.getCause());
     }
 
     @Test
@@ -1393,13 +1466,17 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeLease lease(int port) {
+        return lease(port, suite.required("identity").required("epoch")
+                .longValue());
+    }
+
+    private RuntimeLease lease(int port, long epoch) {
         JsonNode identity = suite.required("identity");
         return new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
                 URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
-                identity.required("leaseId").textValue(),
-                identity.required("epoch").longValue());
+                identity.required("leaseId").textValue(), epoch);
     }
 
     private RuntimeBrokerException awaitFailure() {
@@ -1427,6 +1504,16 @@ class HttpRuntimeTransportTest {
     private ObjectNode successBody() {
         return (ObjectNode) find("success").required("expected")
                 .required("body").deepCopy();
+    }
+
+    private byte[] successBodyWith(String field, String number)
+            throws IOException {
+        ObjectNode body = successBody();
+        body.required(field);
+        // Jackson would normalize the spelling, so splice the literal in.
+        body.put(field, "@");
+        return JSON.writeValueAsString(body).replace("\"@\"", number)
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private JsonNode find(String id) {
