@@ -348,6 +348,54 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('disk floor gate', () => {
+    // The E2E lane's slice of #10035 (#12764): run 36241138248 lost the
+    // sandbox:none leg when the saturated pool host's runner worker died on
+    // ENOSPC writing its own diag log — no failed step, no test result, one
+    // per-commit issue. ci.yml has gated its heavy jobs on
+    // check-disk-floor.sh since #10035 and the release lane since #11972;
+    // the pool-routed E2E leg went without. The gate fails the job fast
+    // with a DISKFLOOR sample naming the runner, and a re-run lands on an
+    // instance with headroom.
+    const steps = yml.jobs['e2e-test-linux'].steps;
+    const names = steps.map((step) => step.name);
+    const gateIndex = names.indexOf('Disk floor gate (self-hosted)');
+
+    it('gates the pool-routed Linux leg on a disk floor before its install', () => {
+      expect(gateIndex).toBeGreaterThanOrEqual(0);
+      const gate = steps[gateIndex];
+      expect(gate.if).toBe("${{ runner.environment == 'self-hosted' }}");
+      // The same direct call as ci.yml: this workflow only ever runs the
+      // pushed or current ref, so unlike the release lane the script always
+      // exists in the checkout and needs no presence guard.
+      expect(gate.run).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      const checkoutIndex = steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      // The script rides the checkout, so the gate can only stand between
+      // it and the install that turns a near-full disk into a dead runner.
+      expect(gateIndex).toBeGreaterThan(checkoutIndex);
+      expect(gateIndex).toBeLessThan(names.indexOf('Install dependencies'));
+    });
+
+    it('keeps the gate on every pool-routed job', () => {
+      // A new pool-routed leg without the gate reddens here instead of on a
+      // saturated host; the hosted legs stay ungated on fresh VMs.
+      const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
+        String(job['runs-on'] ?? '').includes('ecs-qwen'),
+      );
+      expect(poolJobs.map(([id]) => id)).toEqual(['e2e-test-linux']);
+      for (const [id, job] of poolJobs) {
+        const gate = (job.steps ?? []).find(
+          (step) => step.name === 'Disk floor gate (self-hosted)',
+        );
+        expect(gate, id).toBeDefined();
+      }
+    });
+  });
+
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`

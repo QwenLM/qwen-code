@@ -17,6 +17,7 @@
  * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   mkdirSync,
@@ -136,6 +137,31 @@ function chatRecord(
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  mkdirSync(path.join(homeDir, '.qwen'));
+  writeFileSync(
+    path.join(homeDir, '.qwen', 'settings.json'),
+    JSON.stringify({
+      model: { reasoningEffort: 'none' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen-startup-test',
+            name: 'Startup test',
+            baseUrl: 'http://127.0.0.1:9/v1',
+            envKey: 'OPENAI_API_KEY',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['low', 'high'],
+                defaultEffort: 'low',
+                disableField: 'reasoning_effort',
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   localPathOpenAtBoot = isLocalPathOpenAvailable();
   localTerminalOpenAtBoot = isLocalTerminalAvailable();
@@ -341,8 +367,10 @@ describe('qwen serve — capabilities envelope', () => {
     ).toEqual([
       'health',
       'daemon_status',
+      'daemon_update',
       'capabilities',
       'session_create',
+      'session_startup_config',
       'session_id_override',
       'session_scope_override',
       'session_load',
@@ -839,6 +867,112 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect(a.sessionId).toBe(b.sessionId);
     // Exactly one of the two reports `attached: false` (the spawn owner).
     expect([a.attached, b.attached].sort()).toEqual([false, true]);
+  });
+
+  it('confirms real model-only startup and the cached model notification', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId },
+    });
+    try {
+      expect(session).toMatchObject({
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId },
+      });
+      expect(session.startupConfigApplied).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      const status = await client.daemonStatus('full');
+      expect(
+        status.full?.sessions.find(
+          (entry) => entry.sessionId === session.sessionId,
+        )?.currentModelId,
+      ).toBe(modelServiceId);
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('applies high over shared none and tears down only rejected startup selections', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(session.startupConfigApplied).toEqual({
+        modelServiceId,
+        reasoningEffort: 'high',
+        effectiveReasoning: { state: 'enabled', effort: 'high' },
+      });
+      const context = await client.sessionContext(
+        session.sessionId,
+        session.clientId,
+      );
+      expect(context.state.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue: 'high',
+          }),
+        ]),
+      );
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+    const sessionId = randomUUID();
+    const failed = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        cwd: REPO_ROOT,
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    });
+    const failureBody = await failed.json();
+    expect(failed.status, JSON.stringify(failureBody)).toBe(422);
+    expect(failureBody).toMatchObject({
+      code: 'startup_config_rejected',
+    });
+    const missing = await fetch(`${base}/session/${sessionId}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(missing.status).toBe(404);
+  });
+
+  it('rolls back rejected standalone startup so its caller id can be reused', async () => {
+    const sessionId = randomUUID();
+    const modelServiceId = 'qwen-startup-test(openai)';
+    await expect(
+      client.createStandaloneSession({
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      body: { code: 'startup_config_rejected' },
+    });
+    await expect(client.getStandaloneSession(sessionId)).rejects.toMatchObject({
+      status: 404,
+    });
+    const retried = await client.createStandaloneSession({
+      sessionId,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(retried).toMatchObject({
+        sessionId,
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId, reasoningEffort: 'high' },
+      });
+    } finally {
+      await client.closeSession(sessionId);
+    }
   });
 
   it('bad modelServiceId keeps the session alive on the default model', async () => {

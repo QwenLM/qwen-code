@@ -1636,6 +1636,24 @@ describe('EmbeddedApp message edit rewind', () => {
     sdkMocks.rewindSession.mockResolvedValue({});
   });
 
+  function userBlock(id: string, text: string): Record<string, unknown> {
+    return { id, kind: 'user', text };
+  }
+
+  async function deliverTranscript(
+    props: CapturedProps,
+    blocks: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange(blocks);
+      await Promise.resolve();
+    });
+  }
+
   // The daemon-backed edit/rewind shipped with the cutover but nothing ever
   // exercised it: getRewindSnapshots and rewindSession appeared in this file
   // only as mock stubs (#9911).
@@ -1733,6 +1751,88 @@ describe('EmbeddedApp message edit rewind', () => {
       'prompt-3',
       expect.objectContaining({ rewindFiles: false }),
     );
+  });
+
+  // The daemon delivers `session.rewound` on the session stream after the
+  // rewind HTTP response resolves. Returning from prepareSubmit before the
+  // event lands lets the web shell add its optimistic user message, and the
+  // late truncation then wipes that message from the view while the turn
+  // itself proceeds correctly — the message only reappears after a reload.
+  it('holds the submit until the rewind lands in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    let settled = false;
+    const submission = prepareSubmit({
+      sessionId: 'session-1',
+      prompt: 'edited text',
+      inputAnnotations: [],
+    }).then(() => {
+      settled = true;
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    // The `session.rewound` event truncates the transcript to the target turn.
+    await act(async () => {
+      await deliverTranscript(props, [
+        userBlock('u0', 'first'),
+        userBlock('u1', 'second'),
+        userBlock('u2', 'third'),
+      ]);
+      await submission;
+    });
+    expect(settled).toBe(true);
+  });
+
+  it('aborts the submit when the rewind does not land in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    vi.useFakeTimers();
+    try {
+      let rejection: unknown;
+      const submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }).catch((error) => {
+        rejection = error;
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+        await submission;
+      });
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toContain(
+        'Could not confirm the rewind.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

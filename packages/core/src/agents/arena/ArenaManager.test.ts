@@ -471,9 +471,9 @@ describe('ArenaManager', () => {
     });
 
     // The peer's whole job is to produce a diff it is judged on, so it must
-    // keep the software-engineering guidance — Verify (Tests), Verify
-    // (Standards), Report outcomes faithfully — that a
-    // `keepCodingInstructions: false` style deletes from the base prompt.
+    // keep the software-engineering guidance — Verify, Report outcomes
+    // faithfully — that a `keepCodingInstructions: false` style deletes from
+    // the base prompt.
     it('does not let a style strip the coding instructions from a peer', async () => {
       mockBackend.type = 'in-process';
       const haiku = {

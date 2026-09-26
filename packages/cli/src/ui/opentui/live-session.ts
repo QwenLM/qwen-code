@@ -873,6 +873,19 @@ export async function* livePromptEvents(
           const invocation = 'invocation' in c ? c.invocation : undefined;
           if (!invocation) continue;
           descriptionSeen.add(callId);
+          if (
+            'modelFacingName' in c.request &&
+            c.request.modelFacingName === ToolNames.TOOL_CALL &&
+            'tool' in c &&
+            c.tool
+          ) {
+            live.push({
+              type: 'tool-start',
+              id: callId,
+              tool: c.tool.name,
+              title: c.tool.displayName,
+            });
+          }
           live.push({
             type: 'tool-description',
             id: callId,
