@@ -809,7 +809,9 @@ describe('paired execution engine channels', () => {
       try {
         const pending = bridge.spawnOrAttach({ workspaceCwd: WS_A });
         if (mode === 'unsupported')
-          await expect(pending).rejects.toThrow('unsupported engine');
+          await expect(pending).rejects.toThrow(
+            'Invalid execution engine selection',
+          );
         else await expect(pending).rejects.toBe(failure);
         expect(legacy).not.toHaveBeenCalled();
         expect(managed).not.toHaveBeenCalled();
@@ -849,7 +851,7 @@ describe('paired execution engine channels', () => {
       const epoch = bridge.getSessionEventEpoch(original.sessionId);
       await expect(
         bridge.spawnOrAttach({ workspaceCwd: WS_A, sourceType: 'channel' }),
-      ).rejects.toThrow('already live session id');
+      ).rejects.toThrow('already reserved session ID');
       expect(bridge.sessionCount).toBe(1);
       expect(bridge.getSessionEventEpoch(original.sessionId)).toBe(epoch);
       expect(handles.legacy.agent.extMethodCalls).toContainEqual({
@@ -956,7 +958,9 @@ describe('paired execution engine channels', () => {
         await bridge.closeSession(sibling.sessionId);
         siblingId = undefined;
         expect(await pending).toMatchObject({
-          message: expect.stringMatching(/execution engine/i),
+          message: expect.stringMatching(
+            /invalid or already reserved session ID/,
+          ),
         });
         expect(releases[1]).toHaveBeenCalledOnce();
         expect(handles.managed.killed).toBe(true);

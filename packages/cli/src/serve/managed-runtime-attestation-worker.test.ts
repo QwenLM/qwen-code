@@ -10,6 +10,11 @@ import { networkInterfaces } from 'node:os';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import {
+  isManagedContextReady,
+  type ManagedContextBoot,
+} from './managed-context-envelope.js';
 import {
   readManagedRuntimeWorkerBoot,
   startManagedRuntimeAttestationWorker,
@@ -34,6 +39,16 @@ const boot = Object.freeze({
   capabilityDigest: `sha256:${'a'.repeat(64)}`,
   isolationClass: 'workspace',
 } satisfies ManagedRuntimeWorkerBoot);
+
+const contextFixtures = JSON.parse(
+  readFileSync(
+    new URL('./contracts/managed-context-v1.fixtures.json', import.meta.url),
+    'utf8',
+  ),
+) as {
+  boot: ManagedContextBoot;
+  attestationCases: Array<{ id: string; body: unknown }>;
+};
 
 const openWorkers = new Set<ManagedRuntimeAttestationWorkerHandle>();
 
@@ -300,6 +315,86 @@ describe('Managed Runtime attestation worker', () => {
     ).rejects.toThrow('Managed Runtime attestation identity is invalid.');
     expect(listeners()).toBe(before);
   });
+
+  function spawnWorker(): ReturnType<typeof spawn> {
+    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx/esm', cliEntry, 'managed-runtime-worker'],
+      {
+        cwd: packageRoot,
+        env: { ...process.env, NO_COLOR: '1' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    onTestFinished(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    });
+    return child;
+  }
+
+  it('starts with boot v2 through the hidden CLI command', async () => {
+    const contextBoot = contextFixtures.boot;
+    const child = spawnWorker();
+    child.stdin?.end(JSON.stringify(contextBoot));
+    const ready = await waitForReady(child);
+
+    expect(isManagedContextReady(ready, contextBoot)).toBe(true);
+    const attestation = await fetch(
+      `${ready.url}/internal/managed-runtime/v3/attest`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${contextBoot.token}`,
+          'cache-control': 'no-store',
+          'content-type': 'application/json',
+          'x-qwen-managed-lease-id': contextBoot.leaseId,
+          'x-qwen-managed-lease-epoch': String(contextBoot.epoch),
+        },
+        body: JSON.stringify(
+          contextFixtures.attestationCases.find(
+            (fixture) => fixture.id === 'canonical',
+          )!.body,
+        ),
+      },
+    );
+    expect(attestation.status).toBe(200);
+
+    const exited = new Promise<number | null>((resolve) =>
+      child.once('exit', resolve),
+    );
+    child.kill('SIGTERM');
+    expect(await exited).toBe(process.platform === 'win32' ? null : 0);
+  }, 30_000);
+
+  it.each([
+    ['boot v2 with an extra key', { ...contextFixtures.boot, extra: true }],
+    [
+      'boot v2 with a relative mount root',
+      { ...contextFixtures.boot, mountRoot: 'mnt' },
+    ],
+    ['boot v1 marked as version 2', { ...boot, version: 2 }],
+  ])(
+    'exits before the ready line when it refuses %s',
+    async (_label, document) => {
+      const child = spawnWorker();
+      let stdout = '';
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString('utf8');
+      });
+      const exited = new Promise<number | null>((resolve) =>
+        child.once('exit', resolve),
+      );
+      child.stdin?.end(JSON.stringify(document));
+
+      expect(await exited).not.toBe(0);
+      expect(stdout).toBe('');
+    },
+    30_000,
+  );
 
   // ChildProcess.kill() on Windows terminates the process outright: the
   // worker never sees the signal, and Node reports it as killed by that

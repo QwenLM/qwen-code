@@ -17,6 +17,8 @@ import type { HarnessChannel, ChannelLifecycle } from './channel-lifecycle.js';
 import type {
   BridgeRuntimeEpochSource,
   BridgeTelemetry,
+  BridgeExecutionEngine,
+  BridgeOptions,
 } from './bridgeOptions.js';
 import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
@@ -43,6 +45,10 @@ import { writeStderrLine } from './internal/stderrLine.js';
 
 export interface ChannelStartupOptions {
   channelFactory: ChannelFactory;
+  executionEngines?: Pick<
+    NonNullable<BridgeOptions['executionEngines']>,
+    'legacy' | 'managed'
+  >;
   boundWorkspace: string;
   childEnvOverrides: Readonly<Record<string, string | undefined>>;
   initTimeoutMs: number;
@@ -53,7 +59,11 @@ export interface ChannelStartupOptions {
   delegateReadTextFileToClient: boolean;
   isExternalToolGuardRequired(): boolean;
   isShuttingDown(): boolean;
-  constructHarnessChannel(channel: AcpChannel, id: string): HarnessChannel;
+  constructHarnessChannel(
+    channel: AcpChannel,
+    id: string,
+    engine?: BridgeExecutionEngine,
+  ): HarnessChannel;
   handleChannelTransportUnavailable(info: HarnessChannel): void;
   handleChannelExit(
     info: HarnessChannel,
@@ -102,6 +112,7 @@ function safeTransportFailureDetail(error: unknown): string | undefined {
 
 export function createChannelStartup({
   channelFactory,
+  executionEngines,
   boundWorkspace,
   childEnvOverrides,
   initTimeoutMs,
@@ -120,7 +131,11 @@ export function createChannelStartup({
 }: ChannelStartupOptions) {
   let runtimeEpoch = initialRuntimeEpoch;
 
-  async function start(): Promise<HarnessChannel> {
+  async function start(
+    engine?: BridgeExecutionEngine,
+  ): Promise<HarnessChannel> {
+    const factory =
+      engine === undefined ? channelFactory : executionEngines![engine];
     const privateParentCapability = randomBytes(32).toString('base64url');
     const acpChannelId = randomUUID();
     const startupStartedAt = Date.now();
@@ -134,7 +149,7 @@ export function createChannelStartup({
         'qwen-code.daemon.acp_channel.id': acpChannelId,
       },
       async () =>
-        await channelFactory(
+        await factory(
           boundWorkspace,
           {
             ...childEnvOverrides,
@@ -174,7 +189,7 @@ export function createChannelStartup({
     }
     let info: HarnessChannel;
     try {
-      info = constructHarnessChannel(channel, acpChannelId);
+      info = constructHarnessChannel(channel, acpChannelId, engine);
     } catch (error) {
       try {
         channel.killSync();
@@ -231,18 +246,21 @@ export function createChannelStartup({
     channelLifecycle.track(info);
     // Belt-and-suspenders leak detection. The set is intentionally
     // multi-entry to cover the `killSession`-then-`spawnOrAttach`
-    // overlap window (size 2 is legitimate: one dying + one fresh
+    // overlap window (size 2 per engine is legitimate: one dying + one fresh
     // attach-target). Anything higher implies a `channel.exited`
     // handler never fired for some prior channel — a real leak we'd
     // otherwise notice only as gradually-growing RSS over hours.
     // The warning surfaces it the moment it happens. Threshold is
-    // 2 because that's the design ceiling; bumping it requires
+    // 2 per engine because that's the design ceiling; bumping it requires
     // updating both this guard and the comments around
     // `aliveChannels` declaration.
-    if (channelLifecycle.size > 2) {
+    const engineChannelCount = [...channelLifecycle.values()].filter(
+      (candidate) => candidate.executionEngine === engine,
+    ).length;
+    if (engineChannelCount > 2) {
       writeStderrLine(
-        `qwen serve: WARNING aliveChannels.size=${channelLifecycle.size} ` +
-          `(expected 1, max 2 during killSession-then-spawnOrAttach ` +
+        `qwen serve: WARNING engine=${engine ?? 'single'} channelCount=${engineChannelCount} ` +
+          `(expected 1, max 2 per engine during killSession-then-spawnOrAttach ` +
           `overlap) — possible channel leak; check that prior channels' ` +
           `channel.exited fired and the handler ran cleanup.`,
       );
@@ -418,7 +436,7 @@ export function createChannelStartup({
           }),
         onFailure: failChannelLiveness,
         isActive: () =>
-          channelLifecycle.current === info &&
+          channelLifecycle.currentFor(engine) === info &&
           channelLifecycle.has(info) &&
           !info.isDying &&
           !isShuttingDown(),

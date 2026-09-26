@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -458,5 +460,38 @@ class LocalProcessRuntimeProvisionerTest {
             current = current.getCause();
         }
         return (RuntimeBrokerException) current;
+    }
+
+    static void requireNode() {
+        if (commandExists("node")) {
+            return;
+        }
+        if ("github-hosted".equals(System.getenv("RUNNER_ENVIRONMENT"))) {
+            throw new AssertionError(
+                    "node is required on hosted CI runners");
+        }
+        assumeTrue(false, "node is required");
+    }
+
+    private static boolean commandExists(String command) {
+        Process process;
+        try {
+            process = new ProcessBuilder(command, "-v")
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (IOException missing) {
+            return false;
+        }
+        // Starting proves the command exists; a busy runner can take
+        // seconds to print the version, which is not a missing command.
+        try {
+            process.waitFor(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            process.destroyForcibly();
+        }
+        return true;
     }
 }

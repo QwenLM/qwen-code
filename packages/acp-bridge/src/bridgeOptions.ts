@@ -14,7 +14,6 @@
 import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
-  SessionExecutionEngine,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { ChannelFactory } from './channel.js';
@@ -28,6 +27,9 @@ import type {
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
+
+export type BridgeExecutionEngine = 'legacy' | 'managed';
+export const SESSION_EXECUTION_ENGINE_META_KEY = 'qwen.session.executionEngine';
 
 export type BridgeExecutionSelection = {
   readonly daemonOwnedStandalone: boolean;
@@ -280,13 +282,13 @@ export interface BridgeOptions {
   sessionScope?: 'single' | 'thread';
   /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
   channelFactory?: ChannelFactory;
-  /** Server-owned routing; mutually exclusive with the generic channelFactory. */
+  /** Server-owned selection; restore must use verified durable ownership. */
   executionEngines?: {
     legacy: ChannelFactory;
     managed: ChannelFactory;
     select(
       context: BridgeExecutionSelection,
-    ): SessionExecutionEngine | Promise<SessionExecutionEngine>;
+    ): BridgeExecutionEngine | Promise<BridgeExecutionEngine>;
   };
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
