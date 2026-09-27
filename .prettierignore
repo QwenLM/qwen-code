@@ -34,6 +34,9 @@ packages/cua-driver/
 scripts/codemod/fixtures/
 # Recovered measurement evidence retains its original bytes and SHA-256 hashes.
 scripts/test-loc/evidence/historical/
+# Generated evidence records byte hashes; regenerate it with collect.py.
+scripts/test-loc/evidence/round5/manifest.json
+scripts/test-loc/evidence/round5/results.json
 packages/live-host/
 packages/desktop/runtime/
 packages/core/src/skills/bundled/browser-use/runtime/

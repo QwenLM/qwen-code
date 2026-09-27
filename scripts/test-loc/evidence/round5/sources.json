@@ -1,0 +1,617 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "integration-fault-plan",
+      "kind": "plan",
+      "local": ".qwen/test-loc-round5/archive-input/plans/frozen-faults-v3.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/frozen-faults-v3.json",
+      "expectedSha256": "90d408eee19068622fe1df87aaa9c7d9ace3d285785a44bc1d18e8f1a5932d0b"
+    },
+    {
+      "id": "integration-mutation-plan",
+      "kind": "plan",
+      "local": ".qwen/test-loc-round5/archive-input/plans/integration-mutations-plan.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/integration-mutations-plan.json",
+      "expectedSha256": "65d889eb42815bed09fb951253eff1f31712296551760ac48b2ad58ebbf5127c"
+    },
+    {
+      "id": "experiments-fault-plan",
+      "kind": "plan",
+      "local": ".qwen/test-loc-round5/archive-input/plans/experiments-faults-plan.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/experiments-faults-plan.json",
+      "expectedSha256": "8473379364c4757add8c365cc3b481934a7eb9ab36f31101902f4469bd9ef19d"
+    },
+    {
+      "id": "experiments-mutation-plan",
+      "kind": "plan",
+      "local": ".qwen/test-loc-round5/archive-input/plans/experiments-mutations-plan.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/experiments-mutations-plan.json",
+      "expectedSha256": "8f9f4d46ade4be7135647df63736b9357dc069aea470600fe6f6822ffae9a706"
+    },
+    {
+      "id": "integration-faults-baseline-v2",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/faults-baseline-v2.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-baseline-v2.json",
+      "expectedSha256": "abcb94fb4cf5b04a659447130c427360493b3eda3fc381fd8ca5dc3a26f918d5"
+    },
+    {
+      "id": "integration-faults-integrated-v2",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/faults-integrated-v2.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-integrated-v2.json",
+      "expectedSha256": "00dc14e3362abedcce0b2e01468d8b27278006a45662a94aa34c7723a4014e84"
+    },
+    {
+      "id": "skipped-correction-subset-plan",
+      "kind": "plan",
+      "local": ".qwen/test-loc-round5/archive-input/c1/frozen-faults-skipped-supplement.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/frozen-faults-skipped-supplement.json",
+      "expectedSha256": "25b58e1a85937da3617581465d5341e2af0f323acef51a9f9604fdc6c494e64f"
+    },
+    {
+      "id": "integration-faults-baseline-supplement",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/faults-baseline-skipped.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-baseline-skipped.json",
+      "expectedSha256": "565a15c5d241232cdd30c049925849f2db335b8f3971d4515a48c3d6190e66b4"
+    },
+    {
+      "id": "integration-faults-integrated-supplement",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/faults-integrated-skipped.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-integrated-skipped.json",
+      "expectedSha256": "788c8f1cbf052a9fbfa12ec2caca95a2b9ba527646e1b7170f311ae748f07e95"
+    },
+    {
+      "id": "integration-faults-baseline-derived",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/c1-derived/baseline.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c1-derived/baseline.json",
+      "expectedSha256": "3d037c27d45f4f5967d01ee232223b40dcf198ca147edf2bcbd9dccd546b5753"
+    },
+    {
+      "id": "integration-faults-integrated-derived",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/c1-derived/integrated.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c1-derived/integrated.json",
+      "expectedSha256": "a5fda73b92f767c75b10f0b2b1d85c809868b7d378f09dc7e8d3106f92bd048e"
+    },
+    {
+      "id": "integration-fault-comparison",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/c1-derived/comparison.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c1-derived/comparison.json",
+      "expectedSha256": "65bafd945723a9ed38395aae61a8733acee604509284fdb38ff30894220b8a6e"
+    },
+    {
+      "id": "integration-mutations-baseline",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-integration/mutations-integration-baseline.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutations-integration-baseline.json",
+      "expectedSha256": "2f5ceee2d84792c346fa2fb01188a0ab5062636839b59d61b6949692148fccfc"
+    },
+    {
+      "id": "integration-mutations-integrated",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-integration/mutations-integration-integrated.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutations-integration-integrated.json",
+      "expectedSha256": "cb0131e62fa8574837b614f32f52d6572202b77e89081af74dda840841fd9b6d"
+    },
+    {
+      "id": "integration-mutation-comparisons",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-integration/c2-integration-comparison/aggregate.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c2-integration-comparison/aggregate.json",
+      "expectedSha256": "3529480f5f208db27656843cfdca384e38bf46e82a8ecffa4f26ed424309f18d"
+    },
+    {
+      "id": "experiments-faults-before",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1-experiments/faults-experiments-integrated.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-experiments-integrated.json",
+      "expectedSha256": "6d6fc9e21437a4e6766f522b3087887be503e2f0ec81b6dc0e822599b9ae63d4"
+    },
+    {
+      "id": "experiments-faults-after",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1-experiments/faults-experiments-experiments.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-experiments-experiments.json",
+      "expectedSha256": "bbadc9eb2b74e144b75bb342ae56449bf5f56c3f46b1613f21f5608fbec734fd"
+    },
+    {
+      "id": "experiments-fault-comparison",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1-experiments/faults-experiments-comparison.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-experiments-comparison.json",
+      "expectedSha256": "89b8c6a502eced1842a63d44e594cbdaec2f534ffe03f0da43b82602d576c8b8"
+    },
+    {
+      "id": "experiments-mutations-before",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-experiments/mutations-experiments-integrated.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutations-experiments-integrated.json",
+      "expectedSha256": "9b5695fc3d032d53497d1ffcf1c516c493a1c1c6cd2bc252ed42b30500c049fb"
+    },
+    {
+      "id": "experiments-mutations-after",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-experiments/mutations-experiments-experiments.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutations-experiments-experiments.json",
+      "expectedSha256": "2342622d782d8214a950e4910104be04b3cf72494aa4923e69c17760c28c20be"
+    },
+    {
+      "id": "experiments-mutation-comparisons",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c2-experiments/c2-experiments-comparison/aggregate.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c2-experiments-comparison/aggregate.json",
+      "expectedSha256": "0df15e62d5b93c82d125019f08e591842299884f38e7f462f84e6986b0f1ab93"
+    },
+    {
+      "id": "final-experiment-summary",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/final-experiment-summary.json",
+      "origin": "Current worktree final evidence summary; original strict false results retained",
+      "expectedSha256": "4c1bfea6ec08f820d3675e02740179c5bc516eb58061b5ebe11718319d4f474e"
+    },
+    {
+      "id": "memory-import-contract-gate",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/experiment-gates/memory-import-contract/run-KNXG0S/gate.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/memory-import-contract/run-KNXG0S/gate.json"
+    },
+    {
+      "id": "memory-import-contract-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/experiment-gates/memory-import-contract/run-KNXG0S",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/memory-import-contract/run-KNXG0S"
+    },
+    {
+      "id": "memory-import-contract-mapping",
+      "kind": "json",
+      "local": "scripts/test-loc/experiments/memory-import-contract.json",
+      "origin": "current worktree"
+    },
+    {
+      "id": "session-hooks-contract-gate",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/experiment-gates/session-hooks-contract/run-QPOJ7m/gate.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/session-hooks-contract/run-QPOJ7m/gate.json"
+    },
+    {
+      "id": "session-hooks-contract-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/experiment-gates/session-hooks-contract/run-QPOJ7m",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/session-hooks-contract/run-QPOJ7m"
+    },
+    {
+      "id": "session-hooks-contract-mapping",
+      "kind": "json",
+      "local": "scripts/test-loc/experiments/session-hooks-contract.json",
+      "origin": "current worktree"
+    },
+    {
+      "id": "hook-planner-partitions-gate",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/experiment-gates/hook-planner-partitions/run-C0okGM/gate.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/hook-planner-partitions/run-C0okGM/gate.json"
+    },
+    {
+      "id": "hook-planner-partitions-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/experiment-gates/hook-planner-partitions/run-C0okGM",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/experiment-gates/hook-planner-partitions/run-C0okGM"
+    },
+    {
+      "id": "hook-planner-partitions-mapping",
+      "kind": "json",
+      "local": "scripts/test-loc/experiments/hook-planner-partitions.json",
+      "origin": "current worktree"
+    },
+    {
+      "id": "integration-size",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/integration-size.json",
+      "origin": "local derived evidence"
+    },
+    {
+      "id": "coverage-full-comparison",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/coverage-full-comparison.json",
+      "origin": "local derived evidence"
+    },
+    {
+      "id": "coverage-host-callers-comparison",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/coverage-host-callers-comparison.json",
+      "origin": "local derived evidence"
+    },
+    {
+      "id": "experiment-test-hashes",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/experiment-test-hashes.json",
+      "origin": "local derived evidence"
+    },
+    {
+      "id": "tool-regressions-v3",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/tool-regressions-v3.log",
+      "origin": "local verification"
+    },
+    {
+      "id": "collector-skipped-correction-v3",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/collector-skipped-correction-v3.md",
+      "origin": "local verification"
+    },
+    {
+      "id": "integration-fault-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c1-raw",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/{fault-replay-7f3BbW,fault-replay-GL8K5p,fault-replay-OzJTSd,fault-replay-9Jz6X7}"
+    },
+    {
+      "id": "integration-mutation-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c2-integration",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5 completed integration C2 summaries, reports, expected inventory, configs, logs and comparison outputs"
+    },
+    {
+      "id": "experiments-fault-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c1-experiments",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5 completed experiment C1 artifacts"
+    },
+    {
+      "id": "experiments-mutation-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c2-experiments",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5 completed experiment C2 artifacts"
+    },
+    {
+      "id": "integration-expected-mutant-inventory",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c2-integration/mutation-integration-expected/inventory.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutation-integration-expected/inventory.json",
+      "expectedSha256": "d4b5aef8de2e11a1f8f0b6dda44a111f3ea69568bf6a98ff265376181a934537"
+    },
+    {
+      "id": "experiments-expected-mutant-inventory",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c2-experiments/mutation-experiments-expected/inventory.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/mutation-experiments-expected/inventory.json",
+      "expectedSha256": "5d25d9a99178896a747d5aa63afd28af75f11f4abbc3fb40d3f52e6290f45b4f"
+    },
+    {
+      "id": "runner-v3-source",
+      "kind": "raw",
+      "local": "scripts/test-loc/measurement/replay.mjs",
+      "origin": "local skipped-status compatibility correction",
+      "expectedSha256": "cdff4bd4efb38e9cb60410b1cc9ccbaa70c2304e4747a214ba733277ccf13e34"
+    },
+    {
+      "id": "runner-v2-source",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/runtime/replay-v2.mjs",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/measurement/replay.mjs",
+      "expectedSha256": "8b95ae99b7334d96f4b96ce3e849d9ffad8785465419e1483ecfb38fda0e44b3"
+    },
+    {
+      "id": "c1-baseline-historical-comparison",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/c1-baseline-historical-comparison.json",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "c1-baseline-historical-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/c1-baseline-historical-comparison.md",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "c1-supplement-derivation-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/supplement-c1.py",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "c4-observation-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/fault-localization.py",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "mutation-integration-execution-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/run-mutation-gates.sh",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "experiment-execution-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/run-experiment-capability.sh",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "timing-execution-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/run-timing.sh",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "c1-supplement-execution-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/run-c1-supplement.sh",
+      "origin": "Current worktree"
+    },
+    {
+      "id": "integration-c4-localization",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/c1-derived/localization-cases.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c1-derived/localization-cases.json",
+      "expectedSha256": "42a20454c1277b8af8dda009609ff4372e1d65e784ee55e832f955f6db5f5e5b"
+    },
+    {
+      "id": "size-main",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/size-main.json",
+      "origin": "Local completed size measurement: .qwen/test-loc-round5/size-main.json",
+      "expectedSha256": "b593757e249dc4a77e07e2bcb212c2afbd2d591ace9a553fe334f5bd248cd814"
+    },
+    {
+      "id": "size-integrated",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1/size-integrated.json",
+      "origin": "Local completed size measurement: .qwen/test-loc-round5/archive-input/c1/size-integrated.json",
+      "expectedSha256": "4c941a2f302aa2d0d68f802985a3f89f8c7846d342732d64258da88ca97872a4"
+    },
+    {
+      "id": "size-experiments",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/size-experiments.json",
+      "origin": "Local completed size measurement: .qwen/test-loc-round5/size-experiments.json",
+      "expectedSha256": "14604eb9b3b48b1da439071d7740c65f47648b3b887c44b817f3daa52910682b"
+    },
+    {
+      "id": "integration-c1-summaries-and-logs",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c1",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5 (completed C1 summaries and command logs)"
+    },
+    {
+      "id": "integration-c4-original-field-names",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/c1/c1-derived/localization.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/c1-derived/localization.json",
+      "expectedSha256": "7ac7420d3556642169ac5563a22e8ebeff8eb1c81903826541711b8a167e59f4"
+    },
+    {
+      "id": "mutation-runs-comparison-script",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/compare-mutation-runs.py",
+      "origin": "Current worktree",
+      "expectedSha256": "dbfaaae616158e4f9d448106c1bdaf90ef56651b97bf19b7bad5768af7f517ab"
+    },
+    {
+      "id": "experiments-c4-localization",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/c1-experiments/faults-experiments-localization.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/faults-experiments-localization.json",
+      "expectedSha256": "05ac6f242530980debb38ebd65d43156be0e5f0b97f11be947ec91d5829f4eba"
+    },
+    {
+      "id": "integration-c3-and-build-verification-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/verification",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5 completed suite/coverage investigations and build/install/typecheck/format/lint logs; derived lcov-report HTML omitted"
+    },
+    {
+      "id": "integration-audit-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/integration-audit.md",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "integration-audit-data",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/integration-audit.json",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "coverage-investigation-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/coverage-investigation.md",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "config-case-labels-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/config-case-labels.md",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "c1-final-audit-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/c1-final-audit.md",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "supplement-c1-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/supplement-c1.md",
+      "origin": "Current worktree completed analysis"
+    },
+    {
+      "id": "c2-timeout-investigation-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/c2-timeout-investigation.md",
+      "origin": "Current worktree completed analysis",
+      "expectedSha256": "f57571cfa9e83ef01c3e85e20c672952f055b88361a8c33fbd38556fde09735a"
+    },
+    {
+      "id": "c2-timeout-investigation-data",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/c2-timeout-investigation.json",
+      "origin": "Current worktree completed analysis",
+      "expectedSha256": "60ab73f6a7f0afa3c7fae746da723361e8eca691d9856a634c0835d854bee5f0"
+    },
+    {
+      "id": "timing-final-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/timing-final",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/timing-final (all eight completed runs, including excluded round 2 pair)"
+    },
+    {
+      "id": "c1-comparator-v4-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/comparator-v4",
+      "origin": "Current worktree final comparator audit"
+    },
+    {
+      "id": "c1-comparator-v4-manifest",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/comparator-v4/manifest.json",
+      "origin": "Current worktree final comparator audit",
+      "expectedSha256": "5ea419a50de2eb4c76998f0c48568730caa60c89f3c91998f9a6e38708f9cf50"
+    },
+    {
+      "id": "tooling-final-audit",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/tooling-final-audit.md",
+      "origin": "Current worktree final comparator audit",
+      "expectedSha256": "c97e511f67f0ac681c04beeab676b21d0f6150f1e473fc93ba4a62f2aa63c3f0"
+    },
+    {
+      "id": "experiment-capability-audit-analysis",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/experiment-capability-audit.md",
+      "origin": "Current worktree frozen independent capability audit",
+      "expectedSha256": "b26c69c49679736acc37f520c2f805ef4b5406f8b8899a36ebb949271227d936"
+    },
+    {
+      "id": "experiment-capability-audit-data",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/experiment-capability-audit.json",
+      "origin": "Current worktree frozen independent capability audit",
+      "expectedSha256": "c4cd0058bd0fad0e4996b8f4ffe75a5bbdcd8c0e1611ede60f5f1ce46a254cc4"
+    },
+    {
+      "id": "tool-regressions-v4",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/tool-regressions-v4.log",
+      "origin": "Current worktree final comparator audit",
+      "expectedSha256": "029dcfb6a819c01d1648dfccaaa2eceb21fc2f71979cbcb19ea3a01f8c82a258"
+    },
+    {
+      "id": "summarize-timing",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/summarize-timing.py",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "65b8da36fa85c8bdb60b7b73c8dbae7193e0b6213abec77f46abd4ae18d1aa53"
+    },
+    {
+      "id": "summarize-timing-original",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/summarize-timing-original.py",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "08bbeff9c5885e71772629eab0e3763a0f2c3e8dd779490351f950352f2f2373"
+    },
+    {
+      "id": "summarize-timing-original-sha256",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/summarize-timing-original.sha256",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "c6c6dfd60d1bbbc6a75ca00ad5f99fc5ba5a2c6d9afd018efbd2d27362f95094"
+    },
+    {
+      "id": "run-timing-replacement",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/run-timing-replacement.sh",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "170224af0a05d47ca5c92d9e7058967eeb5f0b59a6c3cec2dfb5d3952d266c73"
+    },
+    {
+      "id": "timing-interruption",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/timing-interruption.md",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "1f280051aec509a810aeb986e3b3af2c2704e6dad9565306e75796c32d2060ca"
+    },
+    {
+      "id": "summarize-timing-self-test",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/summarize-timing-self-test.json",
+      "origin": "Current worktree frozen timing selection and interruption evidence",
+      "expectedSha256": "3f4b8147e76110db04cd35b517e915aaa659d5f1816d3c418b720d9723bda55c"
+    },
+    {
+      "id": "final-summary-producer",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/summarize-final.py",
+      "origin": "Current worktree final evidence summary producer",
+      "expectedSha256": "cebff510a37a27a6143ac203d7cce146e196682687eef32eeb61a79c48782d90"
+    },
+    {
+      "id": "timing-final-strict-summary",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/timing-final-summary.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/timing-final-summary.json; exact original bytes, ok:false",
+      "expectedSha256": "2336afdcb8728249ab97f0ee3658a8534fc8775ba28abe101585f4dd01f7d9c6"
+    },
+    {
+      "id": "timing-final-observations",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/timing-final-observations.json",
+      "origin": "Current worktree derived timing observations; health and performance gates remain false",
+      "expectedSha256": "2f9269404d0feeb2cc3da3ab61b631c31ff1ee5a0c3a8aefc872a1861a548416"
+    },
+    {
+      "id": "timing-observations-producer",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/derive-timing-observations.py",
+      "origin": "Current worktree frozen observation producer",
+      "expectedSha256": "5fb2a79dc972f6c4735df7214e7d49dee385aa58c3d4adb15bffed3091be289c"
+    },
+    {
+      "id": "timing-observations-self-test",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/derive-timing-observations-self-test.json",
+      "origin": "Current worktree 23 observation derivation checks",
+      "expectedSha256": "539203b634e4525442ed65bacf792751304eca02428462127200a30b862e45fe"
+    },
+    {
+      "id": "lease-failure-investigation",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/lease-failure-investigation.md",
+      "origin": "Current worktree frozen lease failure investigation",
+      "expectedSha256": "bfef00e420e250ff69c74005f792c80e064302f4c6a1558dc1a19096ef3d17f3"
+    },
+    {
+      "id": "lease-diagnostic-summary",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/lease-diagnostic-summary.json",
+      "origin": "Current worktree frozen lease diagnostics, six completed runs and collector pilot",
+      "expectedSha256": "b140cbeb5a865d29966f67d25a8c764cc8d2dc84354e8ef050214ef00e3075b7"
+    },
+    {
+      "id": "lease-diagnostic-raw",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/lease-diagnostics",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/results/{lease-diagnostic-ab-v2,lease-diagnostic-ab}"
+    },
+    {
+      "id": "measured-experiment-snapshot",
+      "kind": "raw",
+      "local": ".qwen/test-loc-round5/archive-input/snapshot-3b60453c83-archive",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/snapshot-3b60453c83-archive; one commit bundle and binary patch"
+    },
+    {
+      "id": "measured-experiment-snapshot-provenance",
+      "kind": "json",
+      "local": ".qwen/test-loc-round5/archive-input/snapshot-3b60453c83-archive/snapshot-provenance.json",
+      "origin": "agent-sandbox:/tmp/qwen-testloc-round5/snapshot-3b60453c83-archive/snapshot-provenance.json",
+      "expectedSha256": "1c7d21d4fe22fa42fdecd9e201b35aad2f5110c464cc6a0cc3d059b56b4c46f4"
+    }
+  ]
+}
