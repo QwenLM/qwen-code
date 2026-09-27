@@ -87,6 +87,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
+    private static final List<String> GAP_CATEGORIES = List.of("route",
+            "record", "request", "response");
     private static final List<String> API_PREFIXES = List.of("/v1/agents",
             "/api/agent/web-shell/v1");
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
@@ -587,10 +589,15 @@ class ManagedAgentApiContractTest {
     private static List<String> knownGaps() {
         try (InputStream input = ManagedAgentApiContractTest.class
                 .getClassLoader().getResourceAsStream(KNOWN_GAPS)) {
-            return new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                    .lines().map(String::strip)
+            List<String> gaps = new String(input.readAllBytes(),
+                    StandardCharsets.UTF_8).lines().map(String::strip)
                     .filter(line -> !line.isEmpty() && !line.startsWith("#"))
                     .toList();
+            assertThat(gaps).as("lines of %s", KNOWN_GAPS).allMatch(
+                    gap -> GAP_CATEGORIES.stream().anyMatch(
+                            category -> gap.startsWith(category + " ")),
+                    "start with one of " + GAP_CATEGORIES);
+            return gaps;
         } catch (IOException error) {
             throw new UncheckedIOException(error);
         }

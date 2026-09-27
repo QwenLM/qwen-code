@@ -33,7 +33,8 @@ Managed Agent 服务在 `/v1/agents/sessions` 下提供公共 Session 路由，�
 
 ## 3. 非目标
 
-- 不改变任何路由的状态。现有路由全部保持 `partial`。
+- 没有路由改为 `implemented`。唯一的状态变化是把服务端已提供的归档与删除从
+  `planned` 记为 `partial`（4.3）。
 - 不改变服务行为。D1 只记录 D2、D3 必须修复的内容。
 - 不为了让当前服务通过而删除 schema 字段。
 - 持久准入、Turn、AgentDefinition、Artifact、Workspace、Action 与事件保留策略

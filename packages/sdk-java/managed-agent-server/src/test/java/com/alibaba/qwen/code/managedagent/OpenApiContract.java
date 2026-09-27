@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.networknt.schema.AnnotationKeyword;
+import com.networknt.schema.JsonMetaSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaValidatorsConfig;
@@ -24,8 +26,12 @@ final class OpenApiContract {
     private static final String STATUS = "x-qwen-implementation-status";
 
     private final JsonNode spec;
-    private final JsonSchemaFactory factory =
-            JsonSchemaFactory.getInstance(VersionFlag.V202012);
+    private final JsonSchemaFactory factory = JsonSchemaFactory.getInstance(
+            VersionFlag.V202012, builder -> builder.metaSchema(JsonMetaSchema
+                    .builder(JsonMetaSchema.getV202012())
+                    .unknownKeywordFactory((keyword, context) ->
+                            new AnnotationKeyword(keyword))
+                    .build()));
     private final SchemaValidatorsConfig config = SchemaValidatorsConfig
             .builder().formatAssertionsEnabled(true).build();
 

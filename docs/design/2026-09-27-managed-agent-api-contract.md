@@ -37,7 +37,9 @@ the checks that D2 and D3 build on.
 
 ## 3. Non-goals
 
-- No route changes status. Every existing route stays `partial`.
+- No route becomes `implemented`. The only status changes record archive and
+  delete, which the server already serves, as `partial` instead of `planned`
+  (4.3).
 - No server behavior changes. D1 only records what D2 and D3 must fix.
 - No schema field is removed to make the current server pass.
 - Durable admission, Turns, AgentDefinition, Artifacts, Workspaces, Actions and
