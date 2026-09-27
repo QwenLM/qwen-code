@@ -447,4 +447,84 @@ describe('applyReplacementPreservingLineEndings', () => {
     expect(out.match(/(?<!\r)\n/g)).toBeNull();
     expect(elapsed).toBeLessThan(2500);
   });
+
+  // A file that mixes CRLF and LF has no single local ending, so the span is
+  // re-joined with whichever one the surrounding region resolves to. That can
+  // change a break inside the span even when the replacement text is identical
+  // to the text it matched. Pinned here so the limit is a stated behaviour
+  // rather than an accident, and to keep the "nothing outside the span moves"
+  // half of it honest.
+  describe('a span that itself mixes endings', () => {
+    it('re-joins the span with the ending that follows it', () => {
+      expect(splice('a\nb\r\nc\nd\r\n', 'a\nb', 'a\nb')).toBe(
+        'a\r\nb\r\nc\nd\r\n',
+      );
+    });
+
+    it('re-joins the span with the ending that precedes it at end of file', () => {
+      expect(splice('a\r\nb\nc', 'b\nc', 'b\nc')).toBe('a\r\nb\r\nc');
+    });
+
+    it('leaves a span that already matches the resolved ending alone', () => {
+      expect(splice('a\r\nb\nc', 'a\r\nb', 'a\r\nb')).toBe('a\r\nb\nc');
+    });
+
+    it('moves nothing outside the matched span', () => {
+      // The breaks that sit outside the span are carried through byte for byte,
+      // which is the property this whole change exists for. The span itself is
+      // re-joined, as the two tests above show.
+      expect(splice('x\na\nb\r\nc', 'a\nb', 'a\nb')).toBe('x\na\r\nb\r\nc');
+      expect(splice('keep\r\nme\nand\r\nme', 'me\nand', 'me\nand')).toBe(
+        'keep\r\nme\r\nand\r\nme',
+      );
+    });
+
+    it('is a no-op when the span already uses the resolved ending', () => {
+      expect(splice('keep\r\nme\r\nand\r\nme', 'me\r\nand', 'me\r\nand')).toBe(
+        'keep\r\nme\r\nand\r\nme',
+      );
+      expect(splice('keep\nme\nand\nme', 'me\nand', 'me\nand')).toBe(
+        'keep\nme\nand\nme',
+      );
+    });
+
+    it('cannot arise on a uniformly terminated file', () => {
+      // The docstring's guarantee, tested rather than asserted. A file with no
+      // CRLF takes the plain literal replace, so the replacement's endings are
+      // inserted as given; a file with CRLF takes the splice and re-joins the
+      // span with CRLF. Either way each file keeps a single style, and an
+      // identical replacement is a no-op.
+      const lf = 'one\ntwo\nthree\n';
+      for (const replacement of ['TWO\nAGAIN', 'TWO', 'TWO AGAIN']) {
+        const out = splice(lf, 'two', replacement);
+        expect(out).not.toContain('\r');
+        expect(out.startsWith('one\n')).toBe(true);
+        expect(out.endsWith('three\n')).toBe(true);
+      }
+      expect(splice(lf, 'two', 'two')).toBe(lf);
+
+      const crlf = 'one\r\ntwo\r\nthree\r\n';
+      for (const replacement of ['TWO\nAGAIN', 'TWO\r\nAGAIN', 'TWO']) {
+        const out = splice(crlf, 'two', replacement);
+        // Every LF belongs to a CRLF, and no CR is left on its own.
+        expect(out.match(/(?<!\r)\n/g)).toBeNull();
+        expect(out.match(/\r(?!\n)/g)).toBeNull();
+        expect(out.startsWith('one\r\n')).toBe(true);
+        expect(out.endsWith('three\r\n')).toBe(true);
+      }
+      expect(splice(crlf, 'two', 'two')).toBe(crlf);
+    });
+
+    it('leaves the previous path to decide a CRLF in an LF file, as it always did', () => {
+      // The one asymmetry, pinned so it is not mistaken for an oversight: with
+      // no CRLF anywhere in the file the function is a plain literal replace, so
+      // a CRLF inside the replacement survives and the file ends up mixed. This
+      // is what the previous write path produced for the same input, so it is
+      // parity rather than a regression -- but it is the reason the docstring
+      // describes two paths instead of one rule.
+      expect(splice('one\ntwo\nthree\n', 'two', 'TWO\r\nAGAIN')).toBe(
+        'one\nTWO\r\nAGAIN\nthree\n',
+      );
+    });
+  });
 });

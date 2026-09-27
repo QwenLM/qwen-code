@@ -632,6 +632,18 @@ function normalizedToRawOffsets(
  * LF lines. For a file that is already uniformly LF or uniformly CRLF the result
  * is byte-identical to what the previous path produced.
  *
+ * Two paths, and which one runs is decided by whether the file contains a CRLF
+ * at all. A file with none takes the plain literal replace, so the replacement's
+ * own line endings are inserted exactly as given and a CRLF inside the
+ * replacement will leave the file mixed — which is what the previous path did to
+ * such a file as well. A file that does contain a CRLF takes the splice, and
+ * there the resolved ending is one style for the whole span: a lone LF in the
+ * replacement comes out as CRLF, and a span whose own bytes already mix styles
+ * is re-joined throughout, so a replacement whose text is identical to what it
+ * matched can still change breaks inside the span. Nothing outside the matched
+ * spans moves on either path, and for a uniformly terminated file neither of
+ * these can arise.
+ *
  * Matches are located in the normalized text and mapped back, so the spans are
  * the same ones `safeLiteralReplace` would have replaced, including its
  * replace-all behaviour.
