@@ -135,7 +135,7 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 - `packages/cli/src/serve/managed-runtime-attestation-worker.ts`：按 boot 版本分派、各版本的路由，以及 ready v2。
 - `packages/cli/src/serve/managed-runtime-tool-executor.ts`：工具来自一个在每个新调用进入日志之前询问的解析器。boot v1 在启动时构造一次；boot v2 为每次调用构造。每次调用以其会话的身份运行，该会话的项目目录已为其 shell 注册。
 - `packages/cli/src/serve/managed-runtime-tool-routes.ts` 和 `managed-runtime-attestation-contract.ts`：目录不可用时的 409、按 boot 版本参数化的路由 gate，以及所有自有路由共用的一个 JSON 请求体解析器。
-- `packages/core/src/utils/schemaValidator.ts`：能被 JSON 文本完整描述、且首次编译即成功的参数 schema，在每个校验器上只编译一次，以该文本为键；因此带 `$id` 的 schema 被重新构造成新对象后，首次使用时就会被校验，而以前 Ajv 会把这次编译当作 `$id` 重复而拒绝，并跳过校验。其他 schema 照 Ajv 一贯的方式编译，结果也不变；但如果它编译失败且带有 `$id`，日志给出的原因可能是该 `$id` 重复，而不是原来的错误。
+- `packages/core/src/utils/schemaValidator.ts`：能被 JSON 文本完整描述、且首次编译即成功的参数 schema，在每个校验器上只编译一次，以该文本为键；因此带 `$id` 的 schema 被重新构造成新对象后，首次使用时就会被校验，而以前 Ajv 会把这次编译当作 `$id` 重复而拒绝，并跳过校验。文本能否完整描述一个 schema，是按它的数据判断的，所以 Proxy 或 getter 以文本记录下的值为准。其他 schema 照 Ajv 一贯的方式编译，得到的结果和日志中记录的编译错误都与以前相同。对任何 schema 而言，通过 Ajv 中其他 schema 的注册表来解析的引用，都可能解析得与以前不同：重新构造的 schema 对象不再被编译，也就不再刷新这个注册表。
 - 假 worker 及其 Java 测试、它与 `LocalProcessRuntimeProvisionerTest` 共用的一个辅助方法，以及 attestation worker、tool worker、envelope 和 schema 校验器的测试。
 - `packages/cli/src/serve/managed-workspace-binding.ts`：仅修改其头部注释。
 - 本文的中英文两版；envelope 文档中的状态、错误、待决问题和后续工作；W0a 文档的状态和关于接线的那句话；以及 Tool v2 契约文档的 worker 一节和错误类别中指向本文的说明。
@@ -162,9 +162,11 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 - **Boot v1：** workspace 仍在启动时确定；shell 仍看到 Runtime 的会话和项目目录；字节不是合法 UTF-8 的文档仍会被读取；现有的 tool worker 测试原样通过。
 - **Boot v2 编码：** 字节不是合法 UTF-8 的文档会被拒绝。
 - **Core：**
-  - 相同的参数 schema 只编译一次；同一个 schema 对象从不会被序列化第二次，即使 JSON 文本不能完整描述它，或者它编译失败；
-  - JSON 文本不能完整描述的 schema，由对象本身编译，而不是由它的文本编译；
-  - 这样的 schema，以及编译失败的 schema（即使带有 `$id`），得到的结果与以前相同；
+  - 能被 JSON 文本完整描述、且首次编译即成功的相同参数 schema 只编译一次，包括含有 `-0` 的 schema：它们的文本把 `-0` 写成 `0`，而 Ajv 对两者的校验相同，所以带 `$id` 的重新构造对象同样会被校验；
+  - 同一个 schema 对象从不会被再次序列化，即使 JSON 文本不能完整描述它、它首次编译失败，或者它从不能编译；
+  - JSON 文本不能完整描述的 schema（例如含有数组子类、带命名属性的数组或无原型对象的 schema），由对象本身编译，而不是由它的文本编译；
+  - 这样的 schema 得到的结果与以前相同；编译失败的 schema 也是如此，即使带有 `$id`，即使该 `$id` 已被另一个 schema 占用；
+  - 编译失败的 schema 在日志中记录它自己的编译错误，即使它的副本先占用了它的 `$id`；
   - 编译失败的 schema，无论被重新构造多少次，都只由它的文本编译一次；每个重新构造的对象与以前一样，在第二次使用时编译；
   - 调用方修改自己的 schema 对象，不会改变其他 schema 的校验器；
   - 重新构造的带 `$id` 的 schema 会被校验。
