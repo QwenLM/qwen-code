@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,7 @@ public final class LocalProcessRuntimeProvisioner
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    private final String ownerDomain = UUID.randomUUID().toString();
     private final List<String> command;
     private final Path workingDirectory;
     private final HttpRuntimeTransport transport;
@@ -290,8 +292,19 @@ public final class LocalProcessRuntimeProvisioner
         if (process == null) {
             return RuntimeObservation.unknown(handle);
         }
+        if (!process.seed.equals(seed)) {
+            return RuntimeObservation.conflict(handle);
+        }
         if (!process.process.isAlive()) {
-            return RuntimeObservation.notFound();
+            if (handle == null) {
+                return RuntimeObservation.notFound();
+            }
+            return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
+                    seed.getProvisionRequestId() + ":journal-lost",
+                    RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "owned-process-exit",
+                    Instant.now(), ownerDomain + ":" + process.process.pid(),
+                    seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle), null);
         }
         try {
             attest(request, seed, lastLease);

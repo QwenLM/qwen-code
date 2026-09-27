@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-状态：待评审的决策与实施方案，2026-09-27。本文尚未实现恢复能力。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
+状态：W0e-1 实现及待评审的 W0e-2/3 后续设计，2026-09-27。生产 worker 接管与物理回收仍属于后续工作。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
 
 关联：[路线图 #12380](https://github.com/QwenLM/qwen-code/issues/12380)、[丢失执行 #12670](https://github.com/QwenLM/qwen-code/issues/12670)、[本地 worker #12766](https://github.com/QwenLM/qwen-code/issues/12766)、[W0c-3](2026-09-26-managed-workspace-execution.zh-CN.md) 和 [W0d](managed-workspace-w0d-web-shell-binding.zh-CN.md)。
 
@@ -15,6 +15,8 @@ W0d 允许用户创建和查看固定的 Workspace 绑定。恢复必须在保�
 仅供测试的可恢复 provisioner 记录 worker PID 和启动时间，可以驱动已合入的 Broker 对账路径，但它既不是生产身份存储，也不能证明所有写入者都已停止。它报告 `NOT_FOUND` 后，Broker 持久化 `LOST`，未终结执行便会永久钉住该代数。`reconcileExecution` 对孤立的 `EXECUTING` 记录返回 `IN_FLIGHT`，只为 `UNKNOWN` 记录查询证据。
 
 在此基线上，使用真实 Broker JVM、全局 qwen 0.24.6 worker 和持久化 H2 运行了现有 `ProcessCrashFaultGateTest#aHostCrashPinsTheLostGenerationBehindTheUnsettledCall`。测试通过的是对缺陷的断言：`warm`/`acquire` 返回 `runtime_broker_runtime_lost`，`release` 返回 `runtime_reconciliation_required`，执行停留在 `EXECUTING`，没有重放或替代 worker。这是基线证据，不是恢复实现通过验证。该测试杀死指定进程，不能证明真实宿主机重启或包含逃逸子进程的隔离域已停止。
+
+基线还存在无需 Broker 重启的不安全复用：存活 Broker 观察到 worker 死亡后，经 `invalidateBinding`/`failBinding` 将绑定改成 `FAILED`，即使仍有未解决调用或逃逸写入者也会创建替代者。另一种情况是旧 Broker 在其他 Broker 提交 `LOST` 后继续准入新执行，再沿同一失败路径退役已钉住的代数。W0e-1 关闭这两条路径，因此仅 worker 故障（包括 OOM 或 SIGKILL）会让 placement 一直不可用，直到获得独立停写证明；W0e-1 不提供该证明的生产来源。原有 `aWorkerKilledMidExecutionLeavesItUnknownWithoutEvidence` 和 `aReplacementWorkerRunsNothingUntilItsOwnContextIsInstalled` 故障门禁必须改为断言阻止替代，而非自动恢复。
 
 ## 2. 对 #12670 的建议决策
 
@@ -60,7 +62,7 @@ W0d 允许用户创建和查看固定的 Workspace 绑定。恢复必须在保�
 
 SQL 并发边界必须实际实现，不能从 Java `synchronized` 推断。今天 Session 校验和执行插入是不同事务，迟到插入可能发生在 abandonment 扫描之后。新准入与丢失屏障必须锁定同一 binding-generation 行，并在插入事务内验证其状态。统一锁顺序为 binding、Runtime Session、execution；批量 execution 行按稳定 key 排序。屏障后拒绝新准入，但允许按身份读取已有幂等回执。绑定复用在同一屏障下完成最终引用检查。内存测试存储必须提供等价的共享协调边界。
 
-服务端存储清理是停止证明持久化后的独立条件事务。SQL 事务不能跨 HTTP、进程终止或宿主观察。数据库失败意味着保留或重新核查占用，不能解释为清理成功。此恢复流程中的 `FAILED` 绑定或通用 `releaseUnusableSession` 路径，都不能绕过物理复用门禁。
+服务端存储清理是停止证明持久化后的独立条件事务。SQL 事务不能跨 HTTP、进程终止或宿主观察。数据库失败意味着保留或重新核查占用，不能解释为清理成功。`FAILED` 绑定或通用 `releaseUnusableSession` 路径都不能绕过物理复用门禁，包括存活 Broker 的普通故障处理；`LOST` 只能经证据校验的原子恢复路径离开。
 
 旧执行域被钉住时，placement 映射必须保持稳定。当前 placement key 包含目录、capability、isolation 和 provisioner；改变它们可能产生看不到旧绑定的新 slot。准入替代者前，必须将保存的原 placement 与可信部署映射比较，拒绝会绕过未回收执行域的变更，包括没有 storage holder 的 legacy placement。新 request key 下的空 slot 不构成放行依据。本切片要求在改变物理映射/profile 前停止相关工作并完成已验证清理；跨 placement key 的在线迁移需要另行提供物理资源门禁。
 
@@ -94,15 +96,31 @@ SQL 并发边界必须实际实现，不能从 Java `synchronized` 推断。今�
 
 当前 Session busy 检查仅使用 `runtimeSessionId`。恢复查询还必须包含 binding ID 与 runtime generation，并精确比较标识；不同 tenant 复用同一 ID 时不能相互阻断或清理。已有执行行已携带该元组，优先复用，避免引入无关的 tenant schema 重设计；更广泛的 busy-check 清理如有需要另行划定范围。
 
+JDBC 的 `hasActiveByBinding` 和 `hasActiveByRuntimeSession` 谓词必须同时排除 `SETTLED` 与 `ABANDONED`；内存等价实现使用 `isTerminal()`。这些计数变化不能替代物理停写门禁。旧 Broker 可能把已放弃行报告为无效请求、身份冲突或对账失败，而非终态不确定性。
+
 迁移保留现有 `UNKNOWN`、已结算结果及不可变 key。没有可信丢失/停止证据的旧行继续阻断。旧 Java 二进制无法读取新枚举值，因此写入新的 abandonment 记录前需要协调升级服务；不支持旧新 Broker 混用这些行。不能修改已执行的 Flyway migration。公共 Session/Workspace 响应不暴露物理路径和进程元数据。
+
+## 6a. W0e-1 实现
+
+本 PR 实现首个切片。证据 SPI 在原 Binding 增加两个可空 JSON 字段 `lossEvidence` 和 `stopEvidence`，保存版本、事实类型、来源、观察时间、宿主／写入域，以及原 seed 身份和 resource handle，不包含凭据。保留首次失联证据；后续停止证据必须对应同一个域。Execution 增加 `abandonedAt` 和 `lossEvidenceId`；唯一的放弃原因是 `runtime_lost`。先提交的真实结果获胜，不增加 worker Tool 协议状态。
+
+Binding 仓库负责准入和恢复事务。生产 JDBC 仓库必须使用同一个 `DataSource`，不支持的仓库组合明确失败；自定义嵌入仓库需要实现新的原子方法。Session 和 Execution 插入先锁定原 Binding，再检查 Session。恢复依次锁定租户 placement guard、slot、Binding、Session 批次和 Execution 批次。每个事务最多处理 100 个 Execution 和 100 个 Session，保留原回执，并在退休前复查操作租约和剩余引用。后续调用继续未完成批次。
+
+新增小型租户 guard 表，将新 placement 创建与失联标记串行化。Managed Workspace 存在尚未回收的 lost／blocked generation 时，不能通过更换映射或 profile key 创建新 placement；稳定域为 `(tenantId, workspaceId)`，不包含物理和 profile 字段。Legacy Workspace ID 可能由路径派生，因此未清理的 legacy 失联会保守地阻止该租户创建新 placement，直到完成清理；已有 placement 仍可读取。此限制也识别历史 durable FAILED 行，旧 `FAILED` 记录不能作为停写证明。尚未观察到失联、仍为 READY 的旧 Runtime 不支持在线配置迁移；部署必须在验证清理前保持映射稳定。
+
+Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管；重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
+
+私有终态读取、取消和同键创建重试校验原保存的 Binding 与 Session 身份，要求服务鉴权，不依赖本地存活 Session，也不重新解析当前 actor 或映射。HTTP 保留 `runtime_broker_execution_unknown`，附带 `details.terminal: true` 和 `details.reason: runtime_lost`；TypeScript adapter 在 inspect、reconcile 和 cancel 路径保留这些信息，不对外投影物理证据。
+
+Flyway V14 和独立 initializer 增加可空证据／放弃字段及 placement guard。升级测试在迁移前直接写入旧版 SQL 行，迁移后校验 PREPARED、UNKNOWN 和 SETTLED 回执。写入 ABANDONED 前仍需协调升级，不能混用旧二进制。
 
 ## 7. 交付顺序与边界
 
-| 切片           | 交付内容                                                         | 退出条件                                                                         |
-| -------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| W0e-1 / #12670 | 执行终态不确定性、持久证据契约、准入屏障、条件代数清理、私有投影 | 仓库/HTTP/竞态测试通过；缺少停止证据仍阻止复用                                   |
-| W0e-2 / #12766 | 生产持久启动身份与存活 worker 对账                               | 真实进程重启/接管测试通过；身份不完整不产生重复 worker；不支持的停止证明继续阻断 |
-| W0e-3          | 同宿主重启恢复、Workspace holder 清理、旧写入者故障门禁          | 真实 SQL、worker 与宿主/隔离证据在每个验收案例中证明安全推进或明确阻断           |
+| 切片           | 交付内容                                                                                           | 退出条件                                                                         |
+| -------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| W0e-1 / #12670 | 执行终态不确定性、持久证据契约、准入与旧 Broker 屏障、存活 Broker 安全故障处理、条件清理、私有投影 | 仓库/HTTP/竞态测试通过；缺少停止证据仍阻止复用                                   |
+| W0e-2 / #12766 | 生产持久启动身份与存活 worker 对账                                                                 | 真实进程重启/接管测试通过；身份不完整不产生重复 worker；不支持的停止证明继续阻断 |
+| W0e-3          | 同宿主重启恢复、Workspace holder 清理、旧写入者故障门禁                                            | 真实 SQL、worker 与宿主/隔离证据在每个验收案例中证明安全推进或明确阻断           |
 
 这些是实施切片，不是三项已经完成的功能。启用 W0e-2 回收前先合入 W0e-1。W0e 只有完成 W0e-3 才算结束；测试辅助实现通过不能证明生产 provisioner 已达标。
 
@@ -110,22 +128,23 @@ SQL 并发边界必须实际实现，不能从 Java `synchronized` 推断。今�
 
 ## 8. 验收与证据
 
-| 门禁                      | 必须观察到的结果                                                                              |
-| ------------------------- | --------------------------------------------------------------------------------------------- |
-| 丢失执行各状态            | 五种非终态都能以结果未知结束；已提交的 `SETTLED` 证据保持不变                                 |
-| 迟到回调 / claim          | 放弃后的完成、取消、续租和 resolution 不能修改或重新执行记录                                  |
-| 准入竞态                  | 在 Session/execution 插入前暂停，由第二个 Broker 提交丢失后恢复：插入被拒绝，已有回执仍可读取 |
-| 响应丢失 / 重试           | 每个恢复提交之后崩溃，按原身份重试：只有一个终态记录，无重复 worker 或执行                    |
-| Broker 重启后 worker 存活 | 重新证明完全相同身份；原 status/cancel/release 可用；不自动重放 Hosted                        |
-| 共享观察者关闭            | 一个 Broker 关闭只脱离 worker，另一个仍可使用原 worker；显式退役需要独立持久权限              |
-| worker 消失但后代不明     | 证据充分时记录不确定终态；binding、Runtime Session 和存储仍不可复用                           |
-| 已验证宿主重启            | 持久化正确 boot/domain 证据，放弃未知结果，释放精确旧 holder，再在原 Workspace 执行新工作     |
-| 不可信证据                | 超时、缺失记录、PID 复用、错误宿主、incarnation 不符和目录改变都不能解锁或杀死其他进程        |
-| tenant / storage 隔离     | Runtime Session ID 复用和过时清理不能影响其他 binding/tenant；恢复后同存储仍串行              |
-| 旧写入者                  | 逃逸/迟到 writer 仍可写入时替代者继续阻断；证明执行域死亡后，新 holder 开始后没有旧 marker    |
-| 配置 / 授权漂移           | 原绑定保持固定；撤权 actor 不能执行；可信清理不要求恢复该 actor 授权                          |
-| placement key 漂移        | 改变路径/profile/isolation/provisioner 不能通过新 slot 的 provisioning 绕过未回收执行域       |
-| legacy / schema / HTTP    | boot v1 使用相同复用门禁；迁移保留回执；释放后能读取终态且不泄露物理身份                      |
+| 门禁                      | 必须观察到的结果                                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 丢失执行各状态            | 五种非终态都能以结果未知结束；已提交的 `SETTLED` 证据保持不变                                                    |
+| 迟到回调 / claim          | 放弃后的完成、取消、续租和 resolution 不能修改或重新执行记录                                                     |
+| 准入竞态                  | 在 Session/execution 插入前暂停，由第二个 Broker 提交丢失后恢复：插入被拒绝，已有回执仍可读取                    |
+| 旧 Broker                 | 缓存 Session 不能向 LOST 代数准入或将其退役；缺少停写证明时迟到释放不能清除其 Session 或存储占用                 |
+| 响应丢失 / 重试           | 每个恢复提交之后崩溃，按原身份重试：只有一个终态记录，无重复 worker 或执行                                       |
+| Broker 重启后 worker 存活 | 重新证明完全相同身份；原 status/cancel/release 可用；不自动重放 Hosted                                           |
+| 共享观察者关闭            | 一个 Broker 关闭只脱离 worker，另一个仍可使用原 worker；显式退役需要独立持久权限                                 |
+| worker 消失但后代不明     | 证据充分时记录不确定终态；binding、Runtime Session 和存储仍不可复用                                              |
+| 已验证宿主重启            | 持久化正确 boot/domain 证据，放弃未知结果，释放精确旧 holder，再在原 Workspace 执行新工作                        |
+| 不可信证据                | 超时、缺失记录、PID 复用、错误宿主、incarnation 不符和目录改变都不能解锁或杀死其他进程                           |
+| tenant / storage 隔离     | Runtime Session ID 复用和过时清理不能影响其他 binding/tenant；恢复后同存储仍串行                                 |
+| 旧写入者                  | 无论 Broker 是否重启，逃逸/迟到 writer 仍可写入时替代者继续阻断；证明执行域死亡后，新 holder 开始后没有旧 marker |
+| 配置 / 授权漂移           | 原绑定保持固定；撤权 actor 不能执行；可信清理不要求恢复该 actor 授权                                             |
+| placement key 漂移        | 改变路径/profile/isolation/provisioner 不能通过新 slot 的 provisioning 绕过未回收执行域                          |
+| legacy / schema / HTTP    | boot v1 使用相同复用门禁；迁移保留回执；释放后能读取终态且不泄露物理身份                                         |
 
 运行现有 Stage F 进程门禁、新仓库契约在 H2 和真实 MySQL/MariaDB 上的验证、Spring 到 worker 的 holder 恢复，以及受支持宿主重启或隔离域测试。反例使用真正逃逸的后代进程；仅 mock observation 不能证明物理安全。实现阶段运行仓库 build、typecheck、bundle、定向 TypeScript 测试、Java verification/Checkstyle，以及连续两轮干净的完整 diff 自审。详细本地测试计划保存在 `.qwen/e2e-tests/managed-workspace-w0e.md`。
 

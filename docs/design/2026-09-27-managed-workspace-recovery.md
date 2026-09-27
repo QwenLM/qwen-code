@@ -2,8 +2,8 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-Status: proposed decision and implementation plan, 2026-09-27. No recovery
-enablement is implemented by this document. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
+Status: W0e-1 implementation and proposed W0e-2/3 follow-up design, 2026-09-27.
+Production worker adoption and physical reclamation remain follow-up work. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
 
 Related: [roadmap #12380](https://github.com/QwenLM/qwen-code/issues/12380),
 [lost executions #12670](https://github.com/QwenLM/qwen-code/issues/12670),
@@ -41,6 +41,18 @@ passed its assertions of the defect: `warm`/`acquire` returned
 there was no replay or replacement worker. This is baseline evidence, not a
 passing recovery implementation. The test kills selected processes; it does
 not certify an actual host reboot or an isolation domain with escaped children.
+
+The baseline also has unsafe reuse without a Broker restart. A live Broker
+observing a dead worker calls `invalidateBinding`/`failBinding`, changes the
+binding to `FAILED`, and provisions a replacement despite unresolved calls or
+escaped writers. A stale Broker can also admit a new execution after another
+Broker commits `LOST`, then retire that pinned generation through the same
+failure path. W0e-1 closes both paths. Consequently, worker-only failure
+(including OOM or SIGKILL) keeps the placement unavailable until independent
+writer-stop proof exists; W0e-1 does not supply that production proof source.
+The previous `aWorkerKilledMidExecutionLeavesItUnknownWithoutEvidence` and
+`aReplacementWorkerRunsNothingUntilItsOwnContextIsInstalled` fault gates must
+assert blocked replacement instead of automatic recovery.
 
 ## 2. Recommended decision for #12670
 
@@ -162,8 +174,9 @@ The server's storage cleanup is a separate conditional transaction after
 durable stop evidence. No SQL transaction spans HTTP, process termination or
 host observation. Any database failure preserves or rechecks the pin; it does
 not imply successful cleanup. Neither a `FAILED` binding nor a generic
-`releaseUnusableSession` path may bypass the physical reuse gate for this
-recovery flow.
+`releaseUnusableSession` path may bypass the physical reuse gate, including
+ordinary live-Broker failure handling. `LOST` can leave only through the
+evidence-checked atomic recovery path.
 
 The placement mapping must remain stable while an old domain is pinned.
 Current placement keys include directory, capability, isolation and provisioner;
@@ -265,6 +278,12 @@ Existing execution rows already carry this tuple. Prefer it to introducing an
 unrelated tenant-schema redesign; keep a broader busy-check cleanup separately
 scoped if needed.
 
+The JDBC `hasActiveByBinding` and `hasActiveByRuntimeSession` predicates must
+exclude both `SETTLED` and `ABANDONED`; their in-memory equivalents use
+`isTerminal()`. These accounting changes never replace the physical stop gate.
+Old Brokers may report abandoned rows as invalid requests, identity conflicts
+or reconciliation failures instead of terminal uncertainty.
+
 Migrations preserve existing `UNKNOWN`, settled results and immutable keys.
 Old rows without trustworthy loss/stop evidence remain blocked. Unknown enum
 values are not readable by old Java binaries, so new abandonment writes require
@@ -272,13 +291,71 @@ a coordinated server rollout; mixed old/new Brokers against these rows are not
 supported. Do not edit an applied Flyway migration. Keep physical paths and
 process metadata out of public Session/Workspace responses.
 
+## 6a. W0e-1 implementation
+
+This PR implements the first slice. The evidence SPI uses two nullable JSON
+fields on the original binding: `lossEvidence` and `stopEvidence`. Each contains
+a version, fact, source, observation time, host/writer domain and the original
+seed identities and resource handle, without credentials. The first loss proof
+is retained; a later stop proof must match that same domain. Execution rows add
+`abandonedAt` and `lossEvidenceId`; `runtime_lost` is the only abandonment reason.
+A result that committed before abandonment wins. No worker Tool protocol state
+is added.
+
+The binding repository owns admission and recovery transactions. Production
+JDBC repositories must share the same `DataSource`; unsupported repository
+combinations fail explicitly. Custom embedding repositories must implement the
+new atomic methods. Session and execution insertion lock the original binding
+before inspecting the Session. Recovery locks the tenant placement guard, slot,
+binding, Session batch and execution batch in that order. Each transaction
+handles at most 100 executions and 100 Sessions, retains the original receipts,
+and checks the operation lease and remaining references before retirement.
+Further calls resume incomplete batches.
+
+A small tenant guard table serializes new placement creation with loss fences.
+A managed Workspace with an unreclaimed lost or blocked generation cannot
+create another placement under changed mapping/profile keys. Its stable domain
+is `(tenantId, workspaceId)`, excluding physical/profile fields. Legacy Workspace
+IDs can be derived from paths, so unresolved legacy loss conservatively blocks
+new placements for the tenant until cleanup. Existing placement reads remain
+available. This restriction also recognizes historical failed durable rows;
+old `FAILED` records are not stop proof. Online configuration migration while
+an unobserved old runtime is still READY remains unsupported: deployments must
+keep their mapping stable until verified cleanup.
+
+The local provisioner can certify journal loss for a process it still owns and
+has observed exit, using the exact seed, lease and handle. This proves neither
+that descendants stopped nor that a restarted Broker can adopt the worker.
+Missing ownership after restart still provides no evidence. There is no
+production `WRITERS_STOPPED` producer in this slice; deterministic supervisor
+fixtures exercise its consumption. Workspace storage-holder cleanup remains
+W0e-3. Loss-only recovery never calls transport release or clears a holder. Cached
+Session release consults durable state before liveness, so a recovered release
+is idempotent and a LOST generation cannot use the ordinary transport path.
+Final Session release checks the parent and changes the Session under the same
+generation lock. Normal holder release locks and checks the original live
+binding in its SQL transaction; a late deactivation response cannot clear a holder after the loss
+fence. This protects ordinary cleanup without enabling W0e-3 reclamation.
+
+Private terminal read, cancel and same-key create retry validate the original
+saved binding and Session identity and require service authentication. They do
+not depend on a live Session or current actor/mapping resolution. HTTP retains
+`runtime_broker_execution_unknown` with `details.terminal: true` and
+`details.reason: runtime_lost`; the TypeScript adapter preserves that information
+for inspect, reconcile and cancel. No physical evidence is projected publicly.
+
+Flyway V14 and the standalone initializer add nullable evidence/abandonment
+columns and the placement guard. Upgrade tests write pre-change SQL rows before
+migration and verify PREPARED, UNKNOWN and SETTLED receipts afterwards. A
+coordinated rollout remains required before writing ABANDONED rows.
+
 ## 7. Delivery order and boundaries
 
-| Slice          | Deliverable                                                                                                                     | Exit condition                                                                                                                  |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| W0e-1 / #12670 | Execution terminal uncertainty, durable evidence contract, admission fence, conditional generation cleanup, private projections | Repository/HTTP/race tests pass; missing stop proof still blocks reuse                                                          |
-| W0e-2 / #12766 | Production durable launch identity and live-worker reconciliation                                                               | Real process restart/adoption tests pass; incomplete identity never duplicates a worker; unsupported stop proof remains blocked |
-| W0e-3          | Same-host reboot recovery and Workspace holder cleanup, stale-writer fault gates                                                | Real SQL + worker + host/isolation evidence establishes safe progress or explicit blocking in every acceptance case             |
+| Slice          | Deliverable                                                                                                                                                               | Exit condition                                                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| W0e-1 / #12670 | Execution terminal uncertainty, durable evidence contract, admission and stale-Broker fences, safe live-Broker failure handling, conditional cleanup, private projections | Repository/HTTP/race tests pass; missing stop proof still blocks reuse                                                          |
+| W0e-2 / #12766 | Production durable launch identity and live-worker reconciliation                                                                                                         | Real process restart/adoption tests pass; incomplete identity never duplicates a worker; unsupported stop proof remains blocked |
+| W0e-3          | Same-host reboot recovery and Workspace holder cleanup, stale-writer fault gates                                                                                          | Real SQL + worker + host/isolation evidence establishes safe progress or explicit blocking in every acceptance case             |
 
 These are implementation slices, not three already completed features. Land
 W0e-1 before enabling W0e-2 reclamation. W0e is complete only after W0e-3; a
@@ -294,22 +371,23 @@ W0d's narrow `workspace_binding` capability remains unchanged.
 
 ## 8. Acceptance and evidence
 
-| Gate                                 | Required observation                                                                                                                                     |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lost execution states                | Each of the five nonterminal states terminates as outcome-unknown; committed `SETTLED` evidence is unchanged                                             |
-| Delayed callback / claim             | Completion, cancel, renewal and resolution after abandonment cannot mutate or re-execute the record                                                      |
-| Admission race                       | Park before Session/execution insertion, commit loss on a second Broker, resume: insertion is refused; existing receipts remain readable                 |
-| Response loss / retry                | Crash after each recovery commit; repeat with original identities; one terminal record and no duplicate worker or execution                              |
-| Worker alive after Broker restart    | Exact same identity is re-attested; original status/cancel/release works; no automatic Hosted replay                                                     |
-| Shared observer shutdown             | Closing one Broker detaches; another can continue using the original worker; explicit retirement requires its own durable authority                      |
-| Worker absent, descendants uncertain | Record uncertainty if justified; binding, Runtime Session and storage remain unavailable for reuse                                                       |
-| Verified host reboot                 | Persist correct boot/domain evidence, abandon unknown outcomes, release exact old holders, then run new work in the original Workspace                   |
-| Untrusted evidence                   | Timeout, missing record, PID reuse, wrong host, mismatched incarnation and changed directory never unlock or kill another process                        |
-| Tenant / storage isolation           | Reused Runtime Session IDs and stale cleanup cannot affect another binding/tenant; same-storage serialization survives recovery                          |
-| Old writer                           | Escaped/delayed writer is still capable of writes: replacement stays blocked; after verified domain death, no old marker appears after new holder starts |
-| Configuration / authorization drift  | Original binding stays fixed; revoked actors cannot execute; trusted cleanup does not require restoring their grant                                      |
-| Placement-key drift                  | Changing path/profile/isolation/provisioner cannot bypass an unreclaimed domain by provisioning under a new slot                                         |
-| Legacy / schema / HTTP               | Boot v1 obeys the same reuse gate; migration preserves receipts; terminal read works after release and does not expose physical identities               |
+| Gate                                 | Required observation                                                                                                                                                                    |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lost execution states                | Each of the five nonterminal states terminates as outcome-unknown; committed `SETTLED` evidence is unchanged                                                                            |
+| Delayed callback / claim             | Completion, cancel, renewal and resolution after abandonment cannot mutate or re-execute the record                                                                                     |
+| Admission race                       | Park before Session/execution insertion, commit loss on a second Broker, resume: insertion is refused; existing receipts remain readable                                                |
+| Stale Broker                         | A cached Session cannot admit into or retire a LOST generation; late release cannot clear its Session or storage pin without stop proof                                                 |
+| Response loss / retry                | Crash after each recovery commit; repeat with original identities; one terminal record and no duplicate worker or execution                                                             |
+| Worker alive after Broker restart    | Exact same identity is re-attested; original status/cancel/release works; no automatic Hosted replay                                                                                    |
+| Shared observer shutdown             | Closing one Broker detaches; another can continue using the original worker; explicit retirement requires its own durable authority                                                     |
+| Worker absent, descendants uncertain | Record uncertainty if justified; binding, Runtime Session and storage remain unavailable for reuse                                                                                      |
+| Verified host reboot                 | Persist correct boot/domain evidence, abandon unknown outcomes, release exact old holders, then run new work in the original Workspace                                                  |
+| Untrusted evidence                   | Timeout, missing record, PID reuse, wrong host, mismatched incarnation and changed directory never unlock or kill another process                                                       |
+| Tenant / storage isolation           | Reused Runtime Session IDs and stale cleanup cannot affect another binding/tenant; same-storage serialization survives recovery                                                         |
+| Old writer                           | With or without Broker restart, escaped/delayed writers remain capable of writes: replacement stays blocked; after verified domain death, no old marker appears after new holder starts |
+| Configuration / authorization drift  | Original binding stays fixed; revoked actors cannot execute; trusted cleanup does not require restoring their grant                                                                     |
+| Placement-key drift                  | Changing path/profile/isolation/provisioner cannot bypass an unreclaimed domain by provisioning under a new slot                                                                        |
+| Legacy / schema / HTTP               | Boot v1 obeys the same reuse gate; migration preserves receipts; terminal read works after release and does not expose physical identities                                              |
 
 Run the existing Stage F process gates, new repository contracts on H2 and real
 MySQL/MariaDB, Spring-to-worker holder recovery, and supported host reboot or

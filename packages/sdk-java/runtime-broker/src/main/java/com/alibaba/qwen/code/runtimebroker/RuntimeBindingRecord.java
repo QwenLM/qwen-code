@@ -31,6 +31,8 @@ public final class RuntimeBindingRecord {
     private final Instant lastHealthAt;
     private final Instant lastReconciledAt;
     private final Instant lastActiveAt;
+    private final RuntimeRecoveryEvidence lossEvidence;
+    private final RuntimeRecoveryEvidence stopEvidence;
 
     public RuntimeBindingRecord(String bindingId,
             RuntimeProvisionRequest request, long generation, State state,
@@ -65,6 +67,20 @@ public final class RuntimeBindingRecord {
             String operationOwner, Instant operationLeaseUntil,
             long operationGeneration, long version, Instant lastHealthAt,
             Instant lastReconciledAt, Instant lastActiveAt) {
+        this(bindingId, request, provisionSeed, generation, state, lease,
+                resourceHandle, attestationGeneration, drainRequested,
+                operationOwner, operationLeaseUntil, operationGeneration,
+                version, lastHealthAt, lastReconciledAt, lastActiveAt, null, null);
+    }
+
+    RuntimeBindingRecord(String bindingId, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed provisionSeed, long generation, State state,
+            RuntimeLease lease, RuntimeResourceHandle resourceHandle,
+            long attestationGeneration, boolean drainRequested,
+            String operationOwner, Instant operationLeaseUntil,
+            long operationGeneration, long version, Instant lastHealthAt,
+            Instant lastReconciledAt, Instant lastActiveAt,
+            RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence) {
         this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
         if (request == null) {
             throw new IllegalArgumentException("request is required");
@@ -132,6 +148,50 @@ public final class RuntimeBindingRecord {
         this.lastHealthAt = lastHealthAt;
         this.lastReconciledAt = lastReconciledAt;
         this.lastActiveAt = lastActiveAt;
+        requireEvidence(lossEvidence, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
+        requireEvidence(stopEvidence, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
+        if (lossEvidence != null && state != State.LOST && state != State.RELEASED) {
+            throw new IllegalArgumentException("Loss evidence requires a fenced binding");
+        }
+        if (stopEvidence != null && (lossEvidence == null
+                || !stopEvidence.hostDomain().equals(lossEvidence.hostDomain()))) {
+            throw new IllegalArgumentException("Stop evidence must prove the original writer domain");
+        }
+        this.lossEvidence = lossEvidence;
+        this.stopEvidence = stopEvidence;
+    }
+
+    private void requireEvidence(RuntimeRecoveryEvidence evidence,
+            RuntimeRecoveryEvidence.Fact fact) {
+        if (evidence != null && (evidence.fact() != fact
+                || !evidence.matches(provisionSeed, resourceHandle, lease))) {
+            throw new IllegalArgumentException("Recovery evidence identity differs");
+        }
+    }
+
+    public RuntimeRecoveryEvidence getLossEvidence() {
+        return lossEvidence;
+    }
+
+    public RuntimeRecoveryEvidence getStopEvidence() {
+        return stopEvidence;
+    }
+
+    public boolean hasStoppedWriters() {
+        return lossEvidence != null && stopEvidence != null;
+    }
+
+    public RuntimeBindingRecord withRecoveryEvidence(RuntimeRecoveryEvidence loss,
+            RuntimeRecoveryEvidence stop, Instant activeAt) {
+        requireEvidence(loss, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
+        requireEvidence(stop, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
+        return new RuntimeBindingRecord(bindingId, request, provisionSeed,
+                generation, State.LOST, lease, resourceHandle,
+                attestationGeneration, drainRequested, operationOwner,
+                operationLeaseUntil, operationGeneration, version,
+                lastHealthAt, lastReconciledAt, activeAt,
+                lossEvidence == null ? loss : lossEvidence,
+                stopEvidence == null ? stop : stopEvidence);
     }
 
     public String getBindingId() {
@@ -260,6 +320,31 @@ public final class RuntimeBindingRecord {
                 lastReconciledAt, lastActiveAt);
     }
 
+    boolean blocksPlacement(RuntimeProvisionRequest candidate) {
+        return (state == State.LOST || state == State.RECOVERY_BLOCKED
+                || state == State.FAILED && provisionSeed != null)
+                && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
+                && (!request.isManagedContext()
+                        || request.getScope().getWorkspaceId().equals(
+                                candidate.getScope().getWorkspaceId()));
+    }
+
+    void requireSafeReplacement(RuntimeBindingRecord replacement) {
+        if (!Objects.equals(lossEvidence, replacement.lossEvidence)
+                        && lossEvidence != null
+                || !Objects.equals(stopEvidence, replacement.stopEvidence)
+                        && stopEvidence != null) {
+            throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
+        }
+        if (state == State.LOST && replacement.state != State.LOST) {
+            throw new IllegalArgumentException("Lost binding requires atomic recovery");
+        }
+        if ((state == State.READY || state == State.RECOVERY_BLOCKED
+                || state == State.DRAINING) && replacement.state == State.FAILED) {
+            throw new IllegalArgumentException("Unproved runtime loss cannot free a placement");
+        }
+    }
+
     boolean sameIdentity(RuntimeBindingRecord other) {
         return other != null && bindingId.equals(other.bindingId)
                 && request.equals(other.request)
@@ -288,6 +373,6 @@ public final class RuntimeBindingRecord {
                 generation, nextState, nextLease, nextHandle,
                 nextAttestationGeneration, requested, owner, leaseUntil,
                 nextOperationGeneration, nextVersion, healthAt,
-                reconciledAt, activeAt);
+                reconciledAt, activeAt, lossEvidence, stopEvidence);
     }
 }
