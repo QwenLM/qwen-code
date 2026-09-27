@@ -43,6 +43,7 @@ interface EnvironmentPanelProps {
   workspaceCwd?: string;
   gitWorkspaceCwd?: string;
   gitCwd?: string;
+  gitSessionId?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
@@ -56,6 +57,8 @@ interface EnvironmentPanelProps {
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
+  onOpenGitWorktrees?: () => void;
+  onOpenGitLog?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
@@ -149,6 +152,7 @@ export function EnvironmentPanel({
   workspaceCwd,
   gitWorkspaceCwd,
   gitCwd,
+  gitSessionId,
   branch,
   gitStatus,
   tasks,
@@ -162,6 +166,8 @@ export function EnvironmentPanel({
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
+  onOpenGitWorktrees,
+  onOpenGitLog,
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
@@ -309,10 +315,13 @@ export function EnvironmentPanel({
                   onOpenChange={setBranchPickerOpen}
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
+                  gitSessionId={gitSessionId}
                   side="left"
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
+                  onOpenWorktrees={onOpenGitWorktrees}
+                  onOpenLog={onOpenGitLog}
                 >
                   <button
                     type="button"

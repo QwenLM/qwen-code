@@ -420,6 +420,71 @@ describe('createGitHubPullRequest', () => {
     expect(seenEnv?.['GH_TOKEN']).toBe('ws-token');
     expect(seenEnv).not.toHaveProperty('GH_REPO');
   });
+
+  it('uses XDG gh credentials without exposing XDG git config to subprocesses', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      {
+        XDG_CONFIG_HOME: '/tmp/gh-user-config',
+        GIT_SSL_CAINFO: '/tmp/ca.pem',
+        GIT_DIR: '/tmp/decoy/.git',
+      },
+    );
+
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe(
+      path.join('/tmp/gh-user-config', 'gh'),
+    );
+    expect(seenEnv?.['GIT_SSL_CAINFO']).toBe('/tmp/ca.pem');
+    expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
+
+  it("preserves the caller SSH transport for gh pr create's internal git push", async () => {
+    // gh shells out to `git push` for the head branch; the scrubbed env
+    // must re-apply the remote-transport keys the way gitRemoteEnv does for
+    // a direct push, or the push authenticates with the wrong key/proxy.
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      {
+        GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work_ed25519 -J bastion',
+        GIT_SSH: '/tmp/git-ssh',
+        GIT_ASKPASS: '/tmp/askpass',
+        SSH_ASKPASS: '/tmp/ssh-askpass',
+        GIT_DIR: '/tmp/decoy/.git',
+      },
+    );
+
+    expect(result.kind).toBe('ok');
+    expect(seenEnv?.['GIT_SSH_COMMAND']).toBe(
+      'ssh -i ~/.ssh/work_ed25519 -J bastion',
+    );
+    expect(seenEnv?.['GIT_SSH']).toBe('/tmp/git-ssh');
+    expect(seenEnv?.['GIT_ASKPASS']).toBe('/tmp/askpass');
+    expect(seenEnv?.['SSH_ASKPASS']).toBe('/tmp/ssh-askpass');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
 });
 
 describe('normalizeRemoteToWebUrl', () => {

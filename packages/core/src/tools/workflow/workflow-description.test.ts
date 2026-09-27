@@ -30,7 +30,12 @@ interface RouteOptions {
 
 function configFor(options: RouteOptions = {}): Config {
   const {
-    toolNames = [ToolNames.SKILL, ToolNames.WORKFLOW, ToolNames.TOOL_SEARCH],
+    toolNames = [
+      ToolNames.SKILL,
+      ToolNames.WORKFLOW,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ],
     deferred = [],
     revealed = [],
     disabledNames = [],
@@ -85,7 +90,11 @@ describe('Workflow tool description shape', () => {
 
     expect(tool.authoringSurface).toBe('pointer-via-tool-search');
     expect(tool.description).toContain(POINTER_SENTENCE);
-    expect(tool.description).toContain('reveal it with ToolSearch first');
+    // The detour sentence must name the invocation half: tool_search only
+    // reviews the schema (R27-1).
+    expect(tool.description).toContain(
+      'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
   });
 
   // Built while the Skill tool happens to be revealed, the description is
@@ -97,7 +106,9 @@ describe('Workflow tool description shape', () => {
     );
 
     expect(tool.authoringSurface).toBe('pointer-via-tool-search');
-    expect(tool.description).toContain('reveal it with ToolSearch first');
+    expect(tool.description).toContain(
+      'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
   });
 
   describe('inline', () => {
@@ -226,7 +237,7 @@ describe('Workflow tool description shape', () => {
         `hint: Load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
       );
       expect(text).toContain(
-        'If the Skill tool is not in your tool list, reveal it with ToolSearch first.',
+        'If the Skill tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
       );
     });
   });

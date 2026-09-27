@@ -221,6 +221,21 @@ describe('systemInfo', () => {
   });
 
   describe('getSystemInfo', () => {
+    it('reports the Config policy and skips host binary probes', async () => {
+      mockContext.services.config!.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({
+          requestedBackend: 'bwrap',
+          filesystem: 'read-only',
+          network: 'closed',
+        });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.sandboxEnv).toBe(
+        'tools / bwrap → bwrap / read-only / command network: closed',
+      );
+      expect(mockedExecFile).not.toHaveBeenCalled();
+    });
+
     it('should collect all system information', async () => {
       // Ensure SANDBOX is not set for this test
       delete process.env['SANDBOX'];

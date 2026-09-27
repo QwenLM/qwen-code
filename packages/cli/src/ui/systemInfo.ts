@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from './utils/execution-sandbox-display.js';
 import process from 'node:process';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
@@ -171,8 +172,11 @@ export async function getSystemInfo(
   const osArch = process.arch;
   const osRelease = os.release();
   const nodeVersion = process.version;
-  const npmVersion = await getNpmVersion();
-  const sandboxEnv = getSandboxEnv();
+  const executionSandbox = formatExecutionSandbox(context.services.config);
+  const npmVersion = executionSandbox
+    ? 'unavailable in tool sandbox'
+    : await getNpmVersion();
+  const sandboxEnv = executionSandbox ?? getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
   const cliVersion = await getCliVersion();
   const selectedAuthType = context.services.config?.getAuthType() || '';
@@ -210,7 +214,8 @@ export async function getExtendedSystemInfo(
   const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
 
   // For bug reports, use sandbox name without prefix
-  const sandboxEnv = getSandboxEnv(true);
+  const sandboxEnv =
+    formatExecutionSandbox(context.services.config) ?? getSandboxEnv(true);
 
   // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
   const contentGeneratorConfig =

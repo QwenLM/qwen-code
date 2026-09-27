@@ -20,6 +20,7 @@ import type {
   Browsers,
   BrowserTabs,
   BrowserUser,
+  FinalizeTabsOptions,
 } from './types.js';
 
 type Args = Record<string, unknown>;
@@ -63,6 +64,22 @@ class TabsProxy implements BrowserTabs {
     return info == null
       ? undefined
       : new TabProxy(this.context, this.browserId, info);
+  }
+  finalize(options: FinalizeTabsOptions): Promise<void> {
+    if (!options || typeof options !== 'object') {
+      throw new TypeError('tabs.finalize expects an options object');
+    }
+    return this.context.call<void>('tabs.finalize', {
+      browserId: this.browserId,
+      ...(options.keep === undefined
+        ? {}
+        : {
+            keep: options.keep.map(({ tab, status }) => ({
+              tabId: typeof tab === 'string' ? tab : tab.id,
+              status,
+            })),
+          }),
+    });
   }
 }
 

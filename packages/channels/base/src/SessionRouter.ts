@@ -46,6 +46,7 @@ interface SessionOperation {
 type SessionLoadWindow = Set<string>;
 interface ResolveOptions {
   routingThreadId?: string;
+  routeKey?: string;
 }
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
@@ -190,7 +191,14 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string {
+    if (routeKey !== undefined) {
+      return JSON.stringify([
+        this.routingKey(channelName, senderId, chatId, threadId),
+        routeKey,
+      ]);
+    }
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     switch (scope) {
       case 'thread':
@@ -233,6 +241,7 @@ export class SessionRouter {
       senderId,
       chatId,
       options?.routingThreadId ?? threadId,
+      options?.routeKey,
     );
     const input = {
       channelName,
@@ -241,6 +250,9 @@ export class SessionRouter {
       threadId,
       cwd: cwd || this.defaultCwd,
       isGroup,
+      ...(options?.routeKey !== undefined
+        ? { messageRoute: options.routeKey }
+        : {}),
     };
     let failedWaits = 0;
     for (;;) {
@@ -284,6 +296,9 @@ export class SessionRouter {
           chatId: input.chatId,
           threadId: input.threadId,
           isGroup: input.isGroup,
+          ...(input.messageRoute !== undefined
+            ? { messageRoute: input.messageRoute }
+            : {}),
         },
         (currentOperation) =>
           existing
@@ -323,6 +338,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -348,6 +364,9 @@ export class SessionRouter {
         chatId: input.chatId,
         threadId: input.threadId,
         isGroup: input.isGroup,
+        ...(input.messageRoute !== undefined
+          ? { messageRoute: input.messageRoute }
+          : {}),
       });
       this.toCwd.set(sessionId, input.cwd);
       this.liveSessionIds.add(sessionId);
@@ -368,6 +387,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -432,6 +452,9 @@ export class SessionRouter {
             chatId: input.chatId,
             threadId: input.threadId,
             isGroup: input.isGroup,
+            ...(input.messageRoute !== undefined
+              ? { messageRoute: input.messageRoute }
+              : {}),
           });
           this.toCwd.set(replacement, input.cwd);
           this.liveSessionIds.add(replacement);
@@ -466,9 +489,10 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string | undefined {
     return this.toSession.get(
-      this.routingKey(channelName, senderId, chatId, threadId),
+      this.routingKey(channelName, senderId, chatId, threadId, routeKey),
     );
   }
 
@@ -477,6 +501,7 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): boolean {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     // If chatId is provided, do an exact scoped lookup; otherwise scan for any
@@ -485,7 +510,7 @@ export class SessionRouter {
     // check.
     if (chatId) {
       return this.toSession.has(
-        this.routingKey(channelName, senderId, chatId, threadId),
+        this.routingKey(channelName, senderId, chatId, threadId, routeKey),
       );
     }
     if (scope === 'single') {
@@ -915,11 +940,18 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): string[] {
     const removedIds: string[] = [];
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId, threadId);
+      const key = this.routingKey(
+        channelName,
+        senderId,
+        chatId,
+        threadId,
+        routeKey,
+      );
       this.invalidateRouteOperation(key);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
@@ -1309,6 +1341,8 @@ export class SessionRouter {
       typeof typedTarget['channelName'] === 'string' &&
       typeof typedTarget['senderId'] === 'string' &&
       typeof typedTarget['chatId'] === 'string' &&
+      (typedTarget['messageRoute'] === undefined ||
+        typeof typedTarget['messageRoute'] === 'string') &&
       (typedTarget['threadId'] === undefined ||
         typeof typedTarget['threadId'] === 'string') &&
       (typedTarget['isGroup'] === undefined ||

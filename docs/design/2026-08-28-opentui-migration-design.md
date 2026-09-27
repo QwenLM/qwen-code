@@ -174,14 +174,24 @@ holds, the dispatcher falls back to ink silently. npm remains the primary
 install path, so plain-Node loadability is a Phase 3 gate (below), not an
 assumption.
 
-Measured status of that assumption: `@opentui/core` 0.5.8 — the version
+Measured status of that assumption: `@opentui/core` 0.5.10 — the version
 pinned in `packages/cli` — selects its FFI backend with `require('node:ffi')`,
 and that specifier does not resolve on Node 24 (`ERR_UNKNOWN_BUILTIN_MODULE`;
 reported on 24.18.1 during the dialogs-and-commands review and reproduced
-locally on 24.15). The native renderer therefore initialises under **Bun
-only**, today. Two consequences: the silent ink fallback above is
-load-bearing rather than defensive, and the activation batch is runnable
-end-to-end only under Bun until the Node leg is proven.
+locally on 24.15). The backend selection is unchanged from 0.5.8, and the
+failure was re-measured on 0.5.10 under Node 24.19.0. The native renderer
+therefore initialises under **Bun only**, today. Two consequences: the silent
+ink fallback above is load-bearing rather than defensive, and the activation
+batch is runnable end-to-end only under Bun until the Node leg is proven.
+
+The pin sits at 0.5.10 rather than the newer 0.5.11 on purpose. 0.5.11 stops
+printing a markdown link's target text, and that text is what the app-level
+click-to-open path in `packages/cli` matches on, so the bump would silently
+cost every link in a transcript its click handler; it is also the first
+release to declare an `engines` field (`bun >= 1.3.0`, `node >= 26.4.0`),
+which turns the Bun-only status above from a measured fact into an install
+failure. Bump past 0.5.10 only together with a link-target source that does
+not depend on the printed text.
 
 ### Composition-root contracts
 
@@ -228,7 +238,7 @@ safe to run before its owners exist, and the activation batch inherits them:
      only the ones already tested (Warp/Tabby/macOS);
    - the renderer demonstrated loadable under plain Node (`node:ffi`): boot
      plus smoke, not assumed. Bun-only is not acceptable as the default — and
-     Bun-only is where 0.5.8 stands today (measured status above), so this
+     Bun-only is where 0.5.10 stands today (measured status above), so this
      gate is open, not merely unproven;
    - explicit drop / replace / defer-with-tracking-issue decisions for the
      degraded modes: legacy scrollback mode, iTerm2 inline images,

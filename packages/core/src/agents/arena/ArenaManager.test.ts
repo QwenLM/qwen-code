@@ -171,6 +171,27 @@ describe('ArenaManager', () => {
   });
 
   describe('start validation', () => {
+    it('refuses required-container sessions before initializing state or worktrees', async () => {
+      const manager = new ArenaManager({
+        ...mockConfig,
+        getAgentExecutionBackend: () => 'container',
+      } as never);
+      const onStart = vi.fn();
+      manager.getEventEmitter().on(ArenaEventType.SESSION_START, onStart);
+
+      await expect(manager.start(createValidStartOptions())).rejects.toThrow(
+        'Container execution is required',
+      );
+
+      expect(manager.getSessionId()).toBeUndefined();
+      expect(manager.getBackend()).toBeNull();
+      expect(manager.getAgentStates()).toEqual([]);
+      expect(onStart).not.toHaveBeenCalled();
+      expect(hoistedMockDetectBackend).not.toHaveBeenCalled();
+      expect(hoistedMockSetupWorktrees).not.toHaveBeenCalled();
+      expect(await fs.readdir(tempDir)).toEqual([]);
+    });
+
     it('should reject start with less than 2 models', async () => {
       const manager = new ArenaManager(mockConfig as never);
 
@@ -450,9 +471,9 @@ describe('ArenaManager', () => {
     });
 
     // The peer's whole job is to produce a diff it is judged on, so it must
-    // keep the software-engineering guidance — Verify (Tests), Verify
-    // (Standards), Report outcomes faithfully — that a
-    // `keepCodingInstructions: false` style deletes from the base prompt.
+    // keep the software-engineering guidance — Verify, Report outcomes
+    // faithfully — that a `keepCodingInstructions: false` style deletes from
+    // the base prompt.
     it('does not let a style strip the coding instructions from a peer', async () => {
       mockBackend.type = 'in-process';
       const haiku = {

@@ -11,6 +11,7 @@ import {
   MAX_RETAINED_TERMINAL_AGENTS,
   readAgentMetaAsync,
   sanitizeFilenameComponent,
+  snapshotArgsUnavailable,
   type AgentTask,
   type Config,
   type MonitorTask,
@@ -251,6 +252,18 @@ function serializeWorkflowSnapshot(
     kind: 'workflow',
     id: snapshot.runId,
     isHistorical: true,
+    ...optionalField('argsOmitted', snapshot.argsOmitted),
+    // The daemon's own answer, so a client never offers a retry or rerun it
+    // would refuse. `args` itself stays off the wire: it can be 256 KiB, and
+    // it is the caller's data.
+    ...optionalField(
+      'argsUnavailable',
+      // `true as const`: the field is `true | undefined`, and a plain `true`
+      // in this position widens to `boolean`.
+      snapshotArgsUnavailable(snapshot) === undefined
+        ? undefined
+        : (true as const),
+    ),
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField(

@@ -15,6 +15,10 @@ import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailures,
+} from './channel-restore-failures.js';
 
 const WORKSPACE = '/ws/primary';
 
@@ -40,6 +44,8 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  restoreFailures?: ChannelRestoreFailures;
+  mergedChannels?: Record<string, unknown>;
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -131,12 +137,27 @@ function setup(options: {
       channels: [...names],
     })),
   };
+  // The merged system + user + workspace view the worker resolves; by
+  // default it mirrors what this scope persisted.
+  const loadChannelsConfig = vi.fn(() => ({
+    ...(options.mergedChannels ?? persisted.channels),
+  }));
   const service = createChannelManagementService({
     workspaceCwd: WORKSPACE,
     store,
     manager,
+    loadChannelsConfig,
+    ...(options.restoreFailures
+      ? { restoreFailures: options.restoreFailures }
+      : {}),
   });
-  return { service, store, manager, persisted: () => persisted };
+  return {
+    service,
+    store,
+    manager,
+    loadChannelsConfig,
+    persisted: () => persisted,
+  };
 }
 
 function codeOf(result: CreatePairingRequestResult): string {
@@ -565,6 +586,105 @@ describe('createChannelManagementService', () => {
     expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
+  it('lists a channel that failed to restore as an error, not stopped', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+      // Another workspace's same-name channel is not this one.
+      {
+        workspaceCwd: '/ws/other',
+        channel: 'bot',
+        message: 'unrelated',
+      },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('reports a committed channel from its worker, not a restore failure', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'stale',
+      },
+    ]);
+    const { service } = setup({ committedNames: ['bot'], restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'connected',
+    });
+  });
+
+  it.each([
+    {
+      operation: 'start',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.start('bot'),
+    },
+    {
+      operation: 'stop',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.stop('bot'),
+    },
+    {
+      operation: 'upsert',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.upsert('bot', {
+          expectedRevision: 'rev-1',
+          config: { type: 'dingtalk', clientId: 'client-id' },
+        }),
+    },
+    {
+      operation: 'remove',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.remove('bot', { expectedRevision: 'rev-1' }),
+    },
+  ])(
+    'forgets a restore failure once an operator uses $operation',
+    async ({ act }) => {
+      const restoreFailures = createChannelRestoreFailures();
+      restoreFailures.record([
+        {
+          workspaceCwd: WORKSPACE,
+          channel: 'bot',
+          message: 'x',
+        },
+      ]);
+      const { service } = setup({ restoreFailures });
+
+      await act(service);
+
+      expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+    },
+  );
+
+  it('keeps a restore failure when only the startup flag changes', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      { workspaceCwd: WORKSPACE, channel: 'bot', message: 'x' },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toMatchObject({
+      message: 'x',
+    });
+  });
+
   it('does not delete config when worker stop is unconfirmed', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
@@ -618,6 +738,103 @@ describe('createChannelManagementService', () => {
     expect(store.remove).toHaveBeenCalledOnce();
   });
 
+  it('converges an owned worker selected by the all sentinel after its config disappears', async () => {
+    // `serve.channels: ["all"]` never names the channel literally, so a gate
+    // on the scope's literal startup entries cannot see this config loss.
+    const { service, store, manager, loadChannelsConfig, persisted } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['all'] }),
+      committedNames: ['bot'],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).resolves.toMatchObject({ snapshot: { instances: {} } });
+
+    expect(loadChannelsConfig).toHaveBeenCalledWith(WORKSPACE);
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(manager.state().workers).toEqual([]);
+    expect(store.remove).toHaveBeenCalledOnce();
+    // The sentinel refers to the remaining configured channels, so it stays.
+    expect(persisted().startupNames).toEqual(['all']);
+  });
+
+  it('converges an owned worker whose selection was never persisted after its config disappears', async () => {
+    // An API- or flag-started channel has no startup entry in any scope.
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
+      committedNames: ['bot'],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).resolves.toMatchObject({ snapshot: { instances: {} } });
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(manager.state().workers).toEqual([]);
+    expect(store.remove).toHaveBeenCalledOnce();
+  });
+
+  it('converges a stale startup selection when the runtime is silent', async () => {
+    // The primary config-loss shape: config gone, daemon restarted, nothing
+    // committed and no worker — the delete just cleans the persisted entry.
+    const { service, store, manager, persisted } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
+      committedNames: [],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).resolves.toMatchObject({ snapshot: { instances: {} } });
+
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).toHaveBeenCalledOnce();
+    expect(persisted().startupNames).toEqual([]);
+  });
+
+  it('rejects a false-success deletion while an uncommitted worker is visible', async () => {
+    // During an in-flight start or selection replacement a channel can have a
+    // visible worker with no committed selection yet; the delete must not
+    // report success while that worker keeps running.
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
+      committedNames: [],
+    });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      workers: [
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({
+      code: 'channel_runtime_owner_mismatch',
+      message: expect.stringContaining(
+        'A worker exists but the channel is not committed.',
+      ),
+    });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(manager.state().workers).toHaveLength(1);
+  });
+
   it('rejects stale missing-config deletion before stopping its worker', async () => {
     const { service, store, manager } = setup({
       snapshot: settingsSnapshot({ channels: {} }),
@@ -631,25 +848,32 @@ describe('createChannelManagementService', () => {
     expect(store.remove).not.toHaveBeenCalled();
   });
 
-  it('rejects deletion when runtime still sees a channel the resolved scope never persisted', async () => {
-    // The manager resolves the merged system + user + workspace view, so a
+  it('rejects deletion when the merged view still contains a channel this scope never persisted', async () => {
+    // The worker resolves the merged system + user + workspace view, so a
     // channel configured only at user scope runs in this workspace while the
     // resolved scope snapshot shows neither its config nor a startup entry.
     const { service, store, manager } = setup({
       snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
       committedNames: ['proj'],
+      mergedChannels: { proj: { type: 'dingtalk' } },
     });
 
     await expect(
       service.remove('proj', { expectedRevision: 'rev-1' }),
-    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+    ).rejects.toMatchObject({
+      code: 'channel_instance_not_found',
+      message: expect.stringContaining('another scope'),
+    });
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
     expect(manager.committedChannelNames()).toEqual(['proj']);
     expect(manager.state().workers).toHaveLength(1);
   });
 
-  it('reports not found when another workspace owns the only runtime trace and nothing is persisted here', async () => {
+  it('rejects with the foreign-owner mismatch when another workspace owns the only runtime trace and nothing is persisted here', async () => {
+    // The channel's config lives in another workspace's settings file, so the
+    // merged view here no longer contains it; convergence is attempted but
+    // the foreign worker blocks it.
     const { service, store, manager } = setup({
       snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
       committedNames: ['bot'],
@@ -663,7 +887,12 @@ describe('createChannelManagementService', () => {
 
     await expect(
       service.remove('bot', { expectedRevision: 'rev-1' }),
-    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+    ).rejects.toMatchObject({
+      code: 'channel_runtime_owner_mismatch',
+      message: expect.stringContaining(
+        'The only worker belongs to another workspace.',
+      ),
+    });
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
   });
@@ -872,6 +1101,72 @@ describe('createChannelManagementService', () => {
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('retries a channel whose restore failed by starting it', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+
+    const result = await service.restart('bot');
+
+    // Nothing is running to restart; the listed error is what retry acts on.
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+  });
+
+  it('keeps the restore failure when retrying it fails to start', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+    manager.setChannelEnabled.mockRejectedValueOnce(new Error('still down'));
+
+    await expect(service.restart('bot')).rejects.toThrow('still down');
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('retries a replacement that was rolled back by starting it', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.reloadWorkspace.mockRejectedValueOnce(new Error('bad config'));
+    const failed = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'client-id' },
+    });
+    // The failed reload stopped the channel and kept its error.
+    expect(failed.instance.runtime).toEqual({
+      state: 'error',
+      lastError: 'bad config',
+    });
+    manager.setChannelEnabled.mockClear();
+
+    const result = await service.restart('bot');
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
   it('rejects restart of a configured channel that is not enabled', async () => {
@@ -1104,7 +1399,12 @@ describe('createChannelManagementService', () => {
       const { service } = setup({
         snapshot: settingsSnapshot({
           channels: {
-            bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+            bot: {
+              type: 'dingtalk',
+              privatePolicy: 'pairing',
+              senderPolicy: 'open',
+              dmPolicy: 'disabled',
+            },
           },
         }),
       });
@@ -1121,6 +1421,9 @@ describe('createChannelManagementService', () => {
 
   it('rejects pairing operations on a channel without pairing mode', async () => {
     for (const config of [
+      { type: 'dingtalk', privatePolicy: 'open', senderPolicy: 'pairing' },
+      { type: 'dingtalk', privatePolicy: 'disabled', senderPolicy: 'pairing' },
+      { type: 'dingtalk', dmPolicy: 'disabled', senderPolicy: 'pairing' },
       { type: 'dingtalk', senderPolicy: 'open' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'allowlist' },
       { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'disabled' },

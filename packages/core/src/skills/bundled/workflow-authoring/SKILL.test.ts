@@ -256,6 +256,7 @@ describe('bundled workflow-authoring skill', () => {
     ['journal is no longer on disk has nothing to resume'],
     ['start it again without `resumeFromRunId`'],
     ['would run two copies of its agents against one journal'],
+    ['listed as failed with an `interrupted` error'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
     // budget: where total comes from, what spent() counts, what the gate
@@ -268,6 +269,9 @@ describe('bundled workflow-authoring skill', () => {
     ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
+    ["interactive TUI's ink renderer"],
+    ['OpenTUI renderer does not yet run client-scheduled tools'],
+    ["Workflow({ name: '<name>' })"],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });

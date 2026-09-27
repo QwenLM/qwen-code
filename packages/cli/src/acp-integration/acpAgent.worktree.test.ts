@@ -256,6 +256,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
   listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+  claimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -555,7 +556,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       mcpServers: [],
     });
 
-    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(SIDECAR_PATH);
+    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(
+      SIDECAR_PATH,
+      expect.any(Function),
+      SESSION_ID,
+    );
     expect(lastSessionMock?.pendingWorktreeNotice).toBeNull();
 
     mockConnectionState.resolve();
@@ -587,7 +592,11 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       mcpServers: [],
     });
 
-    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(SIDECAR_PATH);
+    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(
+      SIDECAR_PATH,
+      expect.any(Function),
+      SESSION_ID,
+    );
     expect(lastSessionMock?.pendingWorktreeNotice).toBe(contextMessage);
 
     mockConnectionState.resolve();

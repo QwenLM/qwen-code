@@ -8,6 +8,7 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   PairingStore,
+  resolvePrivatePolicy,
   sanitizeLogText,
   type PairingRequest,
 } from '@qwen-code/channel-base';
@@ -21,6 +22,7 @@ import type {
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
+import type { ChannelRestoreFailures } from './channel-restore-failures.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
@@ -155,6 +157,19 @@ export interface CreateChannelManagementServiceOptions {
   workspaceCwd: string;
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
+  /**
+   * A workspace's merged channel config map (system + user + workspace
+   * scopes) — the same view the worker resolves, injected the way
+   * `resolveChannelWorkspaceGroups` receives it. `remove` consults it to
+   * distinguish a configuration that is lost from one this scope never held.
+   */
+  loadChannelsConfig: (workspaceCwd: string) => Record<string, unknown>;
+  /**
+   * The daemon's record of `serve.channels` names that were not restored. A
+   * failed restore never reaches the committed selection, so without it such
+   * a channel would list as `stopped`.
+   */
+  restoreFailures?: Pick<ChannelRestoreFailures, 'get' | 'clear'>;
 }
 
 export class ChannelManagementError extends Error {
@@ -183,6 +198,12 @@ export function createChannelManagementService(
   opts: CreateChannelManagementServiceOptions,
 ): ChannelManagementService {
   const diagnostics = new Map<string, string>();
+  // An operator acting on a channel supersedes both what a previous action
+  // left behind and a restore failure: the outcome that matters is now theirs.
+  const forgetDiagnostics = (name: string): void => {
+    diagnostics.delete(name);
+    opts.restoreFailures?.clear(opts.workspaceCwd, name);
+  };
   let mutationTail = Promise.resolve();
 
   const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
@@ -264,6 +285,10 @@ export function createChannelManagementService(
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
     if (!workspaceCommittedNames().includes(name)) {
+      const restoreFailure = opts.restoreFailures?.get(opts.workspaceCwd, name);
+      if (restoreFailure) {
+        return { state: 'error', lastError: restoreFailure.message };
+      }
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
@@ -425,7 +450,7 @@ export function createChannelManagementService(
     const config = channels[name]!;
     assertWorkspaceConfig(config);
     if (
-      config['senderPolicy'] !== 'pairing' &&
+      resolvePrivatePolicy(config) !== 'pairing' &&
       config['groupPolicy'] !== 'pairing'
     ) {
       throw new ChannelManagementError(
@@ -457,7 +482,7 @@ export function createChannelManagementService(
       const active = workspaceCommittedNames().includes(name);
       if (active) assertOwnedRuntime(name);
       const persisted = await opts.store.upsert(name, request);
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       if (active) {
         try {
           await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
@@ -478,33 +503,27 @@ export function createChannelManagementService(
       const configured = Object.hasOwn(current.channels, name);
       if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (!configured && current.startupNames.includes(name)) {
+      if (!configured) {
+        if (Object.hasOwn(opts.loadChannelsConfig(opts.workspaceCwd), name)) {
+          // The worker resolves the merged system + user + workspace view, so
+          // a channel configured outside this scope still runs here. Its
+          // configuration is not lost — this scope never held it — and
+          // stopping the worker would tear down a channel this route never
+          // listed and cannot delete, so report the scope-local truth
+          // instead.
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace's settings scope, but its runtime is resolved from another scope (user or system settings); it cannot be deleted from here.`,
+          );
+        }
         assertConvergeableRuntimeOwner(name);
-      } else if (
-        !configured &&
-        (opts.manager.committedChannelNames().includes(name) ||
-          workerFor(name).length > 0)
-      ) {
-        // The manager resolves the merged system + user + workspace view, so
-        // the runtime can still see a channel this scope never persisted —
-        // configured only at user scope, or selected in another workspace's
-        // file. Nothing persisted here can converge; stopping the worker
-        // would tear down a channel this route never listed and cannot
-        // delete, so report the scope-local truth instead.
-        throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
-        );
       }
       if (workspaceCommittedNames().includes(name)) {
-        // On the missing-config path the converge gate above already
-        // confirmed the single local owner; only the configured path needs
-        // this check.
-        if (configured) assertOwnedRuntime(name);
+        assertOwnedRuntime(name);
         await stopChannel(name);
       }
       const persisted = await opts.store.remove(name, request);
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async setStartup(name, request) {
@@ -550,7 +569,7 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
       );
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async stop(name) {
@@ -567,7 +586,7 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
       );
-      diagnostics.delete(name);
+      forgetDiagnostics(name);
       return resultFor(name, persisted);
     },
     async restart(name) {
@@ -581,6 +600,21 @@ export function createChannelManagementService(
       }
       assertWorkspaceConfig(persisted.channels[name]!);
       if (!workspaceCommittedNames().includes(name)) {
+        // A channel listed as `error` with nothing running — a restore that
+        // failed, or a replacement rolled back after its reload failed — has
+        // no worker to restart. Clients offer "retry" for that state, and
+        // retrying it means starting it.
+        if (
+          diagnostics.has(name) ||
+          opts.restoreFailures?.get(opts.workspaceCwd, name)
+        ) {
+          await opts.manager.setChannelEnabled(
+            { name, workspaceCwd: opts.workspaceCwd },
+            true,
+          );
+          forgetDiagnostics(name);
+          return resultFor(name, persisted);
+        }
         throw new ChannelManagementError(
           'channel_worker_not_enabled',
           `Channel "${name}" is not running.`,
@@ -589,7 +623,7 @@ export function createChannelManagementService(
       assertOwnedRuntime(name);
       try {
         await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
-        diagnostics.delete(name);
+        forgetDiagnostics(name);
       } catch (error) {
         diagnostics.set(name, diagnostic(error));
         throw error;

@@ -46,6 +46,10 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
+import {
+  shellResultText,
+  type ShellResultDisplay,
+} from '../utils/shell-result.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
@@ -2394,6 +2398,56 @@ describe('ChatRecordingService', () => {
         ]);
       }
     });
+
+    it.each(['', 'small display', 'x'.repeat(40_000)])(
+      'observes structured shell display before and after recording (case %#)',
+      async (text) => {
+        const display: ShellResultDisplay = {
+          type: 'shell_result',
+          version: 1,
+          text,
+          output: text,
+          directory: '/tmp',
+          exitCode: 0,
+          signal: null,
+          pid: null,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        };
+        chatRecordingService.recordToolResult([{ text: 'model response' }], {
+          callId: 'shell-1',
+          status: 'success',
+          resultDisplay: display,
+        });
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        const savedText = shellResultText(record.toolCallResult?.resultDisplay);
+        expect(savedText).toBeDefined();
+        expect(savedText!.length).toBeLessThanOrEqual(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        );
+        for (const [stage, value] of [
+          ['recorder_input', text],
+          ['recorder_output', savedText],
+        ]) {
+          const observation = boundaryObserveMock.mock.calls.find(
+            ([entry]) => entry.stage === stage,
+          )?.[0];
+          const values = observation?.values;
+          expect(
+            (typeof values === 'function' ? values() : values)?.filter(
+              (entry) => entry.representation === 'display',
+            ),
+          ).toEqual([{ representation: 'display', value }]);
+        }
+        expect(display.text).toBe(text);
+      },
+    );
 
     it('should keep small file diff resultDisplay unchanged', async () => {
       const toolResultParts: Part[] = [

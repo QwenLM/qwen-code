@@ -95,11 +95,12 @@ export class WorkflowAgentCapExceededError extends Error {
   }
 }
 
-/** Limits that make every later agent call fail too. */
+/** Run-level limits and policy refusals must survive errors-as-data handling. */
 export function isWorkflowRunLevelError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const name = (error as { name?: unknown }).name;
   return (
+    (error as { __wfRunFailure?: unknown }).__wfRunFailure === true ||
     name === 'WorkflowBudgetExceededError' ||
     name === 'WorkflowAgentCapExceededError'
   );
