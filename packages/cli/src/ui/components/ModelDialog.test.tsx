@@ -1885,6 +1885,84 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(fastIndex);
   });
 
+  it('highlights the matching baseUrl for duplicate compaction-model settings', () => {
+    // The compaction twin of the fast-model case above. `compactionModel`
+    // persists through the same `authType:id\0<baseUrl>` encoder, so its
+    // read-back has to hand that endpoint to the shared matcher as well. If
+    // the `isCompactionModelMode` call site loses the operand, `/model
+    // --compaction` reopens highlighting the FIRST same-id row and Enter
+    // re-persists the other endpoint while the toast still reads
+    // `Compaction Model: openai:shared-fast` (#12760 on the compaction arm).
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        compactionModel: `openai:shared-fast\0${selectedBaseUrl}`,
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'shared-fast',
+        label: '[Free Quota] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://free-quota.example.com/v1',
+      },
+      {
+        id: 'shared-fast',
+        label: '[Token Plan] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                baseUrl: 'https://free-quota.example.com/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://free-quota.example.com/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isCompactionModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const compactionIndex = items.findIndex(
+      (item) =>
+        String(item.value).includes('shared-fast') &&
+        String(item.value).includes(selectedBaseUrl),
+    );
+    expect(compactionIndex).toBeGreaterThan(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(compactionIndex);
+  });
+
   it('falls back to the same-id row when the pinned endpoint matches none (#12760)', () => {
     // A project that declares its own `modelProviders` replaces the user's, so
     // a globally pinned endpoint can match no row here. Without a same-id
