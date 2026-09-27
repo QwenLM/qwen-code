@@ -480,17 +480,28 @@ describe('getInitialChatHistory', () => {
 
     it('keeps the listing for a deferred-but-registered Skill tool', async () => {
       // A Skill tool demoted behind `tool_search` by an active `tools.eager`
-      // allowlist is still registered — `getAllToolNames()` unions factory
-      // registrations — but appears in neither `getFunctionDeclarations()` nor
-      // `getTool()`, which reads only loaded instances. The listing must
-      // survive that demotion, so this is the case a declarations-based gate
-      // wrongly drops. This is the only case in the suite that overrides the
-      // eager default declaration list.
+      // allowlist stays registered, and `getAllToolNames()` unions factory
+      // registrations, so it is still listed — while `getFunctionDeclarations()`
+      // skips permission-deferred tools. `getInitialChatHistory` awaits
+      // `warmAll()` before the gate, and `warmAll()` materializes every factory
+      // (`ensureTool` -> `this.tools.set`), so `getTool()` *does* see the tool
+      // in this state; a listed name with a null from `getTool()` means the
+      // factory's warm rejected, which is a different state and must not be
+      // modelled as deferral. The listing has to survive the demotion, so this
+      // is the case a declarations-based gate wrongly drops — and the only one
+      // in the suite that clears the eager default declaration list.
       mockToolRegistry.getFunctionDeclarations.mockReturnValue([]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ||
+        name === ToolNames.TOOL_CALL ||
+        name === ToolNames.SKILL
+          ? {}
+          : null,
+      );
 
       expect(mockToolRegistry.getAllToolNames()).toEqual([ToolNames.SKILL]);
       expect(mockToolRegistry.getFunctionDeclarations()).toEqual([]);
-      expect(mockToolRegistry.getTool(ToolNames.SKILL)).toBeNull();
+      expect(mockToolRegistry.getTool(ToolNames.SKILL)).toEqual({});
 
       const [history] = await getInitialChatHistory(mockConfig as Config);
 
