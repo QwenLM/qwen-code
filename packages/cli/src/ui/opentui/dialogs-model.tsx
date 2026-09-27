@@ -18,7 +18,7 @@
  */
 
 import { useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
@@ -31,6 +31,7 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
@@ -73,9 +74,12 @@ export function computeModelDialogMaxItems(
   );
 }
 
+export const ADVISOR_OFF_OPTION = '$advisor-off';
+
 export type ModelDialogMode =
   | 'primary'
   | 'fast'
+  | 'advisor'
   | 'voice'
   | 'vision'
   | 'compaction'
@@ -190,9 +194,11 @@ export function modelDialogTitle(
           ? t('Select Compaction Model')
           : mode === 'image'
             ? t('Select Image Model')
-            : mode === 'fast'
-              ? t('Select Fast Model')
-              : t('Select Model');
+            : mode === 'advisor'
+              ? t('Select Advisor Model')
+              : mode === 'fast'
+                ? t('Select Fast Model')
+                : t('Select Model');
   const suffix =
     persistScope === 'workspace'
       ? t(' (this project)')
@@ -220,6 +226,7 @@ export interface OpenTuiModelEntry extends DialogListItem<string> {
 
 /** Plain-text row title (colors are applied at render time). */
 export function formatModelOptionLabel(entry: OpenTuiModelEntry): string {
+  if (entry.key === ADVISOR_OFF_OPTION) return entry.label;
   let label = `[${entry.authType}] ${entry.label}`;
   if (entry.modelId !== entry.label) label += ` (${entry.modelId})`;
   if (entry.isRuntime) label += ' (Runtime)';
@@ -254,6 +261,8 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
 
   const isAuxMode = mode !== 'primary';
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const { width: terminalWidth } = useTerminalDimensions();
+  const ruleWidth = dialogContentWidth(terminalWidth);
 
   const initialIndex = initialKey
     ? Math.max(
@@ -333,19 +342,22 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             onSelectIndex={list.selectIndex}
             onWheel={(direction) =>
               list.setActiveIndex(
-                list.activeIndex + (direction === 'down' ? 1 : -1),
+                list.activeIndexRef.current + (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+              <box flexDirection="column">
+                <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+                {item.description && <text fg={C.dim}>{item.description}</text>}
+              </box>
             )}
           />
         </box>
       )}
 
-      {highlightedEntry && (
+      {highlightedEntry && highlightedEntry.key !== ADVISOR_OFF_OPTION && (
         <box flexDirection="column" marginTop={1}>
-          <text fg={C.dim}>{'─'.repeat(20)}</text>
+          <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
           {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (
             <box marginTop={1}>
               <text fg={C.yellow}>

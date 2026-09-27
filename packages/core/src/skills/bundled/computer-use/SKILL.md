@@ -9,226 +9,270 @@ description: Control local desktop applications through Computer Use for tasks t
 - Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
 - Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
 - `node_repl` state is persistent across calls.
-- For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
+- For text output, use `nodeRepl.write(...)`. It takes a string; use `JSON.stringify(...)` only for textual metadata. For an observation, write its `.text` and emit its screenshots as images; do not stringify an observation or driver result containing image bytes.
+- Omit `yield_time_ms` for ordinary UI calls to use the default 10-second wait. A shorter yield does not speed up the action and can add a `node_repl_wait` round. Use a shorter yield only when you need control back before completion; if a cell is still running, collect its result with `node_repl_wait` before issuing dependent actions.
+
+## Forwarding results in Codex code mode
+
+When calling `node_repl` through `tools.*` inside Codex's outer `functions.exec`,
+forward each returned `content` block by its type. `nodeRepl.emitImage(...)`
+produces an MCP image block; the outer script must pass that block to `image()`
+for the model to receive an image. Use the tool name exposed by your MCP server:
+
+```js
+const result = await tools.mcp__node_repl__node_repl({ code });
+for (const block of result.content ?? []) {
+  if (block.type === 'text') {
+    text(block.text);
+  } else if (block.type === 'image') {
+    image(block);
+  }
+}
+```
+
+Here `code` is the JavaScript to run in the persistent Node REPL. Keep the
+forwarding loop in the outer code-mode script, outside that `code` string.
+Apply the same loop to `node_repl_wait` results: images may arrive only when a
+running cell completes. Forward text blocks too, including running-cell IDs and
+errors. Direct MCP tool calls do not need this outer forwarding loop.
+
+Do not use `text(result)`, `text(block)`, or `JSON.stringify(result)` to forward
+an MCP result containing images: this turns image base64 into text, consuming
+context without showing the image. `image()` accepts one image block, not the
+whole result, so do not use `image(result)` either.
 
 ## Bootstrap
 
 If `node_repl` is unavailable, run:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.3
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.5
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
 ```
 
 Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
 run the second command and retry.
 
-Import the `ComputerUse` API directly once per fresh `node_repl` session:
+Reuse an existing `computer` connected to the intended desktop. Otherwise import
+once per fresh `node_repl` session. The same App workflow below applies to macOS,
+Linux and Windows; no additional platform resource is needed:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
+var platform = await computer.getPlatform();
+nodeRepl.write(`Connected platform: ${platform}`);
 ```
+
+Use the connected platform for shortcuts, not the CLI or Node host operating system.
+When the task identifies an app, combine initialization with `computer.getApp()`
+and its first `getState()` in the same call. Read that state before editing or input.
 
 ## API surface
 
 ```ts
-type WindowTarget = { pid: number; windowId: number };
-type ElementTarget = {
-  pid: number;
-  windowId?: number;
-  elementToken: string;
-};
-type CoordinateTarget = WindowTarget & { x: number; y: number };
-type PointOrElementTarget = CoordinateTarget | ElementTarget;
-type ExactActionTarget = WindowTarget | ElementTarget;
-type DeliveryOptions = { deliveryMode?: DeliveryMode };
-
+type Point = number | { x: number; y: number };
 type ComputerUse = {
-  click: (
-    args: PointOrElementTarget &
-      DeliveryOptions & { button?: MouseButton; count?: number },
-  ) => Promise<object>;
-  doubleClick: (
-    args: PointOrElementTarget & DeliveryOptions,
-  ) => Promise<object>;
-  rightClick: (
-    args: PointOrElementTarget & DeliveryOptions & { modifier?: string[] },
-  ) => Promise<object>;
-  drag: (
-    args: WindowTarget &
-      DeliveryOptions & {
-        fromX: number;
-        fromY: number;
-        toX: number;
-        toY: number;
-      },
-  ) => Promise<object>;
-  observeWindow: (
-    args: WindowTarget & { disableDiff?: boolean; includeScreenshot?: boolean },
-  ) => Promise<WindowObservation>;
-  listApps: () => Promise<Array<App>>;
-  listWindows: (args: { pid: number }) => Promise<Array<Window>>;
-  performSecondaryAction: (
-    args: ElementTarget & { action: string },
-  ) => Promise<object>;
-  pressKey: (
-    args: ExactActionTarget &
-      DeliveryOptions & { key: string; modifiers?: string[] },
-  ) => Promise<object>;
-  hotkey: (
-    args: ExactActionTarget & DeliveryOptions & { keys: string[] },
-  ) => Promise<object>;
-  scroll: (
-    args: PointOrElementTarget &
-      DeliveryOptions & { direction: Direction; amount?: number },
-  ) => Promise<object>;
-  setValue: (args: ElementTarget & { value: string }) => Promise<object>;
-  typeText: (
-    args: ExactActionTarget & DeliveryOptions & { text: string },
-  ) => Promise<object>;
+  getPlatform: () => Promise<'macos' | 'linux' | 'windows'>;
+  getApp: (nameOrIdentifierOrPath: string) => Promise<App>;
+  listApps: () => Promise<
+    Array<{ id: string; displayName: string; isRunning: boolean }>
+  >;
   close: () => Promise<void>;
 };
-
 type App = {
-  name?: string;
-  bundle_id?: string;
-  pid?: number;
-  running?: boolean;
-  launch_path?: string;
+  getState: (options?: {
+    disableDiff?: boolean;
+    includeScreenshot?: boolean;
+    maxTextChars?: number;
+  }) => Promise<State>;
+  click: (
+    point: Point,
+    options?: { button?: 'left' | 'right' | 'middle'; count?: number },
+  ) => Promise<object>;
+  doubleClick: (point: Point) => Promise<object>;
+  rightClick: (
+    point: Point,
+    options?: { modifier?: string[] },
+  ) => Promise<object>;
+  setValue: (element: number, value: string) => Promise<object>;
+  performSecondaryAction: (element: number, action: string) => Promise<object>;
+  typeText: (text: string) => Promise<object>;
+  paste: (
+    text: string,
+    options?: { format?: 'text' | 'md' | 'html'; signal?: AbortSignal },
+  ) => Promise<object>;
+  selectText: (
+    element: number,
+    text: string,
+    options?: {
+      prefix?: string;
+      suffix?: string;
+      selection?: 'text' | 'cursor_before' | 'cursor_after';
+      signal?: AbortSignal;
+    },
+  ) => Promise<object>;
+  pressKey: (
+    key: string,
+    options?: { modifiers?: string[] },
+  ) => Promise<object>;
+  hotkey: (keys: string[]) => Promise<object>;
+  scroll: (
+    point: Point,
+    options: { direction: 'up' | 'down' | 'left' | 'right'; amount?: number },
+  ) => Promise<object>;
+  drag: (options: {
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+  }) => Promise<object>;
 };
-
-type Window = {
-  window_id: number;
-  title?: string;
-  is_on_screen?: boolean;
-  on_current_space?: boolean;
-};
-
-type WindowObservation = {
-  pid: number;
-  windowId: number;
+type State = {
+  app: string;
+  window: string;
   mode: 'full' | 'diff' | 'no_change';
-  resyncReason?: string;
   text: string;
-  elements: Array<Element>;
-  screenshot?: Screenshot;
+  screenshot?: { images: Array<{ mimeType: string; dataBase64: string }> };
 };
-
-type Element = {
-  element_token?: string;
-  role?: string;
-  label?: string;
-  automation_id?: string;
-  value?: unknown;
-  actions?: string[];
-};
-
-type Screenshot = {
-  images: Array<{ mimeType: string; dataBase64: string }>;
-};
-
-type Direction = 'up' | 'down' | 'left' | 'right';
-type MouseButton = 'left' | 'right' | 'middle';
-type DeliveryMode = 'background' | 'foreground';
 ```
 
 ## Workflow
 
+`paste` and `selectText` currently require macOS. On Linux/Windows, use the shared
+`typeText`, `setValue`, `pressKey` and observed actions. Unsupported text methods
+fail with `unsupported_platform`; do not retry them as window failures.
+
 ### 1. Initialize
 
-Start by getting the state for the app and window you want to use. When the task
-names an app, filter for that name directly:
+If initialization already bound the task's app and returned its state, reuse
+that `app` and observation. Otherwise, bind the app named by the task, then read its state.
+`getApp()` binds identity; `getState()` can open a discovered stopped app. Combine these
+steps in one Node REPL call:
 
 ```js
-var apps = await computer.listApps();
-var matches = apps.filter(
-  (app) => app.name === 'Target App' || app.bundle_id === 'com.example.target',
-);
-nodeRepl.write(JSON.stringify(matches));
-
-var windows = await computer.listWindows({ pid: matches[0].pid });
-var target = { pid: matches[0].pid, windowId: windows[0].window_id };
-var state = await computer.observeWindow(target);
-nodeRepl.write(state.text); // This will return the accessibility tree
+var app = await computer.getApp('Microsoft Excel');
+nodeRepl.write((await app.getState()).text);
 ```
 
-If you cannot identify an app from the task, prior context, or builtin apps,
-start by discovering the available apps:
+The app handle tracks its current window and dialog. Read the returned window
+title to confirm the intended document. If the app is unknown or its name is
+ambiguous, discover applications with `computer.listApps()` and use a matching
+application `id` when it distinguishes the app. Two running instances may have
+the same ID; retrying that ID cannot resolve the ambiguity. Ask the user to keep
+only the intended instance open rather than guessing a target or retrying it.
 
-```js
-var apps = await computer.listApps();
-nodeRepl.write(JSON.stringify(apps));
-```
+AX text uses short numeric IDs, such as `[37] TextField "Name"`. Use IDs from
+the current observation for element actions. IDs can change when the app's
+window or session changes. Disabled and static-text rows are observation-only.
 
-After performing one or more UI actions, call `observeWindow(...)` before
-deciding what to do next. This keeps you in the current UI state. Read the
-current actionable `element_token` values from `state.elements`; tokens for
-unchanged elements remain valid across `diff` and `no_change` observations.
+For token efficiency, the accessibility tree will be returned
+as a diff when appropriate. Prefer this default diff output. A full state
+replaces the previous state; a diff updates it; no-change preserves it. If you
+need a full replacement, use `disableDiff: true` only when the previous state
+is unavailable or no longer useful. Do not disregard the text and then assume
+that a subsequent diff will reproduce the information you skipped.
 
-For token efficiency, when appropriate, the accessibility tree will be returned
-as a diff from the most previous accessibility tree, listing only the elements
-that were removed, added, or changed. Prefer this default diff output; pass
-`disableDiff: true` only when you need a fresh full accessibility tree. If you
-disregard the text from a previous call to `observeWindow`, such as when you only
-emit the screenshot, get the full tree next time you inspect AX text.
-`state.elements` remains the current full actionable element list when
-`state.text` is a diff or reports no change.
+Returned text defaults to at most 12,000 characters. Set `maxTextChars` (minimum 512) to adjust the limit. A truncation notice means some captured rows were
+omitted; request `app.getState({ disableDiff: true, maxTextChars: 24000 })` when
+you need more full text. An omitted row does not prove an element is absent.
+Traversal-limited captures cover only the captured nodes: identical captures
+can return no-change, while changes return full captured state. Use current
+captured IDs; after a read failure, use only IDs from the latest observation.
 
 ### 2. Actions using app
 
-Perform one or more actions, and then fetch the latest state:
+After performing one or more UI actions, call `app.getState()` before deciding
+what to do next. Batch actions whose target remains the same, then print only
+the state needed for the next decision:
 
 ```js
-await computer.click({ pid: target.pid, elementToken });
-await computer.setValue({ pid: target.pid, elementToken, value: 'openai.com' });
-await computer.pressKey({ ...target, key: 'Enter' });
-await computer.typeText({ ...target, text: 'hello' });
-await computer.scroll({
-  pid: target.pid,
-  elementToken,
-  direction: 'down',
-  amount: 1,
-});
-await computer.performSecondaryAction({
-  pid: target.pid,
-  elementToken,
-  action: 'Show Menu',
-});
-nodeRepl.write((await computer.observeWindow(target)).text);
+await app.click(37);
+await app.hotkey([platform === 'macos' ? 'super' : 'ctrl', 'a']);
+await app.typeText('hello');
+await app.pressKey('Return');
+nodeRepl.write((await app.getState()).text);
 ```
 
-Notes:
+Use the actual ID from your observation; `37` is only an example.
 
-- Prefer `element_token`-based actions over coordinate actions. If AX actions or AX text are unavailable or behave unexpectedly, switch to screenshots, coordinate clicks, and key presses.
-- `doubleClick` and `rightClick` invoke their dedicated SDK actions; `rightClick` also accepts optional modifiers.
-- If the UI is not behaving as expected, try fetching the latest `observeWindow(...)` state to make sure you have the latest context.
-- Prefer using accessibility text over screenshots for efficiency, but if the interface is not fully working or not providing enough context, make sure to fetch a screenshot to get more context. The accessibility interface may be incomplete in some applications, so a screenshot helps fully understand what is going on.
-- `performSecondaryAction` invokes an accessibility action that an element exposes besides a normal click, such as expanding a disclosure row, showing a menu, incrementing a control, or cancelling something. It requires an action actually exposed for that element in the accessibility text. Do not guess action names.
-- `pressKey` presses one key and accepts optional modifiers; `hotkey` sends a key combination such as `{ keys: ['ctrl', 'c'] }`. Single-key examples include `"a"`, `"Enter"`, `"Tab"`, and `"Up"`.
-- Take care when passing strings containing `\n` or `\r` to `typeText`, as it simulates pressing the return key. Many apps with message composers or forms will respond by sending the message or submitting the form rather than inserting a newline.
-- The SDK targets an exact PID and window ID. If an action opens a dialog, menu, or new window, call `listWindows({ pid })` again and select the current window before continuing.
+An observation is a decision boundary. When the current state already identifies
+the controls and the next actions are known, combine those actions and saving
+in the same call. Read state after the batch. End the batch at a new dialog,
+menu, changed target or uncertain result; use that state before choosing the
+next action. Do not split a known sequence merely to put each action in its own
+call.
+
+- Prefer element IDs to coordinates. `setValue(id, value)` changes a writable control, and `performSecondaryAction(id, action)` invokes a secondary action listed for that element. Use an observed action name rather than guessing.
+- When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
+- `No open application window.` means the app is still running without a document window. If closing it completed the task, finish instead of retrying actions; otherwise open the intended file or window first.
+- An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
+- Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
+- `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the connected platform's appropriate shortcut: macOS generally uses `super`; Linux/Windows generally use `ctrl`.
+- App input manages any required activation internally and restores the previous focus, unless the user has moved it elsewhere. If the platform cannot confirm the target or restore focus, the action reports an error. There is no delivery-mode choice and no automatic replay after an uncertain result.
+- On Linux, some compositor sessions cannot confirm an exact App target. An `app_window_unavailable` result can mean the session does not support this workflow; ask the user to use a supported desktop session instead of retrying input.
+- Literal `\n` or `\r` in `typeText` sends Return. In a composer or form this may submit rather than insert a newline.
+- If AX is incomplete or does not explain the interface, request a screenshot and inspect it. Only currently captured actionable IDs can be used for element actions.
+
+## Paste and select text
+
+These App methods are available on macOS only. Read current state first and use
+an observed element ID for selection.
+
+```js
+await app.selectText(37, 'draft', { prefix: 'Status: ' });
+nodeRepl.write((await app.getState()).text);
+```
+
+Use a real ID and text from your observation; the example assumes that the
+selected element contains exactly one matching `draft` immediately after
+`Status: `.
+
+After confirming the selection, replace it with plain text:
+
+```js
+await app.paste('ready');
+nodeRepl.write((await app.getState()).text);
+```
+
+- `selectText(element, text)` selects one exact, case-sensitive match. Optional
+  `prefix` and `suffix` must be immediately adjacent to that match. Missing or
+  ambiguous matches fail; provide enough observed context to identify one.
+- `selection` defaults to `'text'`. Use `'cursor_before'` or `'cursor_after'` to
+  place the insertion point at a match boundary instead of selecting the text.
+  The element must support a writable text selection; static labels may not.
+- `paste(text)` defaults to plain text. Use `{ format: 'md' }` for Markdown or
+  `{ format: 'html' }` for HTML; the receiving app determines which supplied
+  format it accepts. Use plain text when markup should remain literal.
+- Paste uses the clipboard temporarily. It restores the previous clipboard only
+  while it still owns that transaction; a newer external clipboard change is
+  preserved.
+- Both methods accept an optional `signal`. A completed dispatch, error or
+  cancellation does not by itself prove what changed. Observe state before
+  deciding whether to retry; do not blindly repeat unconfirmed text operations.
 
 ## Reading screenshots
 
-Request a screenshot with the observation, read its accessibility text, and
-emit each returned image:
-
-`includeScreenshot: true` is the parameter that requests a screenshot.
+Every App observation captures the current screenshot internally, independent
+of whether AX returns full state, a diff or no-change. The default return omits
+the image. `includeScreenshot: true` exposes it when visual inspection is needed.
+Prefer the text-only default when it identifies the controls and confirms the
+requested change. Request an image to resolve missing or ambiguous information,
+choose coordinates or verify an appearance that AX does not describe.
 
 ```js
-var state = await computer.observeWindow({
-  ...target,
-  includeScreenshot: true,
-});
+var state = await app.getState({ includeScreenshot: true });
 nodeRepl.write(state.text);
 for (const image of state.screenshot?.images ?? []) {
   await nodeRepl.emitImage(`data:${image.mimeType};base64,${image.dataBase64}`);
 }
 ```
 
-When all Computer Use work is complete:
+Include connection cleanup at the end of the call that emits the final
+verification. Inspect that result before reporting success; reconnect and
+continue if it reveals unfinished work. A separate cleanup-only model turn is
+unnecessary:
 
 ```js
 await computer.close();

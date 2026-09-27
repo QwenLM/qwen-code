@@ -247,10 +247,10 @@ describe('agent-frontmatter-schema', () => {
   });
 
   describe('parseAgentExecutor — qwen-code extension (not mirrored from CC)', () => {
-    it('parses a minimal legal spec', () => {
-      expect(parseAgentExecutor({ kind: 'acp', command: 'npx' })).toEqual({
-        kind: 'acp',
-        command: 'npx',
+    it.each(['acp', 'codex'] as const)('parses a minimal %s spec', (kind) => {
+      expect(parseAgentExecutor({ kind, command: 'native-agent' })).toEqual({
+        kind,
+        command: 'native-agent',
       });
     });
 

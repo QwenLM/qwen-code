@@ -17,11 +17,55 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
-const { openMock } = vi.hoisted(() => ({ openMock: vi.fn() }));
+const { openMock, bigInodeVolume } = vi.hoisted(() => ({
+  openMock: vi.fn(),
+  // Lets a test pose as a volume whose 64-bit file ids exceed the JS
+  // safe-integer range (NTFS): while enabled, every lstat and every
+  // directory-handle stat reports the real inode lifted above 2^60, in
+  // whichever representation the caller asked for. The lift preserves
+  // distinctness, so a physically replaced tree still reports a different
+  // id; the number form rounds into the unsafe range, which is the
+  // pre-#11848 failure shape.
+  bigInodeVolume: { enabled: false },
+}));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  openMock.mockImplementation(actual.open);
-  return { ...actual, open: openMock };
+  const poseStats = (
+    stats: { ino: number | bigint },
+    bigint: boolean,
+  ): void => {
+    if (!bigInodeVolume.enabled) return;
+    stats.ino = bigint
+      ? 2n ** 60n + BigInt(stats.ino)
+      : Number(2n ** 60n + BigInt(stats.ino));
+  };
+  openMock.mockImplementation(
+    async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const stat = handle.stat.bind(handle);
+      // Forward the stat options through, as the statSync mocks in
+      // no-follow-open.test.ts and session-writer-lease.test.ts do: the
+      // journal stats directory handles with `{ bigint: true }`, and a
+      // wrapper that dropped the options bag would silently un-ask the
+      // exact id the fix relies on.
+      handle.stat = (async (options?: { bigint?: boolean }) => {
+        const bigint = options?.bigint === true;
+        const stats = await (bigint ? stat({ bigint: true }) : stat());
+        poseStats(stats as { ino: number | bigint }, bigint);
+        return stats;
+      }) as typeof handle.stat;
+      return handle;
+    },
+  );
+  const lstat = (async (filePath: PathLike, options?: { bigint?: boolean }) => {
+    const bigint = options?.bigint === true;
+    const stats = await (bigint
+      ? actual.lstat(filePath, { bigint: true })
+      : actual.lstat(filePath));
+    poseStats(stats as { ino: number | bigint }, bigint);
+    return stats;
+  }) as typeof actual.lstat;
+  return { ...actual, open: openMock, lstat };
 });
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -141,6 +185,19 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
+  // The regression witness for #11848, now running on every platform. It
+  // was gated off on win32 because the gate's red was witnessing a real
+  // production gap, not a portability artifact: `sameDirectoryIdentity`
+  // compared EQUAL for a complete private replacement of the journal tree
+  // when `inodeVerifiable` was false on both sides, so on NTFS the swap
+  // detection was inert and `hasRecord` answered `false` over an
+  // attacker-created empty tree instead of rejecting with `reason:
+  // 'compromised'` (measured on two independent Windows self-hosted arms at
+  // the base of #11787: `25 tests | 5 failed`, `promise resolved "false"
+  // instead of rejecting`). The root cause was `fs.lstat(directory)` in
+  // `standalone-deletion-journal.ts` asking for a number-backed `Stats`,
+  // which rounds a 64-bit NTFS file index; the `{ bigint: true }`
+  // conversion keeps the id exact, and is what let the win32 gate come off.
   it.each(['base', 'state'] as const)(
     'rejects a complete private replacement %s tree on every operation',
     async (parent) => {
@@ -149,7 +206,7 @@ describe('StandaloneDeletionJournal', () => {
       await journal.writePrepared(record, root);
       const directory = parent === 'base' ? stableBaseDir : ownerDirectory;
       const saved = `${directory}.saved`;
-      const original = await fs.lstat(directory);
+      const original = await fs.lstat(directory, { bigint: true });
       const originalRecord = await fs.readFile(journalPath('prepared'), 'utf8');
       await fs.rename(directory, saved);
       await fs.mkdir(path.join(ownerDirectory, 'deletions'), {
@@ -169,7 +226,9 @@ describe('StandaloneDeletionJournal', () => {
           expect(stat.uid).toBe(process.getuid?.());
         }
       }
-      expect((await fs.lstat(directory)).ino).not.toBe(original.ino);
+      expect((await fs.lstat(directory, { bigint: true })).ino).not.toBe(
+        original.ino,
+      );
       for (const operation of [
         () => journal.hasRecord(SESSION_ID),
         () => journal.listSessionIds(),
@@ -196,6 +255,45 @@ describe('StandaloneDeletionJournal', () => {
       await expect(
         fs.readdir(path.join(ownerDirectory, 'deletions')),
       ).resolves.toEqual([]);
+    },
+  );
+
+  it.each(['base', 'state'] as const)(
+    'rejects a private replacement %s tree on a volume with 64-bit file ids',
+    async (parent) => {
+      // The #11848 acceptance shape, platform-independent by construction:
+      // every stat reports its real inode lifted above 2^60, as an NTFS
+      // volume would. With number-backed stats both sides of the comparison
+      // round into the unsafe range, `inodeVerifiable` turns false on both,
+      // and `sameDirectoryIdentity` compares EQUAL for the replacement — the
+      // fail-open the win32 arms measured. With bigint stats the ids stay
+      // exact and the swap is detected on every operation.
+      const root = await workspace.getRoot();
+      const record = await makeRecord('prepared');
+      bigInodeVolume.enabled = true;
+      try {
+        await journal.writePrepared(record, root);
+        const directory = parent === 'base' ? stableBaseDir : ownerDirectory;
+        const saved = `${directory}.saved`;
+        await fs.rename(directory, saved);
+        await fs.mkdir(path.join(ownerDirectory, 'deletions'), {
+          recursive: true,
+          mode: 0o700,
+        });
+        for (const operation of [
+          () => journal.hasRecord(SESSION_ID),
+          () => journal.listSessionIds(),
+          () => journal.read(SESSION_ID, root),
+          () => journal.clear(SESSION_ID, root),
+          () => journal.writePrepared(record, root),
+        ]) {
+          await expect(operation()).rejects.toMatchObject({
+            reason: 'compromised',
+          });
+        }
+      } finally {
+        bigInodeVolume.enabled = false;
+      }
     },
   );
 
@@ -258,7 +356,11 @@ describe('StandaloneDeletionJournal', () => {
     });
   });
 
-  it('rejects journal directory replacement during phase sync', async () => {
+  it('rejects journal directory replacement during phase sync', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     const root = await workspace.getRoot();
     const record = await makeRecord('prepared');
     const journalDirectory = path.dirname(journalPath('prepared'));
@@ -302,7 +404,11 @@ describe('StandaloneDeletionJournal', () => {
     }
   });
 
-  it('retains a same-session fence until clear durability is confirmed', async () => {
+  it('retains a same-session fence until clear durability is confirmed', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     const root = await workspace.getRoot();
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
@@ -363,7 +469,11 @@ describe('StandaloneDeletionJournal', () => {
   it('requires the journal owner directory to sync before writing a phase', async () => {
     const root = await workspace.getRoot();
     const record = await makeRecord('prepared');
-    const ownerStats = await fs.stat(ownerDirectory);
+    // The journal stats the open handle with `{ bigint: true }` (the #11848
+    // conversion), so the fake handle must answer in kind — a number-backed
+    // `Stats` would miscompare against the bigint identity and reject as
+    // 'compromised' before the sync failure under test ever fires.
+    const ownerStats = await fs.stat(ownerDirectory, { bigint: true });
     const syncError = Object.assign(new Error('owner sync failed'), {
       code: 'EIO',
     });
@@ -380,6 +490,45 @@ describe('StandaloneDeletionJournal', () => {
     await expect(fs.lstat(journalPath('prepared'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('refuses an owner handle whose identity disagrees with the expected one', async () => {
+    // The at-open guard in `openDurableDirectory` is the only check covering
+    // the lstat→open window: the post-open `assertDirectoryIdentity` re-lstats
+    // the PATH, so it cannot see an fd bound to a substituted inode. Before
+    // the `{ bigint: true }` conversion the guard was silently inert on a
+    // >2^53 NTFS id (both sides unverifiable → device-only compare → a
+    // substituted same-device directory passed); now it discriminates, so it
+    // needs a witness. Dropping only the `sameDirectoryIdentity` term used to
+    // leave the suite green: the pre-sync re-check in `syncDurableDirectory`
+    // backstops the same substituted handle and still rejects — but only
+    // AFTER the journal directory was created inside it. The ENOENT assertion
+    // below is what makes this case mutation-visible.
+    const root = await workspace.getRoot();
+    const record = await makeRecord('prepared');
+    // BigIntStats of a DIFFERENT same-device directory. The fake handle must
+    // answer in bigint: a number-backed one rejects on the representation
+    // mismatch (`dev: number !== bigint`) instead of the identity mismatch,
+    // witnessing nothing — the same reason the sync case above stats with
+    // `{ bigint: true }`.
+    const substituted = await fs.stat(stableBaseDir, { bigint: true });
+    openMock.mockImplementationOnce(async (filePath: PathLike) => {
+      expect(filePath.toString()).toBe(ownerDirectory);
+      return {
+        stat: async () => substituted,
+        sync: async () => undefined,
+        close: async () => undefined,
+      } as unknown as fs.FileHandle;
+    });
+
+    await expect(journal.writePrepared(record, root)).rejects.toMatchObject({
+      reason: 'compromised',
+    });
+    // The guard fired before any side effect: the journal directory was never
+    // created, so nothing was written into the substituted tree.
+    await expect(
+      fs.lstat(path.join(ownerDirectory, 'deletions')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('does not hide Windows journal owner open failures', async () => {
@@ -421,11 +570,16 @@ describe('StandaloneDeletionJournal', () => {
     await expect(journal.read(SESSION_ID, root)).resolves.toBeUndefined();
   });
 
-  it('rejects journal directory replacement while clearing phases', async () => {
+  it('rejects journal directory replacement while clearing phases', async (ctx) => {
     const root = await workspace.getRoot();
     const prepared = await makeRecord('prepared');
     await journal.writePrepared(prepared, root);
     const journalDirectory = path.dirname(journalPath('prepared'));
+    const journalStats = await fs.lstat(journalDirectory, { bigint: true });
+    if (journalStats.ino === 0n) {
+      ctx.skip();
+      return;
+    }
     const originalDirectory = `${journalDirectory}.original`;
     const originalOpen = openMock.getMockImplementation();
     if (!originalOpen) throw new Error('expected fs.open implementation');

@@ -90,6 +90,7 @@ export interface ResponsesApiMessageItem {
   type: 'message';
   role: 'user' | 'assistant' | 'system' | 'developer';
   content: string | ResponsesApiContentPart[];
+  phase?: 'commentary' | 'final_answer';
 }
 
 export type ResponsesApiContentPart =
@@ -132,6 +133,7 @@ export interface ResponsesApiOutputMessage {
   id: string;
   role: 'assistant';
   content: ResponsesApiOutputContentPart[];
+  phase?: 'commentary' | 'final_answer';
 }
 
 export interface ResponsesApiOutputTextPart {

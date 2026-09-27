@@ -1,0 +1,11 @@
+# Context tools in code mode
+
+Port the tool exposure and context delivery changes from dragon/code-mode-only onto the QuickJS implementation on dragon/code-mode-only-10377. Preserve the target branch's media helpers, timeout accounting, inline output limits, scheduler batching, explicit per-agent allowlist, and output recovery.
+
+Only eleven registered tools remain direct: ask_user_question, agent, enter_plan_mode, exit_plan_mode, structured_output, create_sub_session, enter_worktree, exit_worktree, send_message, speak_to_user, and wait_threads. Exec is the top-level entry point; tool_search and tool_call stay hidden. Other registered tools are eligible subject to existing agent restrictions and approvals. Worktree approval behavior is unchanged.
+
+The core and ACP dispatchers expose completed native responses to exec via an optional callback before converting them to JavaScript values. Exec retains skill, update_goal and capture_screen_context outputs even without text(), forwards modelOverride property presence and terminateTurn, and delivers native images outside the QuickJS protocol. A host-owned JSON first line records toolResults for skill history restoration. Required context is not subjected to a second script output cap; ordinary script output retains its existing bound and global response budgets still apply. Later script errors remain visible alongside retained context through the normal delivery path. Cancellation clears skill tracking when context cannot be delivered.
+
+A goal proposal forms an execution barrier: previous nested tools finish before it and later tools wait for it. Ordinary calls still execute concurrently. A terminal proposal triggers a host termination message, which completes the QuickJS call with accumulated output and disposes the runtime without allowing script code to catch the termination. Tests cover sequential and concurrent dispatch, nonterminal proposals, native media, skill restoration, cancellation, partial errors, and agent restrictions.
+
+Build, typecheck, bundle, run focused core and ACP tests and the mock CLI plan in .qwen/e2e-tests/code-mode-10377-port.md. Push the migrated branch before removing the old branch locally and on its fork remote. Preserve any unrelated worktree files.

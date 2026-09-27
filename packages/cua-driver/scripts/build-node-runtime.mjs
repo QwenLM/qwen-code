@@ -157,6 +157,9 @@ try {
   writeFileSync(registerPath, patchRegister(readFileSync(registerPath, "utf8")))
   const callPath = join(runtimeRoot, "napi", "src", "call", "mod.rs")
   writeFileSync(callPath, patchCall(readFileSync(callPath, "utf8")))
+  const entryPath = join(runtimeRoot, "napi", "src", "lib.rs")
+  writeFileSync(entryPath, readFileSync(entryPath, "utf8") + "\n" +
+    readFileSync(join(scriptDirectory, "node-main-run-loop.rs"), "utf8"))
 
   const args = ["build", "--release", "--manifest-path", join(runtimeRoot, "napi", "Cargo.toml")]
   if (target) args.push("--target", target)

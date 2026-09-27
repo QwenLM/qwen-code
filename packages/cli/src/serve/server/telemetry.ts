@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/catalog',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/catalog',
+  },
+  {
+    method: 'POST',
     path: '/session',
     attribution: 'handler_resolved',
     route: 'POST /session',
@@ -182,6 +188,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/lsp',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mcp-app/tools/call',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
     method: 'GET',
     path: '/session/:id/resources',
     attribution: 'handler_resolved',
@@ -198,6 +210,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/artifacts',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/artifacts',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/artifacts/:artifactId/content',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/artifacts/:artifactId/content',
   },
   {
     method: 'POST',
@@ -620,6 +638,15 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/turn-index',
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
+    };
+  }
+  const workspaceToolCalls = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
+  );
+  if (workspaceToolCalls?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: decodePathSegment(workspaceToolCalls[1]),
     };
   }
   const workspaceExport = path.match(

@@ -1146,6 +1146,14 @@ const MonitorDetailBody: React.FC<{
         <Text wrap="truncate-end">{entry.command}</Text>
       </Box>
 
+      {entry.outputCaptureError && (
+        <Box>
+          <Text color={theme.status.warning} wrap="wrap">
+            {t('Output capture failed. Displayed output may be incomplete.')}
+          </Text>
+        </Box>
+      )}
+
       {hasError && (
         <Fragment>
           <Box />
@@ -1263,6 +1271,35 @@ const WorkflowDetailBody: React.FC<{
                 : t(
                     'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
                   )}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {entry.sizeWarning && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {`⚠ ${
+                entry.sizeWarning.axis === 'agents'
+                  ? t(
+                      'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+                      {
+                        agents: String(entry.sizeWarning.scheduledAgents),
+                        cap: String(entry.sizeWarning.agentCap),
+                      },
+                    )
+                  : t(
+                      'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
+                      {
+                        tokens: formatTokenCount(
+                          entry.sizeWarning.projectedTokens,
+                        ),
+                        cap: formatTokenCount(entry.sizeWarning.tokenCap),
+                      },
+                    )
+              }`}
             </Text>
           </Box>
         </Fragment>

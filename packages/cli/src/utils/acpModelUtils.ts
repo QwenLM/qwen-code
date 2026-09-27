@@ -14,6 +14,20 @@ import { z } from 'zod';
 
 export const ACP_ROUTE_ID_PREFIX = 'qwen-route:v1:';
 
+export function publicProviderBaseUrl(baseUrl: string): string | undefined {
+  if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
+  try {
+    const url = new URL(baseUrl);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
 function getRouteEndpointIdentity(baseUrl: string | undefined): string | null {
   if (!baseUrl) return null;
   try {

@@ -25,79 +25,32 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-// npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
+// Install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
-  execSync('npm install', { stdio: 'inherit', cwd: root });
+  execSync('corepack pnpm install --frozen-lockfile', {
+    stdio: 'inherit',
+    cwd: root,
+  });
 }
 
 // build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
-// --cli-only: skip packages not needed by the CLI bundle. Web Shell still
-// builds because the HTML export publishes its document renderer with npm.
+// Select the CLI by path: the repository root has the same package name.
 const cliOnly = process.argv.includes('--cli-only');
+// Mobile MCP has an independent build and was never part of the root build.
+const filter = cliOnly
+  ? '--filter "{./packages/cli}..." --filter @qwen-code/node-repl-mcp --filter @qwen-code/channel-plugin-example'
+  : '--filter "!@qwen-code/mobile-mcp"';
+execSync(`corepack pnpm -r ${filter} run build`, {
+  stdio: 'inherit',
+  cwd: root,
+});
 
-// Build in dependency order:
-// 1. core (foundation package, includes test-utils)
-// 2. channel-base (base channel infrastructure - used by channel adapters and cli)
-// 3. channel adapters (depend on channel-base)
-// 4. audio-capture (native microphone backend used by cli)
-// 5. acp-bridge (depends on core - used by cli)
-// 6. sdk (build-time devDep on acp-bridge for shared constants, used by cli channel worker)
-// 7. web-shell (document renderer used by web-templates)
-// 8. web-templates (embeddable web templates - used by cli)
-// 9. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
-// 10. vscode-ide-companion
-// 11. external-context integrations (private Qwen extensions)
-const buildOrder = [
-  'packages/core',
-  'packages/channels/base',
-  'packages/channels/telegram',
-  'packages/channels/weixin',
-  'packages/channels/dingtalk',
-  'packages/channels/dws',
-  'packages/channels/wecom',
-  'packages/channels/feishu',
-  'packages/channels/qqbot',
-  'packages/channels/github',
-  // gitlab is a builtin of the cli channel registry like its siblings; it
-  // used to build only transitively via cli's tsconfig project reference.
-  'packages/channels/gitlab',
-  'packages/channels/plugin-example',
-  'packages/audio-capture',
-  'packages/node-repl',
-  'packages/acp-bridge',
-  'packages/sdk-typescript',
-  'packages/web-shell',
-  'packages/web-templates',
-  'packages/cli',
-  ...(cliOnly
-    ? []
-    : [
-        'packages/qwen-live',
-        'packages/vscode-ide-companion',
-        'packages/chrome-extension',
-        'integrations/external-context',
-        'integrations/external-context-mem0',
-      ]),
-];
-
-for (const workspace of buildOrder) {
-  const command =
-    workspace === 'packages/audio-capture'
-      ? `npm run build:ts --workspace=${workspace}`
-      : `npm run build --workspace=${workspace}`;
-  execSync(command, { stdio: 'inherit', cwd: root });
-
-  // After cli is built, generate the JSON Schema for settings
-  // so the vscode-ide-companion extension can provide IntelliSense
-  if (workspace === 'packages/cli') {
-    execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
-      stdio: 'inherit',
-      cwd: root,
-    });
-  }
-}
+execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
+  stdio: 'inherit',
+  cwd: root,
+});
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above

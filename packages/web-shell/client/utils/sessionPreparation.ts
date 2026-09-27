@@ -11,6 +11,7 @@ const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
@@ -41,6 +42,14 @@ export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
 }
 
+function isSupersededSessionLoad(error: unknown): boolean {
+  return (
+    (error instanceof DOMException || error instanceof Error) &&
+    error.name === 'AbortError' &&
+    error.message.includes('superseded by a newer request')
+  );
+}
+
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
@@ -55,6 +64,7 @@ export async function createAndAttachSessionForPrompt({
   onSessionCreated,
   onSessionAllocated,
   getCurrentSessionId,
+  getCurrentWorkspaceCwd,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
@@ -74,6 +84,7 @@ export async function createAndAttachSessionForPrompt({
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
+  getCurrentWorkspaceCwd?: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<{
   worktree?: { slug: string; path: string; branch: string };
@@ -103,6 +114,7 @@ export async function createAndAttachSessionForPrompt({
         }
       : {
           workspaceCwd,
+          getCurrentWorkspaceCwd,
           sessionContext,
           sourceType: sessionSourceType,
           ...(approvalMode ? { approvalMode } : {}),
@@ -215,6 +227,18 @@ export async function createAndAttachSessionForPrompt({
     }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
+    if (isSupersededSessionLoad(error)) {
+      // A newer controlled session request won latest-wins and now owns the
+      // provider; its switch already detached this client. Keep the created
+      // session on the daemon as a normal list entry — a later loadSession
+      // attaches it fresh — and skip cleanup that would target the winner's
+      // (or a missing) client.
+      warn(
+        '[WebShell] first-prompt preparation superseded; keeping session for later attach:',
+        sessionId,
+      );
+      throw error;
+    }
     await sessionActions
       .releaseSession(sessionId)
       .catch((releaseError: unknown) => {

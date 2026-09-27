@@ -66,15 +66,17 @@ export async function evaluatePermissionFlow(
   invocation: AnyToolInvocation,
   toolName: string,
   toolParams: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<PermissionFlowResult> {
   // ── L3: Tool's default permission ───────────────────────────────────
-  const defaultPermission = await invocation.getDefaultPermission();
+  const defaultPermission = await invocation.getDefaultPermission(signal);
 
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
   const pmCtx = buildPermissionCheckContext(
     toolName,
-    toolParams,
+    // Some tools scope their rules by values derived during the L3 check.
+    invocation.getPermissionMatchParams?.() ?? toolParams,
     config.getTargetDir?.() ?? '',
     invocation.permissionAliases,
   );

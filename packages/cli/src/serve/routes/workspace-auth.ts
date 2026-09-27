@@ -5,7 +5,11 @@
  */
 
 import type { Application, RequestHandler } from 'express';
-import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  ProviderInstallError,
+  resolveModelProtocol,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -342,6 +346,20 @@ export function registerWorkspaceAuthRoutes(
         }
       }
       try {
+        resolveModelProtocol(
+          installRequest.protocol ?? knownProvider.protocol,
+          {
+            wireApi: installRequest.wireApi,
+          },
+        );
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_api',
+        });
+        return;
+      }
+      try {
         const assertGenerationOpen = captureGenerationAssertion?.();
         assertGenerationOpen?.();
         const result = assertGenerationOpen
@@ -366,6 +384,15 @@ export function registerWorkspaceAuthRoutes(
           ...(runtimeSync ? { runtimeSync } : {}),
         });
       } catch (err) {
+        if (
+          err instanceof ProviderInstallError &&
+          err.step === 'modelPurpose'
+        ) {
+          res
+            .status(400)
+            .json({ error: err.message, code: 'model_purpose_conflict' });
+          return;
+        }
         sendBridgeError(res, err, {
           route: 'POST /workspace/auth/provider',
           providerId: installRequest.providerId,

@@ -256,6 +256,22 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('.qwen/tmp');
   });
 
+  it('does not capture the worktree leases, which moved out of .qwen/tmp', () => {
+    // Leases now live outside the workspace, but an older build may have left
+    // `.qwen/review-leases` residue behind. The filter keeps excluding that
+    // retired directory so its session ids, prompt ids, worktree paths and
+    // branches never become review input.
+    write(
+      '.qwen/review-leases/qwen-review-lease-pr-1.json',
+      '{"sessionId":"s","promptId":"p"}\n',
+    );
+    write('real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['real.ts']);
+    expect(res.text).not.toContain('review-leases');
+  });
+
   it('excludes plumbing a round in ANOTHER directory wrote', () => {
     // The three `paths.ts` constants are cwd-relative for EVERY invocation,
     // so a round run from `sub/` writes `sub/.qwen/…`. A filter built from

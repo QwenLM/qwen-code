@@ -17,6 +17,23 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('SKILL');
 
 /**
+ * Why the model cannot invoke a skill right now, or `undefined` when it can.
+ * Shared by the availability filter and the resume path, so a resumed session
+ * never re-arms a skill no tool call could load. Read live, not off
+ * `SkillTool`'s asynchronously refreshed snapshots.
+ */
+export function skillModelInvocationBlock(
+  config: Config,
+  skillManager: SkillManager,
+  skill: SkillConfig,
+): 'disabled' | 'inactive' | 'hidden' | undefined {
+  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  return undefined;
+}
+
+/**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
@@ -137,19 +154,14 @@ async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
+  // Include a skill only when the model could invoke it right now (see
+  // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
   const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
-    (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      isEnabled(s),
+    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -224,6 +236,16 @@ function compareSkillEntries(
   if (aGroup !== bGroup) return aGroup - bGroup;
   return a.name.localeCompare(b.name);
 }
+
+/**
+ * Opening sentence of the block coreToolScheduler adds to a tool result when
+ * reading a file activates a path-gated skill. The scheduler folds that
+ * envelope into the tool response rather than emitting it as its own text
+ * part, so `isSkillListingReminder` deliberately does not match it and
+ * `/context` bills it with the tool result (#12235).
+ */
+export const SKILLS_ACTIVATED_OPENER =
+  'The following skill(s) became available via the Skill tool based on the file you just accessed';
 
 /**
  * Renders normalized skill entries into the `<available_skills>` body. Pure: no

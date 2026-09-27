@@ -8,11 +8,21 @@
     "types": ["node", "vitest/globals"],
     "paths": {
       "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
+      "@qwen-code/qwen-code-core/shellResult": [
+        "../core/src/utils/shell-result.ts"
+      ],
       "@qwen-code/qwen-code-core/subSessionConstants": [
         "../core/src/tools/sub-session-constants.ts"
       ],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/telemetryConstants": [
+        "../core/src/telemetry/constants.ts"
+      ],
+      "@qwen-code/qwen-code-core/omni": ["../core/src/omni/index.ts"],
+      "@qwen-code/qwen-code-core/omniPolicyCollection": [
+        "../core/src/omni/policy/model-call-collection.ts"
       ],
       "@qwen-code/qwen-code-core/goalWire": ["../core/src/goals/goal-wire.ts"],
       "@qwen-code/qwen-code-core/noFollowOpen": [

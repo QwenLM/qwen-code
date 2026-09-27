@@ -192,6 +192,9 @@ for (const pageRecords of [16, 200]) {
     baseURL,
   }) => {
     if (pageRecords === 200) {
+      // 4x CPU throttling over a 2,400-record fixture runs at 75-91% of the
+      // shared 60s budget and has timed out on all 3 attempts on CI (#11736).
+      test.setTimeout(120_000);
       const client = await page.context().newCDPSession(page);
       await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
     }

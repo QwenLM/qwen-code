@@ -124,6 +124,18 @@ describe('ECS runner qwen update workflow', () => {
     );
   });
 
+  it('pins the install to the /usr/local prefix', () => {
+    // Clearing NPM_CONFIG_PREFIX only drops the environment variable; npm's
+    // own computed default survives it, and on hk-4 and hk-5 that default is a
+    // bundled Node directory rather than /usr/local. The install then succeeds
+    // into a tree the runner's PATH never reads, while the verify step keeps
+    // checking /usr/local/bin/qwen — which is how those pools served four
+    // releases on a stale binary. This flag is the only thing making the
+    // target explicit, and it was dropped once before without anything
+    // objecting.
+    assert.ok(workflow.includes('npm install -g --prefix /usr/local'));
+  });
+
   it('pins the 90-minute resolve budget', () => {
     const resolveJob = workflow.slice(
       workflow.indexOf('  resolve:'),

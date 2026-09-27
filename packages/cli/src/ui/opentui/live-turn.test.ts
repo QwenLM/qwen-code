@@ -34,6 +34,8 @@ const live = vi.hoisted(() => ({
   waiters: [] as Array<() => void>,
   declines: new Set<number>(),
   signals: [] as AbortSignal[],
+  /** Events a 1-based turn yields ahead of the stub's bare `done`. */
+  script: new Map<number, Array<Record<string, unknown>>>(),
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -50,6 +52,7 @@ vi.mock('./live-session.js', () => ({
       await new Promise<void>((resolve) => live.waiters.push(resolve));
     }
     if (live.declines.has(live.turns.length)) return;
+    for (const event of live.script.get(live.turns.length) ?? []) yield event;
     yield { type: 'done' };
   },
 }));
@@ -116,6 +119,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.waiters.length = 0;
     live.declines.clear();
     live.signals.length = 0;
+    live.script.clear();
   });
 
   it('fires onComplete once when a turn completes without an abort', async () => {
@@ -255,7 +259,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('look @notes.md');
     });
-    expect(result.current.queueLength).toBe(1);
+    expect(result.current.messageQueue).toEqual(['look @notes.md']);
 
     await act(async () => {
       for (const wake of live.waiters.splice(0)) wake();
@@ -270,7 +274,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[1]?.options).toMatchObject({
       submittedPrompt: 'look @notes.md',
     });
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
   });
 
   it('consumes only its own submission when a replayed turn declines (R2-2)', async () => {
@@ -292,7 +296,10 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('then do the other thing');
     });
-    expect(result.current.queueLength).toBe(2);
+    expect(result.current.messageQueue).toEqual([
+      'look @notes.md',
+      'then do the other thing',
+    ]);
 
     await act(async () => {
       for (const wake of live.waiters.splice(0)) wake();
@@ -301,7 +308,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
 
     expect(live.turns[1]?.prompt).toBe('look @notes.md');
     expect(live.turns[2]?.prompt).toBe('then do the other thing');
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
   });
 
   it('restores a dropped steering batch at the front of the queue', () => {
@@ -319,7 +326,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('queued after');
     });
-    expect(result.current.queueLength).toBe(1);
+    expect(result.current.messageQueue).toEqual(['queued after']);
 
     const { restoreSteering } = live.turns[0]?.options as unknown as {
       restoreSteering: (texts: readonly string[]) => void;
@@ -327,14 +334,139 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       restoreSteering(['  steer me  ', '', 'then @b.ts']);
     });
-    expect(result.current.queueLength).toBe(3);
+    expect(result.current.messageQueue).toEqual([
+      'steer me',
+      'then @b.ts',
+      'queued after',
+    ]);
 
     let popped: string | null = null;
     act(() => {
       popped = result.current.popQueue();
     });
 
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
     expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
+  });
+
+  it('drops the visible queue rows when the transcript resets', () => {
+    // `/clear` and a session switch rebuild the transcript. A stale row would
+    // keep advertising a prompt the following turn never runs.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    act(() => {
+      result.current.submit('queued after');
+    });
+    expect(result.current.messageQueue).toEqual(['queued after']);
+
+    act(() => {
+      result.current.resetTranscript([]);
+    });
+    expect(result.current.messageQueue).toEqual([]);
+  });
+});
+
+describe('useOpenTuiLiveTurn streaming counters', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+  });
+
+  function renderTurn() {
+    return renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+  }
+
+  async function settle(result: { current: { streaming: boolean } }) {
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+  }
+
+  it('counts model text, thoughts and tool args, but never tool output', async () => {
+    live.script.set(1, [
+      { type: 'thinking', delta: 'hmm' },
+      { type: 'text', delta: 'hello there' },
+      {
+        type: 'tool-start',
+        id: 'c1',
+        tool: 'run_shell_command',
+        title: 'ls',
+      },
+      { type: 'tool-args', id: 'c1', args: '{"command":"ls"}' },
+      // Tool-generated, not model-generated: ink leaves it out of the estimate.
+      { type: 'tool-output', id: 'c1', output: 'a lot of stdout' },
+      { type: 'tool-end', id: 'c1', success: true, summary: '' },
+    ]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.streamingCharsRef.current).toBe(
+      'hmm'.length + 'hello there'.length + '{"command":"ls"}'.length,
+    );
+  });
+
+  it('marks content as receiving once model text arrives', async () => {
+    live.script.set(1, [{ type: 'text', delta: 'here you go' }]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.isReceivingContent).toBe(true);
+  });
+
+  it('returns to the waiting-on-API state once the tool batch ends', async () => {
+    live.script.set(1, [
+      { type: 'text', delta: 'let me look' },
+      {
+        type: 'tool-start',
+        id: 'c1',
+        tool: 'run_shell_command',
+        title: 'ls',
+      },
+      { type: 'tool-end', id: 'c1', success: true, summary: '' },
+    ]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('go');
+    });
+    await settle(result);
+
+    expect(result.current.isReceivingContent).toBe(false);
+  });
+
+  it('restarts the counter for each new user turn', async () => {
+    live.script.set(1, [{ type: 'text', delta: 'aaaa' }]);
+    live.script.set(2, [{ type: 'text', delta: 'bb' }]);
+    const { result } = renderTurn();
+
+    act(() => {
+      result.current.submit('one');
+    });
+    await settle(result);
+    expect(result.current.streamingCharsRef.current).toBe(4);
+
+    act(() => {
+      result.current.submit('two');
+    });
+    await vi.waitFor(() =>
+      expect(result.current.streamingCharsRef.current).toBe(2),
+    );
   });
 });

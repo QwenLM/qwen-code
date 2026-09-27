@@ -77,7 +77,7 @@ export interface MonitorTask extends TaskBase {
   idleTimer?: ReturnType<typeof setTimeout>;
   droppedLines: number;
   /**
-   * First output-capture write failure, when one occurred. A write that
+   * First output-capture failure since the last successful flush. A write that
    * fails after the initial creation (disk full, project dir turned
    * read-only) otherwise leaves the capture file silently stale while
    * every reader presents its last line as the task's complete output;
@@ -392,6 +392,10 @@ export class MonitorRegistry {
    */
   setStatusChangeCallback(cb: MonitorStatusChangeCallback | undefined): void {
     this.statusChangeCallback = cb;
+  }
+
+  clearStatusChangeCallback(cb: MonitorStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) this.statusChangeCallback = undefined;
   }
 
   abortAll(options: MonitorCancelOptions = {}): void {

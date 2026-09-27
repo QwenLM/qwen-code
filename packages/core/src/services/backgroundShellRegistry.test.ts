@@ -74,6 +74,68 @@ function makeTempDir(): string {
 }
 
 describe('readTaskOutputTail', () => {
+  it.each([11, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES, MAX_TASK_OUTPUT_TAIL_BYTES])(
+    'keeps the served output within a %i-byte budget after a complete escape',
+    (maxBytes) => {
+      const outputFile = makeOutputFile(
+        'zz\n\u001b[31m' + 'b'.repeat(4091) + 'a'.repeat(maxBytes),
+      );
+      expect(readTaskOutputTail(outputFile, maxBytes)).toEqual({
+        text: 'a'.repeat(maxBytes),
+        truncated: true,
+      });
+    },
+  );
+
+  it('caps larger requests at 64 KiB', () => {
+    const outputFile = makeOutputFile(
+      'a'.repeat(MAX_TASK_OUTPUT_TAIL_BYTES + 50),
+    );
+    expect(
+      readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES * 2),
+    ).toEqual({
+      text: 'a'.repeat(MAX_TASK_OUTPUT_TAIL_BYTES),
+      truncated: true,
+    });
+  });
+
+  it('keeps decoded invalid UTF-8 within the requested byte budget', () => {
+    const outputFile = makeOutputFile('');
+    writeFileSync(outputFile, Buffer.from([0x61, 0xff, 0x62]));
+    expect(readTaskOutputTail(outputFile, 3)).toEqual({
+      text: 'b',
+      truncated: true,
+    });
+  });
+
+  it('keeps embedded controls out of served text', () => {
+    const outputFile = makeOutputFile('aaaa\u001b[31\u000bmred\nlast line\n');
+    expect(readTaskOutputTail(outputFile)).toEqual({
+      text: 'aaaared\nlast line',
+      truncated: false,
+    });
+  });
+
+  it.each([
+    [1, 'c'],
+    [2, 'bc'],
+    [3, 'abc'],
+    [4, 'abc'],
+    [5, 'abc'],
+    [6, '文abc'],
+    [7, '文abc'],
+    [8, '文abc'],
+  ] as const)(
+    'keeps a UTF-8 window boundary %i bytes from the end intact',
+    (maxBytes, expected) => {
+      const outputFile = makeOutputFile('\u001b[31m中文abc');
+      expect(readTaskOutputTail(outputFile, maxBytes)).toEqual({
+        text: expected,
+        truncated: true,
+      });
+    },
+  );
+
   it('returns the sanitized tail and reports truncation', () => {
     const outputFile = makeOutputFile('prefix\u001b[31msafe\u001b[0m-tail');
 
@@ -135,10 +197,10 @@ describe('readTaskOutputTail', () => {
     // or the tail window opening mid-escape) is not an Fe leader, so the
     // per-character backstop removes just the ESC and the real character
     // that followed it survives.
-    const outputFile = makeOutputFile('alpha\u001bW313 beta\n');
+    const outputFile = makeOutputFile('alpha\u001bx313 beta\n');
 
     expect(readTaskOutputTail(outputFile, MAX_TASK_OUTPUT_TAIL_BYTES)).toEqual({
-      text: 'alphaW313 beta',
+      text: 'alphax313 beta',
       truncated: false,
     });
   });
@@ -230,8 +292,8 @@ describe('readTaskOutputTail', () => {
 
   it('reconstitutes the sequence when the served window opens mid-escape', () => {
     // The window opens one byte after an ESC, between the leader and its
-    // parameters: the look-back prepends the leader so the stripper
-    // removes the whole sequence and the real first line survives,
+    // parameters: the lookback restores parser state so the sequence is
+    // removed and the real first line survives,
     // instead of dropping the line or serving the leaderless residue.
     const tail = '[31mBuild failed\n' + 'y'.repeat(60) + '\n';
     const outputFile = makeOutputFile('pad\u001b' + tail);
@@ -335,8 +397,8 @@ describe('stripOutputControlChars', () => {
     // Unassigned finals are not escapes: a bare ESC before one costs only
     // the ESC byte, so a window that opens right after a stray ESC keeps
     // the real byte that followed it.
-    expect(stripOutputControlChars('alpha\u001bW313 beta\n')).toBe(
-      'alphaW313 beta\n',
+    expect(stripOutputControlChars('alpha\u001bx313 beta\n')).toBe(
+      'alphax313 beta\n',
     );
   });
 });

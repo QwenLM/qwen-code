@@ -149,6 +149,16 @@ describe('emit-workflow — the roster it bakes into the script', () => {
     expect(agents.length).toBeGreaterThan(1);
   });
 
+  it('emits only the focused navigation reviewer for a profiled plan', () => {
+    const plan = localPlan({ reviewProfile: 'docs-nav' });
+    writeFileSync(planPath, JSON.stringify(plan));
+    const agents = buildFanOutRoster(plan, planPath);
+    expect(agents.map((agent) => agent.key)).toEqual(['docs-nav']);
+    expect(readRecordedPrompts(planPath).get('docs-nav')).toBe(
+      agents[0].prompt,
+    );
+  });
+
   // Byte-parity with the hand-launched path is structural — both go through
   // `buildLaunch` — and this pins it so a future refactor that gives this
   // command its own builder fails here rather than in a review whose delivery
@@ -752,6 +762,34 @@ describe('emit-workflow — where it writes', () => {
     expect(readFileSync(firstPath, 'utf8')).toBe(script);
     expect(readFileSync(emittedScriptPath(), 'utf8')).toBe(
       buildReviewWorkflowScript([agents[1]], '/review-tree'),
+    );
+  });
+
+  it('emits a one-agent workflow for a fix-audit manifest, with no worktree pin', async () => {
+    // Step 6B dispatches the fix auditor through the same machinery as
+    // every other recorded wave: one manifest, one foreground workflow.
+    // Its plan is a local/file one, which carries no `worktreePath`, so
+    // the child must not be pinned to a review tree — the audit reads the
+    // working tree the fix was applied in.
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const key = 'fix-audit--9dace1f6b360';
+    const prompt = 'You are review agent `fix-audit`\nverbatim';
+    recordPrompt(plan, key, prompt);
+    const manifest = join(dir, 'fix-audit.json');
+    writeFileSync(manifest, JSON.stringify(createWorkflowBatch(plan, [key])));
+    mocks.buildLaunchOverride = () => {
+      throw new Error('a selected batch must never rebuild its prompts');
+    };
+    await yargs(['emit-workflow', '--plan', plan, '--batch', manifest])
+      .command(emitWorkflowCommand)
+      .exitProcess(false)
+      .parseAsync();
+    expect(readFileSync(emittedScriptPath(), 'utf8')).toBe(
+      buildReviewWorkflowScript([{ key, prompt }], undefined),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('1 agents required.'),
     );
   });
 

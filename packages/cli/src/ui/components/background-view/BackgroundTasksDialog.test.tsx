@@ -1344,6 +1344,15 @@ describe('BackgroundTasksDialog', () => {
       expect(f5).toContain('5 events');
     });
 
+    it('shows a capture warning only when output capture failed', () => {
+      const failed = openMonitorDetail({
+        outputCaptureError: 'ENOSPC: private/path',
+      } as Partial<DialogEntry>);
+      expect(failed).toContain('Output capture failed.');
+      expect(failed).not.toContain('private/path');
+      expect(openMonitorDetail()).not.toContain('Output capture failed.');
+    });
+
     it('renders droppedLines only when > 0', () => {
       expect(
         openMonitorDetail({ droppedLines: 0 } as Partial<DialogEntry>),
@@ -1564,6 +1573,26 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('3.5k/10k tokens');
       expect(f).toContain('Plan');
       expect(f).toContain('3.5kt');
+    });
+
+    it('explains the large-workflow flag in the detail view', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        sizeWarning: {
+          axis: 'agents' as const,
+          scheduledAgents: 40,
+          totalTokens: 0,
+          projectedTokens: 2_800_000,
+          agentCap: 15,
+          tokenCap: 1_500_000,
+          capFromGuideline: true,
+          at: 0,
+        },
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = (h.lastFrame() ?? '').replace(/\s+/g, ' ');
+      expect(f).toContain('Large workflow:');
+      expect(f).toContain('40 agents scheduled');
     });
 
     it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {

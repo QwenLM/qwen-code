@@ -7,21 +7,18 @@
  */
 
 /**
- * Native OpenTUI ApprovalMode and Effort dialogs (parity follow-up to #8677),
- * ported from ink ApprovalModeDialog/EffortDialog: a radio list navigated with
- * up/down, Enter applies (settings + config), Esc cancels.
+ * Native OpenTUI ApprovalMode / Reasoning Effort / Output Style dialogs,
+ * ported from ink ApprovalModeDialog / EffortDialog / OutputStyleDialog onto
+ * the shared dialog primitives: `> Title` plus a dim subtitle, numbered radio
+ * rows carrying ink's own label text, ink's footer hint, and the approval
+ * dialog's Tab-reachable scope step.
  */
 
+import { useEffect, useRef, useState } from 'react';
 import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
-import { useRenderer, useKeyboard } from '@opentui/react';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+  APPROVAL_MODES,
+  ApprovalMode,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import {
@@ -32,98 +29,79 @@ import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-e
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
+  getScopeItems,
+  getScopeMessageForSetting,
+} from '../../config/dialogScopeUtils.js';
+import {
   applyOutputStyleSelection,
   loadSessionOutputStyles,
 } from '../commands/output-style-utils.js';
-import { toOriginalKey } from './key-map.js';
+import { formatEffortChangeMessage } from '../commands/effort-utils.js';
+import { EFFORT_DESCRIPTIONS } from '../components/EffortDialog.js';
+import {
+  formatApprovalModeDescription,
+  formatApprovalModeName,
+} from '../utils/approvalModeDisplay.js';
+import { t } from '../../i18n/index.js';
+import {
+  DialogFrame,
+  DialogSelect,
+  FooterHint,
+  useDialogFrameKeys,
+  useDialogSelect,
+  type UseDialogSelectResult,
+} from './dialogs-shared.js';
+import type { DialogListItem } from './dialogs-core.js';
 import { C } from './theme.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
-function useEsc(onClose: () => void) {
-  const renderer = useRenderer();
-  useLayoutEffect(() => {
-    const onRaw = (seq: string): boolean => {
-      if (seq !== '\x1b') return false;
-      onClose();
-      return true;
-    };
-    renderer.addInputHandler(onRaw);
-    return () => renderer.removeInputHandler(onRaw);
-  }, [renderer, onClose]);
+interface LabeledItem<T> extends DialogListItem<T> {
+  label: string;
 }
 
-function RadioList({
-  items,
-  selected,
-  onMove,
-  onPick,
-}: {
-  items: Array<{ key: string; label: string; desc?: string }>;
-  selected: number;
-  onMove: (d: 1 | -1) => void;
-  onPick: () => void;
+/**
+ * The ink dialogs build one `name — description` string per row and let
+ * BaseSelectionList colour it as a whole, so the label is a single text run
+ * here too rather than a name/description pair.
+ */
+function LabeledRows<T>(props: {
+  list: UseDialogSelectResult<LabeledItem<T>>;
+  focused: boolean;
 }) {
-  useKeyboard((key) => {
-    const o = toOriginalKey(key);
-    if (o.name === 'up') onMove(-1);
-    else if (o.name === 'down') onMove(1);
-    else if (o.name === 'return') onPick();
-  });
+  const { list, focused } = props;
   return (
-    <box flexDirection="column" marginTop={1}>
-      {items.map((it, i) => (
-        <box key={it.key} flexDirection="row">
-          <text fg={i === selected ? C.accent : C.dim}>
-            {i === selected ? '● ' : '○ '}
-          </text>
-          <text
-            fg={i === selected ? C.text : C.dim}
-            attributes={i === selected ? 1 : 0}
-          >
-            {it.label}
-          </text>
-          {it.desc ? <text fg={C.dim}>{`  ${it.desc}`}</text> : null}
-        </box>
-      ))}
-    </box>
+    <DialogSelect
+      items={list.items}
+      activeIndex={list.activeIndex}
+      scrollOffset={list.scrollOffset}
+      showNumbers={focused}
+      focused={focused}
+      onHover={list.setActiveIndex}
+      onSelectIndex={list.selectIndex}
+      onWheel={(direction) =>
+        list.setActiveIndex(
+          list.activeIndexRef.current + (direction === 'down' ? 1 : -1),
+        )
+      }
+      renderLabel={(item, { titleColor }) => (
+        <text fg={titleColor}>{item.label}</text>
+      )}
+    />
   );
 }
 
-const Shell = ({
-  title,
-  children,
-}: {
-  title: string;
-  children?: ReactNode;
-}) => (
-  <box
-    flexDirection="column"
-    border
-    borderColor={C.dim}
-    paddingLeft={2}
-    paddingRight={2}
-    paddingTop={1}
-    paddingBottom={1}
-    marginTop={1}
-    flexShrink={0}
-  >
-    <box flexDirection="row" justifyContent="space-between">
-      <text fg={C.accent} attributes={1}>
-        {title}
+/** The `> Title <dim subtitle>` row every ink dialog opens with. */
+function DialogTitle(props: { title: string; subtitle?: string }) {
+  return (
+    <box flexDirection="row" marginBottom={1}>
+      <text fg={C.text} attributes={1}>
+        {'> '}
+        {props.title}{' '}
       </text>
-      <text fg={C.dim}>{'↑↓ · enter · esc'}</text>
+      {props.subtitle ? <text fg={C.dim}>{props.subtitle}</text> : null}
     </box>
-    {children}
-  </box>
-);
-
-const MODE_DESC: Record<string, string> = {
-  default: 'Prompt for each tool',
-  'auto-edit': 'Auto-approve edits',
-  auto: 'Full auto, safer rules',
-  yolo: 'Auto-approve everything',
-  plan: 'Plan only, no execution',
-};
+  );
+}
 
 export function OpenTuiApprovalModeDialog(props: {
   config?: Config;
@@ -132,60 +110,151 @@ export function OpenTuiApprovalModeDialog(props: {
   onApprovalModeChanged: (m: ApprovalMode) => void;
 }) {
   const { config, settings, onClose, onApprovalModeChanged } = props;
-  const modes = APPROVAL_MODES as ApprovalMode[];
-  const current = config?.getApprovalMode?.();
-  const [sel, setSel] = useState(
-    Math.max(0, modes.indexOf(current as ApprovalMode)),
+  const [view, setView] = useState<'mode' | 'scope'>('mode');
+  const [selectedScope, setSelectedScope] = useState<SettingScope>(
+    SettingScope.User,
   );
-  useEsc(onClose);
-  const pick = () => {
-    const mode = modes[sel];
-    if (mode) {
+  const [error, setError] = useState<string | null>(null);
+  const current = config?.getApprovalMode?.() ?? ApprovalMode.DEFAULT;
+  // ink keeps its own highlighted-mode state and seeds the list index from it,
+  // so the remount that follows a scope trip restores the row the arrows last
+  // landed on rather than the mode the config happens to hold.
+  const [highlightedMode, setHighlightedMode] = useState<ApprovalMode>(current);
+
+  const modeItems: Array<LabeledItem<ApprovalMode>> = APPROVAL_MODES.map(
+    (mode) => ({
+      key: mode,
+      value: mode,
+      label: `${formatApprovalModeName(mode)} - ${formatApprovalModeDescription(
+        mode,
+      )}`,
+    }),
+  );
+  const modeList = useDialogSelect<LabeledItem<ApprovalMode>>({
+    items: modeItems,
+    initialIndex: Math.max(
+      0,
+      modeItems.findIndex((item) => item.value === highlightedMode),
+    ),
+    focused: view === 'mode',
+    numbers: view === 'mode',
+    // The scope step's close remounts this list; the highlighted mode is what
+    // survives that trip, and the scope is what changes on it.
+    resyncKey: selectedScope,
+    onHighlight: (mode) => setHighlightedMode(mode),
+    onSelect: (mode) => {
       try {
-        // ink defaults the persist scope to User (its scope picker) — an
-        // untrusted workspace never receives writes; the runtime applies the
-        // merged setting (useApprovalModeCommand parity).
-        settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
-        config?.setApprovalMode?.(settings.merged.tools?.approvalMode ?? mode);
-        onApprovalModeChanged(mode);
-      } catch {
-        /* trust gate */
-      }
-    }
-    onClose();
-  };
-  return (
-    <Shell title="Approval Mode">
-      <RadioList
-        items={modes.map((m) => ({
-          key: m,
-          label: String(m),
-          desc: MODE_DESC[String(m)],
-        }))}
-        selected={sel}
-        onMove={(d) =>
-          setSel((s) => Math.min(modes.length - 1, Math.max(0, s + d)))
+        // Do not persist a privileged mode that this workspace cannot use;
+        // User scope would make it active in other trusted workspaces.
+        if (
+          config?.isTrustedFolder() === false &&
+          mode !== ApprovalMode.DEFAULT &&
+          mode !== ApprovalMode.PLAN
+        ) {
+          throw new Error(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
         }
-        onPick={pick}
+        settings.setValue(selectedScope, 'tools.approvalMode', mode);
+        const effectiveMode = settings.merged.tools?.approvalMode ?? mode;
+        config?.setApprovalMode?.(effectiveMode);
+        onApprovalModeChanged(effectiveMode);
+      } catch (e) {
+        // Keep the dialog open and show the refusal: an empty catch here made a
+        // gate rejection indistinguishable from an accepted choice.
+        setError((e as Error).message);
+        return;
+      }
+      onClose();
+    },
+  });
+
+  const scopeItems: Array<LabeledItem<SettingScope>> = getScopeItems().map(
+    (item) => ({
+      key: item.value,
+      value: item.value,
+      label: t(item.label),
+    }),
+  );
+  const scopeList = useDialogSelect<LabeledItem<SettingScope>>({
+    items: scopeItems,
+    initialIndex: Math.max(
+      0,
+      scopeItems.findIndex((item) => item.value === selectedScope),
+    ),
+    focused: view === 'scope',
+    numbers: view === 'scope',
+    // ink's handleScopeSelect only records the scope and steps back: the mode
+    // row's Enter is what persists.
+    onSelect: (scope) => {
+      setSelectedScope(scope);
+      setView('mode');
+    },
+    onHighlight: (scope) => setSelectedScope(scope),
+  });
+
+  useDialogFrameKeys({
+    onTab: () => setView((prev) => (prev === 'mode' ? 'scope' : 'mode')),
+    onEscape: onClose,
+  });
+
+  const otherScopeModifiedMessage = getScopeMessageForSetting(
+    'tools.approvalMode',
+    selectedScope,
+    settings,
+  );
+  const showWorkspacePriorityWarning =
+    selectedScope === SettingScope.User &&
+    otherScopeModifiedMessage.toLowerCase().includes('workspace');
+
+  return (
+    <DialogFrame>
+      {view === 'mode' ? (
+        <box flexDirection="column">
+          <DialogTitle
+            title={t('Approval Mode')}
+            subtitle={otherScopeModifiedMessage}
+          />
+          <LabeledRows list={modeList} focused={view === 'mode'} />
+          {showWorkspacePriorityWarning ? (
+            <box marginTop={1}>
+              <text fg={C.yellow}>
+                {`⚠ ${t(
+                  'Workspace approval mode exists and takes priority. User-level change will have no effect.',
+                )}`}
+              </text>
+            </box>
+          ) : null}
+          {error ? (
+            <box marginTop={1}>
+              <text fg={C.red}>{error}</text>
+            </box>
+          ) : null}
+        </box>
+      ) : (
+        <box flexDirection="column">
+          <DialogTitle title={t('Apply To')} />
+          <LabeledRows list={scopeList} focused={view === 'scope'} />
+        </box>
+      )}
+      <FooterHint
+        text={
+          view === 'mode'
+            ? t('(Use Enter to select, Tab to configure scope)')
+            : t('(Use Enter to apply scope, Tab to go back)')
+        }
       />
-    </Shell>
+    </DialogFrame>
   );
 }
-
-const EFFORT_DESC: Record<string, string> = {
-  low: 'Fastest and cheapest',
-  medium: 'Balanced speed/cost',
-  high: 'Default strong reasoning',
-  xhigh: 'Extended agentic reasoning',
-  max: 'Maximum reasoning',
-};
 
 export function OpenTuiEffortDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
+  notify?: (text: string, level?: 'info' | 'error') => void;
 }) {
-  const { config, settings, onClose } = props;
+  const { config, settings, onClose, notify } = props;
   const tiers = config
     ? [...getReasoningEffortsForConfig(config)]
     : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
@@ -193,11 +262,15 @@ export function OpenTuiEffortDialog(props: {
   // out-of-range effort starts at the top (ink EffortDialog parity).
   const currentEffort = config?.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
-  const [sel, setSel] = useState(Math.max(0, configuredIndex));
-  useEsc(onClose);
-  const pick = () => {
-    const effort = tiers[sel];
-    if (effort) {
+  const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => ({
+    key: tier,
+    value: tier,
+    label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
+  }));
+  const list = useDialogSelect<LabeledItem<ReasoningEffort>>({
+    items,
+    initialIndex: Math.max(0, configuredIndex),
+    onSelect: (effort) => {
       try {
         // Apply at runtime (next turn) and persist for future sessions;
         // provider adapters clamp the tier per model (ink useEffortCommand
@@ -210,36 +283,40 @@ export function OpenTuiEffortDialog(props: {
           'model.reasoningEffort',
           effort,
         );
+        // Read back after the apply: the message names what the provider
+        // actually clamped the tier to, not what the row asked for.
+        if (config) notify?.(formatEffortChangeMessage(config, effort));
       } catch {
         /* ignore */
       }
-    }
-    onClose();
-  };
+      onClose();
+    },
+  });
+  useDialogFrameKeys({ onEscape: onClose });
+
   return (
-    <Shell title="Reasoning Effort">
-      <RadioList
-        items={tiers.map((t) => ({
-          key: t,
-          label: String(t),
-          desc: EFFORT_DESC[String(t)],
-        }))}
-        selected={sel}
-        onMove={(d) =>
-          setSel((s) => Math.min(tiers.length - 1, Math.max(0, s + d)))
-        }
-        onPick={pick}
+    <DialogFrame>
+      <DialogTitle
+        title={t('Reasoning Effort')}
+        subtitle={t('(applied across all providers; clamped per model)')}
       />
-      {currentEffort && configuredIndex === -1 ? (
-        <text fg={C.dim}>
-          {`${currentEffort} is not available for this model — using the model/provider default.`}
-        </text>
+      <LabeledRows list={list} focused />
+      {configuredIndex === -1 ? (
+        <box marginTop={1}>
+          <text fg={C.dim}>
+            {currentEffort
+              ? t(
+                  '{{effort}} is not available for this model — using the model/provider default.',
+                  { effort: currentEffort },
+                )
+              : t('No effort configured — using the model/provider default.')}
+          </text>
+        </box>
       ) : null}
-    </Shell>
+      <FooterHint text={t('(Use Enter to select, Esc to cancel)')} />
+    </DialogFrame>
   );
 }
-
-const DEFAULT_STYLE_DESC = 'The standard prompt, with no extra style';
 
 /** Case-insensitive membership, the way the catalog dedupes and looks up. */
 function containsStyle(
@@ -250,11 +327,19 @@ function containsStyle(
   return styles.some((style) => style.name.toLowerCase() === wanted);
 }
 
+/** ink OutputStyleDialog's `describe`: built-ins translate, customs cite the source. */
+function describeStyle(style: OutputStyleDefinition): string {
+  if (style.source === 'built-in') {
+    return t(style.description);
+  }
+  return `${style.description} (${style.source})`;
+}
+
 export function OpenTuiOutputStyleDialog(props: {
   config: Config;
   settings: LoadedSettings;
   onClose: () => void;
-  notify: (text: string) => void;
+  notify: (text: string, level?: 'info' | 'error') => void;
 }) {
   const { config, settings, onClose, notify } = props;
   // The catalog, not just the built-ins: a custom style can be active under
@@ -284,6 +369,7 @@ export function OpenTuiOutputStyleDialog(props: {
         if (!cancelled) {
           notifyRef.current(
             `Failed to load output styles: ${error instanceof Error ? error.message : String(error)}`,
+            'error',
           );
           onCloseRef.current();
         }
@@ -294,15 +380,11 @@ export function OpenTuiOutputStyleDialog(props: {
     };
   }, [config]);
 
-  // Unlike /effort, "no style configured" genuinely is the first entry
-  // (default), so pre-selecting index 0 in that case tells the truth (ink
-  // OutputStyleDialog parity).
   const currentStyle = config.getOutputStyle();
-  const current = currentStyle?.name;
   // The catalog is re-read on every open and skips a file it cannot parse, so
   // the active style can be absent from it (edited into an invalid state,
   // renamed, grown past the size cap, a dangling dotfiles symlink) while the
-  // session still runs it. Listing the live definition keeps the `●` marker
+  // session still runs it. Listing the live definition keeps the `›` marker
   // truthful; falling back to index 0 would mark `default` as active and one
   // Enter would persist it over the user's setting.
   const catalog =
@@ -310,69 +392,61 @@ export function OpenTuiOutputStyleDialog(props: {
       ? [...styles, currentStyle]
       : styles;
 
-  const items: Array<{
-    key: string;
-    label: string;
-    desc: string;
-    style: OutputStyleDefinition | undefined;
-  }> = catalog
+  const items: Array<LabeledItem<OutputStyleDefinition | undefined>> = catalog
     ? [
         {
           key: 'default',
-          label: 'default',
-          desc: DEFAULT_STYLE_DESC,
-          style: undefined,
+          value: undefined,
+          label: `default — ${t('The standard prompt, with no extra style')}`,
         },
         ...catalog.map((style) => ({
           key: style.name,
-          label: style.name,
-          desc:
-            style.source === 'built-in'
-              ? style.description
-              : `${style.description} (${style.source})`,
-          style,
+          value: style as OutputStyleDefinition | undefined,
+          label: `${style.name} — ${describeStyle(style)}`,
         })),
       ]
     : [];
-  // Derive the selection after the catalog is ready. The catalog dedupes and
-  // `findOutputStyle` looks up case-insensitively, so membership is matched
-  // the same way here.
-  const [sel, setSel] = useState(0);
-  useEffect(() => {
-    if (!styles) return;
-    const wanted = current?.toLowerCase();
-    const index = items.findIndex((item) => item.key.toLowerCase() === wanted);
-    setSel(index >= 0 ? index : 0);
-    // The item list is derived from `styles`, so that is the real dependency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [styles, current]);
-  useEsc(onClose);
-  const pick = () => {
-    const item = items[sel];
-    if (!item) return;
-    // Close first, like ink's handleOutputStyleSelect: the apply rebuilds
-    // the system instruction, and the dialog should not sit open for it.
-    onClose();
-    void applyOutputStyleSelection(config, settings, item.style).then(
-      (message) => notify(message),
-      (error: unknown) =>
-        notify(error instanceof Error ? error.message : String(error)),
-    );
-  };
+  // Unlike /effort, "no style configured" genuinely is the first entry
+  // (default), so pre-selecting index 0 in that case tells the truth. The name
+  // is matched case-insensitively, like every other style lookup.
+  const wanted = currentStyle?.name.toLowerCase();
+  const list = useDialogSelect<LabeledItem<OutputStyleDefinition | undefined>>({
+    items,
+    initialIndex: Math.max(
+      0,
+      items.findIndex((item) => item.key.toLowerCase() === wanted),
+    ),
+    onSelect: (style) => {
+      // Close first, like ink's handleOutputStyleSelect: the apply rebuilds
+      // the system instruction, and the dialog should not sit open for it.
+      onClose();
+      void applyOutputStyleSelection(config, settings, style).then(
+        (message) => notify(message),
+        (error: unknown) =>
+          notify(
+            t('Failed to set "{{key}}": {{error}}', {
+              key: 'general.outputStyle',
+              error: error instanceof Error ? error.message : String(error),
+            }),
+            'error',
+          ),
+      );
+    },
+  });
+  useDialogFrameKeys({ onEscape: onClose });
+
   return (
-    <Shell title="Output Style">
-      {styles ? (
-        <RadioList
-          items={items}
-          selected={sel}
-          onMove={(d) =>
-            setSel((s) => Math.min(items.length - 1, Math.max(0, s + d)))
-          }
-          onPick={pick}
-        />
+    <DialogFrame>
+      <DialogTitle
+        title={t('Output Style')}
+        subtitle={t('(applies now and persists to settings)')}
+      />
+      {catalog ? (
+        <LabeledRows list={list} focused />
       ) : (
-        <text fg={C.dim}>Loading output styles…</text>
+        <text fg={C.dim}>{t('Loading output styles…')}</text>
       )}
-    </Shell>
+      <FooterHint text={t('(Use Enter to select, Esc to cancel)')} />
+    </DialogFrame>
   );
 }

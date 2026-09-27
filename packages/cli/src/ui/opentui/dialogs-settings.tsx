@@ -44,6 +44,7 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
+  isNumericSettingType,
   TOGGLE_TYPES,
   type SettingsType,
   type SettingsValue,
@@ -57,6 +58,7 @@ import { getSystemInfoFields } from '../systemInfoFields.js';
 import { ICON } from '../constants.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -183,7 +185,7 @@ export function parseEditCommit(
   buffer: string,
 ): string | number | null | undefined {
   const trimmed = buffer.trim();
-  if (type === 'number') {
+  if (isNumericSettingType(type)) {
     if (trimmed === '') return null;
     const numParsed = Number(trimmed);
     return Number.isNaN(numParsed) ? null : numParsed;
@@ -260,7 +262,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
     SettingScope.User,
   );
-  const [activeSettingIndex, setActiveSettingIndex] = useState(0);
+  const {
+    cursor: activeSettingIndex,
+    cursorRef: activeSettingIndexRef,
+    setCursor: setActiveSettingIndex,
+  } = useBatchSafeCursor();
   const [scrollOffset, setScrollOffset] = useState(0);
   const [activeTab, setActiveTab] = useState<SettingsTab>('settings');
   const [focusZone, setFocusZone] = useState<'tabs' | 'search' | 'list'>(
@@ -319,7 +325,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   useEffect(() => {
     setActiveSettingIndex(0);
     setScrollOffset(0);
-  }, [searchQuery]);
+  }, [searchQuery, setActiveSettingIndex]);
 
   const allItems = buildSettingsListItems({
     excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
@@ -397,7 +403,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   };
 
   const resetCurrentToDefault = (key: string) => {
-    const currentSetting = items[activeSettingIndex];
+    const currentSetting = items[activeSettingIndexRef.current];
     if (!currentSetting || currentSetting.key !== key) return;
     const defaultValue = getDefaultValue(key);
     applySettingValue(key, defaultValue);
@@ -564,7 +570,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       const definition = getSettingDefinition(editingKey);
       const ch = original.sequence;
       let isValidChar = false;
-      if (definition?.type === 'number') {
+      if (isNumericSettingType(definition?.type)) {
         isValidChar = /^[0-9\-+.]$/.test(ch);
       } else {
         isValidChar = ch.length === 1 && ch >= ' ' && !ctrl;
@@ -575,48 +581,53 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       return;
     }
     if (keyMatchers[Command.SELECTION_UP](original)) {
-      if (activeSettingIndex === 0) {
+      if (activeSettingIndexRef.current === 0) {
         setFocusZone('search');
         setScrollOffset(0);
       } else {
-        const newIndex = activeSettingIndex - 1;
+        const newIndex = activeSettingIndexRef.current - 1;
         setActiveSettingIndex(newIndex);
         if (newIndex < scrollOffset) setScrollOffset(newIndex);
       }
     } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
       const newIndex =
-        activeSettingIndex < items.length - 1 ? activeSettingIndex + 1 : 0;
+        activeSettingIndexRef.current < items.length - 1
+          ? activeSettingIndexRef.current + 1
+          : 0;
       setActiveSettingIndex(newIndex);
       if (newIndex === 0) setScrollOffset(0);
       else if (newIndex >= scrollOffset + maxItemsToShow)
         setScrollOffset(newIndex - maxItemsToShow + 1);
     } else if (name === 'return' || name === 'space') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (!currentItem) return;
       if (isSubDialogSetting(currentItem.key)) {
         if (name === 'return') onSelect(currentItem.key, selectedScope);
         return;
       }
-      if (currentItem.type === 'number' || currentItem.type === 'string') {
+      if (
+        isNumericSettingType(currentItem.type) ||
+        currentItem.type === 'string'
+      ) {
         startEditing(currentItem.key);
       } else {
         toggleCurrent(currentItem.key);
       }
     } else if (name === 'right') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem && isSubDialogSetting(currentItem.key)) {
         onSelect(currentItem.key, selectedScope);
       }
     } else if (/^[0-9]$/.test(original.sequence)) {
-      const currentItem = items[activeSettingIndex];
-      if (currentItem?.type === 'number') {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (isNumericSettingType(currentItem?.type)) {
         startEditing(currentItem.key, original.sequence);
       } else {
         setFocusZone('search');
         setSearchQuery((q) => q + original.sequence);
       }
     } else if (ctrl && (name === 'c' || name === 'l')) {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem) resetCurrentToDefault(currentItem.key);
     } else if (showRestartPrompt && name === 'r') {
       applyRestart();
@@ -715,7 +726,8 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             onWheel={(direction) =>
               scopeList.setActiveIndex(
-                scopeList.activeIndex + (direction === 'down' ? 1 : -1),
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
@@ -751,7 +763,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             let displayValue: string;
             if (isEditing) {
               displayValue = edit.buffer;
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               const path = item.key.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
               const defaultValue = getDefaultValue(item.key);

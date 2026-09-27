@@ -491,6 +491,7 @@ describe('review run (handler)', () => {
       downgraded: true,
       downgradedFrom: 'Request changes',
       remediation: ['do x'],
+      waivedFixes: ['reverse audit: the rebuild FIX is withheld — the wall.'],
     });
     await runHandler();
 
@@ -503,6 +504,10 @@ describe('review run (handler)', () => {
     expect(result.downgraded).toBe(true);
     expect(result.downgradedFrom).toBe('Request changes');
     expect(result.remediation).toEqual(['do x']);
+    // A gap with no FIX is explained, not silent — through the driver too.
+    expect(result.waivedFixes).toEqual([
+      'reverse audit: the rebuild FIX is withheld — the wall.',
+    ]);
     expect(result.reportPath).toContain('review.md');
     expect(process.exitCode).toBe(0);
   });

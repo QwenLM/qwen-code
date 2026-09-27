@@ -9,22 +9,40 @@ fn is_selectable_container_role(role: &str) -> bool {
     matches!(role, "AXRow" | "AXCell" | "AXListItem" | "AXImage")
 }
 
+fn selection_write_result(
+    role: String,
+    status: AXError,
+    selected: Option<bool>,
+) -> anyhow::Result<Option<String>> {
+    if status == kAXErrorAttributeUnsupported {
+        return Ok(None);
+    }
+    if status == kAXErrorSuccess && selected == Some(true) {
+        return Ok(Some(role));
+    }
+    anyhow::bail!(
+        "AXSelected write on {role} could not be confirmed (AX error {status}); \
+         observe before retrying; no additional selection or pointer action was sent"
+    )
+}
+
 /// Select the nearest list-like element at or above `element_ptr` and confirm
 /// the write through `AXSelected` read-back.
 ///
 /// Finder and other AppKit collection views commonly expose an item's label as
 /// an actionable child (`AXTextField`) while the selectable object is its
 /// parent `AXRow`. Neither object necessarily advertises `AXPress`, and Finder
-/// can return `kAXErrorCannotComplete` for a press on the row. A pointer click
-/// selects that row, so the AX equivalent is to set the row's `AXSelected`
-/// attribute rather than treating the failed press as terminal.
+/// can return `kAXErrorCannotComplete` for a press on the row. The semantic
+/// choice is made before dispatch by setting the row's `AXSelected` attribute.
 ///
 /// Finder icon views expose each selectable file directly as an `AXImage` with
 /// an `AXSelected` attribute, so that role is included alongside the standard
 /// row-like containers. The fallback remains bounded and requires a successful
 /// `AXSelected=true` read-back, so an arbitrary failed image/button press cannot
-/// become a claimed success.
-pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
+/// become a claimed success. `Ok(None)` permits a pointer alternative only
+/// when no selection write was attempted or the attribute was unsupported.
+/// Any uncertain write stops both the ancestor search and the caller's fallback.
+pub fn select_nearest_container(element_ptr: usize) -> anyhow::Result<Option<String>> {
     let mut current = element_ptr as AXUIElementRef;
     let mut owns_current = false;
 
@@ -34,14 +52,15 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
             && unsafe { copy_bool_attr(current, "AXSelected") }.is_some()
         {
             let err = unsafe { set_bool_attr_true(current, "AXSelected") };
-            if err == kAXErrorSuccess
-                && unsafe { copy_bool_attr(current, "AXSelected") } == Some(true)
-            {
-                if owns_current {
-                    unsafe { CFRelease(current as CFTypeRef) };
-                }
-                return Some(role);
+            let selected = if err == kAXErrorSuccess {
+                unsafe { copy_bool_attr(current, "AXSelected") }
+            } else {
+                None
+            };
+            if owns_current {
+                unsafe { CFRelease(current as CFTypeRef) };
             }
+            return selection_write_result(role, err, selected);
         }
 
         let parent = unsafe { copy_element_attr(current, "AXParent") };
@@ -49,7 +68,7 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
             unsafe { CFRelease(current as CFTypeRef) };
         }
         let Some(parent) = parent else {
-            return None;
+            return Ok(None);
         };
         current = parent;
         owns_current = true;
@@ -58,7 +77,7 @@ pub fn select_nearest_container(element_ptr: usize) -> Option<String> {
     if owns_current {
         unsafe { CFRelease(current as CFTypeRef) };
     }
-    None
+    Ok(None)
 }
 
 /// Read the selection state of the nearest collection-like element without
@@ -245,6 +264,39 @@ fn map_action(action: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_selection_write_cannot_reach_a_pointer_alternative() {
+        for (status, selected) in [
+            (kAXErrorSuccess, Some(false)),
+            (kAXErrorSuccess, None),
+            (kAXErrorFailure, None),
+            (kAXErrorInvalidUIElement, None),
+            (-25206, Some(true)),
+        ] {
+            let mut pointer_sent = false;
+            let result = selection_write_result("AXRow".into(), status, selected).map(|role| {
+                if role.is_none() {
+                    pointer_sent = true;
+                }
+            });
+            assert!(result.is_err(), "status={status}, selected={selected:?}");
+            assert!(!pointer_sent);
+        }
+    }
+
+    #[test]
+    fn confirmed_and_unsupported_selection_writes_keep_distinct_outcomes() {
+        assert_eq!(
+            selection_write_result("AXRow".into(), kAXErrorSuccess, Some(true)).unwrap(),
+            Some("AXRow".into())
+        );
+        assert_eq!(
+            selection_write_result("AXRow".into(), kAXErrorAttributeUnsupported, None).unwrap(),
+            None,
+            "an explicitly unsupported write permits a pointer alternative"
+        );
+    }
 
     #[test]
     fn disabled_elements_are_refused_before_dispatch() {

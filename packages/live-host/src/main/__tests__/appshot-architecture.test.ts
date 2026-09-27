@@ -58,6 +58,91 @@ describe('built-in Appshot architecture', () => {
     assert.doesNotMatch(builderConfig, /from:\s*['"][^'"]+\.app['"]/u);
   });
 
+  it('keeps full-display capture separate from foreground Appshot and never reads accessibility', async () => {
+    const source = await readFile(NATIVE_SOURCE, 'utf8');
+    const capture = source.slice(
+      source.indexOf('void ExecuteDisplayCapture('),
+      source.indexOf('void CompleteDisplayCapture('),
+    );
+    assert.match(capture, /CGPreflightScreenCaptureAccess/u);
+    assert.match(capture, /ResolveDisplay\(work->selection\)/u);
+    assert.match(capture, /current->uuid != target->uuid/u);
+    assert.doesNotMatch(
+      capture,
+      /AXIsProcessTrusted|CaptureAccessibilityTree|FindForegroundWindow|CapturePng\(/u,
+    );
+    assert.match(source, /CGGetActiveDisplayList/u);
+    assert.match(source, /CGDisplayCreateUUIDFromDisplayID/u);
+    assert.match(source, /screen\.localizedName/u);
+    assert.match(source, /"listDisplays"/u);
+    assert.match(source, /"captureDisplay"/u);
+  });
+
+  it('covers full display bounds, desktop and system layers while excluding Host windows', async () => {
+    const source = await readFile(NATIVE_SOURCE, 'utf8');
+    const modern = source.slice(
+      source.indexOf('CGImageRef CaptureDisplayWithScreenCaptureKit('),
+      source.indexOf('std::vector<uint8_t> CaptureDisplayPng('),
+    );
+    const legacy = source.slice(
+      source.indexOf('std::vector<uint8_t> CaptureDisplayPng('),
+      source.indexOf('napi_value Boolean('),
+    );
+    assert.match(modern, /getShareableContentExcludingDesktopWindows:NO/u);
+    assert.match(modern, /application\.processID == getpid\(\)/u);
+    assert.match(
+      modern,
+      /initWithDisplay:selected_display\s+excludingApplications:excluded\s+exceptingWindows:@\[\]/u,
+    );
+    assert.match(modern, /macOS 14\.2[^]*includeMenuBar = YES/u);
+    assert.match(modern, /filter\.pointPixelScale/u);
+    assert.match(modern, /excluded\.count == 0/u);
+    assert.doesNotMatch(modern, /initWithDesktopIndependentWindow|sourceRect/u);
+    assert.match(
+      legacy,
+      /CGWindowListCopyWindowInfo\(\s*kCGWindowListOptionOnScreenOnly/u,
+    );
+    assert.doesNotMatch(
+      legacy,
+      /kCGWindowListExcludeDesktopElements|kCGWindowLayer|layer\.intValue/u,
+    );
+    assert.match(legacy, /pid\.intValue != getpid\(\)/u);
+    assert.match(
+      legacy,
+      /CFArrayCreateMutable\(kCFAllocatorDefault, 0, nullptr\)/u,
+    );
+    assert.match(
+      legacy,
+      /CGWindowListCreateImageFromArray\(\s*target\.bounds, ids/u,
+    );
+    assert.match(source, /1920\.0 \/ width, 1080\.0 \/ height/u);
+    assert.match(legacy, /bytes\.size\(\) > kMaxDisplayPngBytes/u);
+    const build = await readFile(
+      new URL('../../../scripts/build.mjs', import.meta.url),
+      'utf8',
+    );
+    assert.match(build, /'ColorSync'/u);
+  });
+
+  it('rejects ambiguous display UUIDs instead of selecting the first match', async () => {
+    const source = await readFile(NATIVE_SOURCE, 'utf8');
+    const resolve = source.slice(
+      source.indexOf('std::optional<DisplayTarget> ResolveDisplay('),
+      source.indexOf('std::string NormalizeText('),
+    );
+    assert.match(resolve, /std::optional<DisplayTarget> selected;/u);
+    assert.match(
+      resolve,
+      /if \(selected\.has_value\(\)\) return std::nullopt;/u,
+    );
+    assert.match(
+      resolve,
+      /selection == "primary" && display_id == CGMainDisplayID\(\)/u,
+    );
+    assert.match(resolve, /return selected;/u);
+    assert.doesNotMatch(resolve, /return DisplayTarget\{/u);
+  });
+
   it('locks down Electron runtime escape hatches in packaged builds', async () => {
     const builderConfig = await readFile(BUILDER_CONFIG, 'utf8');
 

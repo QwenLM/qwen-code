@@ -1,8 +1,10 @@
 name: 'Desktop Release'
 
-run-name: 'Desktop release ${{ inputs.version }}'
+run-name: 'Desktop release ${{ github.event.release.tag_name || inputs.version }}'
 
 on:
+  release:
+    types: ['published']
   workflow_dispatch:
     inputs:
       version:
@@ -10,7 +12,7 @@ on:
         required: true
         type: 'string'
       qwen_code_ref:
-        description: 'Qwen Code branch, tag, or commit to bundle.'
+        description: 'Qwen Code branch or commit to bundle, reachable from main. A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
         required: true
         default: 'main'
         type: 'string'
@@ -65,7 +67,6 @@ on:
       clobber:
         required: true
         type: 'boolean'
-
 permissions:
   contents: 'read'
 
@@ -81,9 +82,20 @@ env:
 jobs:
   prepare:
     name: 'Prepare release metadata'
+    if: |-
+      ${{
+        github.event_name != 'release' ||
+        (
+          github.repository == 'QwenLM/qwen-code' &&
+          vars.RELEASE_DESKTOP_SYNC_PUBLISH == 'true' &&
+          startsWith(github.event.release.tag_name, 'v') &&
+          github.event.release.prerelease == false
+        )
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     outputs:
+      already_published: '${{ steps.published.outputs.already_published }}'
       qwen_code_sha: '${{ steps.source.outputs.sha }}'
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
@@ -97,7 +109,7 @@ jobs:
         shell: 'bash'
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
-          INPUT_VERSION: '${{ inputs.version }}'
+          INPUT_VERSION: '${{ github.event.release.tag_name || inputs.version }}'
           IS_DRAFT: '${{ inputs.draft }}'
           IS_DRY_RUN: '${{ inputs.dry_run }}'
           IS_PRERELEASE: '${{ inputs.prerelease }}'
@@ -112,7 +124,7 @@ jobs:
             echo "::error::Desktop prereleases must use a SemVer prerelease suffix, for example 0.2.1-rc.1: $INPUT_VERSION"
             exit 1
           fi
-          if [ "$IS_DRY_RUN" = 'false' ] && [ "$IS_DRAFT" = 'false' ] && [ "$IS_PRERELEASE" = 'false' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [ "$IS_DRY_RUN" != 'true' ] && [ "$IS_DRAFT" != 'true' ] && [ "$IS_PRERELEASE" != 'true' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Published stable Desktop versions must use X.Y.Z: $INPUT_VERSION"
             exit 1
           fi
@@ -127,24 +139,87 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=desktop-v$version" >> "$GITHUB_OUTPUT"
 
+      - name: 'Check whether stable release is already published'
+        id: 'published'
+        shell: 'bash'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_CLOBBER: '${{ inputs.clobber }}'
+          RELEASE_DRAFT: '${{ inputs.draft }}'
+          RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
+          RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
+          RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
+          RELEASE_TAG: '${{ steps.version.outputs.tag }}'
+          RELEASE_VERSION: '${{ steps.version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          echo 'already_published=false' >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" != 'release' ] && {
+            [ "$RELEASE_DRY_RUN" = 'true' ] ||
+            [ "$RELEASE_DRAFT" = 'true' ] ||
+            [ "$RELEASE_PRERELEASE" = 'true' ] ||
+            [ "$RELEASE_CLOBBER" = 'true' ] ||
+            [ "$RELEASE_ELECTRON_BRIDGE" = 'true' ];
+          }; then
+            exit 0
+          fi
+
+          release="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)" || exit 0
+          if ! jq -e '.isDraft == false and .isPrerelease == false' <<< "$release" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          if ! gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json' >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          if ! curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! jq -e --arg version "$RELEASE_VERSION" '.version == $version' "$directory/oss-desktop-latest.json" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          echo "::notice::Desktop $RELEASE_VERSION is already published; skipping build, publish and sync-oss. Dispatch this workflow with clobber=true to force a rebuild."
+          echo 'already_published=true' >> "$GITHUB_OUTPUT"
+
       - name: 'Resolve Qwen Code source'
         id: 'source'
         shell: 'bash'
         env:
-          INPUT_REF: '${{ inputs.qwen_code_ref }}'
+          INPUT_REF: '${{ github.event.release.tag_name || inputs.qwen_code_ref }}'
           IS_DRY_RUN: '${{ inputs.dry_run }}'
         run: |
           set -euo pipefail
           git fetch origin "$INPUT_REF"
           sha="$(git rev-parse FETCH_HEAD)"
-          if [ "$IS_DRY_RUN" = 'false' ]; then
-            if [ "$GITHUB_REF_NAME" != 'main' ]; then
-              echo '::error::Published desktop releases must run from main.'
+          if [ "$IS_DRY_RUN" != 'true' ]; then
+            if [ "$GITHUB_REF_NAME" != 'main' ] && [ "$GITHUB_EVENT_NAME" != 'release' ]; then
+              echo '::error::Published desktop releases must run from main or follow a published release.'
               exit 1
             fi
+            # CLI release tags usually point at an off-main version-bump commit
+            # whose parent is on main. Verify that parent, while still building
+            # the tag itself; tag-publishing permission remains the trust anchor
+            # for the version-bump commit.
+            ancestor="$sha"
+            if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+              ancestor="$(git rev-parse "${sha}^")"
+            fi
             git fetch origin main:refs/remotes/origin/main
-            if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
-              echo '::error::Published desktop releases may only bundle commits reachable from main.'
+            if ! git merge-base --is-ancestor "$ancestor" refs/remotes/origin/main; then
+              if [ "$GITHUB_EVENT_NAME" = 'release' ]; then
+                echo "::error::Release $INPUT_REF: the tag commit's first parent $ancestor is not reachable from main, so this step cannot confirm the release was cut from main. That shape is a non-main source ref, or commits added to the release branch after the version bump; the dispatch arm refuses it too."
+              else
+                echo '::error::Published desktop releases may only bundle commits reachable from main.'
+              fi
               exit 1
             fi
           fi
@@ -152,6 +227,7 @@ jobs:
 
   build:
     name: 'Build ${{ matrix.name }}'
+    if: "${{ needs.prepare.outputs.already_published != 'true' }}"
     needs: 'prepare'
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 120
@@ -201,9 +277,7 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            packages/desktop-shell/package-lock.json
+          cache-dependency-path: 'packages/desktop/package-lock.json'
 
       - name: 'Configure bundled Node.js cache'
         id: 'node-cache-path'
@@ -225,7 +299,7 @@ jobs:
 
       - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
         with:
-          workspaces: 'packages/desktop-shell/src-tauri -> target'
+          workspaces: 'packages/desktop/src-tauri -> target'
 
       - name: 'Install Linux dependencies'
         if: "runner.os == 'Linux'"
@@ -234,21 +308,27 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils xvfb
 
       - name: 'Install Qwen Code dependencies'
+        shell: 'bash'
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: 'npm ci --no-audit --progress=false'
+        run: |-
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          else
+            npm ci --no-audit --progress=false
+          fi
 
       - name: 'Install desktop dependencies'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm ci'
 
       - name: 'Set desktop version'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'node scripts/version.js "${{ needs.prepare.outputs.version }}"'
 
       - name: 'Require updater signing key for publishing'
-        if: '${{ inputs.dry_run == false }}'
+        if: "${{ github.event_name == 'release' || inputs.dry_run == false }}"
         shell: 'bash'
         env:
           TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
@@ -260,7 +340,7 @@ jobs:
           fi
 
       - name: 'Import macOS certificate'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         env:
           APPLE_CERTIFICATE: '${{ secrets.APPLE_CERTIFICATE }}'
@@ -296,7 +376,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: 'Configure macOS notarization'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         env:
           APPLE_API_ISSUER: '${{ secrets.APPLE_API_ISSUER }}'
@@ -328,7 +408,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: 'Import Windows certificate'
-        if: "runner.os == 'Windows' && inputs.dry_run == false"
+        if: "runner.os == 'Windows' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'pwsh'
         env:
           WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
@@ -364,7 +444,7 @@ jobs:
           }
 
       - name: 'Prepare bundled runtime'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run build:runtime'
 
       - uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
@@ -374,16 +454,16 @@ jobs:
           key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - name: 'Run desktop tests'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm test'
 
       - name: 'Run desktop release tests'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run test:release'
 
       - name: 'Sign bundled vendor binaries (macOS)'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
-        working-directory: 'packages/desktop-shell'
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
+        working-directory: 'packages/desktop'
         shell: 'bash'
         env:
           APPLE_SIGNING_IDENTITY: '${{ env.APPLE_SIGNING_IDENTITY }}'
@@ -435,19 +515,19 @@ jobs:
           echo "Signed and verified ${#mach_o[@]} Mach-O binaries under $runtime_dir."
 
       - name: 'Refresh bundled runtime checksums after signing (macOS)'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
-        working-directory: 'packages/desktop-shell'
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
+        working-directory: 'packages/desktop'
         run: 'node scripts/prepare-runtime.js --refresh-checksums'
 
       - name: 'Verify bundled runtime'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         run: 'npm run smoke:runtime'
 
       - name: 'Build desktop installers'
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         env:
-          DRY_RUN: '${{ inputs.dry_run }}'
+          DRY_RUN: "${{ github.event_name == 'release' && 'false' || inputs.dry_run }}"
           TAURI_SIGNING_PRIVATE_KEY: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}'
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
@@ -462,11 +542,11 @@ jobs:
           npm run tauri -- build "${args[@]}"
 
       - name: 'Verify macOS signature'
-        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'bash'
         run: |
           set -euo pipefail
-          app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          app="$(find packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
           entitlements="$(mktemp)"
@@ -475,12 +555,12 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlements")" = true
 
       - name: 'Verify Windows signature'
-        if: "runner.os == 'Windows' && inputs.dry_run == false"
+        if: "runner.os == 'Windows' && (github.event_name == 'release' || inputs.dry_run == false)"
         shell: 'pwsh'
         env:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
-          $installer = Get-ChildItem packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
+          $installer = Get-ChildItem packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
           $signature = Get-AuthenticodeSignature $installer.FullName
           if ($signature.Status -eq 'Valid') {
             Write-Output "Windows installer is Authenticode-signed."
@@ -497,18 +577,18 @@ jobs:
           LEGACY_ARCH: '${{ matrix.legacy_arch }}'
         run: |
           set -euo pipefail
-          app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name 'Qwen Code Desktop.app' -print -quit)"
+          app="$(find packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name 'Qwen Code Desktop.app' -print -quit)"
           if [ -z "$app" ]; then
             echo '::error::The legacy-named macOS app bundle was not produced.'
             exit 1
           fi
-          destination="packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/electron-bridge"
+          destination="packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/electron-bridge"
           mkdir -p "$destination"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$destination/Qwen-Code-Desktop-$LEGACY_ARCH.zip"
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'macOS'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -519,7 +599,7 @@ jobs:
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'Windows'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'pwsh'
         run: |
           $executable = Get-ChildItem src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop.exe | Select-Object -First 1
@@ -527,7 +607,7 @@ jobs:
 
       - name: 'Smoke packaged application'
         if: "runner.os == 'Linux'"
-        working-directory: 'packages/desktop-shell'
+        working-directory: 'packages/desktop'
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -541,7 +621,7 @@ jobs:
           set -euo pipefail
           destination="$RUNNER_TEMP/desktop-artifacts"
           mkdir -p "$destination"
-          bundle_root="packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          bundle_root="packages/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
           while IFS= read -r -d '' artifact; do
             name="$(basename "$artifact")"
             if [ "$RUNNER_OS" = 'macOS' ]; then
@@ -592,12 +672,16 @@ jobs:
 
   publish:
     name: 'Publish GitHub release'
-    if: "${{ inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ (github.event_name == 'release' || inputs.dry_run == false) && github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.already_published != 'true' }}"
     needs:
       - 'prepare'
       - 'build'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
+    # The feed move below overwrites desktop-latest.json with --clobber, so it
+    # sits behind the same deployment gate as the OSS mirror job.
+    environment:
+      name: 'production-release'
     permissions:
       contents: 'write'
     steps:
@@ -670,7 +754,7 @@ jobs:
           echo "url=$release_url" >> "$GITHUB_OUTPUT"
 
       - name: 'Update stable updater feed'
-        if: '${{ inputs.draft == false && inputs.prerelease == false }}'
+        if: "${{ github.event_name == 'release' || (inputs.draft == false && inputs.prerelease == false) }}"
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
@@ -738,7 +822,7 @@ jobs:
 
   sync-oss:
     name: 'Mirror stable Desktop release to Aliyun OSS'
-    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false)) && needs.prepare.outputs.already_published != 'true' }}"
     needs:
       - 'prepare'
       - 'build'
@@ -750,6 +834,7 @@ jobs:
     with:
       version: '${{ needs.prepare.outputs.version }}'
       source: 'artifact'
+      follows_release: "${{ github.event_name == 'release' }}"
     secrets:
       ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
       ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

@@ -30,6 +30,10 @@ vi.mock('node:os', async (importOriginal) => {
 
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
+const mockRuntimeShell = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: mockRuntimeShell,
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
 
@@ -157,6 +161,10 @@ vi.mock('../utils/shellAstParser.js', () => ({
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
+import type {
+  ShellExecutionResult,
+  ShellOutputEvent,
+} from '../services/shellExecutionService.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import {
   MAX_TASK_OUTPUT_TAIL_BYTES,
@@ -223,6 +231,7 @@ describe('MonitorTool', () => {
     delete process.env['GIT_PAGER'];
 
     vi.clearAllMocks();
+    mockRuntimeShell.mockReset();
     mockOsPlatform.mockReturnValue('linux');
     if (atomicFileWriteMock.real) {
       atomicFileWriteMock.mock.mockImplementation(atomicFileWriteMock.real);
@@ -239,6 +248,7 @@ describe('MonitorTool', () => {
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getShellExecutionSandbox: vi.fn().mockReturnValue(undefined),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
@@ -312,6 +322,128 @@ describe('MonitorTool', () => {
         };
       }
     ).createInvocation(params);
+
+  describe('tool execution sandbox', () => {
+    beforeEach(() => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue(
+        {} as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>,
+      );
+    });
+
+    it('streams stdout and stderr independently and settles the existing registry', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      let finish!: (result: ShellExecutionResult) => void;
+      const result = new Promise<ShellExecutionResult>((resolve) => {
+        finish = resolve;
+      });
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { pid: 9876, result };
+        },
+      );
+      const emit = vi.spyOn(monitorRegistry, 'emitEvent');
+      const turn = new AbortController();
+      await createInvocation({ command: 'watch command' }).execute(turn.signal);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockRuntimeShell).toHaveBeenCalledWith(
+        mockConfig,
+        'watch command',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        { maxBufferedOutputBytes: 4096 },
+        { streamStdout: true },
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      expect(entry.pid).toBe(9876);
+      turn.abort();
+      expect(signal.aborted).toBe(false);
+      output({ type: 'data', chunk: 'out', stream: 'stdout' });
+      output({ type: 'data', chunk: 'err\n', stream: 'stderr' });
+      output({ type: 'data', chunk: 'put\nlast', stream: 'stdout' });
+      finish({ exitCode: 0, signal: null } as ShellExecutionResult);
+      await result;
+      await entry.outputCaptureClosed;
+      expect(emit.mock.calls.map((call) => call[1])).toEqual([
+        'err',
+        'output',
+        'last',
+      ]);
+      expect(entry.status).toBe('completed');
+      expect(readFileSync(entry.outputFile, 'utf8')).toBe('outerr\nput\nlast');
+    });
+
+    it('fails and stops a sandboxed monitor after binary output', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      output({ type: 'binary_detected' });
+      expect(entry.status).toBe('failed');
+      expect(signal.aborted).toBe(true);
+    });
+
+    it('fails an unconfirmed sandbox completion', async () => {
+      mockRuntimeShell.mockResolvedValue({
+        result: Promise.resolve({
+          error: new Error('Sandbox termination is unconfirmed'),
+          exitCode: 0,
+          signal: null,
+        }),
+      });
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      await Promise.resolve();
+      expect(monitorRegistry.getAll()[0]?.status).toBe('failed');
+    });
+
+    it('stops through the monitor abort controller without replaying on the host', async () => {
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, _output, abortSignal) => {
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      monitorRegistry.cancel(monitorRegistry.getRunning()[0]!.monitorId);
+      expect(signal.aborted).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('fails setup without falling back to a host process', async () => {
+      mockRuntimeShell.mockRejectedValue(new Error('sandbox unavailable'));
+      const result = await createInvocation({
+        command: 'watch command',
+      }).execute(new AbortController().signal);
+      expect(result.llmContent).toContain('sandbox unavailable');
+      expect(monitorRegistry.getRunning()).toEqual([]);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('does not run host AST permission probes', async () => {
+      const invocation = createInvocation({ command: 'git status' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      await invocation.getConfirmationDetails(new AbortController().signal);
+      expect(mockIsShellCommandReadOnlyAST).not.toHaveBeenCalled();
+    });
+  });
 
   describe('schema', () => {
     it('declares monitor limits as integers', () => {
@@ -815,6 +947,42 @@ describe('MonitorTool', () => {
       );
     });
 
+    it('clears a capture warning after a successful flush restores the tail', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      atomicFileWriteMock.mock.mockRejectedValueOnce(
+        new Error('temporary write failure'),
+      );
+      mockChild.stdout.emit('data', Buffer.from('first line\n'));
+      await vi.waitFor(() =>
+        expect(task.outputCaptureError).toBe('temporary write failure'),
+      );
+      mockChild.stdout.emit('data', Buffer.from('second line\n'));
+      mockChild._emitClose(0);
+      await task.outputCaptureClosed;
+      expect(task.outputCaptureError).toBeUndefined();
+      expect(readFileSync(task.outputFile, 'utf8')).toBe(
+        'first line\nsecond line\n',
+      );
+    });
+
+    it('preserves real output after adjacent escapes and oversized C1 payloads', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      mockChild.stdout.emit('data', Buffer.from('A\x1b'));
+      mockChild.stdout.emit('data', Buffer.from('\x1b]0;t\x07Deploying\n'));
+      mockChild.stderr.emit(
+        'data',
+        Buffer.from('\u009d52;' + 'x'.repeat(5000)),
+      );
+      mockChild.stderr.emit('data', Buffer.from('\u009cDone\n'));
+      mockChild._emitClose(0);
+      await task.outputCaptureClosed;
+      expect(readFileSync(task.outputFile, 'utf8')).toBe('ADeploying\nDone\n');
+    });
+
     it('decodes multi-byte UTF-8 split across stdout chunks intact', async () => {
       const invocation = createInvocation({ command: 'tail -f app.log' });
 
@@ -1089,16 +1257,13 @@ describe('MonitorTool', () => {
       });
     });
 
-    it('flushes held escape and decoder tails into the capture at close', async () => {
+    it('discards decoder residue inside an unfinished escape at close', async () => {
       const invocation = createInvocation({ command: 'tail -f app.log' });
 
       await invocation.execute(new AbortController().signal);
       const task = monitorRegistry.getRunning()[0]!;
-      // Ends mid-escape and mid-codepoint: both tails are released at close
-      // rather than silently dropped from the capture file. The held CSI
-      // leader is stripped on its own so the decoder's replacement
-      // character cannot defeat the stripper's end-of-input arm; only the
-      // U+FFFD survives.
+      // The decoder residue is still inside an unfinished CSI and must not
+      // leak out of that sequence when the stream closes.
       const chunk = Buffer.concat([
         Buffer.from('tail \u001b['),
         Buffer.from([0xe6]),
@@ -1106,7 +1271,7 @@ describe('MonitorTool', () => {
       mockChild.stdout.emit('data', chunk);
       mockChild._emitClose(0);
       await vi.waitFor(() => {
-        expect(readFileSync(task.outputFile, 'utf8')).toBe('tail \ufffd');
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('tail ');
       });
     });
 

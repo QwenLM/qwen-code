@@ -15,6 +15,11 @@
  * hash diverges, or that has no journaled result, runs live, and every call
  * after it runs live too.
  *
+ * A run's first line is `launched`, written once at its start and never on a
+ * resume, so the journal of a run that launched is never empty. A resume whose
+ * journal is not on disk is refused: there is nothing to replay, and running
+ * every agent again under the old run id would only read as a continuation.
+ *
  * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
  * they buy on resume is the ability to say WHY a call is running live again:
  * `failed` means the previous run's dispatch settled without a value, while
@@ -30,9 +35,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`, `tools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -47,6 +52,10 @@ import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -82,13 +91,40 @@ export interface JournalFailedEntry {
   agentId: string;
 }
 
+/**
+ * The first record of every run, written once when the run starts and never on
+ * a resume. It carries nothing: its job is to make the journal of a run that
+ * launched non-empty before any agent settles, so "this run was interrupted
+ * before its first result" and "this run's journal is gone" are different
+ * files on disk.
+ */
+export interface JournalLaunchedEntry {
+  type: 'launched';
+  version: 1;
+}
+
 export type JournalEntry =
+  | JournalLaunchedEntry
   | JournalStartedEntry
   | JournalResultEntry
-  | JournalFailedEntry;
+  | JournalFailedEntry
+  | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
+
+/**
+ * What reading a run's journal found. `missing` and `unreadable` are kept
+ * apart from an empty replay because a resume means something different for
+ * each: an empty journal belongs to a run that had nothing to cache yet, while
+ * a journal that is not there leaves nothing to resume at all.
+ */
+export type JournalLoadResult =
+  | { kind: 'loaded'; replay: JournalReplay }
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; reason: string };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
+  sourceRef?: WorkflowSourceRef;
+  sourceError?: string;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
@@ -98,11 +134,38 @@ export interface JournalReplay {
 }
 
 /**
+ * The `agent()` options that change what a dispatch does, as one list: the
+ * resume key projects exactly these, and the orchestrator's fast path, which
+ * hands the session config to the agent untouched, is taken only when every
+ * one of them is absent. `label` / `phase` / `stallMs` are deliberately not
+ * here: they are cosmetic or operational.
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+  'tools',
+] as const;
+
+/**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` / `tools` change what the dispatch does; `label` / `phase` /
+ * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
+ * keys are sorted recursively so a re-serialized schema with reordered keys
+ * hashes the same.
+ *
+ * `effort`, `disallowedTools` and `tools` change how hard the agent thinks and
+ * what it may do, so a resume that changed any of them has to run live. The
+ * sandbox normalizes them before they get here — an effort alias to its tier, a
+ * tool list to a sorted, de-duplicated array with built-in display names mapped
+ * to tool names — so `'med'` and `'medium'`, `Edit` and `edit`, or the same
+ * tools in another order, are one key. Any other name is kept as written, so
+ * two spellings that reach the same MCP tool are two keys.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -111,13 +174,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-  ] as const) {
+  for (const k of DISPATCH_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -196,6 +253,8 @@ export function deriveArgsSeed(args: unknown): string {
  * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
+  let sourceRef: WorkflowSourceRef | undefined;
+  let sourceError: string | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
@@ -212,14 +271,39 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
       failed.add(e.key);
+    } else if (e.type === 'source') {
+      try {
+        const ref = readWorkflowSourceRef(e.sourceRef);
+        if (
+          e.version !== 1 ||
+          !ref ||
+          (sourceRef &&
+            (sourceRef.id !== ref.id || sourceRef.revision !== ref.revision))
+        ) {
+          throw new Error('Conflicting or unsupported workflow source record.');
+        }
+        sourceRef = ref;
+      } catch {
+        sourceError = 'Workflow journal contains invalid source metadata.';
+      }
     }
   }
-  return { results, started, failed };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(sourceError ? { sourceError } : {}),
+  };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Append-only JSONL journal for one workflow run. Reads tolerate a missing
- * file (fresh run); appends are fire-and-forget at the call site (the
+ * Append-only JSONL journal for one workflow run. A read says whether the file
+ * was there (see {@link JournalLoadResult}); appends are fire-and-forget at the call site (the
  * orchestrator does not await them on the hot path — a journal write
  * failure must not fail the dispatch).
  */
@@ -273,8 +357,16 @@ export class WorkflowJournal {
     }
   }
 
-  /** Remove a never-registered run's journal file, best-effort. */
+  /**
+   * Remove a never-registered run's journal file, best-effort.
+   *
+   * Waits for every append already queued first. An append still in flight
+   * would otherwise land after the delete and recreate the file, leaving a run
+   * id that never registered with a non-empty journal a later resume would
+   * accept.
+   */
   async remove(): Promise<void> {
+    await this.drain();
     try {
       if (await this.hasSymlinkedPath()) return;
       await fs.rm(this.path, { force: true });
@@ -289,15 +381,42 @@ export class WorkflowJournal {
     }
   }
 
-  /** Load + parse all entries into replay maps. Empty maps if no file. */
-  async load(): Promise<JournalReplay> {
+  /**
+   * Load and parse every entry into replay maps. A file that is not there and
+   * a file that cannot be read are reported as such rather than as an empty
+   * replay; a file that exists and holds no entries is `loaded`.
+   */
+  async load(): Promise<JournalLoadResult> {
     try {
-      const entries = await read<JournalEntry>(this.path);
-      return buildReplay(entries);
+      await fs.stat(this.path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { kind: 'missing' };
+      }
+      debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
+      return { kind: 'unreadable', reason: describeError(e) };
+    }
+    try {
+      const entries = await read<JournalEntry>(this.path, {
+        throwOnNonEnoentError: true,
+      });
+      return { kind: 'loaded', replay: buildReplay(entries) };
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
-      return { results: new Map(), started: new Map(), failed: new Set() };
+      return { kind: 'unreadable', reason: describeError(e) };
     }
+  }
+
+  /**
+   * Record that the run launched. Best-effort: the record only sharpens what a
+   * later resume can say, so failing to write it must not fail the launch.
+   */
+  async markLaunched(): Promise<void> {
+    await this.append({ type: 'launched', version: 1 }).catch((error) =>
+      debugLogger.warn(
+        `WorkflowJournal.markLaunched failed for ${this.path}: ${error}`,
+      ),
+    );
   }
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */

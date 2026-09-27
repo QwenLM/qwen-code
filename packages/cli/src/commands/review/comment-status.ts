@@ -34,6 +34,7 @@ import {
 } from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
 import { worktreePath } from './lib/paths.js';
+import { untrustedGitfile } from './lib/worktree.js';
 import {
   anyCommentCarriesCriticalMarker,
   isBlockerBody,
@@ -271,8 +272,30 @@ export function summarizeThreads(threads: ThreadStatus[]): ThreadSummary {
  * worktree. Memoized per (path, sinceSha): several threads routinely anchor
  * to the same file at the same commit.
  */
-export function makeGitProbe(worktree: string): CodeChangeProbe {
+export function makeGitProbe(
+  worktree: string,
+  // The trust verdict, asked ONCE by the report and handed down so the probe
+  // and the report can never disagree: evaluated separately, the two calls
+  // straddle a rewrite (or merely a timeout on one side) and the report
+  // certifies a trust state its own `threads[]` payload contradicts — a
+  // `worktreeUntrusted` string beside measured code facts, or a clean verdict
+  // beside all-`unknown` ones. Defaulted rather than required so standalone
+  // callers (the integration suite, the canary) keep self-gating.
+  untrusted: string | null = untrustedGitfile(worktree),
+): CodeChangeProbe {
+  // The pointer this probe reads THROUGH is inside the directory the review
+  // sandbox hands the reviewed code read-write, so `-C <review worktree>` is
+  // not by itself a scoping guarantee: a `.git` rewritten to a planted admin
+  // entry makes every answer below the plant's own. That is not a hypothetical
+  // degradation — `changedSinceComment: false` from a planted repository is
+  // this command certifying that the code behind a blocker thread did not
+  // move, which is exactly the fact a reviewer acts on. Gated at the one place
+  // that owns all three spawns rather than at each of them.
+  //
+  // The existing `!inRepo` degradation carries it: every thread's code facts
+  // become `unknown`, which the report already distinguishes from "unchanged".
   const inRepo =
+    untrusted === null &&
     gitOpt('-C', worktree, 'rev-parse', '--is-inside-work-tree') === 'true';
   const memo = new Map<string, ReturnType<CodeChangeProbe>>();
   // Ancestry depends on the SHA alone (HEAD is fixed for the run); memoizing
@@ -411,10 +434,22 @@ function writeCommentStatusReport(
   const { prAuthor, liveHeadBefore, liveHeadAfter, comments } = facts;
 
   const worktree = worktreePath(prNumber);
-  const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
+  // The gate the probe reads through, asked ONCE for the whole report and
+  // handed down to it: a HEAD sha read through a rewritten pointer is the
+  // planted repository's, and it feeds `worktreeStale` — the flag that
+  // decides whether this report's code facts are announced as describing a
+  // superseded checkout. Asked twice, the two answers can diverge between
+  // calls, and the report would certify a trust state its `threads[]`
+  // contradicts.
+  const worktreeUntrusted = untrustedGitfile(worktree);
+  const worktreeHeadSha =
+    worktreeUntrusted === null
+      ? gitOpt('-C', worktree, 'rev-parse', 'HEAD')
+      : null;
   // A null HEAD means the worktree is absent (comment-status run before
-  // fetch-pr, or after cleanup) — every thread's code facts then degrade to
-  // 'unknown', which must not pass silently as if the files were unchanged.
+  // fetch-pr, or after cleanup) or unusable — every thread's code facts then
+  // degrade to 'unknown', which must not pass silently as if the files were
+  // unchanged.
   const worktreeMissing = worktreeHeadSha === null;
   // Anchor facts (`line`, outdated) describe the LIVE head — the platform
   // maps comments against the latest diff it serves. Code facts
@@ -469,7 +504,11 @@ function writeCommentStatusReport(
   const threads = buildThreadStatuses(
     comments,
     prAuthor,
-    makeGitProbe(worktree),
+    // The SAME verdict the report level just read: asking the gate a second
+    // time here would let the two answers diverge (a timeout on one side, a
+    // pointer swapped between them), and the report would certify a trust
+    // state its own thread facts contradict.
+    makeGitProbe(worktree, worktreeUntrusted),
     me,
   );
   if (worktreeStale) {
@@ -493,6 +532,7 @@ function writeCommentStatusReport(
     headDrift,
     headMovedDuringFetch,
     inlineComments: comments.length,
+    worktreeUntrusted,
     summary,
     threads,
   };
@@ -506,7 +546,17 @@ function writeCommentStatusReport(
       `${summary.changedSinceComment} on files changed since their comment, ` +
       `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
   );
-  if (worktreeMissing) {
+  if (worktreeUntrusted !== null) {
+    // Distinct from the missing-worktree warning below: the tree IS there, and
+    // saying "run fetch-pr first" would send a reader to re-create a worktree
+    // when what happened is that its pointer stopped being trustworthy.
+    writeStdoutLine(
+      `warning: the worktree at ${worktree} was not read — ${worktreeUntrusted}. ` +
+        `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
+        `only the anchor and reply facts are usable. Sweep the tree ` +
+        `(\`qwen review cleanup\`) and re-fetch before trusting code facts for this PR.`,
+    );
+  } else if (worktreeMissing) {
     writeStdoutLine(
       `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
         `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
@@ -580,6 +630,11 @@ function writeDegradedCommentStatusReport(
         headDrift: false,
         headMovedDuringFetch: false,
         inlineComments: 0,
+        // Same shape as the success report: `null` is "the gate did not
+        // refuse", which is honest here — a degraded run never got as far as
+        // asking. The absent-worktree flag above already carries the
+        // unavailability.
+        worktreeUntrusted: null,
         summary: summarizeThreads([]),
         threads: [],
       },

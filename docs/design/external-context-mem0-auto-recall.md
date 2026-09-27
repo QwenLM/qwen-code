@@ -126,7 +126,7 @@ Qwen.
 - Provider query: 512 Unicode code points.
 - Provider timeout: 100-5000 ms.
 - Internal Hook wall-clock budget: 6500 ms.
-- Qwen command-Hook timeout: 8000 ms.
+- Qwen command-Hook timeout: 8 seconds.
 - Provider response: 1 MiB before JSON parsing.
 - Output: five items, 1000 Unicode code points per content field, and 4000
   JavaScript code units for the serialized envelope.

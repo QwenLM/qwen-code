@@ -79,14 +79,25 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
           stream.lastActivityMs = Date.now();
           const collector = stream.activeCollector;
           if (collector) {
+            const meta = update['_meta'];
+            // Discrete notices and automatic background output carry `_meta`
+            // like a final chunk but do not belong to this prompt collector.
+            if (
+              typeof meta === 'object' &&
+              meta !== null &&
+              ((meta as Record<string, unknown>)['qwenDiscreteMessage'] ===
+                true ||
+                (meta as Record<string, unknown>)['backgroundTurn'] !==
+                  undefined)
+            ) {
+              continue;
+            }
             const text = content['text'];
             if (typeof text === 'string' && text) {
               collector.texts.push(text);
             }
-            // Protocol contract: daemon emits _meta only on the final
-            // agent_message_chunk update (sibling of sessionUpdate/content).
-            // If future daemon versions move _meta elsewhere, this check
-            // will need updating — the collector will hang until timeout.
+            // After excluding notices and background output, `_meta` marks
+            // the foreground final chunk.
             if ('_meta' in update) {
               collector.resolve();
             }

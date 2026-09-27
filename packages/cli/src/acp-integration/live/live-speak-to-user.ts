@@ -20,7 +20,7 @@ export interface SpeakToUserParams {
   message: string;
 }
 
-export type SpeakToUserExecutor = (message: string) => Promise<void>;
+export type SpeakToUserExecutor = (message: string) => Promise<void | boolean>;
 
 class SpeakToUserInvocation extends BaseToolInvocation<
   SpeakToUserParams,
@@ -43,8 +43,15 @@ class SpeakToUserInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
-    await this.speak(this.params.message);
+    const delivered = await this.speak(this.params.message);
     signal.throwIfAborted();
+    if (delivered === false) {
+      return {
+        llmContent:
+          'Voice disconnected before this update could be spoken. Continue the task and include this update in the final text response. Do not retry speech until a new voice call is active.',
+        returnDisplay: `Voice disconnected; update not spoken: ${this.params.message}`,
+      };
+    }
     return {
       llmContent: 'The voice update was sent.',
       returnDisplay: 'Spoke to user',

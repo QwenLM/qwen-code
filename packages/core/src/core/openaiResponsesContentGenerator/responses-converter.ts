@@ -30,6 +30,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import {
+  getResponsesMessage,
+  type ResponsesMessageMetadata,
+  type ResponsesTextPart,
+} from '../../utils/responses-message.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -126,6 +131,36 @@ function decodeReasoningSignature(
  */
 export class ResponsesStreamState {
   responseId: string | null = null;
+  private messages = new Map<number, ResponsesMessageMetadata>();
+
+  updateMessage(index: number, item: { id: string; phase?: string }): void {
+    const metadata = this.messages.get(index) ?? { id: item.id };
+    if (item.phase === 'commentary' || item.phase === 'final_answer') {
+      metadata.phase = item.phase;
+    }
+    this.messages.set(index, metadata);
+  }
+
+  textPart(data: {
+    delta: string;
+    output_index?: number;
+    item_id?: string;
+  }): Part {
+    if (
+      data.output_index !== undefined &&
+      data.item_id &&
+      !this.messages.has(data.output_index)
+    ) {
+      this.updateMessage(data.output_index, { id: data.item_id });
+    }
+    const metadata =
+      data.output_index === undefined
+        ? undefined
+        : this.messages.get(data.output_index);
+    const part: ResponsesTextPart = { text: data.delta };
+    if (metadata) part.responsesMessage = metadata;
+    return part;
+  }
   private funcCallArgs: Map<
     number,
     { id: string; name: string; args: string }
@@ -183,13 +218,19 @@ export function convertResponsesEventToGemini(
       if (data.item.type === 'function_call') {
         const fc = data.item as ResponsesApiOutputFunctionCall;
         state.initFunctionCall(data.output_index, fc.id, fc.call_id, fc.name);
+      } else if (data.item.type === 'message') {
+        state.updateMessage(data.output_index, data.item);
       }
       return null;
     }
 
     case 'response.output_text.delta': {
-      const data = event.data as { delta: string };
-      return makeChunkResponse(model, state, [{ text: data.delta }]);
+      const data = event.data as {
+        delta: string;
+        output_index?: number;
+        item_id?: string;
+      };
+      return makeChunkResponse(model, state, [state.textPart(data)]);
     }
 
     case 'response.refusal.delta': {
@@ -198,8 +239,12 @@ export function convertResponsesEventToGemini(
       // output_text.delta) so the user sees the refusal instead of geminiChat
       // throwing InvalidStreamError('...empty response text.') and retrying
       // the full prompt transientMaxRetries times.
-      const data = event.data as { delta: string };
-      return makeChunkResponse(model, state, [{ text: data.delta }]);
+      const data = event.data as {
+        delta: string;
+        output_index?: number;
+        item_id?: string;
+      };
+      return makeChunkResponse(model, state, [state.textPart(data)]);
     }
 
     case 'response.refusal.done':
@@ -232,6 +277,10 @@ export function convertResponsesEventToGemini(
         output_index: number;
         item: ResponsesApiOutputItem;
       };
+      if (data.item.type === 'message') {
+        state.updateMessage(data.output_index, data.item);
+        return null;
+      }
       if (data.item.type === 'function_call') {
         const fc = data.item as ResponsesApiOutputFunctionCall;
         const buf = state.getFunctionCallBuffer(data.output_index);
@@ -327,6 +376,12 @@ export function convertResponsesEventToGemini(
 
     case 'response.completed': {
       const raw = event.data as Record<string, unknown>;
+      const output = (
+        (raw['response'] ?? raw) as { output?: ResponsesApiOutputItem[] }
+      ).output;
+      output?.forEach((item, index) => {
+        if (item.type === 'message') state.updateMessage(index, item);
+      });
       const envelope = (raw['response'] ?? raw) as {
         id?: string;
         usage?: ResponsesApiUsage;
@@ -359,7 +414,11 @@ export function convertResponsesEventToGemini(
         id?: string;
         usage?: ResponsesApiUsage;
         incomplete_details?: { reason?: string };
+        output?: ResponsesApiOutputItem[];
       };
+      envelope.output?.forEach((item, index) => {
+        if (item.type === 'message') state.updateMessage(index, item);
+      });
       if (envelope.id) state.responseId = envelope.id;
       return makeFinalResponse(
         model,
@@ -512,6 +571,7 @@ export function convertGeminiContentsToResponsesInput(
     // Flushed before any function_call/function_call_output/reasoning item
     // so relative ordering within the turn is preserved.
     let pendingContentParts: ResponsesApiContentPart[] = [];
+    let pendingMessage: ResponsesMessageMetadata | undefined;
     // Media attached to tool results (functionResponse.parts) is staged here
     // and flushed as one follow-up user message after all tool outputs in this
     // turn, so tool-returned images aren't silently dropped. Mirrors the Chat
@@ -524,12 +584,21 @@ export function convertGeminiContentsToResponsesInput(
         pendingContentParts[0]!.type === 'input_text'
           ? pendingContentParts[0]!.text
           : pendingContentParts;
-      items.push({ type: 'message', role, content } as ResponsesApiMessageItem);
+      items.push({
+        type: 'message',
+        role,
+        content,
+        ...(role === 'assistant' && pendingMessage?.phase
+          ? { phase: pendingMessage.phase }
+          : {}),
+      } as ResponsesApiMessageItem);
       pendingContentParts = [];
+      pendingMessage = undefined;
     };
 
     for (const part of parts) {
       if (typeof part === 'string') {
+        if (pendingMessage) flushPendingMessage();
         pendingContentParts.push({ type: 'input_text', text: part });
         continue;
       }
@@ -570,6 +639,15 @@ export function convertGeminiContentsToResponsesInput(
       }
 
       if ('text' in part && part.text) {
+        const metadata =
+          role === 'assistant' ? getResponsesMessage(part) : undefined;
+        if (
+          pendingMessage?.id !== metadata?.id ||
+          pendingMessage?.phase !== metadata?.phase
+        ) {
+          flushPendingMessage();
+        }
+        pendingMessage = metadata;
         pendingContentParts.push({ type: 'input_text', text: part.text });
       }
 

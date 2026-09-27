@@ -21,8 +21,10 @@
  *  - history: ↑/↓ (and Ctrl+P/N) walk the submitted prompts through the
  *    ported InputHistory with the original two-step edge transition;
  *  - completions: `/command` suggestions from the real interactive command
- *    registry and `@file` suggestions from core's FileSearch, with the
- *    original accept rules (Tab/Enter, trailing space, directory drill-in);
+ *    registry and `@` suggestions from ink's own useAtCompletion — files,
+ *    prior sessions, MCP references and extensions behind a category tab bar —
+ *    with the original accept rules (Tab/Enter, trailing space, directory
+ *    drill-in);
  *  - Esc: double-Esc clears the buffer (footer-style "Press Esc again to
  *    clear." hint surfaced via onEscapeArmedChange); while streaming Esc
  *    interrupts instead (in shell mode it exits the mode first, and also
@@ -50,13 +52,7 @@ import {
 } from './input-prompt-key.js';
 import type { KeyEvent, PasteEvent, TextareaRenderable } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
-import {
-  FileSearchFactory,
-  ApprovalMode,
-  Storage,
-  type Config,
-  type FileSearch,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import {
   clipboardHasImage,
   saveClipboardImage,
@@ -65,11 +61,14 @@ import {
 import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
-import type { Suggestion } from '../utils/suggestions.js';
-import { cpLen, toCodePoints } from '../utils/textUtils.js';
-import { t } from '../../i18n/index.js';
+import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
+import { cpLen, toCodePoints, truncateToWidth } from '../utils/textUtils.js';
 import { C } from './theme.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
+import { useAtCompletion } from '../hooks/useAtCompletion.js';
+import { categoryLabel } from '../components/SuggestionsDisplay.js';
+import { t } from '../../i18n/index.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
@@ -77,6 +76,7 @@ import {
   EscapeClearModel,
   MAX_SUGGESTIONS_TO_SHOW,
   applyCompletion,
+  atCategoryTabs,
   codePointIndexToDisplayCol,
   codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
@@ -85,12 +85,13 @@ import {
   displayColToCodePointIndex,
   displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
-  fileSearchToSuggestions,
+  filterByCategory,
   freePastePlaceholderId,
   historyDownDecision,
   historyUpDecision,
   isLargePaste,
   isPerfectMatchForTarget,
+  nextCategory,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -99,6 +100,7 @@ import {
   slashCompletionPositions,
   subcommandSuggestions,
   suggestionWindow,
+  type CompletionCategory,
 } from './input-prompt-model.js';
 
 /**
@@ -151,24 +153,21 @@ function buildCompletionContext(
 
 const DEFAULT_PLACEHOLDER = '  Type your message or @path/to/file';
 const ESCAPE_ARM_HINT = 'Press Esc again to clear.';
+/** Floor a described `@` row keeps for its description (ink parity). */
+const MIN_DESCRIPTION_WIDTH = 12;
 
-/** Approval-mode chrome exactly like InputPrompt's statusColor/statusText. */
+/** Approval-mode chrome exactly like InputPrompt's statusColor/prefix. */
 function promptChrome(approvalMode: ApprovalMode | undefined): {
   prefix: string;
   color?: string;
-  statusText?: string;
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return {
-        prefix: '>',
-        color: C.yellow,
-        statusText: t('Accepting edits'),
-      };
+      return { prefix: '>', color: C.warningDim };
     case ApprovalMode.AUTO:
-      return { prefix: '>', color: C.accent, statusText: t('Auto mode') };
+      return { prefix: '>', color: C.purple };
     case ApprovalMode.YOLO:
-      return { prefix: '*', color: C.red, statusText: t('YOLO mode') };
+      return { prefix: '*', color: C.errorDim };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
       return { prefix: '>' };
@@ -214,6 +213,19 @@ export interface InputPromptProps {
   shellModeActive?: boolean;
   /** U-33: toggles shell mode (empty-buffer `!`, ink InputPrompt parity). */
   onToggleShellMode?: () => void;
+  /**
+   * Completion-dropdown visibility, lifted for the shell: ink's Composer hides
+   * the footer while the suggestion list is open, and here the footer is a
+   * sibling of the composer rather than a child of it.
+   */
+  onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Cycles the approval mode (ink `useAutoAcceptIndicator`). The shell owns
+   * Shift+Tab itself, so this is only the Windows bare-Tab fallback — the one
+   * route that has to stay here, because the composer is the only place that
+   * knows whether Tab was already spent on a completion.
+   */
+  onCycleApprovalMode?: () => void;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -235,6 +247,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onPromptSuggestionAbort,
     shellModeActive = false,
     onToggleShellMode,
+    onSuggestionsVisibilityChange,
+    onCycleApprovalMode,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -269,8 +283,29 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }
 
   const [textVersion, setTextVersion] = useState(0);
-  const [suggestions, setSuggestions] = useState<readonly Suggestion[]>([]);
-  const [activeIndex, setActiveIndex] = useState(0);
+  // Raw producer output. `suggestions` below is this list filtered to the
+  // active `@` category tab, so navigation, acceptance and the visible window
+  // all index the same rows the user sees (ink useCompletion).
+  const [rawSuggestions, setRawSuggestions] = useState<readonly Suggestion[]>(
+    [],
+  );
+  const {
+    value: activeCategory,
+    ref: activeCategoryRef,
+    setValue: setActiveCategory,
+  } = useBatchSafeState<CompletionCategory>('all');
+  const categoryTabs = atCategoryTabs(rawSuggestions);
+  // Derived rather than corrected in an effect: a tab that a newer result set
+  // no longer contains reads as 'all' for this render, which is ink's fallback.
+  const atCategory = categoryTabs.includes(activeCategory)
+    ? activeCategory
+    : 'all';
+  const suggestions = filterByCategory(rawSuggestions, atCategory);
+  const {
+    cursor: activeIndex,
+    cursorRef: activeIndexRef,
+    setCursor: setActiveIndex,
+  } = useBatchSafeCursor();
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
   const [attachments, setAttachments] = useState<
@@ -281,9 +316,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // original's isHistoryRestoredText.
   const historyRestoredTextRef = useRef<string | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
-  const fileSearchRef = useRef<FileSearch | null>(null);
-  const fileSearchReadyRef = useRef<Promise<void> | null>(null);
-  const atSearchSeqRef = useRef(0);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
   // Query-relative replacement range for the current buffer's SLASH target.
   // The perfect-match verdict is deliberately not cached alongside it: Enter
@@ -330,13 +362,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
 
-  // Shell mode overrides the approval chrome (ink InputPrompt order: `!`
-  // wins over the approval-mode prefix and replaces its status text with
-  // "Shell mode" — the only signal that Enter now executes shell commands).
+  // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
+  // over the approval-mode prefix). The label itself lives in the footer, as
+  // ink's ShellModeIndicator does.
   const chrome = shellModeActive
-    ? { prefix: '!', color: C.accent, statusText: t('Shell mode') }
+    ? { prefix: '!', color: C.symbol }
     : promptChrome(approvalMode);
-  const borderColor = chrome.color ?? C.accent;
+  const borderColor = focus
+    ? (chrome.color ?? C.borderFocused)
+    : C.borderDefault;
 
   // ── real command registry feeding /-completion ──────────────────────────
   useEffect(() => {
@@ -351,41 +385,35 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     };
   }, [config]);
 
-  // ── @-completion file index (core FileSearch, like useAtCompletion) ─────
+  // ── @-completion sources (files, sessions, MCP, extensions) ──────────────
+  // ink's own hook, reused verbatim: it owns the FileSearch lifecycle and the
+  // merge order (mcp → file → session). `refreshCompletion` publishes the
+  // query; null disables the hook.
   const projectRoot = config?.getTargetDir() ?? process.cwd();
-  const ensureFileSearch = useCallback((): Promise<void> => {
-    if (fileSearchReadyRef.current) return fileSearchReadyRef.current;
-    const searcher = FileSearchFactory.create({
-      projectRoot,
-      ignoreDirs: [],
-      useGitignore: config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
-      useQwenignore:
-        config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
-      customIgnoreFiles: config?.getFileFilteringOptions()?.customIgnoreFiles,
-      cache: true,
-      cacheTtl: 30,
-      enableRecursiveFileSearch: config?.getEnableRecursiveFileSearch() ?? true,
-      enableFuzzySearch: config?.getFileFilteringEnableFuzzySearch() !== false,
-    });
-    fileSearchReadyRef.current = searcher
-      .initialize()
-      .then(() => {
-        fileSearchRef.current = searcher;
-      })
-      .catch(() => {
-        fileSearchReadyRef.current = null;
-      });
-    return fileSearchReadyRef.current;
-  }, [config, projectRoot]);
-
-  useEffect(
-    () => () => {
-      void fileSearchRef.current?.dispose?.();
-      fileSearchRef.current = null;
-      fileSearchReadyRef.current = null;
+  const [atQuery, setAtQuery] = useState<string | null>(null);
+  // Both callbacks are gated on the mode ref: leaving AT makes the hook
+  // dispatch RESET, and that flush lands after the render in which
+  // refreshCompletion already published the slash list for the same keystroke.
+  const onAtSuggestions = useCallback(
+    (next: Suggestion[]) => {
+      if (completionModeRef.current !== CompletionMode.AT) return;
+      setRawSuggestions(next);
+      setActiveIndex(0);
     },
-    [],
+    [setActiveIndex],
   );
+  const onAtLoading = useCallback((loading: boolean) => {
+    if (completionModeRef.current !== CompletionMode.AT) return;
+    setLoadingSuggestions(loading);
+  }, []);
+  useAtCompletion({
+    enabled: atQuery !== null,
+    pattern: atQuery ?? '',
+    config: config ?? undefined,
+    cwd: projectRoot,
+    setSuggestions: onAtSuggestions,
+    setIsLoadingSuggestions: onAtLoading,
+  });
 
   // The completion target for the buffer as it stands right now. Read from the
   // editor, never from published state, so a key that lands before the
@@ -423,13 +451,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       completionModeRef.current = CompletionMode.IDLE;
       slashRangeRef.current = null;
       suggestionNavigatedRef.current = false;
-      setSuggestions([]);
+      setAtQuery(null);
+      setActiveCategory('all');
+      setRawSuggestions([]);
       setActiveIndex(0);
       setLoadingSuggestions(false);
       return;
     }
 
     completionModeRef.current = target.mode;
+    // Publishing the query is the whole AT branch: the hook does the search.
+    setAtQuery(target.mode === CompletionMode.AT ? target.query : null);
     // Any buffer change invalidates dropdown navigation (ink resets
     // navigatedRef when the query changes).
     suggestionNavigatedRef.current = false;
@@ -458,11 +490,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         void complete(context, parsed.argumentString)
           .then((results) => {
             if (slashSearchSeqRef.current !== seq) return;
-            setSuggestions(commandCompletionItemsToSuggestions(results ?? []));
+            setRawSuggestions(
+              commandCompletionItemsToSuggestions(results ?? []),
+            );
             setActiveIndex(0);
           })
           .catch(() => {
-            if (slashSearchSeqRef.current === seq) setSuggestions([]);
+            if (slashSearchSeqRef.current === seq) setRawSuggestions([]);
           })
           .finally(() => {
             if (slashSearchSeqRef.current === seq) setLoadingSuggestions(false);
@@ -473,38 +507,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // Sub-command level: ranked candidates from the parsed command tree
       // (`/cmd ` → its subCommands, `/dir ad` → `add`), recency-weighted.
       slashSearchSeqRef.current++;
-      setSuggestions(
+      setRawSuggestions(
         subcommandSuggestions(parsed, recentSlashCommandsRef.current),
       );
       setActiveIndex(0);
       setLoadingSuggestions(false);
-      return;
     }
-
-    // AT: async file search; a sequence guard drops stale results.
-    const seq = ++atSearchSeqRef.current;
-    setLoadingSuggestions(true);
-    void ensureFileSearch().then(async () => {
-      if (atSearchSeqRef.current !== seq) return;
-      const searcher = fileSearchRef.current;
-      if (!searcher) {
-        setLoadingSuggestions(false);
-        return;
-      }
-      try {
-        const results = await searcher.search(target.query, {
-          maxResults: MAX_SUGGESTIONS_TO_SHOW * 3,
-        });
-        if (atSearchSeqRef.current !== seq) return;
-        setSuggestions(fileSearchToSuggestions(results));
-        setActiveIndex(0);
-      } catch {
-        if (atSearchSeqRef.current === seq) setSuggestions([]);
-      } finally {
-        if (atSearchSeqRef.current === seq) setLoadingSuggestions(false);
-      }
-    });
-  }, [ensureFileSearch, config, currentCompletionTarget]);
+  }, [config, currentCompletionTarget, setActiveCategory, setActiveIndex]);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -579,7 +588,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         setTextVersion((v) => v + 1);
         historyRef.current?.reset();
         historyRestoredTextRef.current = null;
-        setSuggestions([]);
+        setRawSuggestions([]);
         setAttachments([]);
         onSubmit(finalText, images.length > 0 ? images : undefined);
         // Same dismissal as the real submit path below: a submitOnAccept
@@ -792,7 +801,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         isPerfectMatchForTarget(liveTarget, commandsRef.current);
       if (showing && (!isPerfectMatch || suggestionNavigatedRef.current)) {
         key.preventDefault();
-        acceptSuggestion(activeIndex, true);
+        acceptSuggestion(activeIndexRef.current, true);
         return;
       }
 
@@ -842,7 +851,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setAttachments([]);
       historyRef.current?.reset();
       historyRestoredTextRef.current = null;
-      setSuggestions([]);
+      setRawSuggestions([]);
       setLoadingSuggestions(false);
       onSubmit(finalText, images.length > 0 ? images : undefined);
       // Ink dismisses on submit so a synchronous command (/clear, /help)
@@ -931,12 +940,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       if (completionModeRef.current !== CompletionMode.IDLE) {
         completionModeRef.current = CompletionMode.IDLE;
-        setSuggestions([]);
+        setRawSuggestions([]);
         setLoadingSuggestions(false);
         // Invalidate in-flight searches: an async resolution landing after
         // the Esc would otherwise re-populate the dismissed dropdown and
-        // turn the next Enter into an accidental suggestion insert.
-        atSearchSeqRef.current++;
+        // turn the next Enter into an accidental suggestion insert. The mode
+        // ref flipped above is what drops the `@` ones — the shared hook's
+        // callbacks are gated on it — and the counter covers slash argument
+        // completion, which the port still drives itself.
         slashSearchSeqRef.current++;
         return;
       }
@@ -979,24 +990,52 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     const showing = suggestions.length > 0;
 
+    // The visible category tabs own the bare arrows while they are up, exactly
+    // as in ink — modifiers pinned false so Alt+arrow word movement and any
+    // Ctrl+arrow terminal binding still reach the buffer.
+    if (
+      showing &&
+      categoryTabs.length > 2 &&
+      (key.name === 'left' || key.name === 'right') &&
+      !key.shift &&
+      !key.ctrl &&
+      !key.meta
+    ) {
+      key.preventDefault();
+      // From the raw state, not the derived tab: when a newer result set dropped
+      // the active category, ink's step finds no index and lands on 'all'.
+      setActiveCategory(
+        nextCategory(
+          categoryTabs,
+          activeCategoryRef.current,
+          key.name === 'right' ? 1 : -1,
+        ),
+      );
+      setActiveIndex(0);
+      return;
+    }
+
     if (showing && (navigationUp || navigationDown)) {
       key.preventDefault();
       // Navigation marks the dropdown as user-driven: with a perfect command
       // match, Enter then accepts the highlighted suggestion instead of
       // submitting the typed text (ink navigatedRef parity).
       suggestionNavigatedRef.current = true;
-      setActiveIndex((prev) => {
-        if (navigationUp) {
-          return prev <= 0 ? suggestions.length - 1 : prev - 1;
-        }
-        return prev >= suggestions.length - 1 ? 0 : prev + 1;
-      });
+      const prev = activeIndexRef.current;
+      const last = suggestions.length - 1;
+      let next: number;
+      if (navigationUp) {
+        next = prev <= 0 ? last : prev - 1;
+      } else {
+        next = prev >= last ? 0 : prev + 1;
+      }
+      setActiveIndex(next);
       return;
     }
 
     if (showing && key.name === 'tab' && !key.shift) {
       key.preventDefault();
-      acceptSuggestion(activeIndex, false);
+      acceptSuggestion(activeIndexRef.current, false);
       return;
     }
 
@@ -1015,6 +1054,24 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       onPromptSuggestionDismiss?.();
       return;
     }
+
+    // Windows cannot tell Shift+Tab from a bare Tab in some terminals, so there
+    // a free Tab cycles the mode too (ink useAutoAcceptIndicator, #4171). Both
+    // Tab consumers above return, which is why this needs no shouldBlockTab
+    // guard of its own. A real Shift+Tab belongs to the shell: it has to keep
+    // cycling while a dialog or a confirmation has this composer unmounted.
+    if (
+      process.platform === 'win32' &&
+      key.name === 'tab' &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.shift
+    ) {
+      key.preventDefault();
+      onCycleApprovalMode?.();
+      return;
+    }
+
     if (
       key.name === 'right' &&
       !key.ctrl &&
@@ -1121,7 +1178,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   }, []);
 
-  const columns = Math.max(width - 2, 1);
+  const columns = Math.max(width, 1);
   const dashLine = '─'.repeat(columns);
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
@@ -1129,25 +1186,51 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   );
   const showDropdown =
     loadingSuggestions || (suggestions.length > 0 && visible.length > 0);
+  useEffect(() => {
+    onSuggestionsVisibilityChange?.(showDropdown);
+  }, [showDropdown, onSuggestionsVisibilityChange]);
 
-  // Slash-mode labels share one half-width command column, exactly like the
-  // ink SuggestionsDisplay.
-  const labelColumnWidth = Math.min(
-    Math.max(
-      ...suggestions.map(
-        (s) =>
-          (s.label ?? s.value).length +
-          (s.argumentHint ? 1 + s.argumentHint.length : 0),
-      ),
-      0,
-    ),
-    Math.floor(columns * 0.5),
-  );
+  // Slash rows share one half-width command column so their descriptions line
+  // up. `@` rows share a column only when they carry a description — sessions,
+  // MCP servers/resources and extensions do, plain file paths do not — so a
+  // long path still takes the whole width instead of wrapping inside a column
+  // sized for a shorter reference. The badge counts toward the column: ink
+  // measures label + argumentHint + sourceBadge, so a `[Skill]` row fits the
+  // column it was sized for. completionModeRef only ever changes inside
+  // refreshCompletion, alongside the setRawSuggestions that re-renders this
+  // block.
+  const fullLabelWidth = (s: Suggestion) =>
+    [s.label ?? s.value, s.argumentHint, s.sourceBadge]
+      .filter(Boolean)
+      .join(' ').length;
+  const slashColumn = completionModeRef.current === CompletionMode.SLASH;
+  // The half-width cap applies to ink's `contentWidth` — the row after the
+  // 2-column active marker — not to the terminal width.
+  const contentWidth = Math.max(columns - 2, 1);
+  const describedLabelWidths = suggestions
+    .filter((s) => s.description)
+    .map(fullLabelWidth);
+  const labelColumnWidth = slashColumn
+    ? Math.min(
+        Math.max(...suggestions.map(fullLabelWidth), 0),
+        Math.floor(contentWidth * 0.5),
+      )
+    : describedLabelWidths.length > 0
+      ? Math.min(
+          Math.max(...describedLabelWidths),
+          Math.max(contentWidth - MIN_DESCRIPTION_WIDTH - 2, 1),
+        )
+      : 0;
+  // What a row actually has left for description text: the dropdown box sits
+  // two columns in on each side, the active marker takes 2, and the description
+  // pays a 2-column gutter. Over-allocating here does not clip — it wraps the
+  // tail onto a second row and doubles the height.
+  const descriptionWidth = Math.max(columns - 8 - labelColumnWidth, 1);
 
   return (
-    <box flexDirection="column" marginLeft={1} marginRight={1}>
+    <box flexDirection="column">
       {attachments.length > 0 && (
-        <box flexDirection="column" paddingLeft={1}>
+        <box flexDirection="column" paddingLeft={2}>
           {attachments.map((a) => (
             <text key={a.id} fg={C.purple}>{`📎 ${a.filename}`}</text>
           ))}
@@ -1160,7 +1243,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         borderStyle="single"
         borderColor={borderColor}
       >
-        <text fg={chrome.color ?? C.purple}>{chrome.prefix} </text>
+        <text fg={chrome.color ?? C.accent}>{chrome.prefix} </text>
         <textarea
           ref={(el) => {
             editorRef.current = el as TextareaRenderable | null;
@@ -1190,14 +1273,35 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         />
       </box>
       {showDropdown && (
-        <box flexDirection="column" marginLeft={1} marginRight={1}>
+        <box flexDirection="column" marginLeft={2} marginRight={2}>
           {loadingSuggestions && <text fg={C.dim}>Loading suggestions...</text>}
+          {categoryTabs.length > 2 && (
+            <box flexDirection="row" marginBottom={1}>
+              {categoryTabs.map((cat, i) => {
+                const active = cat === atCategory;
+                return (
+                  <box key={cat} marginLeft={i === 0 ? 0 : 1}>
+                    <text
+                      fg={active ? C.hover : C.dim}
+                      bg={active ? C.accent : undefined}
+                    >
+                      {` ${categoryLabel(cat)} `}
+                    </text>
+                  </box>
+                );
+              })}
+              <box marginLeft={2}>
+                <text fg={C.dim}>{t('(←/→ to switch)')}</text>
+              </box>
+            </box>
+          )}
           {hasMoreAbove && <text fg={C.text}>▲</text>}
           {visible.map((suggestion, index) => {
             const originalIndex = startIndex + index;
             const isActive = originalIndex === activeIndex;
             const color = isActive ? C.accent : C.dim;
             const label = suggestion.label ?? suggestion.value;
+            const sharedColumn = slashColumn || !!suggestion.description;
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
@@ -1206,17 +1310,51 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                 <box width={2} flexShrink={0}>
                   <text fg={color}>{isActive ? '> ' : '  '}</text>
                 </box>
-                <box width={labelColumnWidth} flexShrink={0}>
-                  <text fg={color} attributes={isActive ? 1 : 0}>
-                    {label}
-                    {suggestion.argumentHint
-                      ? ` ${suggestion.argumentHint}`
-                      : ''}
-                  </text>
+                <box
+                  flexShrink={sharedColumn ? 0 : 1}
+                  // `"auto"` rather than omitting the attribute: @opentui resets
+                  // a removed prop by assigning null, which its width setter
+                  // type-guards away, so the slash column would stay stuck on
+                  // every `@` row after one slash completion.
+                  width={sharedColumn ? labelColumnWidth : 'auto'}
+                >
+                  {/* Separate flex children, not one text: an over-long hint then
+                      wraps in the width left after the label. Char wrap matches
+                      ink's hard wrap-ansi; word wrap strands `[` on its own row. */}
+                  <box flexDirection="row">
+                    <box flexShrink={0}>
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {label}
+                      </text>
+                    </box>
+                    {suggestion.argumentHint && (
+                      <text fg={C.dim} wrapMode="char">
+                        {` ${suggestion.argumentHint}`}
+                      </text>
+                    )}
+                    {suggestion.sourceBadge && (
+                      <text
+                        fg={color}
+                        attributes={isActive ? 1 : 0}
+                        wrapMode="char"
+                      >
+                        {` ${suggestion.sourceBadge}`}
+                      </text>
+                    )}
+                  </box>
                 </box>
                 {suggestion.description && (
                   <box paddingLeft={2} flexGrow={1}>
-                    <text fg={color}>{suggestion.description}</text>
+                    <text fg={color}>
+                      {truncateToWidth(
+                        normalizeDescription(suggestion.description),
+                        descriptionWidth,
+                      )}
+                    </text>
                   </box>
                 )}
               </box>
@@ -1229,11 +1367,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             </text>
           )}
         </box>
-      )}
-      {/* No "(shift + tab to cycle)" suffix like ink's AutoAcceptIndicator:
-          nextApprovalMode is not bound to any key in this renderer yet. */}
-      {chrome.statusText && (
-        <text fg={chrome.color ?? C.dim}>{chrome.statusText}</text>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
     </box>
