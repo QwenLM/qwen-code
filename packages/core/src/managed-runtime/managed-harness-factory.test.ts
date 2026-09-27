@@ -674,10 +674,23 @@ describe('managed harness factory', () => {
       ordinal: 1,
       inputDigest: '8'.repeat(64),
     };
-    await handle.commitAwaitRuntimeBatch([first, second]);
+    await handle.commitAwaitRuntimeBatch([first, second], {
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
+    await expect(
+      handle.commitAwaitRuntimeBatch([first, second], {
+        turnId: 'other-turn',
+        promptId: 'other-prompt',
+      }),
+    ).rejects.toThrow(/unfinished turn/);
     const wait = parseHarnessCheckpointV1(
       (await session.authority.readCheckpointState())!,
     );
+    expect(wait.identity).toMatchObject({
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
     expect(wait.tools?.items.map((item) => item.executionCallId)).toEqual([
       'ex-1',
       'ex-2',

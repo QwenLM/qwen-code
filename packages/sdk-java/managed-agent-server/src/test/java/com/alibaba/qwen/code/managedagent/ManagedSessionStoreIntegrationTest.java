@@ -20,6 +20,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -78,6 +79,65 @@ class ManagedSessionStoreIntegrationTest {
                         .content(writerRequest(WRITER_A).toString()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    @Test
+    void toolResultsAreDurableBeforeJournalCommitAndRemainWriterFenced() throws Exception {
+        String session = "output-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/" + session;
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+        byte[] bytes = new byte[1024 * 1024];
+        Arrays.fill(bytes, (byte) 0xff);
+        ObjectNode body = objectMapper.createObjectNode().put("workspaceId", WORKSPACE).put("writerId", WRITER_A)
+                .put("writerGeneration", 1).put("resourceId", "captured-segment")
+                .put("kind", "managed-tool-result-content").put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", sha256(bytes))
+                .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(body.toString()))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.resourceId").value("captured-segment"))
+                    .andExpect(jsonPath("$.byteLength").value(bytes.length))
+                    .andExpect(jsonPath("$.digest").value(sha256(bytes))).andExpect(jsonPath("$.bytesBase64").doesNotExist());
+        }
+        assertThat(jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head WHERE session_id = ?",
+                Long.class, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id = ?",
+                Long.class, session)).isEqualTo(1);
+        mvc.perform(get(base + "/resources/captured-segment").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(content().bytes(bytes));
+        ObjectNode changed = body.deepCopy().put("bytesBase64", Base64.getEncoder().encodeToString(new byte[bytes.length]))
+                .put("digest", sha256(new byte[bytes.length]));
+        mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(changed.toString()))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_resource_conflict"));
+        mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(body.deepCopy().put("kind", "managed-tool-result-page").toString()))
+                .andExpect(status().isPayloadTooLarge());
+        mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(body.deepCopy().put("digest", "0".repeat(64)).toString()))
+                .andExpect(status().isBadRequest());
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE session_id = ?", session);
+        mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(body.toString())).andExpect(status().isConflict());
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_B).toString())).andExpect(status().isOk());
+        mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(body.toString())).andExpect(status().isConflict());
+        mvc.perform(get(base + "/resources/captured-segment").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(content().bytes(bytes));
     }
 
     @Test

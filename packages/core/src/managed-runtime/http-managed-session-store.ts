@@ -25,6 +25,10 @@ import {
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
+  HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
+  type DurableToolResultResourceStore,
+} from './resource-tool-result-store.js';
+import {
   scanManagedSessionJournal,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
@@ -63,6 +67,8 @@ export interface HttpManagedSessionStoreOptions {
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
+  readonly toolResultResources: DurableToolResultResourceStore;
+  assertWritable(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -86,6 +92,12 @@ export function createHttpManagedSessionStores(
   return {
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
+    toolResultResources: {
+      publish: (kind, bytes, resourceId) =>
+        client.publishToolResult(kind, bytes, resourceId),
+      read: (ref) => client.readResource(ref),
+    },
+    assertWritable: () => client.assertWritable(),
     close: () => client.seal(),
   };
 }
@@ -551,7 +563,25 @@ class ManagedSessionStoreHttpClient {
       undefined,
       'application/octet-stream, application/json',
     );
-    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!response.body) throw corrupt('resource response has no body.');
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        length += chunk.value.byteLength;
+        if (length > ref.byteLength) {
+          await reader.cancel();
+          throw corrupt('resource response exceeds its declared length.');
+        }
+        chunks.push(chunk.value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = Buffer.concat(chunks);
     if (
       response.headers.get('X-Qwen-Resource-Kind') !== ref.kind ||
       response.headers.get('X-Qwen-Resource-Schema-Version') !==
@@ -565,6 +595,50 @@ class ManagedSessionStoreHttpClient {
       );
     }
     return bytes;
+  }
+
+  async assertWritable(): Promise<void> {
+    await this.renewWriter();
+  }
+
+  async publishToolResult(
+    kind: string,
+    source: Buffer,
+    resourceId: string = randomUUID(),
+  ): Promise<ManagedSessionDurableRef> {
+    const limit = HOSTED_TOOL_RESULT_RESOURCE_LIMITS[kind];
+    if (
+      !Object.hasOwn(HOSTED_TOOL_RESULT_RESOURCE_LIMITS, kind) ||
+      source.byteLength < 1 ||
+      source.byteLength > limit
+    ) {
+      throw new ManagedSessionRecordError(
+        'Unsupported tool result resource or size.',
+      );
+    }
+    assertManagedSessionStableId(resourceId, 'tool result resourceId');
+    const bytes = Buffer.from(source);
+    const ref: ManagedSessionDurableRef = {
+      resourceId,
+      kind,
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: sha256(bytes),
+    };
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const receipt = assertManagedSessionDurableRef(
+      (await this.json('/tool-results:publish', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...ref,
+        bytesBase64: bytes.toString('base64'),
+      })) as ManagedSessionJsonValue,
+      'tool result publication',
+    );
+    requireSameRef(receipt, ref);
+    return ref;
   }
 
   async blockRecovery(request: {

@@ -238,7 +238,7 @@ public final class JdbcToolExecutionRepository
                     true);
             if (current.getState() == ToolExecutionRecord.State.PREPARED) {
                 requested = requested.withResult(
-                        Map.of("executionStatus", "cancelled"),
+                        current.cancellationBeforeDispatch(),
                         current.getLastSequence(),
                         JdbcRepositorySupport.databaseNow(connection));
             }

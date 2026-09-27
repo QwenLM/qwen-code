@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.fastjson2.JSON;
 import java.net.InetSocketAddress;
@@ -136,6 +137,79 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void v3UsesSavedSelectionAndObservesTheOriginalExecutionAfterResponseLoss() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> registered = fixture.post("/tool-sessions/runtime:publisher", Map.of(
+                    "protocolVersion", 1, "requestId", "register", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "publisher", Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                            "token", "a".repeat(43))));
+            assertEquals(200, registered.statusCode(), registered.body());
+            assertEquals("1", JSON.parseObject(registered.body()).getString("bindingGeneration"));
+            String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hello\"}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn", "callId", "worker-call",
+                    "argsDigest", digest, "runtimeProtocol", 3, "inputDigest", "b".repeat(64));
+            ToolExecutionRecord reserved = fixture.service.prepareExecution("harness", "runtime", "v3", reference)
+                    .toCompletableFuture().join();
+            assertThrows(RuntimeBrokerException.class,
+                    () -> fixture.service.createExecution("harness", "runtime", "bypass", reference));
+            String id = reserved.getExecutionCallId();
+            fixture.service.startExecution("harness", "runtime", id, payload).toCompletableFuture().join();
+            assertEquals(id, fixture.transport.lastReference.get("executionCallId"));
+            ToolExecutionRecord unknown = fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join();
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+            assertTrue(!unknown.getReference().containsKey("executionCallId"));
+            fixture.transport.runtimeStatus = Map.of("state", "executing");
+            String route = "/executions/" + id + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime";
+            HttpRequest request = HttpRequest.newBuilder(fixture.uri(route)).header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> running = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, running.statusCode(), running.body());
+            assertEquals("executing", JSON.parseObject(running.body()).getJSONObject("status").getString("state"));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
+            fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
+            HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(200, cancelling.statusCode(), cancelling.body());
+            assertEquals("cancel_requested", JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
+            assertEquals(1, fixture.transport.cancellations.get());
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
+            fixture.transport.runtimeStatus = Map.of("state", "settled", "result", Map.of("executionStatus", "cancelled"));
+            HttpResponse<String> settled = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, settled.statusCode(), settled.body());
+            assertEquals("settled", JSON.parseObject(settled.body()).getJSONObject("status").getString("state"));
+            HttpResponse<String> acknowledged = fixture.post("/executions/" + id + ":acknowledge", Map.of(
+                    "protocolVersion", 1, "requestId", "ack", "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                    "receipt", Map.of("executionCallId", id)));
+            assertEquals(200, acknowledged.statusCode(), acknowledged.body());
+            assertTrue(JSON.parseObject(acknowledged.body()).getBooleanValue("acknowledged"));
+            assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void v3PreparedCancellationNeverStartsAndCarriesNoCapture() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord record = fixture.service.prepareExecution("harness", "runtime", "v3-cancel",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "worker-call",
+                            "argsDigest", "sha256:" + "a".repeat(64), "runtimeProtocol", 3, "inputDigest", "b".repeat(64)))
+                    .toCompletableFuture().join();
+            HttpResponse<String> cancelled = fixture.post("/executions/" + record.getExecutionCallId() + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(200, cancelled.statusCode(), cancelled.body());
+            var result = JSON.parseObject(cancelled.body()).getJSONObject("status").getJSONObject("result");
+            assertEquals("not_started", result.get("executionStatus"));
+            assertTrue(result.containsKey("capture"), cancelled.body());
+            assertEquals(null, result.get("capture"));
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void cancelPreparedWorkNeverInvokesTransport() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -200,8 +274,27 @@ class RuntimeBrokerHttpServerTest {
 
     private static final class FailingTransport implements RuntimeTransport {
         private final AtomicInteger executions = new AtomicInteger();
+        private final AtomicInteger cancellations = new AtomicInteger();
         private boolean fail = true;
         private Map<String, Object> lastReference;
+        private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
+
+        @Override
+        public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session, Map<String, Object> publisher) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference, Map<String, Object> receipt) {
+            return CompletableFuture.completedFuture(runtimeStatus);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> status(RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> reference, long afterSequence) {
+            return CompletableFuture.completedFuture(runtimeStatus);
+        }
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
@@ -226,7 +319,8 @@ class RuntimeBrokerHttpServerTest {
         @Override
         public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference) {
-            return CompletableFuture.completedFuture(Map.of("state", "unknown"));
+            cancellations.incrementAndGet();
+            return CompletableFuture.completedFuture(runtimeStatus);
         }
 
         @Override

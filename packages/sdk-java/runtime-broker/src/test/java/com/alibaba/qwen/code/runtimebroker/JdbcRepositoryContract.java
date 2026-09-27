@@ -930,6 +930,19 @@ public final class JdbcRepositoryContract {
         assertNull(second.claimDispatch(prepared.getExecutionCallId(),
                 prefix + "-dispatcher-a", Duration.ofMinutes(30)));
 
+        ToolExecutionRecord v3 = first.findOrCreate(ToolExecutionRecord.prepared(
+                prefix + "-v3-execution", prefix + "-v3-idempotency", prefix + "-v3-binding", 1,
+                prefix + "-v3-harness", prefix + "-v3-runtime", prefix + "-v3-turn", prefix + "-v3-call", "outer-digest",
+                Map.of("sessionId", prefix + "-v3-runtime", "promptId", prefix + "-v3-turn", "callId", prefix + "-v3-call",
+                        "runtimeProtocol", 3, "inputDigest", "b".repeat(64), "argsDigest", "outer-digest")));
+        second.requestCancel(v3.getExecutionCallId(), v3.getVersion());
+        ToolExecutionRecord v3Restored = reconstructed.findByExecutionCallId(v3.getExecutionCallId());
+        assertEquals("not_started", v3Restored.getExecutionStatus());
+        assertEquals(3, v3Restored.getReference().get("runtimeProtocol"));
+        assertEquals("b".repeat(64), v3Restored.getReference().get("inputDigest"));
+        assertTrue(v3Restored.getResult().containsKey("capture"));
+        assertNull(v3Restored.getResult().get("capture"));
+
         String stickyKey = prefix + "-sticky-idempotency";
         ToolExecutionRecord sticky = first.findOrCreate(execution(
                 prefix + "-sticky-execution", stickyKey,

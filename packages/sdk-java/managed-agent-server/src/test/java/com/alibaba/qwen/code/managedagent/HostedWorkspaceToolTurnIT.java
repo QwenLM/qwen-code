@@ -27,7 +27,7 @@ class HostedWorkspaceToolTurnIT {
     private Path temporary;
 
     @Test
-    @Timeout(180)
+    @Timeout(360)
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
@@ -38,7 +38,11 @@ class HostedWorkspaceToolTurnIT {
         Path root = cli.getParent().getParent();
         String tenant = "hosted-tools-" + UUID.randomUUID();
         List<Path> workspaces = List.of(Files.createDirectory(temporary.resolve("alpha")),
-                Files.createDirectory(temporary.resolve("beta")));
+                Files.createDirectory(temporary.resolve("beta")),
+                Files.createDirectory(temporary.resolve("shell")),
+                Files.createDirectory(temporary.resolve("storage-failure")),
+                Files.createDirectory(temporary.resolve("raw-reply-loss")),
+                Files.createDirectory(temporary.resolve("cancel")));
         var arguments = new ArrayList<>(List.of(
                 "--server.address=127.0.0.1", "--server.port=0",
                 "--spring.datasource.url=jdbc:h2:mem:hosted-tools;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -80,10 +84,13 @@ class HostedWorkspaceToolTurnIT {
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
+                        "toolProfile", index < 2 ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
                         "directory", workspaces.get(index).resolve("child").toString()));
             }
             Path config = temporary.resolve("driver.json");
+            Path resultFile = temporary.resolve("shell-output.json");
             new ObjectMapper().writeValue(config.toFile(), Map.of("tenantId", tenant, "sessions", sessions,
+                    "resultFile", resultFile.toString(),
                     "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                     "brokerUrl", spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
             Path log = temporary.resolve("driver.log");
@@ -91,12 +98,31 @@ class HostedWorkspaceToolTurnIT {
                     "integration-tests/helpers/hosted-workspace-tool-turn-driver.ts", config.toString())
                     .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
             try {
-                assertThat(driver.waitFor(130, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
+                assertThat(driver.waitFor(270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                 assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                 assertThat(Files.readString(log)).contains("HOSTED_WORKSPACE_TOOLS_OK");
-                for (Path workspace : workspaces) {
+                for (Path workspace : workspaces.subList(0, 2)) {
                     assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                     assertThat(workspace.resolve("proof.txt")).doesNotExist();
+                }
+                List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
+                spring.getBean(EmbeddedRuntimeBroker.class).close();
+                for (ProcessHandle producer : producers) {
+                    producer.onExit().get(10, TimeUnit.SECONDS);
+                    assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                }
+                System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
+                Path readerLog = temporary.resolve("reader.log");
+                Process reader = new ProcessBuilder(node, "--import", "tsx",
+                        "integration-tests/helpers/hosted-shell-result-reader.ts", resultFile.toString())
+                        .directory(root.toFile()).redirectErrorStream(true).redirectOutput(readerLog.toFile()).start();
+                try {
+                    assertThat(reader.waitFor(60, TimeUnit.SECONDS)).as("Reader timeout: %s", Files.readString(readerLog)).isTrue();
+                    assertThat(reader.exitValue()).as("Reader output: %s", Files.readString(readerLog)).isZero();
+                    assertThat(Files.readString(readerLog)).contains("HOSTED_SHELL_RETAINED_OUTPUT_OK");
+                } finally {
+                    if (reader.isAlive()) reader.destroyForcibly();
                 }
             } finally {
                 driver.descendants().forEach(process -> process.destroyForcibly());

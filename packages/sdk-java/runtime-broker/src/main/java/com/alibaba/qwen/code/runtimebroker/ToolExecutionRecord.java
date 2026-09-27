@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 
@@ -9,6 +10,17 @@ import java.util.Set;
 public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
+
+    Map<String, Object> cancellationBeforeDispatch() {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
+            return Map.of("executionStatus", "cancelled");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
+    }
 
     public enum State {
         PREPARED,

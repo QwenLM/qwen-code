@@ -103,6 +103,22 @@ public final class ManagedSessionStoreModels {
             @Size(max = 90_000) String bytesBase64) {
     }
 
+    public record PublishToolResultRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 512) String resourceId,
+            @NotBlank @Size(max = 512) String kind,
+            @Min(1) @Max(1) int schemaVersion,
+            @Min(1) @Max(1024 * 1024) long byteLength,
+            @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
+            @NotBlank @Size(max = 1_398_104) String bytesBase64) {
+    }
+
+    public record ToolResultResourceRef(String resourceId, String kind,
+            int schemaVersion, long byteLength, String digest) {
+    }
+
     public record CommitTransactionRequest(
             @NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 512) String writerId,
