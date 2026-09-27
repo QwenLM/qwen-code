@@ -64,6 +64,11 @@ export function validateHostedHarnessProfile(
       '--profile hosted-harness conflicts with the experimental Managed Gateway and Runtime worker options.',
     );
   }
+  if (opts.experimentalPairedEngines) {
+    throw new Error(
+      '--profile hosted-harness does not pair execution engines.',
+    );
+  }
   if (!opts.managedRuntimeBrokerUrl?.trim()) {
     throw new Error(
       `--profile hosted-harness requires --managed-runtime-broker-url or ${environment.brokerUrl}.`,

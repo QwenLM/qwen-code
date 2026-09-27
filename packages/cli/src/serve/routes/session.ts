@@ -4486,9 +4486,8 @@ export function registerSessionRoutes(
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.
-        const session = await archiveCoordinator.runSharedMany(
-          [sessionId],
-          async () => {
+        const session = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
             if (managedSessionStore === undefined) {
@@ -4807,7 +4806,7 @@ export function registerSessionRoutes(
               }
             }
             return restored;
-          },
+          }),
         );
         const cleanupRestoredSession = async (): Promise<void> => {
           if (deferRestoreAskUserQuestionPrompt) {

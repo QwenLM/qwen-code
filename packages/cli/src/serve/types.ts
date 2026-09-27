@@ -342,6 +342,13 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /**
+   * Build every ordinary workspace runtime's Bridge with paired Legacy and
+   * Managed engines. No Managed engine exists for these hosts yet, so new
+   * sessions run on Legacy with a durable owner and Managed owners are
+   * refused on restore.
+   */
+  experimentalPairedEngines?: boolean;
   /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
   experimentalManagedAgents?: boolean;
   /** Expose the private authenticated Tool-only Runtime worker protocol. */

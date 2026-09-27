@@ -171,6 +171,7 @@ import {
   requestedSessionIdPersistenceExists,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
+import type { ManagedExecutionEngine } from './session-execution-engine-selector.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -648,6 +649,12 @@ export interface ServeAppDeps {
     policy: ChildHeapPolicy;
     ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.

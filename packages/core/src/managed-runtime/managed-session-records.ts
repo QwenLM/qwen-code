@@ -83,6 +83,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'child_run',
   'child_acceptance',
   'memory_job',
+  'monitor_run',
   'goal_state',
   'todo_state',
   'plan_mode',
@@ -833,6 +834,28 @@ function assertPayloadRules(
       }
       return;
     }
+    case 'wake.requested': {
+      if (
+        assertManagedSessionSequence(
+          payload['requiredSequence'],
+          `${at}.requiredSequence`,
+        ) < 1
+      ) {
+        fail(`${at}.requiredSequence must start at 1.`);
+      }
+      return;
+    }
+    case 'checkpoint.committed': {
+      if (
+        assertManagedSessionSequence(
+          payload['coveredSequence'],
+          `${at}.coveredSequence`,
+        ) < 1
+      ) {
+        fail(`${at}.coveredSequence must start at 1.`);
+      }
+      return;
+    }
     case 'context.compacted': {
       const from = assertManagedSessionSequence(
         payload['fromSequence'],
@@ -842,6 +865,9 @@ function assertPayloadRules(
         payload['toSequence'],
         `${at}.toSequence`,
       );
+      if (from < 1 || to < 1) {
+        fail(`${at} sequence references must start at 1.`);
+      }
       if (to < from) {
         fail(`${at}.toSequence must not precede ${at}.fromSequence.`);
       }

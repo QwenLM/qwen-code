@@ -561,6 +561,41 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('logs why an execution engine rejection happened', () => {
+    const daemonLog = { warn: vi.fn() } as unknown as DaemonLogger;
+    const ctx = { route: 'POST /session/:id/load', sessionId: 'session-1' };
+
+    sendBridgeError(
+      responseMock().response,
+      new SessionExecutionEngineError('session-1', 'incomplete transcript'),
+      ctx,
+      daemonLog,
+    );
+    sendBridgeError(
+      responseMock().response,
+      new RequestError(-32024, 'belongs to managed', {
+        errorKind: 'session_execution_engine_unavailable',
+      }),
+      ctx,
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenNthCalledWith(
+      1,
+      'Session execution engine for session-1: incomplete transcript.',
+      {
+        route: 'POST /session/:id/load',
+        sessionId: 'session-1',
+        errorType: 'SessionExecutionEngineError',
+      },
+    );
+    expect(daemonLog.warn).toHaveBeenNthCalledWith(
+      2,
+      'belongs to managed',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+  });
+
   it('maps a Bridge rejection of an invalid requested ID to HTTP 400', () => {
     const { response, status, json } = responseMock();
 

@@ -474,14 +474,74 @@ describe('managed session per-kind rules', () => {
   });
 
   it('registers a closed v1 domain index without duplicates', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(32);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(32);
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(33);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(33);
     // Added explicitly rather than folded into one of the history domains:
     // file backups are their own fact with their own producer and consumer.
     expect(MANAGED_SESSION_DOMAINS).toContain('file_history');
     // Its own name rather than `session_metadata`: readers parse the original
     // record, and one domain name cannot describe two body shapes.
     expect(MANAGED_SESSION_DOMAINS).toContain('session_source');
+    expect(MANAGED_SESSION_DOMAINS).toContain('monitor_run');
+  });
+
+  it('requires event-sequence references to start at 1', () => {
+    const wake = {
+      v: 1,
+      sequence: 2,
+      eventId: 'evt-2',
+      sessionKey,
+      kind: 'wake.requested',
+      occurredAt: 1,
+      payload: {
+        wakeId: 'wake-1',
+        reason: 'input',
+        subject: { type: 'turn', turnId: 'turn-1' },
+        sourceEventId: 'evt-1',
+        requiredSequence: 0,
+      },
+    };
+    expect(() => parseManagedSessionEvent(wake)).toThrow(/must start at 1/);
+    expect(() =>
+      parseManagedSessionEvent({
+        ...eventForKind('checkpoint.committed'),
+        payload: {
+          ...(eventForKind('checkpoint.committed')['payload'] as object),
+          coveredSequence: 0,
+        },
+      }),
+    ).toThrow(/must start at 1/);
+    expect(() =>
+      parseManagedSessionEvent({
+        ...eventForKind('context.compacted'),
+        payload: {
+          ...(eventForKind('context.compacted')['payload'] as object),
+          fromSequence: 0,
+        },
+      }),
+    ).toThrow(/sequence references must start at 1/);
+  });
+
+  it('rejects a compaction range whose end precedes its start', () => {
+    expect(() =>
+      parseManagedSessionEvent({
+        v: 1,
+        sequence: 7,
+        eventId: 'evt-7',
+        sessionKey,
+        kind: 'context.compacted',
+        occurredAt: 1,
+        subject: activationSubject,
+        payload: {
+          compactionId: 'compaction-1',
+          fromSequence: 4,
+          toSequence: 3,
+          summaryRef: ref(),
+          replacedMessageIds: [],
+          tokenCountsRef: null,
+        },
+      }),
+    ).toThrow(/toSequence must not precede payload.fromSequence/);
   });
 
   it('validates the lifecycle target state', () => {
