@@ -47,6 +47,11 @@ const LIVE_RUN_STATUSES = new Set([
   'cancelling',
 ]);
 
+/** Subject of a counted `in_progress` reason: "1 Agent is" / "2 Agents are". */
+function agentsAre(count: number): string {
+  return count === 1 ? '1 Agent is' : `${count} Agents are`;
+}
+
 /**
  * What a finished run left behind for the thread to answer.
  *
@@ -176,12 +181,13 @@ export function resolveThreadStatus(
   const live = thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status));
   if (live.length > 0) {
     const queued = live.filter((run) => run.status === 'queued').length;
+    const running = live.length - queued;
     return {
       status: 'in_progress',
       reason:
         queued === live.length
-          ? `${queued} 个智能体排队中，尚未开始执行`
-          : `${live.length - queued} 个智能体执行中${queued ? `，${queued} 个排队中` : ''}`,
+          ? `${agentsAre(queued)} queued and not started`
+          : `${agentsAre(running)} running${queued ? `, ${queued} queued` : ''}`,
       outstanding,
     };
   }

@@ -94,10 +94,23 @@ describe('resolveThreadStatus', () => {
     );
 
     expect(result.status).toBe('in_progress');
-    expect(result.reason).toBe('1 个智能体执行中');
+    expect(result.reason).toBe('1 Agent is running');
     expect(resolve(thread({ runs: [run({ status: 'queued' })] })).reason).toBe(
-      '1 个智能体排队中，尚未开始执行',
+      '1 Agent is queued and not started',
     );
+    // Reasons are shown beside the status, so they stay in English and count
+    // both halves of a mixed queue.
+    expect(
+      resolve(
+        thread({
+          runs: [
+            run({ status: 'running' }),
+            run({ id: 'rn_2', agentId: 'ag_bob', status: 'running' }),
+            run({ id: 'rn_3', agentId: 'ag_carol', status: 'queued' }),
+          ],
+        }),
+      ).reason,
+    ).toBe('2 Agents are running, 1 queued');
   });
 
   it('reports in_review once the last run is quiescent', () => {
