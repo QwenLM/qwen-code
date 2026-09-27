@@ -8998,6 +8998,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'rejects a stale auxiliary endpoint for %s',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBeUndefined();
+        if (key === 'fastModel')
+          config.setFastModel('openai:shared\0https://moved.example/v1');
+        else
+          config.setCompactionModel('openai:shared\0https://moved.example/v1');
+        expect(read()).toBe('openai:shared\0https://moved.example/v1');
+      },
+    );
+
     it('keeps the endpoint disambiguator on a persisted fast model selector (#12760)', () => {
       // Two providers expose the same model id over the openai protocol; the
       // picker pins the second one as `authType:id\0baseUrl`. Dropping the

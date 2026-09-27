@@ -25,7 +25,9 @@ export function dropCredentialFromAuxSelector(
   const sep = value.indexOf('\0');
   if (sep < 0) return value;
   const url = value.slice(sep + 1);
-  return sanitizeProviderBaseUrl(url) === url ? value : value.slice(0, sep);
+  return sanitizeProviderBaseUrl(url) === url && !/[?#]/.test(url)
+    ? value
+    : value.slice(0, sep);
 }
 
 export function hasOwnModelProviders(settingsObj: unknown): boolean {

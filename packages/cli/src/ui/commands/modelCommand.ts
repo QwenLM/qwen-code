@@ -624,7 +624,7 @@ export const modelCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current fast model: ${fastModelSetting ? formatVisionModelSettingForDisplay(fastModelSetting) : 'not set'}\nUse "/model --fast <model-id>" to set fast model.`,
+            content: `Current fast model: ${fastModelSetting?.split('\0', 1)[0] || 'not set'}\nUse "/model --fast <model-id>" to set fast model.`,
           };
         }
         return {
@@ -863,8 +863,9 @@ export const modelCommand: SlashCommand = {
         }
         if (context.executionMode !== 'interactive') {
           const compactionModel =
-            context.services.settings?.merged?.compactionModel?.trim() ||
-            t('not set (falls back to the main model)');
+            context.services.settings?.merged?.compactionModel
+              ?.trim()
+              .split('\0', 1)[0] || t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',

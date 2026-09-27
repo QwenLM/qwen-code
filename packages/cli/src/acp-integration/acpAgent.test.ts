@@ -19981,6 +19981,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings redacts auxiliary endpoint metadata on read and workspace write', async () => {
+    const settings = makeCoreSettings();
+    const selector = 'openai:shared\0https://api.example/v1?key=sk-acp';
+    Object.assign(settings.user.settings, { fastModel: selector });
+    Object.assign(settings.workspace.settings, { fastModel: selector });
+    Object.assign(settings.merged, { fastModel: selector });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+        user: { values: { fastModel: string } };
+        workspace: { values: { fastModel: string } };
+        merged: { values: { fastModel: string } };
+      };
+      for (const view of [result.user, result.workspace, result.merged]) {
+        expect(view.values.fastModel).toBe('openai:shared');
+      }
+      expect(JSON.stringify(result)).not.toContain('sk-acp');
+      await agent.extMethod('qwen/settings/setCoreValue', {
+        scope: 'workspace',
+        key: 'fastModel',
+        value: selector,
+      });
+      expect(settings.setValue).toHaveBeenCalledWith(
+        'Workspace',
+        'fastModel',
+        'openai:shared',
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('qwen/settings/getCore redacts MCP server env/header secrets', async () => {
     const settings = makeCoreSettings();
     (settings.user.settings as Record<string, unknown>)['mcpServers'] = {

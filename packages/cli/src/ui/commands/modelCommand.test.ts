@@ -1577,6 +1577,31 @@ describe('modelCommand', () => {
     });
   });
 
+  it.each(['fast', 'compaction'] as const)(
+    'redacts auxiliary endpoint metadata in --%s readback',
+    async (mode) => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: createMockConfig({
+            model: 'qwen-max',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              [`${mode}Model`]:
+                'openai:shared\0https://user:sk-readback@api.example/v1',
+            },
+          },
+        },
+      });
+      const result = await modelCommand.action!(mockContext, `--${mode}`);
+      expect(JSON.stringify(result)).toContain('openai:shared');
+      expect(JSON.stringify(result)).not.toContain('sk-readback');
+      expect(JSON.stringify(result)).not.toContain('\\u0000');
+    },
+  );
+
   it('should open the vision model dialog for /model --vision in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',

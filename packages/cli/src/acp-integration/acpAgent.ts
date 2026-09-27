@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { dropCredentialFromAuxSelector } from '../config/modelProvidersScope.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   buildHooksListing,
@@ -2101,7 +2102,10 @@ function readCoreSettingValues(
   for (const key of QWEN_CORE_SETTING_KEYS) {
     const value = getNestedSettingValue(source, key);
     if (value !== undefined) {
-      values[key] = value;
+      values[key] =
+        key === 'fastModel' && typeof value === 'string'
+          ? value.split('\0', 1)[0]
+          : value;
     }
   }
   return values;
@@ -14159,11 +14163,14 @@ class QwenAgent implements Agent {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
+        const scope = toSettingsScope(params['scope']);
+        const value = params['value'];
         const normalizedValue = normalizeCoreSettingValue(
           settingKey,
-          params['value'],
+          settingKey === 'fastModel' && typeof value === 'string'
+            ? dropCredentialFromAuxSelector(value, scope)
+            : value,
         );
-        const scope = toSettingsScope(params['scope']);
         settings.setValue(scope, key, normalizedValue);
         if (settingKey === 'model.name') {
           // Selecting a model by id here can't disambiguate providers that

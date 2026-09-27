@@ -6120,6 +6120,12 @@ export class Config {
     const persisted = this.fastModel ?? '';
     const endpointIdx = persisted.indexOf('\0');
     const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
+    if (
+      baseUrl &&
+      !available.some((m) => m.id === selector.modelId && m.baseUrl === baseUrl)
+    ) {
+      return undefined;
+    }
     const qualified = `${rawSelector.authType}:${selector.modelId}`;
     return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
   }
@@ -6249,6 +6255,14 @@ export class Config {
       const persisted = this.compactionModel ?? '';
       const endpointIdx = persisted.indexOf('\0');
       const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
+      if (
+        baseUrl &&
+        !available.some(
+          (m) => m.id === selector.modelId && m.baseUrl === baseUrl,
+        )
+      ) {
+        return undefined;
+      }
       const qualified = `${rawSelector.authType}:${selector.modelId}`;
       return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
     }

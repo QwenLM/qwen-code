@@ -804,6 +804,26 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('redacts auxiliary endpoint metadata without hiding the fast model setting', async () => {
+    const selector = 'openai:shared\0https://user:sk-http@api.example/v1';
+    const { app } = makeApp({
+      userSettings: { fastModel: selector },
+      workspaceSettings: { fastModel: selector },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'fastModel',
+      ).values,
+    ).toEqual({
+      effective: 'openai:shared',
+      user: 'openai:shared',
+      workspace: 'openai:shared',
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sk-http');
+  });
+
   it('redacts MCP secrets in reads and restores them on writes', async () => {
     const existing = {
       secure: {
