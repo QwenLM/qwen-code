@@ -286,7 +286,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
 - No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace.
 - A replacement snapshot cannot drop a Workspace, lower its generation, or change its storage ID without a new generation.
 - The Java package uses only the JDK: no other Broker class, Spring, CLI internals or scheduler.
-- The documentation does not claim persistence, wiring or capability advertisement.
+- The documentation does not claim persistence or capability advertisement. The worker was wired later, in W0c-1.
 
 ## Open questions
 

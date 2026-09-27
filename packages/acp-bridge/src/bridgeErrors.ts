@@ -23,6 +23,7 @@
  * httpAcpBridge.ts re-export shim.
  */
 
+import { RequestError } from '@agentclientprotocol/sdk';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
@@ -101,6 +102,44 @@ export class SessionNotFoundError extends Error {
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
     this.code = code;
+  }
+}
+
+/**
+ * A caller-supplied session ID that a paired Bridge rejects before dispatch.
+ * Direct ACP callers still see invalid params (-32602); hosts map `errorKind`
+ * to 400 `invalid_session_id` or 409 `session_id_conflict`. An invalid ID is
+ * not echoed back.
+ */
+export class RequestedSessionIdRejectedError extends RequestError {
+  override readonly name = 'RequestedSessionIdRejectedError';
+
+  constructor(
+    readonly errorKind: 'invalid_session_id' | 'session_id_conflict',
+    readonly sessionId?: string,
+  ) {
+    super(
+      -32602,
+      errorKind === 'invalid_session_id'
+        ? 'Invalid params: Requested session ID is invalid'
+        : `Invalid params: Session ${sessionId} is already live`,
+      errorKind === 'invalid_session_id'
+        ? { errorKind }
+        : { errorKind, sessionId },
+    );
+  }
+}
+
+/** Managed sessions cannot be branched or forked into side tasks. */
+export class ManagedSessionBranchUnsupportedError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(
+      `Session ${sessionId} runs on the Managed execution engine, which does not support branching`,
+    );
+    this.name = 'ManagedSessionBranchUnsupportedError';
+    this.sessionId = sessionId;
   }
 }
 
@@ -660,13 +699,21 @@ export class WorkspaceDrainingError extends Error {
  * child's state is unknown; settlement-overdue states mean the child still
  * holds work the bridge can neither cancel nor account for. Existing sessions
  * remain usable. Cleanup-failed states last until channel recycle;
- * settlement-overdue states may clear when the abandoned request settles.
+ * settlement-overdue states may clear when the abandoned request settles. On a
+ * paired Bridge any of them quarantines the channel: its sessions get no new
+ * work either, and the refusal lasts until the channel is gone.
  */
 export type BridgeChannelUnavailableReason =
   | 'restore_cleanup_failed'
   | 'restore_settlement_overdue'
   | 'new_session_cleanup_failed'
-  | 'new_session_settlement_overdue';
+  | 'new_session_settlement_overdue'
+  /**
+   * A paired Bridge terminated a quarantined channel but cannot confirm that
+   * its process tree is gone; the engine stays closed until it can, which may
+   * need an operator.
+   */
+  | 'channel_exit_unverified';
 
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
@@ -680,15 +727,19 @@ export class BridgeChannelQuarantinedError extends Error {
   constructor(
     reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
     retryAfterSeconds: number = RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
+    work: 'sessions' | 'prompts' = 'sessions',
   ) {
     super(
-      reason === 'restore_settlement_overdue'
-        ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
-        : reason === 'new_session_settlement_overdue'
-          ? 'The ACP channel is unavailable for new sessions while an abandoned session initialization has not settled'
-          : reason === 'new_session_cleanup_failed'
-            ? 'The ACP channel is unavailable for new sessions while timed-out session initialization cleanup is pending'
-            : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+      `The ACP channel is unavailable for new ${work} ` +
+        (reason === 'restore_settlement_overdue'
+          ? 'because an abandoned session restore did not settle in time'
+          : reason === 'new_session_settlement_overdue'
+            ? 'because an abandoned session initialization did not settle in time'
+            : reason === 'new_session_cleanup_failed'
+              ? 'while timed-out session initialization cleanup is pending'
+              : reason === 'channel_exit_unverified'
+                ? 'until its terminated process tree is confirmed gone; operator action may be required'
+                : 'while timed-out restore cleanup is pending'),
     );
     this.name = 'BridgeChannelQuarantinedError';
     this.reason = reason;

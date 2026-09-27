@@ -1352,6 +1352,16 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void refusesAnIllFormedRuntimeSessionIdBeforeResolvingTheScope() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> fixture.service.acquire("harness", "s\uD800",
+                            "bootstrap"));
+            assertNull(fixture.resolver.lastHarness.get());
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -1377,6 +1387,18 @@ class RuntimeBrokerServiceTest {
                     invalidPayload.getCode());
             assertEquals(400, invalidPayload.getStatusCode());
             assertTrue(!invalidPayload.isRetryable());
+            // The JSON writer would send each of these as "p?".
+            for (String field : List.of("promptId", "callId",
+                    "argsDigest")) {
+                Map<String, Object> reference = new HashMap<>(Map.of(
+                        "sessionId", "runtime", "promptId", "prompt",
+                        "callId", "call", "argsDigest", "digest"));
+                reference.put(field, "p\uD800");
+                assertEquals("runtime_reference_invalid", failure(
+                        fixture.service.createExecution("harness", "runtime",
+                                "surrogate-" + field, reference)).getCode(),
+                        field);
+            }
         }
     }
 

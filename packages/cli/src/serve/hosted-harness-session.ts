@@ -392,6 +392,15 @@ export function registerHostedHarnessSessionRoutes(
     void (async () => {
       let admitted = false;
       let settled = false;
+      let turnResult: ChatRecord | undefined;
+      const turnResultRecord = (
+        state: 'completed' | 'cancelled' | 'error',
+        stopReason: string,
+      ) =>
+        record(session, req.params['id'], 'system', null, {
+          subtype: 'turn_result',
+          systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
+        });
       try {
         const authority = session.managed.authority;
         const contentRef = await session.managed.resources.publish(
@@ -459,21 +468,27 @@ export function registerHostedHarnessSessionRoutes(
               );
             }
           }
-          await session.managed.sink.write(
-            record(session, req.params['id'], 'system', null, {
-              subtype: 'turn_result',
-              systemPayload: {
-                promptId,
-                state,
-                stopReason,
-                endedAt: Date.now(),
-              },
-            }),
-          );
+          turnResult = turnResultRecord(state, stopReason);
+          await session.managed.sink.write(turnResult);
           settled = true;
         });
-      } catch {
-        if (admitted && !settled) session.blocked = true;
+      } catch (cause) {
+        if (admitted && !settled) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
+          );
+          try {
+            const state = abort.signal.aborted ? 'cancelled' : 'error';
+            await session.managed.sink.write(
+              turnResult ?? turnResultRecord(state, state),
+            );
+          } catch (settleCause) {
+            session.blocked = true;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
+            );
+          }
+        }
         if (!res.headersSent) error(res, 503, 'hosted_prompt_admission_failed');
       } finally {
         if (timer) clearTimeout(timer);

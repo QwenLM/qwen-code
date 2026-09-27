@@ -56,6 +56,9 @@ reader and writer foundations; the issue discussion must still settle the
 minimal dependency and the relationship between `session_execution_engine`
 and `managed_session_header_v1`. This slice does not create another format or
 require all of Stage G. Production enablement requires that host integration.
+The Legacy host receipt, owner persistence and the cold-restore selector are
+specified in the B2a follow-up,
+[Paired engine owner selection and typed rejections](./2026-09-26-paired-engine-owner-selection.md).
 
 ### Channels and admission
 
@@ -84,18 +87,21 @@ tracked children. No failure path switches to the other factory.
 ### Registration and cleanup
 
 Before dispatch, reject an unaddressable caller-supplied ID or an ID already
-owned by a live session. Before registration, check the actual engine receipt
+owned by a live session, using the typed rejection defined in the B2a
+follow-up. Before registration, check the actual engine receipt
 and the returned session ID. Invalid, conflicting or missing receipts reject
 registration. Close a safely addressable unregistered session on its original connection. If its ID
 cannot be safely addressed, quarantine the original channel, let other sessions
 drain, and retain admission until physical exit. Never close another session
 merely because a malformed response returned its ID.
 
-Existing sessions on a quarantined channel can continue prompting. Fresh work
-for that engine remains blocked until they drain and the channel exits; there
-is no bounded drain deadline or automatic recycle in this slice. Before
-production enablement, #12380 must define an operational recovery policy that
-accounts for those live sessions and physical admission ownership.
+Quarantine recovery follows the #12737 decision and is specified in
+[paired engine per-engine operations](./2026-09-26-paired-engine-per-engine-operations.md)
+(B2c). A quarantined channel admits no new prompt, background turn or side
+request, closes its settled sessions, retires once it drains, and is terminated
+at a drain deadline measured once from the start of the quarantine. Admission,
+IDs and owners stay held until the channel's exit is observed, and the engine
+stays closed to fresh sessions until the child's process tree is released.
 
 Restore failures after a successful ACP response use the same original-channel
 cleanup discipline. Public timeout is not evidence of physical completion.
@@ -117,10 +123,10 @@ Workspace MCP, configuration/status control and preheat use Legacy. Aggregate
 liveness and activity inspect both engines; idle reclamation locates the actual
 candidate by ID. Preheat keepalive extends only Legacy's idle deadline. Managed
 sessions and in-flight work prevent their own channel from being reclaimed;
-Managed has no independent preheat keepalive in this slice. Child resource
-sampling and user-language delivery also remain Legacy-only. Before production
-enablement, #12380 must define per-engine resource aggregation and language
-propagation together with host wiring.
+Managed has no preheat or keepalive of its own, and resource sampling does not
+keep it up. Child resource sampling covers every live channel, and a
+user-language change reaches every live engine; a Managed channel that starts
+later is sent the last change before its first session. B2c specifies both.
 
 Production paired-host wiring is also blocked on these workspace contracts:
 
@@ -137,12 +143,14 @@ Production paired-host wiring is also blocked on these workspace contracts:
   rule must not silently leave existing Managed sessions on old permissions.
 
 These are acceptance gates for #12380 host integration, not capabilities supplied
-by the current Legacy-only workspace-control implementation.
+by the current Legacy-only workspace-control implementation. The B2b follow-up,
+[Paired engine workspace runtime identity](./2026-09-26-paired-engine-workspace-runtime-identity.md),
+specifies the first two gates; the third remains open.
 
-The existing workspace-stop receipt addresses one physical channel, so stopping
-multiple live channels is explicitly blocked until that receipt is extended.
-A single live channel remains stoppable. Managed branch/side-task requests reject
-before mutating history.
+This slice's workspace-stop receipt addresses one physical channel, so stopping
+multiple live channels is blocked; a single live channel remains stoppable. The
+B2b follow-up extends the receipt to every live channel. Managed
+branch/side-task requests reject before mutating history.
 
 ## Files and consumers
 
@@ -180,4 +188,5 @@ engine's current channel as the entire workspace. Tests must observe actual
 factory/connection calls and pending teardown, not only final session counts.
 The owner persistence dependency and production host receipt implementation
 remain the integration questions posted in #12380; the Bridge seam is usable
-for contract tests while those are resolved.
+for contract tests while those are resolved. The B2a follow-up implements the
+Legacy receipt and the restore selector; host wiring remains open.
