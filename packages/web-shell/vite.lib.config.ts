@@ -166,6 +166,10 @@ const TRANSCRIPT_DEAD_MESSAGES = new Map(
       './client/components/workspace-agents/messages.ts',
       './client/components/workspace-agents/messages.transcript-stub.ts',
     ],
+    [
+      './client/settings/messages.ts',
+      './client/settings/messages.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),
@@ -181,11 +185,9 @@ function stubTranscriptDeadMessages(): Plugin {
         ...options,
         skipSelf: true,
       });
-      return (
-        (resolved &&
-          TRANSCRIPT_DEAD_MESSAGES.get(normalizePath(resolved.id))) ??
-        null
-      );
+      return resolved
+        ? (TRANSCRIPT_DEAD_MESSAGES.get(normalizePath(resolved.id)) ?? null)
+        : null;
     },
   };
 }

@@ -22,6 +22,7 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
@@ -569,6 +570,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonRuntimeStopRequest,
   DaemonRuntimeStopSession,
+  DaemonRuntimeStopChannel,
   DaemonRuntimeStopResult,
   DaemonRuntimeStopSnapshot,
   DaemonRuntimeStopOption,

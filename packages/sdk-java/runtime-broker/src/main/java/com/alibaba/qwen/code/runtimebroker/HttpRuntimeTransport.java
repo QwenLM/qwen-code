@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -194,6 +195,42 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     ManagedContextProtocol.verify(receipt, expected);
                     return receipt;
                 });
+    }
+
+    /** Activates or closes the installed fixed-profile Session gate. */
+    public CompletionStage<Void> activateWorkspace(RuntimeBindingRecord runtime,
+            RuntimeSessionRecord sessionRecord, ContextBinding binding, boolean active) {
+        RuntimeSession session = sessionRecord.getSession();
+        RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        RuntimeProvisionRequest request = runtime.getRequest();
+        if (seed == null || runtime.getLease() == null
+                || !runtime.getBindingId().equals(sessionRecord.getBindingId())
+                || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
+                || !request.isManagedContext()
+                || !request.getScope().equals(session.getScope())
+                || !session.getHarnessSessionId().equals(request.getIsolationKey())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
+                        session.getScope().getCapabilityDigest())
+                || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
+                        binding.getContextConfigRef())) {
+            throw new IllegalArgumentException("Workspace activation identity is invalid");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("operation", active ? "activate" : "release");
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("contextDigest", binding.getContextDigest());
+        body.put("contextConfigRef", binding.getContextConfigRef());
+        body.put("profile", WorkspaceExecutionProfile.PROFILE);
+        Map<String, Object> expected = new LinkedHashMap<>(body);
+        expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+        expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
+        expected.put("epoch", seed.getEpoch());
+        expected.put("active", active);
+        return post(runtime.getLease(), "/internal/managed-runtime/v3/activation",
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(
+                        ManagedContextProtocol.parse(bytes), expected));
     }
 
     /**
@@ -630,8 +667,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         try {
             fields = JsonCodec.parseObject(bytes,
                     "Managed Runtime attestation");
-        } catch (RuntimeBrokerException exception) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        } catch (RuntimeBrokerException | IllegalArgumentException exception) {
+            throw protocol("Managed Runtime attestation response is invalid.",
+                    exception);
         }
         if (!fields.keySet().equals(RESPONSE_FIELDS)) {
             throw protocol("Managed Runtime attestation response is invalid.");
@@ -697,10 +735,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        Object raw = response.get("protocolVersion");
-        if (!(raw instanceof Number number)
-                || new BigDecimal(number.toString())
-                        .compareTo(BigDecimal.valueOf(2)) != 0) {
+        BigDecimal version = exactNumber(response.get("protocolVersion"));
+        if (version == null
+                || version.compareTo(BigDecimal.valueOf(2)) != 0) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -708,15 +745,31 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        Object value = response.get(field);
-        if (!(value instanceof Number number)) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        BigDecimal value = exactNumber(response.get(field));
+        if (value != null) {
+            try {
+                long parsed = value.longValueExact();
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (ArithmeticException exception) {
+                // A fraction or a value beyond a long is not an epoch.
+            }
         }
-        long parsed = number.longValue();
-        if (number.doubleValue() != parsed || parsed <= 0) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        throw protocol("Managed Runtime attestation response is invalid.");
+    }
+
+    private static BigDecimal exactNumber(Object value) {
+        // A parsed Double or Float may be rounded and a Short or Byte wrapped,
+        // as with 40000000000000001E-16 or 65540S, so an integer written with
+        // a non-zero exponent (40e-1) fails closed. Exact-decimal parsing would
+        // keep it, but fastjson2 2.0.60 then reads 0.020000000000000000000E1
+        // as 2.
+        if (value instanceof Integer || value instanceof Long
+                || value instanceof BigInteger || value instanceof BigDecimal) {
+            return new BigDecimal(value.toString());
         }
-        return parsed;
+        return null;
     }
 
     private static boolean jsonContentType(String value) {
@@ -772,8 +825,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static RuntimeBrokerException protocol(String message) {
-        return error(400, "managed_runtime_attestation_invalid", message,
-                false);
+        return protocol(message, null);
+    }
+
+    private static RuntimeBrokerException protocol(String message,
+            Throwable cause) {
+        return new RuntimeBrokerException(400,
+                "managed_runtime_attestation_invalid", message, false, cause);
     }
 
     private static RuntimeBrokerException conflict(String message) {

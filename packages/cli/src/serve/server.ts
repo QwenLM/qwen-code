@@ -1427,7 +1427,8 @@ export function createServeApp(
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
