@@ -133,7 +133,24 @@ it('never starts a pre-cancelled reservation', async () => {
   ]);
 });
 
-it('queries the original identity after a lost start and refuses unknown status', async () => {
+it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
+  'preserves a definite %s start rejection without polling',
+  async (code) => {
+    const paths: string[] = [];
+    const broker = await fixture((path) => {
+      paths.push(path);
+      return { code: 409, body: { code } };
+    });
+    await expect(
+      broker.execute('execution', '{}', new AbortController().signal),
+    ).rejects.toEqual(new HostedWorkspaceBrokerRejection(409, code));
+    expect(paths).toEqual([
+      '/internal/runtime-broker/v1/executions/execution:start',
+    ]);
+  },
+);
+
+it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];
   const broker = await fixture((path) => {
     paths.push(path);
@@ -142,6 +159,32 @@ it('queries the original identity after a lost start and refuses unknown status'
   await expect(
     broker.execute('execution', '{}', new AbortController().signal),
   ).rejects.toThrow('409');
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+    '/internal/runtime-broker/v1/executions/execution',
+  ]);
+});
+
+it('queries the original identity after an uncertain start failure', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    if (path.endsWith(':start'))
+      return { code: 503, body: { code: 'runtime_execution_failed' } };
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
   expect(paths).toEqual([
     '/internal/runtime-broker/v1/executions/execution:start',
     '/internal/runtime-broker/v1/executions/execution',

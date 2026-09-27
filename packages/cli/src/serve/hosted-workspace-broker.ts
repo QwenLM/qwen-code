@@ -103,7 +103,14 @@ export class HostedWorkspaceBroker {
     if (!signal.aborted) {
       try {
         response = await this.request(`${path}:start`, { payloadJson });
-      } catch {
+      } catch (error) {
+        if (
+          error instanceof HostedWorkspaceBrokerRejection &&
+          error.status === 409 &&
+          (error.code === 'runtime_idempotency_conflict' ||
+            error.code === 'runtime_execution_conflict')
+        )
+          throw error;
         // A lost start reply is not permission to start another invocation.
       }
     }
