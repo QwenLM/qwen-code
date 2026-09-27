@@ -961,6 +961,35 @@ describe('EditTool', () => {
       );
     });
 
+    it('keeps the prior CRLF write behavior when inline modification replaces the whole file', async () => {
+      const original = 'a\r\nb\r\nc\n';
+      fs.writeFileSync(filePath, original, 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'b',
+        new_string: 'B',
+      };
+      const invocation = tool.build(params);
+      const signal = new AbortController().signal;
+      const confirmation = await invocation.getConfirmationDetails(signal);
+      if (confirmation.type !== 'edit') {
+        throw new Error(`Expected edit confirmation, got ${confirmation.type}`);
+      }
+
+      const updatedParams = tool
+        .getModifyContext(signal)
+        .createUpdatedParams(
+          confirmation.originalContent ?? '',
+          'a\nb\nc\nX\n',
+          params,
+        );
+      const result = await tool.build(updatedParams).execute(signal);
+
+      expect(result.llmContent).toMatch(/Showing lines/);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nb\r\nc\r\nX\r\n');
+    });
+
     // The inserted text is the one thing the edit did ask for, so it
     // takes the line ending of the text it replaced. Without that a
     // uniform CRLF file would gain LF lines the caller never wrote.

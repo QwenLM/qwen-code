@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   detectLineEnding,
   ensureCrlfLineEndings,
 } from '../services/fileSystemService.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { safeLiteralReplace } from './textUtils.js';
 import {
   applyReplacementPreservingLineEndings,
@@ -411,41 +412,63 @@ describe('applyReplacementPreservingLineEndings', () => {
   });
 
   it('gives an edit on the first line the ending of a mixed file', () => {
-    // Same shape, but the file's first break is LF and a later one is CRLF. The
-    // first ending is the closest thing to a verdict this position has.
+    // The break immediately after the matched text is CRLF. Later LF breaks
+    // remain outside the span and are copied unchanged.
     expect(splice('one\r\ntwo\r\nthree\nfour\n', 'one', 'ONE\nAGAIN')).toBe(
       'ONE\r\nAGAIN\r\ntwo\r\nthree\nfour\n',
     );
   });
 
-  it('stays linear when replacing every match on one long line', () => {
-    // `replace_all` over a file that is essentially a single line used to rescan
-    // backwards to the previous break for every match, which made the whole
-    // operation quadratic in the file size -- a 256 KB input took about 8.5 s
-    // and 512 KB about 42 s, with the loop synchronous throughout, so the event
-    // loop was blocked for the duration. Carrying the preceding break forward
-    // makes it linear: the same 256 KB now takes about 0.16 s and 512 KB about
-    // 0.6 s.
-    //
-    // 256 KB is the size used rather than the reviewer's 1 MB because the point is
-    // a threshold this test can assert, not the largest input that fits: 8.5 s
-    // before the change is comfortably over the 2.5 s budget and 0.16 s after it
-    // is comfortably under, so the assertion is not sensitive to a slow machine.
+  it('uses the first file ending once for many matches on one long line', () => {
     const raw = 'var x=1;'.repeat(29_136) + '\r\n';
-    const started = performance.now();
-    const out = applyReplacementPreservingLineEndings(
-      raw,
-      normalized(raw),
-      'var',
-      'let',
-    );
-    const elapsed = performance.now() - started;
+    const originalIndexOf = String.prototype.indexOf;
+    let firstEndingScans = 0;
+    const indexOfSpy = vi
+      .spyOn(String.prototype, 'indexOf')
+      .mockImplementation(function (
+        this: string,
+        searchString: string,
+        position?: number,
+      ) {
+        if (this === raw && searchString === '\n') {
+          firstEndingScans++;
+        }
+        return originalIndexOf.call(this, searchString, position);
+      });
+
+    let out: string;
+    let elapsed: number;
+    try {
+      const started = performance.now();
+      out = applyReplacementPreservingLineEndings(
+        raw,
+        normalized(raw),
+        'var',
+        'let',
+      );
+      elapsed = performance.now() - started;
+    } finally {
+      indexOfSpy.mockRestore();
+    }
 
     // Correctness first: every match replaced, and no ending invented.
     expect(out.startsWith('let x=1;')).toBe(true);
     expect(out).not.toContain('var');
     expect(out.match(/(?<!\r)\n/g)).toBeNull();
-    expect(elapsed).toBeLessThan(2500);
+    expect(firstEndingScans).toBe(1);
+    expectWithinLatencyBudget(elapsed, 2500, { poolMultiplier: 4 });
+  });
+
+  it('uses the first break for a first-line edit even when later breaks differ', () => {
+    expect(splice('one X\ntwo\r\nthree\n', 'one', 'ONE\nAGAIN')).toBe(
+      'ONE\nAGAIN X\ntwo\r\nthree\n',
+    );
+  });
+
+  it('preserves the prior file-wide style when the edit spans the whole file', () => {
+    expect(splice('a\r\nb\r\nc\n', 'a\nb\nc\n', 'a\nb\nc\nX\n')).toBe(
+      'a\r\nb\r\nc\r\nX\r\n',
+    );
   });
 
   // A file that mixes CRLF and LF has no single local ending, so the span is
@@ -466,7 +489,7 @@ describe('applyReplacementPreservingLineEndings', () => {
     });
 
     it('leaves a span that already matches the resolved ending alone', () => {
-      expect(splice('a\r\nb\nc', 'a\r\nb', 'a\r\nb')).toBe('a\r\nb\nc');
+      expect(splice('a\r\nb\r\nc\n', 'a\nb', 'a\nb')).toBe('a\r\nb\r\nc\n');
     });
 
     it('moves nothing outside the matched span', () => {
@@ -480,7 +503,7 @@ describe('applyReplacementPreservingLineEndings', () => {
     });
 
     it('is a no-op when the span already uses the resolved ending', () => {
-      expect(splice('keep\r\nme\r\nand\r\nme', 'me\r\nand', 'me\r\nand')).toBe(
+      expect(splice('keep\r\nme\r\nand\r\nme', 'me\nand', 'me\nand')).toBe(
         'keep\r\nme\r\nand\r\nme',
       );
       expect(splice('keep\nme\nand\nme', 'me\nand', 'me\nand')).toBe(

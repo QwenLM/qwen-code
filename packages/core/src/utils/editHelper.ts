@@ -533,12 +533,8 @@ function firstLineEnding(content: string): string {
  * Answers "which line ending most recently precedes this index" for a series of
  * indices that only move forwards.
  *
- * Matches are consumed in increasing order within one splice, so the character
- * before the current index has usually already been looked at for the previous
- * match. Scanning backwards from every match again makes `replace_all` over a
- * file that is essentially one long line quadratic in the file size, because each
- * match walks the whole distance back to the start. Carrying the answer forward
- * makes the total work linear.
+ * Matches are consumed in increasing order within one splice. Carrying the
+ * answer forward means this cursor scans each preceding character at most once.
  */
 class PrecedingLineEnding {
   private readonly content: string;
@@ -625,24 +621,22 @@ function normalizedToRawOffsets(
  * `detectLineEnding` answers `crlf` as soon as the file contains a single
  * `\r\n`, and `ensureCrlfLineEndings` then converts every `\n`.
  *
- * Here the untouched prefix and suffix are copied verbatim from `rawContent`, so
- * only the matched spans are replaced. Inserted text takes the line ending of
- * the region it replaced — the span's own trailing break, else the break that
- * follows it, else the one before it — so a uniformly-CRLF file does not gain
- * LF lines. For a file that is already uniformly LF or uniformly CRLF the result
- * is byte-identical to what the previous path produced.
+ * For a local span, the untouched prefix and suffix are copied verbatim from
+ * `rawContent`. Inserted text takes the ending of the replaced region — the
+ * span's trailing break, else the break immediately after it, else the one
+ * before it. A whole-file span keeps the previous writer's file-wide CRLF
+ * conversion because there are no outside bytes to preserve. Uniformly
+ * terminated files remain byte-identical to the previous path.
  *
  * Two paths, and which one runs is decided by whether the file contains a CRLF
  * at all. A file with none takes the plain literal replace, so the replacement's
  * own line endings are inserted exactly as given and a CRLF inside the
  * replacement will leave the file mixed — which is what the previous path did to
- * such a file as well. A file that does contain a CRLF takes the splice, and
- * there the resolved ending is one style for the whole span: a lone LF in the
- * replacement comes out as CRLF, and a span whose own bytes already mix styles
- * is re-joined throughout, so a replacement whose text is identical to what it
- * matched can still change breaks inside the span. Nothing outside the matched
- * spans moves on either path, and for a uniformly terminated file neither of
- * these can arise.
+ * such a file as well. A file that does contain a CRLF takes the splice. Local
+ * spans use one resolved ending throughout, so a mixed span can change breaks
+ * inside that span even when its normalized text is unchanged. A whole-file
+ * span uses CRLF throughout, matching the previous writer. Bytes outside matched
+ * spans stay unchanged.
  *
  * Matches are located in the normalized text and mapped back, so the spans are
  * the same ones `safeLiteralReplace` would have replaced, including its
@@ -671,6 +665,7 @@ export function applyReplacementPreservingLineEndings(
   let copiedUpTo = 0;
   let searchFrom = 0;
   const preceding = new PrecedingLineEnding(rawContent);
+  let fileEnding: string | null = null;
   for (;;) {
     const matchAt = normalizedContent.indexOf(oldString, searchFrom);
     if (matchAt === -1) {
@@ -715,16 +710,19 @@ export function applyReplacementPreservingLineEndings(
     // below would be performed only to be discarded.
     const spanStartsWithBreak =
       rawContent[rawStart] === '\n' || rawContent[rawStart] === '\r';
-    // Otherwise the breaks the edit adds sit where the span was and take the ending
-    // of that region: the span's own trailing break, else the one right after it,
-    // else the one that opened the line, else -- when the span is the whole file
-    // around it and there is no break either side -- the file's first ending.
-    const ending = spanStartsWithBreak
-      ? matchedLeadingEnding
-      : (spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
-        lineEndingAfter(rawContent, rawEnd) ??
-        preceding.at(rawStart) ??
-        firstLineEnding(rawContent));
+    const spansWholeFile =
+      copiedUpTo === 0 && rawStart === 0 && rawEnd === rawContent.length;
+    // A full-file replacement has no untouched bytes to splice around. Keep the
+    // previous writer's file-wide CRLF behavior for it; inline editor changes
+    // can submit the whole normalized file as one replacement span.
+    const ending = spansWholeFile
+      ? '\r\n'
+      : spanStartsWithBreak
+        ? matchedLeadingEnding
+        : (spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
+          lineEndingAfter(rawContent, rawEnd) ??
+          preceding.at(rawStart) ??
+          (fileEnding ??= firstLineEnding(rawContent)));
     const insertedEnding = ending;
     const inserted = newString
       .split(/\r\n|\n/)

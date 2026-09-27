@@ -345,10 +345,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         )
       : (currentContent ?? '');
 
-    // The bytes that go to disk, spliced out of the content as read. For an
-    // edit to a file that mixes CRLF and LF, `newContent` above would hand the
-    // writer one style for the whole file and rewrite every terminator the edit
-    // never touched; this keeps each untouched line byte-identical.
+    // The bytes that go to disk, spliced out of the content as read. For a
+    // local edit to a mixed-ending file, bytes outside the matched span remain
+    // unchanged. An inline editor replacement can span the whole file; that
+    // case keeps the previous writer's file-wide CRLF behavior.
     const contentForWrite =
       !error && !isNewFile && rawContent !== null && currentContent !== null
         ? applyReplacementPreservingLineEndings(
@@ -664,7 +664,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
               // `prepareTextFileContent` expands *every* `\n` when it is told
               // the file is `crlf` — which `detectLineEnding` reports as soon as
               // the file contains a single `\r\n`. Passing the verdict back
-              // would undo the splice above.
+              // would undo the splice above. Direct local and sandbox writes
+              // honor these bytes except for Windows .bat/.cmd normalization.
+              // Daemon/SSH backends can still re-derive a whole-file ending;
+              // their write policies are outside this caller's control.
             },
           },
           editData.sandboxFileVersion,
