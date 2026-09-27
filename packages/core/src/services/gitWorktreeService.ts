@@ -78,11 +78,13 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * holding nothing but links), and the session marker
  * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
  * rule) or untracked (a fixture without one). A marker the repository tracks
- * is a committed file rather than the daemon's, so an edit to one counts as
- * work like any other tracked change. The argv tokens added for this probe
- * are literals placed after the `status` subcommand and are never
- * caller-derived (see `load-simple-git.ts`), and `runGit` scrubs the
- * environment (`gitEnv`) so an inherited `GIT_DIR` or
+ * counts as work like any other tracked change: an edit to a tracked path is
+ * indistinguishable from user work, and since `writeWorktreeSessionMarker`
+ * overwrites a tracked marker unconditionally the daemon can be the author of
+ * that edit, so such a preserve is permanent rather than transient. The argv
+ * tokens added for this probe are literals placed after the `status`
+ * subcommand and are never caller-derived (see `load-simple-git.ts`), and
+ * `runGit` scrubs the environment (`gitEnv`) so an inherited `GIT_DIR` or
  * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
  *
  * Fail-closed: any read error counts as work, preserving the checkout.
@@ -167,9 +169,10 @@ function isDisposableIgnoredEntry(entry: string): boolean {
  * because `git worktree add` does not create it, and nothing writes an
  * exclude rule for linked paths, so git collapses the whole subtree to a
  * single `?? tools/` entry that never names the link. Such a collapsed
- * directory is exempt only when every entry inside it is itself a symlink —
- * a real file or directory beside the links is work, and any read error
- * fails closed exactly like the status probe does.
+ * directory is exempt only when it holds at least one entry and every entry
+ * inside it is itself a symlink — an empty one is not a link, a real file or
+ * directory beside the links is work, and any read error fails closed exactly
+ * like the status probe does.
  *
  * Quoted (special-character) paths are not resolved and count as work.
  */
@@ -184,11 +187,17 @@ async function isSymlinkEntry(
     if (stats.isSymbolicLink()) return true;
     if (!stats.isDirectory()) return false;
     // Dirents from `readdir` do not follow links, so a real subdirectory —
-    // which may hold work one level down — fails this check.
+    // which may hold work one level down — fails this check. An *empty*
+    // directory would satisfy "every child is a link" vacuously, and git does
+    // list empty ignored directories (`!! build/`), so require at least one
+    // link: waiving such an entry as `symlink` would authorize a removal with
+    // a breadcrumb naming an exemption the checkout has nothing to do with.
+    let sawLink = false;
     for (const child of await fs.readdir(absolute, { withFileTypes: true })) {
       if (!child.isSymbolicLink()) return false;
+      sawLink = true;
     }
-    return true;
+    return sawLink;
   } catch {
     return false;
   }

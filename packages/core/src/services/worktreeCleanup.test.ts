@@ -239,19 +239,50 @@ describe('cleanupStaleAgentWorktrees', () => {
     const wtPath = await createAgentWorktree('agent-aabbccd');
     await writeWorktreeSessionMarker(wtPath, 'session-1');
     await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
 
     const removed = await cleanupStaleAgentWorktrees(repoRoot);
 
     expect(removed).toBe(1);
+    // `writeWorktreeSessionMarker` writes the `info/exclude` rule, so this
+    // fixture pins the *ignored* disjunct of the marker arm.
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('waiving !! .qwen-session (session-marker)'),
+    );
+  });
+
+  it('still reaps a stale worktree whose session marker was never git-excluded', async () => {
+    // `addWorktreeSessionMarkerExclude` is best-effort and swallows every
+    // error, so a checkout can carry the daemon's own marker with no exclude
+    // rule and git then lists it as `?? .qwen-session`. Write the file
+    // directly: `writeWorktreeSessionMarker` always writes the rule and so
+    // can only ever render `!!`. Without this case, dropping the
+    // `status === '??'` disjunct keeps the whole suite green while every
+    // such aged checkout is preserved forever — the pile-up the sweep exists
+    // to prevent. The shared `.gitignore` deliberately has no marker rule.
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, '.qwen-session'), 'session-1', 'utf8');
+    await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('waiving ?? .qwen-session (session-marker)'),
+    );
   });
 
   it('preserves a stale worktree whose only content is an edit to a tracked .qwen-session', async () => {
     // The marker exemption is for the daemon's own file, which git lists as
     // ignored (its `info/exclude` rule) or untracked (a fixture without one).
-    // A repository that *tracks* `.qwen-session` — a committed fixture, or a
-    // marker staged after that best-effort exclude write failed — renders as
+    // A repository that *tracks* `.qwen-session` renders an edit to it as
     // ` M .qwen-session`: a real uncommitted edit, and the name match alone
     // would waive it and authorize a force-remove plus branch delete over it.
+    // (A marker merely *staged* after that best-effort exclude write failed
+    // has no HEAD version, so git renders `A ` — which this gate likewise
+    // leaves counting as work.)
     await fs.writeFile(path.join(repoRoot, '.qwen-session'), 'committed\n');
     // -f so a global excludesFile matching the marker cannot fail the add;
     // ignore rules never apply to a tracked path, so the ` M` shape holds.
@@ -472,6 +503,40 @@ describe('cleanupStaleAgentWorktrees', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('still reaps a stale worktree whose *ignored* symlinkDirectories parent holds only links', async () => {
+    // The same nested value under a repo that ignores the parent (`.cache/`
+    // in `.gitignore`, `worktree.symlinkDirectories: [".cache/build"]`): git
+    // collapses the wholly-ignored subtree to `!! .cache/` and never names
+    // the link, so the collapsed arm has to answer for `!!` too. The `??`
+    // case above pins only the untracked side, so narrowing that arm to
+    // `status === '??'` would keep every existing case green while
+    // `.cache/`-style checkouts silently became unreapable forever.
+    await addIgnoreRule('.cache/');
+    const cacheTarget = path.join(repoParent, 'cache-build');
+    await fs.mkdir(cacheTarget);
+    await fs.writeFile(path.join(cacheTarget, 'o.txt'), 'x\n');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, '.cache'));
+    await fs.symlink(
+      cacheTarget,
+      path.join(wtPath, '.cache', 'build'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    // Reaping unlinks the link; the shared target must survive.
+    await expect(
+      fs.access(path.join(cacheTarget, 'o.txt')),
+    ).resolves.toBeUndefined();
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('waiving !! .cache/ (symlink)'),
+    );
+  });
+
   it('preserves a stale worktree holding a real file beside a nested symlink', async () => {
     // The collapsed-directory waiver has to stay symlink-only: one real file
     // beside the link is untracked work and must pin the checkout.
@@ -493,6 +558,30 @@ describe('cleanupStaleAgentWorktrees', () => {
     await expect(
       fs.access(path.join(wtPath, 'tools', 'notes.md')),
     ).resolves.toBeUndefined();
+  });
+
+  it('preserves a stale worktree whose only content is an empty ignored directory', async () => {
+    // git lists empty *ignored* directories (never empty untracked ones), so
+    // the collapsed arm can be reached with zero children — where "every
+    // child is a symlink" is vacuously true. `build` is not in
+    // DISPOSABLE_IGNORED_ROOTS, so without the at-least-one-link requirement
+    // this checkout is waived, reaped, and the breadcrumb names an exemption
+    // (`symlink`) that does not exist in it.
+    await addIgnoreRule('build/');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'build'));
+    await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'build')),
+    ).resolves.toBeUndefined();
+    expect(worktreeServiceLogger.debug).not.toHaveBeenCalledWith(
+      expect.stringContaining('waiving !! build/ (symlink)'),
+    );
   });
 
   it('reads a directory with no .git of its own as dirty, not as the enclosing repo', async () => {
