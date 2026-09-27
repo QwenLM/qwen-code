@@ -6279,10 +6279,7 @@ describe('SessionArtifactStore', () => {
       rebuilt.artifacts[1]!.id,
     ]);
 
-    for (const override of [
-      { source: 'client' as const },
-      { source: 'hook' as const },
-    ]) {
+    for (const override of [{ source: 'client' as const }]) {
       const rejected = new SessionArtifactStore({
         sessionId,
         workspaceCwd: workspace,
@@ -6294,6 +6291,25 @@ describe('SessionArtifactStore', () => {
       expect(warnings).toContain(
         'artifact snapshot restore failed; kept existing live artifacts',
       );
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
+
+    // R3-1 (#12473): hook-origin records also go through the upgrade
+    // path (mergeArtifact keeps existing.source), so the gate accepts
+    // both tool and hook. A hook-source override is quiet-dropped like
+    // a tool-source one — the record disappears without a `skipped `
+    // warning and the all-legacy RESTORE_FAILED branch fires.
+    {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, source: 'hook' as const }],
+      });
+      expect(warnings.some((w) => w.startsWith('skipped '))).toBe(false);
+      expect(warnings.join('\n')).toContain('artifact snapshot restore failed');
       expect((await rejected.list()).artifacts).toEqual([]);
     }
 

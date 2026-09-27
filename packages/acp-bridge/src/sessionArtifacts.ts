@@ -799,7 +799,7 @@ export class SessionArtifactStore {
             typeof artifact.url === 'string' &&
             isFileArtifactUrl(artifact.url) &&
             getWebPreviewSnapshotId(artifact) === undefined &&
-            artifact.source === 'tool' &&
+            (artifact.source === 'tool' || artifact.source === 'hook') &&
             warnings.at(-1)?.startsWith('skipped marker artifact ') &&
             warnings.at(-1)?.includes('url must use http or https')
           ) {
@@ -918,7 +918,7 @@ export class SessionArtifactStore {
             typeof artifact.url === 'string' &&
             isFileArtifactUrl(artifact.url) &&
             getWebPreviewSnapshotId(artifact) === undefined &&
-            artifact.source === 'tool';
+            (artifact.source === 'tool' || artifact.source === 'hook');
           if (isLegacyFileArtifact) {
             legacyPublishedFileCount++;
             continue;
