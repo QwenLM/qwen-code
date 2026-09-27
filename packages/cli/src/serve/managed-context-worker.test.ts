@@ -341,6 +341,40 @@ describe('Managed context worker boot', () => {
     expect(toolStatuses).toEqual([400, 400, 400]);
   });
 
+  it('mounts Tool v3 only when a local publisher is injected', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(BOOT, {
+      prepare: async () => {
+        throw new Error('unexpected capture');
+      },
+      accept: async () => {
+        throw new Error('unexpected receipt');
+      },
+    });
+    openWorkers.add(worker);
+    const response = await post(
+      worker.ready.url,
+      '/internal/managed-runtime/v3/status',
+      {
+        protocolVersion: 3,
+        toolResult: 'managed-tool-result/1',
+        reference: {
+          sessionId: 'runtime-session-a',
+          promptId: 'turn-a',
+          callId: 'call-a',
+          argsDigest:
+            '424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8',
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      protocolVersion: 3,
+      toolResult: 'managed-tool-result/1',
+      state: 'unknown',
+    });
+  });
+
   it('answers 404 to the v3 routes under boot v1', async () => {
     const origin = await startWorker({
       type: 'boot',
