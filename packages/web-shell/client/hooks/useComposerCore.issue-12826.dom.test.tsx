@@ -34,10 +34,7 @@ import { act, useLayoutEffect, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Transaction } from '@codemirror/state';
 import { I18nProvider } from '../i18n';
-import {
-  useComposerCore,
-  type UseComposerCoreReturn,
-} from './useComposerCore';
+import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
