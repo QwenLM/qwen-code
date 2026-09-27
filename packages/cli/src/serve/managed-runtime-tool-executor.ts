@@ -272,8 +272,9 @@ export class ManagedToolExecutor {
     if (existing) {
       if (
         existing.version !== 3 ||
-        !sameInvocation(existing, reference, toolName, inputJson) ||
-        JSON.stringify(existing.v3Capture) !== JSON.stringify(capture)
+        !sameReference(existing.reference, reference) ||
+        existing.toolName !== toolName ||
+        !sameCapture(existing.v3Capture, capture)
       ) {
         throw new ManagedToolConflictError(
           'Managed Runtime invocation identity conflicts.',
@@ -525,6 +526,7 @@ export class ManagedToolExecutor {
               protocolVersion: 3,
               toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
               state: 'settled',
+              lastSequence: entry.lastSequence + 1,
               result: entry.v3Result,
             }),
           ) > MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES
@@ -659,6 +661,20 @@ function sameReference(
     left.promptId === right.promptId &&
     left.callId === right.callId &&
     left.argsDigest === right.argsDigest
+  );
+}
+
+function sameCapture(
+  left: LocalShellCaptureRequest['capture'] | undefined,
+  right: LocalShellCaptureRequest['capture'],
+): boolean {
+  return (
+    left?.tenantId === right.tenantId &&
+    left.sessionId === right.sessionId &&
+    left.turnId === right.turnId &&
+    left.executionCallId === right.executionCallId &&
+    left.bindingGeneration === right.bindingGeneration &&
+    left.capturePolicy === right.capturePolicy
   );
 }
 

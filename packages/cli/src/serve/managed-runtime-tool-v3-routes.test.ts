@@ -31,6 +31,7 @@ import {
   parseHarnessCheckpointV1,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import {
   createManagedToolSet,
@@ -411,14 +412,13 @@ describe('Tool v3 local worker routes', () => {
     };
     const marker = path.join(root, 'effects');
     const command = `printf x >> ${JSON.stringify(marker)}; head -c 1048576 /dev/zero`;
-    const digest = createHash('sha256')
-      .update(JSON.stringify({ command }))
-      .digest('hex');
+    const input = { command, is_background: false };
+    const digest = managedToolDigest(input);
     const originalReference = { ...reference, argsDigest: digest };
     const request = {
       reference: originalReference,
       toolName: 'run_shell_command',
-      input: { command },
+      input,
       capture: {
         tenantId: sessionKey.tenantId,
         sessionId: sessionKey.sessionId,
@@ -453,7 +453,18 @@ describe('Tool v3 local worker routes', () => {
     );
     const [first, concurrent] = await Promise.all([
       executor.executeV3(request),
-      executor.executeV3(request),
+      executor.executeV3({
+        ...request,
+        input: { is_background: false, command },
+        capture: {
+          capturePolicy: 'complete_required',
+          bindingGeneration: '1',
+          executionCallId: identity.executionCallId,
+          turnId: 'turn-a',
+          sessionId: sessionKey.sessionId,
+          tenantId: sessionKey.tenantId,
+        },
+      }),
     ]);
     expect(concurrent).toEqual(first);
     expect(first).toMatchObject({
