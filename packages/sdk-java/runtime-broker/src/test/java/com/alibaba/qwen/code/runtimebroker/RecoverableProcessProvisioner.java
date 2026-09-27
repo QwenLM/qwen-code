@@ -66,6 +66,12 @@ final class RecoverableProcessProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return local.createRequest(scope, isolationKey);
+    }
+
+    @Override
     public CompletionStage<RuntimeLease> provision(
             RuntimeProvisionRequest request) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException(

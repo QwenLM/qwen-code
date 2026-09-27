@@ -513,6 +513,17 @@ function pendingSwapError(standaloneDir: string): Error {
   );
 }
 
+// Marker-present variant of the pending-swap remedy: on these branches the
+// .deferred marker itself is the artifact blocking the update, so the
+// remedy must name it — removing only .new and the lock leaves the marker
+// in place, and the next update hits the same marker branch again.
+function deferredMarkerError(standaloneDir: string): Error {
+  return new Error(
+    `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+      `If no qwen-update.bat process is running, remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, then try again.`,
+  );
+}
+
 // A bat swap waits at most ~60s for the CLI and launcher to exit before
 // moving directories, so a .new directory older than this without a
 // .deferred marker cannot belong to a live swap: the bat deletes the marker
@@ -530,7 +541,7 @@ function checkDeferredSwap(standaloneDir: string): void {
     } catch {
       // A marker we cannot read cannot prove the bat is gone (EACCES/EBUSY/
       // EIO) — fail closed rather than deleting a swap that may be live.
-      throw pendingSwapError(standaloneDir);
+      throw deferredMarkerError(standaloneDir);
     }
     const batPid = parseInt(marker, 10);
     if (!Number.isSafeInteger(batPid) || batPid <= 0 || batPid > 2147483647) {
@@ -538,9 +549,36 @@ function checkDeferredSwap(standaloneDir: string): void {
       // PID makes process.kill throw ERR_INVALID_ARG_TYPE instead of answering
       // the liveness question. Send it to the error that carries the removal
       // steps rather than one that tells the user to wait.
-      throw pendingSwapError(standaloneDir);
+      throw deferredMarkerError(standaloneDir);
     }
     if (!isProcessProvablyGone(batPid)) {
+      // A PID that cannot be proven gone normally means the bat is still
+      // swapping — but a hung bat or a reused PID would block every future
+      // update forever, so an aged marker escapes to a deferred-marker remedy
+      // instead. The parent writes the marker right after spawning the bat and
+      // the bat deletes it on exit, so the marker's mtime ages the same way as
+      // the marker-less .new check below. The escape must not authorize
+      // deleting .new: a stale marker does not prove the swap directory is
+      // safe to remove, so swapProvenDead stays false.
+      let markerStale = false;
+      try {
+        markerStale =
+          Date.now() - fs.statSync(deferredMarker).mtimeMs >
+          PENDING_SWAP_STALE_MS;
+      } catch {
+        // unreadable — cannot prove age, keep waiting
+      }
+      if (markerStale) {
+        // This branch fires precisely when the PID is not provably gone (alive,
+        // or held by a process we may not signal), so the guard must stay
+        // actionable when a qwen-update.bat really is running (hung bat: end it
+        // first); with a reused PID no bat exists and the cleanup applies
+        // directly.
+        throw new Error(
+          `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+            `If a qwen-update.bat process is still running, end it first; then remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, and try again.`,
+        );
+      }
       throw new Error(
         'A previous update is still being applied. Please wait a moment and try again.',
       );

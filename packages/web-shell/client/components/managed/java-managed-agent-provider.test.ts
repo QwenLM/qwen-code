@@ -157,7 +157,6 @@ describe('createJavaManagedAgentProvider', () => {
     expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
       sessionId: 'session-1',
       afterSequence: 8,
-      limit: 100,
     });
   });
 
