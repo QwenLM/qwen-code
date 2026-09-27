@@ -145,7 +145,9 @@ Production paired-host wiring is also blocked on these workspace contracts:
 These are acceptance gates for #12380 host integration, not capabilities supplied
 by the current Legacy-only workspace-control implementation. The B2b follow-up,
 [Paired engine workspace runtime identity](./2026-09-26-paired-engine-workspace-runtime-identity.md),
-specifies the first two gates; the third remains open.
+specifies the first two gates, and
+[Paired engine workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md)
+specifies the third.
 
 This slice's workspace-stop receipt addresses one physical channel, so stopping
 multiple live channels is blocked; a single live channel remains stoppable. The
