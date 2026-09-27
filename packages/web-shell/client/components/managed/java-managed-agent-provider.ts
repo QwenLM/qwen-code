@@ -39,7 +39,7 @@ export function createJavaManagedAgentProvider(
       );
       return {
         sessions: page.data.map(toSessionSummary),
-        nextCursor: page.nextCursor,
+        nextCursor: page.nextCursor ?? undefined,
       };
     },
     async getSession(sessionId, request) {
@@ -65,7 +65,7 @@ export function createJavaManagedAgentProvider(
         events: [...itemEvents, ...tailEvents].sort(
           (left, right) => left.id - right.id,
         ),
-        olderCursor: transcript.olderCursor,
+        olderCursor: transcript.olderCursor ?? undefined,
         lastEventId: transcript.lastSequence,
       };
     },
@@ -116,7 +116,7 @@ export function createJavaManagedAgentProvider(
     },
     async *subscribeEvents(sessionId, request) {
       for await (const event of client.streamEvents(
-        { sessionId, afterSequence: request.lastEventId, limit: 100 },
+        { sessionId, afterSequence: request.lastEventId },
         request.signal,
       )) {
         const projected = projectJavaAgentEvent(event);
