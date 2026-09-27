@@ -538,8 +538,8 @@ export const DEFAULT_THREAD_AUTO_TURN_BUDGET = 12;
  */
 export const DEFAULT_THREAD_TOKEN_BUDGET = 1_000_000;
 
-/** Bound on retained posts per thread. */
+/** Recent-post retention target; referenced and idempotency records are retained. */
 export const MAX_THREAD_MESSAGES = 500;
 
-/** Bound on retained run records per thread. */
+/** Recent-run retention target; live, accounting and unresolved records are retained. */
 export const MAX_THREAD_RUNS = 200;

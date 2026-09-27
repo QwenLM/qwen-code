@@ -174,7 +174,14 @@ export function hasLiveDescendant(
       if (seen.has(child.id)) continue;
       seen.add(child.id);
       queue.push(child.id);
-      if (child.status === 'done') continue;
+      // A terminal thread (done/cancelled) is a live dependency only while
+      // it still owes the parent a report: `child.status !== 'open'` alone
+      // would count a cancelled child forever, and the parent's
+      // no-live-dependency guard could never fire again.
+      const owesReport = child.outbox.some(
+        (event) => event.kind === 'parent_report' && event.status === 'pending',
+      );
+      if (isThreadTerminal(child.status) && !owesReport) continue;
       const canWakeParent =
         child.status !== 'open' ||
         child.runs.some(
@@ -184,10 +191,7 @@ export function hasLiveDescendant(
             run.status === 'finishing' ||
             run.status === 'cancelling',
         ) ||
-        child.outbox.some(
-          (event) =>
-            event.kind === 'parent_report' && event.status === 'pending',
-        );
+        owesReport;
       if (canWakeParent) return true;
     }
   }

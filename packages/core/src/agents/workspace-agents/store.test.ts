@@ -67,9 +67,11 @@ import {
 } from './store.js';
 import { postMessage, postMessageInTransaction } from './thread-actions.js';
 import { issueA2AGrant } from './a2a-grants.js';
+import { resolveThreadStatus } from './thread-status.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
+  MAX_THREAD_RUNS,
   type WorkspaceAgent,
   type Thread,
   type ThreadEvent,
@@ -627,6 +629,78 @@ describe('retiring an agent', () => {
     await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
       'updated',
     );
+  });
+
+  it('finishes disabling after the roster committed but thread cleanup failed', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
+    );
+    atomicWriteFault.filePath = getThreadPath(PROJECT_ROOT, 'th_root');
+    atomicWriteFault.mode = 'throwBefore';
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
+    ).rejects.toThrow('injected crash');
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0].enabled).toBe(false);
+    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0].status).toBe(
+      'queued',
+    );
+
+    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
+    const stored = await readThread(PROJECT_ROOT, 'th_root');
+    expect(stored?.runs[0].status).toBe('cancelled');
+    expect(stored?.status).toBe('blocked');
+    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
+    expect(await readThread(PROJECT_ROOT, 'th_root')).toEqual(stored);
+  });
+
+  it('refuses disabling before writing the roster when a thread is unreadable', async () => {
+    await seed([ALICE]);
+    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {});
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
+    ).rejects.toThrow('thread records are unreadable');
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0].enabled).not.toBe(
+      false,
+    );
+  });
+
+  it('retains an unresolved close through trimming and releases it after acknowledgement', async () => {
+    await seed([ALICE]);
+    const blocker = run(1, 0, { closeKind: 'blocked' });
+    await writeThread(
+      PROJECT_ROOT,
+      thread({
+        status: 'blocked',
+        runs: [
+          blocker,
+          ...Array.from({ length: MAX_THREAD_RUNS }, (_, index) =>
+            run(index + 2, 0),
+          ),
+        ],
+      }),
+    );
+    const stored = (await readThread(PROJECT_ROOT, 'th_root'))!;
+    expect(stored.runs.some((entry) => entry.id === blocker.id)).toBe(true);
+    expect(
+      resolveThreadStatus({ thread: stored, hasLiveChildDependency: false })
+        .status,
+    ).toBe('blocked');
+
+    await writeThread(PROJECT_ROOT, {
+      ...stored,
+      runs: stored.runs.map((entry) =>
+        entry.id === blocker.id
+          ? { ...entry, closeAcknowledgedAtSequence: 0 }
+          : entry,
+      ),
+    });
+    expect(
+      (await readThread(PROJECT_ROOT, 'th_root'))?.runs.some(
+        (entry) => entry.id === blocker.id,
+      ),
+    ).toBe(false);
   });
 
   it('reports cancellation when disabling the last queued run of a child', async () => {
