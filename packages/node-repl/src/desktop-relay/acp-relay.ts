@@ -296,15 +296,14 @@ export class AcpRelay {
         if (frame.code === 'rate_limited') return;
         if (frame.code === 'already_registered') {
           // Our own earlier register is still being added at the daemon;
-          // wait for it without spending the retry budget.
+          // wait for its reply, but keep retries within the registration budget.
           if (this.registerTimer) clearTimeout(this.registerTimer);
           this.registerTimer = setTimeout(() => {
             this.registerTimer = undefined;
             if (this.ended !== undefined || this.phase !== 'registering') {
               return;
             }
-            this.registerAttempts = Math.max(0, this.registerAttempts - 1);
-            this.sendRegister();
+            void this.retryRegister(message);
           }, this.options.registerTimeoutMs ?? DEFAULTS.registerTimeoutMs);
           return;
         }

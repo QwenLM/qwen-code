@@ -319,6 +319,41 @@ class MemorySocket extends Duplex {
 }
 
 describe('serveConnection', () => {
+  it('leaves the working relay untouched when approval arrives after disconnecting the request', async () => {
+    let approve!: (allowed: boolean) => void;
+    const { ctx, record, setRecord } = context({
+      askConsent: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            approve = resolve;
+          }),
+      ),
+    });
+    const previous: RelayRecord = {
+      pid: 200,
+      processIdentity: 'previous',
+      origin: ORIGIN,
+      daemonUrl: `${ORIGIN}/`,
+      sessionId: 'old-session',
+      phase: 'connected',
+      updatedAt: '',
+    };
+    setRecord(previous);
+    const socket = new MemorySocket();
+    const done = serveConnection(socket, { http: ctx });
+    socket.push(
+      `POST /connect HTTP/1.1\r\nHost: ${HOST}\r\nOrigin: ${ORIGIN}\r\nContent-Length: ${Buffer.byteLength(connectBody)}\r\n\r\n${connectBody}`,
+    );
+    await vi.waitFor(() => expect(ctx.askConsent).toHaveBeenCalledOnce());
+    socket.destroy();
+    await new Promise<void>((resolve) => socket.once('close', resolve));
+    approve(true);
+    await done;
+    expect(ctx.terminate).not.toHaveBeenCalled();
+    expect(ctx.startRelay).not.toHaveBeenCalled();
+    expect(record()).toBe(previous);
+  });
+
   it('answers an HTTP request and closes', async () => {
     const { ctx } = context();
     const socket = new MemorySocket();

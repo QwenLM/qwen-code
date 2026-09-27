@@ -245,6 +245,12 @@ export function deriveDesktopRelayStatus(input: {
   if (!input.sessionId || !input.daemonUrl)
     return { phase: 'needs-session', ...(live ? { canDisconnect: true } : {}) };
   if (input.awaitingApproval) return { phase: 'awaiting-approval' };
+  if (input.error !== undefined)
+    return {
+      phase: 'failed',
+      message: input.error,
+      ...(live ? { canDisconnect: true } : {}),
+    };
   if (input.probe === undefined) return { phase: 'checking' };
   if (input.probe.kind === 'permission-required') {
     return { phase: 'permission-required' };
@@ -258,17 +264,11 @@ export function deriveDesktopRelayStatus(input: {
     if (active.phase === 'connected') return { phase: 'connected' };
     if (live) return { phase: 'connecting' };
     if (active.phase === 'failed') {
-      return { phase: 'failed', message: input.error ?? active.message };
+      return { phase: 'failed', message: active.message };
     }
   } else if (live) {
-    // A relay that is live for another session says nothing about this one, so
-    // it must not mask this session's own connect failure.
-    if (input.error !== undefined)
-      return { phase: 'failed', message: input.error };
     return { phase: 'other-session' };
   }
-  if (input.error !== undefined)
-    return { phase: 'failed', message: input.error };
   return { phase: 'idle' };
 }
 
@@ -471,9 +471,11 @@ export function DesktopRelayControl({
   // Connect-flow state belongs to the session and daemon it was raised against;
   // without this, switching either one shows the previous session's pending
   // dialog or its stale error.
+  const pendingConnect = useRef<AbortController | undefined>(undefined);
   useEffect(() => {
     setAwaitingApproval(false);
     setError(undefined);
+    return () => pendingConnect.current?.abort();
   }, [sessionId, daemonUrl]);
 
   const status = deriveDesktopRelayStatus({
@@ -523,12 +525,20 @@ export function DesktopRelayControl({
     if (!sessionId || !daemonUrl) return;
     setError(undefined);
     setAwaitingApproval(true);
-    const result = await connectDesktopRelay({
-      daemonUrl,
-      sessionId,
-      ...(token ? { token } : {}),
-      ...(route.kind === 'qualified' ? { workspace: route.selector } : {}),
-    });
+    pendingConnect.current?.abort();
+    const controller = new AbortController();
+    pendingConnect.current = controller;
+    const result = await connectDesktopRelay(
+      {
+        daemonUrl,
+        sessionId,
+        ...(token ? { token } : {}),
+        ...(route.kind === 'qualified' ? { workspace: route.selector } : {}),
+      },
+      undefined,
+      controller.signal,
+    );
+    if (controller.signal.aborted) return;
     setAwaitingApproval(false);
     if (!result.ok) {
       setError(
@@ -549,8 +559,9 @@ export function DesktopRelayControl({
     // clearing it on failure would report a revoke that never arrived and leave
     // no way to retry.
     if (revoked) setProbe(undefined);
+    else setError(t('desktopRelay.error.unreachable'));
     await refresh();
-  }, [refresh]);
+  }, [refresh, t]);
 
   const copy = useCallback(async () => {
     try {
@@ -594,7 +605,10 @@ export function DesktopRelayControl({
           copied={copied}
           onConnect={() => void connect()}
           onDisconnect={() => void disconnect()}
-          onCheckAgain={() => void refresh()}
+          onCheckAgain={() => {
+            setError(undefined);
+            void refresh();
+          }}
           onCopyCommand={() => void copy()}
         />
       </PopoverContent>

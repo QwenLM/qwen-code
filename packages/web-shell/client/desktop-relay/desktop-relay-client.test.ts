@@ -36,6 +36,30 @@ function respond(status: number, body: unknown) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('DESKTOP_RELAY_INSTALL_COMMAND', () => {
+  it('aborts the pending approval request when its session is left', async () => {
+    const controller = new AbortController();
+    let approvalSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
+      if (!String(url).endsWith('/connect'))
+        return new Response('{}', { status: 200 });
+      approvalSignal = init?.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) =>
+        approvalSignal!.addEventListener('abort', () =>
+          reject(new Error('cancelled')),
+        ),
+      );
+    });
+    const pending = connectDesktopRelay(
+      { daemonUrl: 'https://devbox:4170/', sessionId: 's1' },
+      fetchImpl,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(approvalSignal).toBeDefined());
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(approvalSignal?.aborted).toBe(true);
+  });
+
   it('pins the published node-repl version instead of @latest', () => {
     const pin = DESKTOP_RELAY_INSTALL_COMMAND.match(
       /^npx -y @qwen-code\/node-repl-mcp@(\S+) desktop-relay install$/,

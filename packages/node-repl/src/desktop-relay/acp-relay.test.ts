@@ -215,6 +215,45 @@ describe('AcpRelay', () => {
     expect(h.closed()).toBe(true);
   });
 
+  it('bounds retries while an earlier registration is still in flight', async () => {
+    vi.useFakeTimers();
+    const h = harness({ maxRegisterAttempts: 2, registerTimeoutMs: 100 });
+    const ended = vi.fn();
+    void h.relay.run().then(ended);
+    try {
+      h.handlers().open();
+      h.handlers().message(
+        JSON.stringify({
+          id: 'desktop-relay-acp-initialize',
+          result: {},
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      h.handlers().message(
+        JSON.stringify({
+          type: 'mcp_error',
+          code: 'already_registered',
+          message: 'still adding',
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(99);
+      expect(ended).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ended).toHaveBeenCalledWith({
+        reason: 'failed',
+        code: 'register_failed',
+        message: 'still adding after 2 attempt(s)',
+      });
+      expect(h.sent.filter((f) => f['type'] === 'mcp_register')).toHaveLength(
+        2,
+      );
+      expect(h.closed()).toBe(true);
+    } finally {
+      h.relay.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it('fails when the daemon rejects ACP initialize', async () => {
     const h = harness();
     const ended = h.relay.run();

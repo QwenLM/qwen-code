@@ -39,7 +39,7 @@ afterEach(async () => {
   );
 });
 
-describe('ownsRelayProcess', () => {
+describe.skipIf(process.platform === 'win32')('ownsRelayProcess', () => {
   it('requires the process title as well as a live pid', async () => {
     const identity = `qwen-relay-test-${process.pid}`;
     const child = spawn(

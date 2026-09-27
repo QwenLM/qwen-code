@@ -230,23 +230,34 @@ describe('deriveDesktopRelayStatus', () => {
     ).toEqual({ phase: 'permission-required' });
   });
 
-  it("does not let another session's relay hide this session's failure", () => {
-    expect(
-      deriveDesktopRelayStatus({
+  it.each(['s1', 's2'])(
+    'shows errors and preserves revocation for live session %s',
+    (sessionId) => {
+      const status = deriveDesktopRelayStatus({
         ...base,
         error: 'connect refused',
         probe: {
           kind: 'ready',
           version: '0.1.5',
           active: {
-            sessionId: 's2',
+            sessionId,
             daemonUrl: 'https://devbox:4170',
             phase: 'connected',
           },
         },
-      }),
-    ).toEqual({ phase: 'failed', message: 'connect refused' });
-  });
+      });
+      expect(status).toEqual({
+        phase: 'failed',
+        message: 'connect refused',
+        canDisconnect: true,
+      });
+      mount(status);
+      expect(container?.querySelector('[role="alert"]')?.textContent).toBe(
+        'connect refused',
+      );
+      expect(button('Disconnect')).toBeDefined();
+    },
+  );
 });
 
 describe('retainLiveDesktopRelayProbe', () => {

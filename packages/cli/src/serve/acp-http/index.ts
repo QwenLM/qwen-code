@@ -1764,12 +1764,13 @@ export function mountAcpHttp(
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
         const presented = extractUpgradeBearer(req);
-        desktopRelayClaim = presented
-          ? upgradeCredentials.consumeDesktopRelayCredential?.(
-              presented,
-              rawPath,
-            )
-          : undefined;
+        desktopRelayClaim =
+          presented && upgradeListenerIdentity.kind === 'primary'
+            ? upgradeCredentials.consumeDesktopRelayCredential?.(
+                presented,
+                rawPath,
+              )
+            : undefined;
         if (
           !presented ||
           (!desktopRelayClaim &&

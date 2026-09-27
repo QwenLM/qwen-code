@@ -214,6 +214,7 @@ function currentRecord(ctx: AgentContext): RelayRecord | undefined {
 export async function handleHttpRequest(
   request: HttpRequest,
   ctx: AgentContext,
+  signal?: AbortSignal,
 ): Promise<HttpOutcome> {
   // A rebound DNS name reaches this port with a foreign Host header; only the
   // loopback names are accepted, so a page cannot pose as same-origin.
@@ -271,6 +272,9 @@ export async function handleHttpRequest(
     }
     if (!(await ctx.askConsent(consentMessage(origin, parsed)))) {
       return json(403, cors, { ok: false, code: 'denied' });
+    }
+    if (signal?.aborted) {
+      return json(409, cors, { ok: false, code: 'cancelled' });
     }
     // One relay per computer: an approved connection replaces the previous one.
     const previous = ctx.readRecord();
@@ -353,6 +357,7 @@ export function serveConnection(
   deps: ConnectionDeps,
 ): Promise<void> {
   return new Promise((resolve) => {
+    const controller = new AbortController();
     let buffer = Buffer.alloc(0);
     let dispatched = false;
     const timer = setTimeout(() => {
@@ -380,7 +385,11 @@ export function serveConnection(
       if (parsed.kind !== 'complete') return;
       let outcome: HttpOutcome;
       try {
-        outcome = await handleHttpRequest(parsed.request, deps.http);
+        outcome = await handleHttpRequest(
+          parsed.request,
+          deps.http,
+          controller.signal,
+        );
       } catch (error) {
         outcome = json(
           500,
@@ -392,6 +401,7 @@ export function serveConnection(
           },
         );
       }
+      if (controller.signal.aborted) return;
       socket.end(
         formatHttpResponse(outcome.status, outcome.headers, outcome.body),
       );
@@ -419,6 +429,7 @@ export function serveConnection(
 
     socket.on('error', () => undefined);
     socket.on('close', () => {
+      controller.abort();
       if (dispatched) return;
       dispatched = true;
       clearTimeout(timer);

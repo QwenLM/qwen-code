@@ -12065,6 +12065,21 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
+  it('rejects a primary desktop relay credential on the local-control listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const result = await wsConnectLocalControl(desktopRelayCredential!);
+    result.socket?.close();
+    expect(result.code).toBe(401);
+    const primary = await wsConnect({
+      headers: { Authorization: `Bearer ${desktopRelayCredential!}` },
+    });
+    primary.close();
+  });
+
   it('limits a desktop relay credential to one ACP connection, client, server, and session', async () => {
     await startServer({
       token: 'runtime-token',

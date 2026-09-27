@@ -19,7 +19,7 @@ export const DESKTOP_RELAY_URL = 'http://127.0.0.1:47821';
  * `missing` state that command produced) would block on stdin and install
  * nothing. `desktop-relay-client.test.ts` fails when the pin drifts from
  * `packages/node-repl/package.json`, and `.github/workflows/cd-cua-driver.yml`
- * publishes that version, so the pinned spec always carries the subcommand.
+ * must publish that version before the setup command can be used.
  */
 export const DESKTOP_RELAY_INSTALL_COMMAND =
   'npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install';
@@ -152,6 +152,7 @@ export async function probeDesktopRelay(
 export async function connectDesktopRelay(
   request: DesktopRelayConnectRequest,
   fetchImpl: FetchLike = defaultFetch,
+  cancellation?: AbortSignal,
 ): Promise<DesktopRelayConnectResult> {
   try {
     const prewarmResponse = await withTimeout(10_000, (signal) =>
@@ -172,7 +173,9 @@ export async function connectDesktopRelay(
           },
           body: '{}',
           cache: 'no-store',
-          signal,
+          signal: cancellation
+            ? AbortSignal.any([signal, cancellation])
+            : signal,
         },
       ),
     );
@@ -206,7 +209,9 @@ export async function connectDesktopRelay(
               ...(request.workspace ? { workspace: request.workspace } : {}),
             }),
             cache: 'no-store',
-            signal,
+            signal: cancellation
+              ? AbortSignal.any([signal, cancellation])
+              : signal,
           },
         ),
       );
@@ -235,7 +240,7 @@ export async function connectDesktopRelay(
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...request, token: relayCredential }),
         cache: 'no-store',
-        signal,
+        signal: cancellation ? AbortSignal.any([signal, cancellation]) : signal,
       }),
     );
     if (response.ok) return { ok: true };
