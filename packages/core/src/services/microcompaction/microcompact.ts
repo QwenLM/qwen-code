@@ -64,9 +64,14 @@ interface MemoryBodySlice extends MemoryBodyVersion {
 
 function getMemoryBodySlicesForResponse(
   part: Part | undefined,
+  callIdentityById: ToolCallIdentityById,
 ): MemoryBodySlice[] | undefined {
-  if (part?.functionResponse?.name !== ToolNames.SEARCH_MEMORY) return [];
-  const output = part.functionResponse.response?.['output'];
+  if (
+    getResponseToolIdentity(part, callIdentityById)?.name !==
+    ToolNames.SEARCH_MEMORY
+  )
+    return [];
+  const output = part?.functionResponse?.response?.['output'];
   if (typeof output !== 'string') return undefined;
   try {
     const parsed = JSON.parse(output) as {
@@ -115,9 +120,13 @@ export function collectResidentMemoryBodies(
   history: Content[],
 ): MemoryBodyVersion[] {
   const slicesByVersion = new Map<string, MemoryBodySlice[]>();
+  const callIdentityById = buildToolCallIdentityById(history);
   for (const content of history) {
     for (const part of content.parts ?? []) {
-      for (const slice of getMemoryBodySlicesForResponse(part) ?? []) {
+      for (const slice of getMemoryBodySlicesForResponse(
+        part,
+        callIdentityById,
+      ) ?? []) {
         const key = memoryBodyVersionKey(slice);
         const slices = slicesByVersion.get(key) ?? [];
         slices.push(slice);
@@ -963,8 +972,11 @@ export function microcompactHistory(
               unresolvedEvictedReads++;
             }
           }
-          if (part.functionResponse.name === ToolNames.SEARCH_MEMORY) {
-            const bodies = getMemoryBodySlicesForResponse(part);
+          if (toolName === ToolNames.SEARCH_MEMORY) {
+            const bodies = getMemoryBodySlicesForResponse(
+              part,
+              callIdentityById,
+            );
             if (!bodies) {
               unresolvedEvictedMemoryBodies++;
             } else {

@@ -314,23 +314,28 @@ describe('SearchMemoryTool', () => {
     const liveCoverage = memoryManager.getBodyCoverageInHistory();
     liveCoverage.set('project:long.md', {
       version: 7,
-      total: 20000,
-      ranges: [{ start: 0, end: 8000 }],
+      total: 30000,
+      ranges: [
+        { start: 0, end: 8000 },
+        { start: 8000, end: 16000 },
+      ],
     });
     vi.mocked(executeSearchMemory).mockImplementationOnce(
       async (_params, options) => {
         memoryManager.getBodyPresentVersionsInHistory().clear();
         liveCoverage.clear();
         // readContentResult pushes the call's new window onto the cloned
-        // pre-call entry, so the call map carries both ranges.
+        // pre-call entry, so the call map carries prior and newly read ranges.
         options?.bodyCoverage?.set('project:long.md', {
           version: 7,
-          total: 20000,
+          total: 30000,
           ranges: [
             { start: 0, end: 8000 },
             { start: 8000, end: 16000 },
+            { start: 16000, end: 24000 },
           ],
         });
+        options?.exhaustedBodyRefs?.add('project:long.md');
         return {
           mode: 'fetch',
           sourceStatus: {
@@ -351,9 +356,12 @@ describe('SearchMemoryTool', () => {
 
     expect(liveCoverage.get('project:long.md')).toEqual({
       version: 7,
-      total: 20000,
-      ranges: [{ start: 8000, end: 16000 }],
+      total: 30000,
+      ranges: [{ start: 16000, end: 24000 }],
     });
+    expect(
+      memoryManager.getExhaustedBodyRefsForCurrentTurn().has('project:long.md'),
+    ).toBe(false);
   });
 
   it('does not commit a full-presence claim built on evicted coverage', async () => {
@@ -740,6 +748,29 @@ describe('SearchMemoryTool', () => {
     expect(executeSearchMemory).toHaveBeenCalledTimes(1);
     expect(duplicate.llmContent).toContain('"duplicateRequest": true');
     expect(duplicate.llmContent).toContain('previous result');
+  });
+
+  it('does not promise a previous result while an identical request can still fail', async () => {
+    const tool = new SearchMemoryTool(config());
+    let rejectPending!: (error: Error) => void;
+    vi.mocked(executeSearchMemory).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPending = reject;
+        }),
+    );
+    const params = { mode: 'search' as const, keywords: ['memory selector'] };
+    const first = tool
+      .build(params)
+      .execute(new AbortController().signal)
+      .catch((error: unknown) => error);
+    const duplicate = await tool
+      .build(params)
+      .execute(new AbortController().signal);
+    rejectPending(new Error('search failed'));
+    expect(await first).toMatchObject({ message: 'search failed' });
+    expect(duplicate.llmContent).toContain('if it failed, retry');
+    expect(duplicate.llmContent).not.toContain('already ran');
   });
 
   it('lets repeated fetches reach version-aware body handling', async () => {

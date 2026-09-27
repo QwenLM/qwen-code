@@ -8360,55 +8360,64 @@ hello
       );
     });
 
-    it('should log initial delivery when auto-memory is injected on UserQuery', async () => {
-      mockMemoryManager.recall.mockResolvedValue({
-        prompt: '## Relevant memory\n\nInitial memory result.',
-        selectedDocs: [
-          {
-            type: 'user',
-            filePath: '/test/project/root/.qwen/memory/user.md',
-            relativePath: 'user.md',
-            filename: 'user.md',
-            title: 'User Memory',
-            description: 'User preferences',
-            body: '- User prefers terse responses.',
-            mtimeMs: 1,
-          },
-        ],
-        strategy: 'model',
-      });
-
-      mockTurnRunFn.mockReturnValue(
-        (async function* () {
-          yield { type: 'content', value: 'Hello' };
-        })(),
-      );
-
-      client['chat'] = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as LlmChat;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Quick question' }],
-        new AbortController().signal,
-        'prompt-id-initial-memory-delivery',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
-        mockConfig,
-        expect.objectContaining({
-          phase: 'refined',
-          delivery_point: 'initial',
+    it.each([false, true])(
+      'logs accepted memory delivery even when a later stream error occurs: %s',
+      async (failAfterAcceptance) => {
+        mockMemoryManager.recall.mockResolvedValue({
+          prompt: '## Relevant memory\n\nInitial memory result.',
+          selectedDocs: [
+            {
+              type: 'user',
+              filePath: '/test/project/root/.qwen/memory/user.md',
+              relativePath: 'user.md',
+              filename: 'user.md',
+              title: 'User Memory',
+              description: 'User preferences',
+              body: '- User prefers terse responses.',
+              mtimeMs: 1,
+            },
+          ],
           strategy: 'model',
-          docs_selected: 1,
-          latency_ms: expect.any(Number),
-        }),
-      );
-    });
+        });
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: 'content', value: 'Hello' };
+            if (failAfterAcceptance) {
+              yield {
+                type: LlmEventType.Error,
+                value: { error: { message: 'stream failed' } },
+              };
+            }
+          })(),
+        );
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+        } as unknown as LlmChat;
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-initial-memory-delivery',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            phase: 'refined',
+            delivery_point: 'initial',
+            strategy: 'model',
+            docs_selected: 1,
+            latency_ms: expect.any(Number),
+          }),
+        );
+      },
+    );
 
     it('should log discard telemetry when auto-memory selects no docs', async () => {
       mockMemoryManager.recall.mockResolvedValue({

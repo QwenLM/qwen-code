@@ -4076,9 +4076,8 @@ export class LlmClient {
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
     // text is in history either way, and discarding would re-inject the same
-    // router block and focused leaves on the next turn. The LlmEventType.Error
-    // early return is the exception — it keeps discarding via the finally,
-    // since a failed request may have left nothing in history.
+    // router block and focused leaves on the next turn. Errors before any
+    // acceptance still discard the prepared delivery.
     const settleMemoryDelivery = () => {
       if (!memoryDeliveryToCommit) return;
       if (modelRequestAccepted) {
@@ -4946,6 +4945,7 @@ export class LlmClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            settleMemoryDelivery();
             return turn;
           }
         }

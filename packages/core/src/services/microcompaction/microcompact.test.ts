@@ -2330,20 +2330,38 @@ describe('microcompactHistory memory body eviction', () => {
     toolResultsNumToKeep: 1,
   };
 
-  it('reports a memory ref when its last body result is cleared', () => {
-    const history = [
-      makeMemoryResult('project:old.md', 'old body'),
-      makeMemoryResult('project:new.md', 'new body'),
-    ];
+  it.each([false, true])(
+    'reports a cleared memory ref through the tool bridge: %s',
+    (bridged) => {
+      const history = [
+        makeMemoryResult('project:old.md', 'old body'),
+        makeMemoryResult('project:new.md', 'new body'),
+      ];
+      if (bridged) {
+        const output = history[0]!.parts![0]!.functionResponse!.response![
+          'output'
+        ] as string;
+        history.splice(
+          0,
+          1,
+          makeBridgedToolCall('memory-call', 'search_memory'),
+          makeBridgedToolResult('memory-call', output),
+        );
+      }
+      expect(collectResidentMemoryBodies(history)).toContainEqual({
+        memoryRef: 'project:old.md',
+        mtimeMs: 1,
+      });
 
-    const result = microcompactHistory(history, Date.now(), settings, {
-      force: true,
-    });
+      const result = microcompactHistory(history, Date.now(), settings, {
+        force: true,
+      });
 
-    expect(result.meta?.evictedMemoryBodies).toEqual([
-      { memoryRef: 'project:old.md', mtimeMs: 1 },
-    ]);
-  });
+      expect(result.meta?.evictedMemoryBodies).toEqual([
+        { memoryRef: 'project:old.md', mtimeMs: 1 },
+      ]);
+    },
+  );
 
   it('reports an unresolved memory body when result JSON is not intact', () => {
     const corrupted = makeMemoryResult('project:old.md', 'old body');

@@ -58,7 +58,7 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
           mode: this.params.mode,
           duplicateRequest: true,
           warning:
-            'This identical search_memory request already ran in the current turn. Use the previous result or change the parameters instead of repeating it.',
+            'An identical search_memory request is in progress or was already attempted this turn. Check its result; if it failed, retry after that failure instead of assuming a previous result exists.',
         },
         null,
         2,
@@ -182,7 +182,17 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
       }
     });
     callExhaustedBodyRefs.forEach((ref) => {
-      if (!preCallExhaustedBodyRefs.has(ref)) {
+      const claimedCoverage = callBodyCoverage.get(ref);
+      const merged = bodyCoverage.get(ref);
+      if (
+        !preCallExhaustedBodyRefs.has(ref) &&
+        claimedCoverage &&
+        merged &&
+        merged.version === claimedCoverage.version &&
+        claimedCoverage.ranges.every((range) =>
+          isRangeCovered(merged.ranges, range),
+        )
+      ) {
         exhaustedBodyRefs.add(ref);
       }
     });
