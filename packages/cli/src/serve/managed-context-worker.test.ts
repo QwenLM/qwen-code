@@ -38,6 +38,7 @@ import {
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
@@ -339,6 +340,40 @@ describe('Managed context worker boot', () => {
       })),
     );
     expect(toolStatuses).toEqual([400, 400, 400]);
+  });
+
+  it('mounts Tool v3 only when a local publisher is injected', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(BOOT, {
+      prepare: async () => {
+        throw new Error('unexpected capture');
+      },
+      accept: async () => {
+        throw new Error('unexpected receipt');
+      },
+    });
+    openWorkers.add(worker);
+    const response = await post(
+      worker.ready.url,
+      '/internal/managed-runtime/v3/status',
+      {
+        protocolVersion: 3,
+        toolResult: 'managed-tool-result/1',
+        reference: {
+          sessionId: 'runtime-session-a',
+          promptId: 'turn-a',
+          callId: 'call-a',
+          argsDigest:
+            '424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8',
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      protocolVersion: 3,
+      toolResult: 'managed-tool-result/1',
+      state: 'unknown',
+    });
   });
 
   it('answers 404 to the v3 routes under boot v1', async () => {
@@ -1296,7 +1331,13 @@ describe('Managed Workspace execution activation', () => {
     ).toBe('success');
   });
 
-  it('refuses release while an invocation is active, and retains status/cancel after directory loss', async () => {
+  // Runs for 30 seconds unless it is cancelled, under bash and cmd.exe alike.
+  // cmd.exe has no `#` comments, so `sleep 30 # …` fails at once there.
+  const WAIT_30_SECONDS = `"${process.execPath}" -e "setTimeout(String, 30000)"`;
+
+  // Starts `command` as a shell call in the Session's `child` directory. The
+  // call reports `executing` before its shell starts.
+  async function startSlowCall(command: string) {
     const root = workspace();
     fs.mkdirSync(path.join(root, 'child'));
     const origin = await startWorker({
@@ -1309,44 +1350,89 @@ describe('Managed Workspace execution activation', () => {
     expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
       200,
     );
-    const call = shell(
-      request.sessionId,
-      'slow',
-      'sleep 30 # intentional-sleep: in-flight release test',
-    );
+    const call = shell(request.sessionId, 'slow', command);
     const running = post(origin, EXECUTE, call);
+    // A test that fails before cancel() must not leave this unobserved.
+    running.catch(() => undefined);
     const lookup = {
       protocolVersion: 2,
       reference: call.reference,
       afterSequence: 0,
     };
+    const status = async () =>
+      (await (await post(origin, STATUS, lookup)).json()).state;
     await vi.waitFor(async () => {
-      expect((await (await post(origin, STATUS, lookup)).json()).state).toBe(
-        'executing',
-      );
+      expect(await status()).toBe('executing');
     });
-    expect(
-      (await post(origin, ACTIVATION, activation(request, 'release'))).status,
-    ).toBe(409);
-    fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
-    expect(
-      (
-        await post(origin, CANCEL, {
-          protocolVersion: 2,
-          reference: call.reference,
-        })
-      ).status,
-    ).toBe(200);
-    expect((await (await running).json()).result.executionStatus).toBe(
-      'cancelled',
-    );
-    expect((await (await post(origin, STATUS, lookup)).json()).state).toBe(
-      'settled',
-    );
-    expect(
-      (await post(origin, ACTIVATION, activation(request, 'release'))).status,
-    ).toBe(200);
+    const cancel = async () => {
+      const cancelled = await post(origin, CANCEL, {
+        protocolVersion: 2,
+        reference: call.reference,
+      });
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toMatchObject({
+        state: 'cancel_requested',
+      });
+      // A cancel that does not stop the command would still settle as
+      // cancelled once the command ends by itself, 30 seconds in, so the call
+      // must settle well before that.
+      await vi.waitFor(
+        async () => {
+          expect(await status()).toBe('settled');
+        },
+        { timeout: 10_000 },
+      );
+      expect((await (await running).json()).result.executionStatus).toBe(
+        'cancelled',
+      );
+    };
+    const release = async () =>
+      (await post(origin, ACTIVATION, activation(request, 'release'))).status;
+    return { root, status, cancel, release };
+  }
+
+  it('refuses release while an invocation is active, and allows it once the invocation settles', async () => {
+    const { cancel, release } = await startSlowCall(WAIT_30_SECONDS);
+
+    expect(await release()).toBe(409);
+    await cancel();
+    expect(await release()).toBe(200);
   });
+
+  // Windows refuses to rename a directory that a native process, such as
+  // cmd.exe or node, uses as its working directory. Under Git Bash, which CI
+  // uses, the rename succeeds once the shell has written `started.txt`. So on
+  // Windows the test runs only when the Shell tool runs bash.
+  it.skipIf(
+    process.platform === 'win32' && getShellConfiguration().shell !== 'bash',
+  )(
+    'retains status and cancel for an active invocation after its directory is lost',
+    async () => {
+      const { root, status, cancel, release } = await startSlowCall(
+        'echo started > started.txt && sleep 30',
+      );
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(root, 'child', 'started.txt'))).toBe(
+            true,
+          );
+        },
+        { timeout: 10_000 },
+      );
+
+      // A scanner or a process starting in the directory can make Windows
+      // refuse the rename for a moment, so it is retried.
+      await vi.waitFor(
+        () => {
+          fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
+        },
+        { timeout: 3_000 },
+      );
+      expect(await status()).toBe('executing');
+      await cancel();
+      expect(await release()).toBe(200);
+    },
+  );
 
   it('rechecks a closed gate after an asynchronous tool resolver returns', async () => {
     const root = workspace();

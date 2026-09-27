@@ -1164,23 +1164,19 @@ export async function setWorkspaceAgentEnabled(
         );
       }
       const now = Date.now();
+      // Import lazily because run lifecycle is built on this store module.
+      const { finishRunInTransaction } = await import('./run-lifecycle.js');
       for (const thread of threads) {
         if (isThreadTerminal(thread.status)) continue;
-        if (
-          !thread.runs.some(
-            (run) => run.agentId === agentId && run.status === 'queued',
-          )
-        ) {
-          continue;
+        for (const run of thread.runs) {
+          if (run.agentId !== agentId || run.status !== 'queued') continue;
+          await finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: { status: 'cancelled' },
+            now,
+          });
         }
-        await transaction.writeThread({
-          ...thread,
-          runs: thread.runs.map((run) =>
-            run.agentId === agentId && run.status === 'queued'
-              ? { ...run, status: 'cancelled', endedAt: now }
-              : run,
-          ),
-        });
       }
     }
     return 'updated';

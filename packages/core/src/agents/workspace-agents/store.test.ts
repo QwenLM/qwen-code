@@ -618,11 +618,37 @@ describe('retiring an agent', () => {
     const stored = await readThread(PROJECT_ROOT, 'th_root');
     expect(stored?.runs[0]?.status).toBe('cancelled');
     expect(stored?.runs[0]?.endedAt).toEqual(expect.any(Number));
+    expect(stored?.status).toBe('blocked');
     // With the dead run settled the agent holds no live work, so retiring
     // it — previously refused — now succeeds.
     await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
       'updated',
     );
+  });
+
+  it('reports cancellation when disabling the last queued run of a child', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({
+        id: 'th_child',
+        rootThreadId: 'th_root',
+        parentThreadId: 'th_root',
+        status: 'in_progress',
+        runs: [run(1, 0, { status: 'queued', endedAt: undefined })],
+      }),
+    );
+
+    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
+
+    const stored = await readThread(PROJECT_ROOT, 'th_child');
+    expect(stored?.outbox).toEqual([
+      expect.objectContaining({
+        kind: 'parent_report',
+        causedByRunId: 'rn_1',
+        payload: expect.objectContaining({ event: 'child_cancelled' }),
+      }),
+    ]);
   });
 
   it('leaves running work alone on disable', async () => {

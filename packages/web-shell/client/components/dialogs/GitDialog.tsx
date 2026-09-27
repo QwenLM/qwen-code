@@ -80,6 +80,7 @@ export function GitDialog({
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const { client, capabilities } = useWorkspace();
+  const gitSessionId = gitCwd ? sessionId : undefined;
   const prsSupported =
     capabilities?.features?.includes(GITHUB_PRS_FEATURE) === true;
   const worktreesSupported =
@@ -184,7 +185,7 @@ export function GitDialog({
           return;
         }
         const ws = client.workspaceByCwd(workspaceCwd);
-        return ws.workspaceGitDiff(gitCwd).then((diff) => {
+        return ws.workspaceGitDiff(gitCwd, gitSessionId).then((diff) => {
           if (abort.signal.aborted) return;
           if (diff.files.length === 0) {
             setGenerating(false);
@@ -235,7 +236,7 @@ export function GitDialog({
     return () => {
       abort.abort();
     };
-  }, [isCommit, client, workspaceCwd, gitCwd]);
+  }, [isCommit, client, workspaceCwd, gitCwd, gitSessionId]);
 
   // Clamp if the PR tab vanishes mid-session.
   const clampedTab = tabViews.includes(
@@ -301,10 +302,15 @@ export function GitDialog({
           commitMsg.trim(),
           { all: true },
           gitCwd,
+          gitSessionId,
         );
         if (andPush) {
           try {
-            await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
+            await ws.workspaceGitPush(
+              { setUpstream: true },
+              gitCwd,
+              gitSessionId,
+            );
             setCommitMsg('');
             setCommitStatus({
               msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
@@ -336,13 +342,22 @@ export function GitDialog({
         setCommitBusy(null);
       }
     },
-    [client, workspaceCwd, gitCwd, commitMsg, commitBusy, prBusy, t],
+    [
+      client,
+      workspaceCwd,
+      gitCwd,
+      gitSessionId,
+      commitMsg,
+      commitBusy,
+      prBusy,
+      t,
+    ],
   );
 
   const loadPrBranches = useCallback(() => {
     const ws = client.workspaceByCwd(workspaceCwd);
     setPrBranchesError(false);
-    ws.workspaceGitBranches(gitCwd)
+    ws.workspaceGitBranches(gitCwd, gitSessionId)
       .then((branches) => {
         const local = branches.local.map((b) => b.name);
         const remoteMap = new Map<string, string[]>();
@@ -367,7 +382,7 @@ export function GitDialog({
         setPrBranchesError(true);
         prHeadInfoRef.current = null;
       });
-  }, [client, workspaceCwd, gitCwd]);
+  }, [client, workspaceCwd, gitCwd, gitSessionId]);
 
   // Auto-fill PR form when it opens.
   useEffect(() => {
@@ -398,7 +413,7 @@ export function GitDialog({
         if (abort.signal.aborted) return;
         setPrBase(base);
         if (!sid) {
-          ws.workspaceGit()
+          ws.workspaceGit({ cwd: gitCwd, sessionId: gitSessionId })
             .then((git) => {
               if (!abort.signal.aborted && git.branch && !git.detached)
                 setPrTitle(git.branch);
@@ -410,8 +425,10 @@ export function GitDialog({
           return;
         }
         return Promise.all([
-          ws.workspaceGitLog(50, 0, gitCwd, `${base}..HEAD`),
-          ws.workspaceGitDiff(gitCwd),
+          ws.workspaceGitLog(50, 0, gitCwd, `${base}..HEAD`, {
+            sessionId: gitSessionId,
+          }),
+          ws.workspaceGitDiff(gitCwd, gitSessionId),
         ]).then(([log, diff]) => {
           if (abort.signal.aborted) return;
           if (!log.available) {
@@ -507,7 +524,7 @@ export function GitDialog({
             msg: err instanceof Error ? err.message : String(err),
             type: 'error',
           });
-          ws.workspaceGit()
+          ws.workspaceGit({ cwd: gitCwd, sessionId: gitSessionId })
             .then((git) => {
               if (!abort.signal.aborted && git.branch && !git.detached)
                 setPrTitle(git.branch);
@@ -520,7 +537,16 @@ export function GitDialog({
       });
 
     return () => abort.abort();
-  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t, loadPrBranches]);
+  }, [
+    prFormOpen,
+    isCommit,
+    client,
+    workspaceCwd,
+    gitCwd,
+    gitSessionId,
+    t,
+    loadPrBranches,
+  ]);
 
   const doCreatePr = useCallback(async () => {
     if (!prTitle.trim() || prGenerating || prBusy) return;
@@ -551,6 +577,7 @@ export function GitDialog({
           base: baseBranch || undefined,
         },
         gitCwd,
+        gitSessionId,
       );
       setPrStatus({
         msg: t('gitCommit.prCreated', { number: result.number ?? '' }),
@@ -595,6 +622,7 @@ export function GitDialog({
     client,
     workspaceCwd,
     gitCwd,
+    gitSessionId,
     prTitle,
     prBody,
     prBase,
@@ -656,12 +684,14 @@ export function GitDialog({
             <GitDiffContent
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              gitSessionId={gitSessionId}
               onSubtitleChange={setSubtitle}
             />
           ) : clampedTab === 'log' ? (
             <GitLogContent
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              gitSessionId={gitSessionId}
               onSubtitleChange={setSubtitle}
             />
           ) : clampedTab === 'worktrees' ? (

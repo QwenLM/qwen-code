@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  McpAppToolResult,
   BackgroundNotificationTurn,
   ManagedToolV2Client,
   GoalControlRequest,
@@ -824,6 +825,16 @@ export interface BridgeBranchSessionRequest {
   sourceId?: string;
   replayInheritedHistory?: boolean;
   atRecordId?: string;
+  /** Daemon-internal target id used to prepare durable worktree metadata. */
+  targetSessionId?: string;
+  /** Persist the fork without restoring it inside the bridge. */
+  persistOnly?: boolean;
+}
+
+export interface BridgeSessionExecutionSnapshot {
+  workspaceCwd: string;
+  effectiveCwd: string;
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1878,7 +1889,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession>;
 
-  /** Restore latest-state forks; leave historical checkpoint forks persisted. */
+  /** Restore forks unless persistOnly is set. */
   branchSession(
     sessionId: string,
     req: BridgeBranchSessionRequest,
@@ -2266,6 +2277,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Daemon-internal execution location; never populated from client input. */
+  getSessionExecutionSnapshot(
+    sessionId: string,
+  ): BridgeSessionExecutionSnapshot;
+
   /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
@@ -2403,6 +2419,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /** Execute an App-visible tool through the bound session permission pipeline. */
+  callMcpAppTool(
+    sessionId: string,
+    request: BridgeMcpAppToolCall,
+    signal: AbortSignal,
+    context: { clientId: string },
+  ): Promise<McpAppToolResult>;
 
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
@@ -3000,10 +3024,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
   readonly pendingPromptTotal?: number;
 
+  /** Number of live ACP channels (spawned and not dying): one per engine
+   *  that has a child, so up to two on a paired Bridge. Optional — see
+   *  {@link pendingPromptTotal}; absent means at most one. */
+  readonly liveChannelCount?: number;
+
   /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
    *  chart), or undefined before the first successful poll / when no child is
-   *  live. Synchronous cache read for the metrics sampler. Optional — see
-   *  {@link pendingPromptTotal}. */
+   *  live. On a paired Bridge it combines the fresh reading of each live
+   *  child: rss and cpu are summed, the age is the oldest, heap marks keep
+   *  their maxima. Synchronous cache read for the metrics sampler. Optional —
+   *  see {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
     | {
         rssBytes: number;
@@ -3018,9 +3049,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
          *  measured zero and an unmeasured child are different claims, and
          *  only the first may be read as "this child needed no heap". */
         heap?: ChildHeapReport;
+        /** How many children the reading covers. Absent on bridges predating
+         *  the field, which cover exactly one. */
+        children?: number;
+        /** How many of those children contributed to `heap`. Absent on
+         *  bridges predating the field: one when `heap` is present. */
+        heapReported?: number;
       }
     | undefined;
-  /** Poll the live child's resource extMethod and refresh the cache that
+  /** Poll each live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
    *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
   refreshChildResource?(): Promise<void>;
@@ -3083,3 +3120,12 @@ export interface ShellCommandResult {
 
 /** @deprecated Use `AcpSessionBridge` instead. */
 export type HttpAcpBridge = AcpSessionBridge;
+
+export interface BridgeMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type BridgeMcpAppToolResult = McpAppToolResult;
