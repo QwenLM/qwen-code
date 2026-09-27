@@ -196,6 +196,7 @@ interface ServeArgs {
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
+  'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions': number;
   'max-total-sessions'?: number;
@@ -229,6 +230,7 @@ interface ServeArgs {
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
+  'experimental-paired-engines': boolean;
   'experimental-managed-agents': boolean;
   'experimental-managed-runtime-worker': boolean;
   'experimental-managed-runtime-auto-local': boolean;
@@ -285,7 +287,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: ['default', 'hosted-harness'] as const,
         default: 'default' as const,
         description:
-          'Deployment profile. hosted-harness is reserved and currently rejects startup; Broker session wiring is not implemented.',
+          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+      })
+      .option('hosted-harness-capability-digest', {
+        type: 'string',
+        description:
+          'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
       .option('token', {
         type: 'string',
@@ -600,6 +607,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
           'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
+      })
+      .option('experimental-paired-engines', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Experimental: build workspace runtimes, other than the private ' +
+          'Conversations one, with paired Legacy and Managed engines. No ' +
+          'Managed engine is available yet, so sessions run on Legacy with a ' +
+          'durable owner.',
       })
       .option('experimental-managed-agents', {
         type: 'boolean',
@@ -970,6 +986,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
           : {}),
+        ...(argv['experimental-paired-engines']
+          ? { experimentalPairedEngines: true }
+          : {}),
         ...(argv['experimental-managed-agents']
           ? { experimentalManagedAgents: true }
           : {}),
@@ -999,6 +1018,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['managed-runtime-broker-token'] !== undefined
           ? {
               managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+            }
+          : {}),
+        ...(argv['hosted-harness-capability-digest'] !== undefined
+          ? {
+              hostedHarnessCapabilityDigest:
+                argv['hosted-harness-capability-digest'],
             }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined
@@ -1064,7 +1089,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         );
         applyOpenWithAuth(serveOptions);
       }
-      const handle = await runQwenServe(serveOptions);
+      const handle = await runQwenServe(serveOptions, {
+        updateRestartArgv: process.argv.slice(2),
+      });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

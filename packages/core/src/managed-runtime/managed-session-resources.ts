@@ -222,7 +222,18 @@ function assertPathSegment(value: string, label: string): string {
 async function syncDirectory(directory: string): Promise<void> {
   const handle = await open(directory, 'r');
   try {
+    // Windows cannot fsync a directory; tolerate the refusal the same way
+    // the writer-lease and deletion-journal stores do.
     await handle.sync();
+  } catch (error) {
+    if (
+      process.platform !== 'win32' ||
+      !['EACCES', 'EINVAL', 'EPERM'].includes(
+        (error as NodeJS.ErrnoException).code ?? '',
+      )
+    ) {
+      throw error;
+    }
   } finally {
     await handle.close();
   }

@@ -747,6 +747,13 @@ jobs:
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          test_runner=()
+          if [ "$(id -u)" -eq 0 ]; then
+            # Permission-denial fixtures must also work on root-run ECS lanes.
+            chown -R 0 "$GITHUB_WORKSPACE" "$HOME"
+            echo 'Dropping DAC override capabilities for root unit tests'
+            test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')
+          fi
           # ENOSPC has failed test steps mid-suite while the host looks
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
@@ -777,10 +784,10 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          npm run test:ci:workspaces -- "${retry_arg[@]}"
+          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
           RC=$?
           if [ "$RC" -eq 0 ]; then
-            npm run test:scripts -- "${retry_arg[@]}"
+            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
             RC=$?
           fi
           set -e
@@ -1270,9 +1277,22 @@ jobs:
       # test:ci` (vitest) does not collect `node:test` files — so run them here
       # too, or a compositor/publisher change could pass CI without its
       # regression tests. Linux-only (they're platform-independent).
+      # One retry, the unit lane's contention doctrine (#10868): the battery
+      # spawns real subprocess loops on the shared ECS pool, and a main push
+      # has no flaky-rerun patrol — a single host hiccup failed the lane on a
+      # CSS-only commit (#12772). A real break still fails both attempts.
+      # Attempt 1 tees to a log so the warning can name the failed suites;
+      # pipefail (defaults.run.shell: bash) is what keeps node's status
+      # through that pipe. The warning is gated on the retry's success, so
+      # only an absorbed flake is annotated — a double failure reddens the
+      # lane directly (the #11364 doctrine from e2e.yml).
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}'
+        run: |-
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
+            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
+              echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
+          }
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -1638,6 +1658,12 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
+      - name: 'Hosted portable process smoke'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
+        run: |-
+          npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
+
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
@@ -1812,6 +1838,12 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+
+      - name: 'Hosted portable process smoke'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
+        run: |-
+          npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
 
       - name: 'Run tests and generate reports'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"

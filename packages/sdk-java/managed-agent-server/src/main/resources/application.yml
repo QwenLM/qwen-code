@@ -16,6 +16,11 @@ server:
   address: '${QWEN_MANAGED_AGENT_SERVER_ADDRESS:127.0.0.1}'
   shutdown: 'graceful'
 
+logging:
+  pattern:
+    # Brackets only when a request id is set, not on every other log line.
+    correlation: '%replace([%X{requestId}] ){''^\[\] $'', ''''}'
+
 management:
   endpoints:
     web:
@@ -24,6 +29,7 @@ management:
 
 qwen:
   managed-agent:
+    agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
     session-store:
       enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'

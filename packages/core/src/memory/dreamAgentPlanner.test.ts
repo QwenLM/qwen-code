@@ -146,6 +146,20 @@ describe('dreamAgentPlanner', () => {
     const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
 
     expect(result).toBe(mockResult);
+    const prompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].systemPrompt;
+    expect(prompt).toContain('category:');
+    expect(prompt).toContain('keywords:');
+    expect(prompt).toContain('usage_scenarios:');
+    expect(prompt).toContain('1,200 characters');
+    expect(prompt).toContain('Update the MEMORY.md index');
+    // Dream no longer inherits the session auto-memory prompt (it is blanked
+    // for memory-scoped agents), so the type/scope/body-structure and
+    // what-not-to-save guidance it used to pick up from there has to live in
+    // its own prompt.
+    expect(prompt).toContain('## Types of memory');
+    expect(prompt).toContain('<scope>');
+    expect(prompt).toContain('<body_structure>');
+    expect(prompt).toContain('## What NOT to save in memory');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         maxTurns: 8,
