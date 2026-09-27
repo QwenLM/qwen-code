@@ -99,9 +99,9 @@ vi.mock('./ui/popover', async () => {
 
 const {
   workspaceGitBranches,
+  workspaceGitCheckout,
   workspaceGitCreateBranch,
   workspaceGitPull,
-  workspaceGitCheckout,
   workspaceGitPush,
   workspaceGit,
   workspaceGitRemotes,
@@ -110,9 +110,9 @@ const {
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
+  const workspaceGitCheckout = vi.fn();
   const workspaceGitCreateBranch = vi.fn();
   const workspaceGitPull = vi.fn();
-  const workspaceGitCheckout = vi.fn();
   const workspaceGitPush = vi.fn();
   const workspaceGit = vi.fn();
   const workspaceGitRemotes = vi.fn();
@@ -135,9 +135,9 @@ const {
   };
   return {
     workspaceGitBranches,
+    workspaceGitCheckout,
     workspaceGitCreateBranch,
     workspaceGitPull,
-    workspaceGitCheckout,
     workspaceGitPush,
     workspaceGit,
     workspaceGitRemotes,
@@ -228,12 +228,15 @@ function mount(
   overrides: Partial<{
     onOpenDiff: () => void;
     onOpenCommit: () => void;
+    onOpenWorktrees: () => void;
+    onOpenLog: () => void;
     onOpenChange: (open: boolean) => void;
     onBranchChanged: () => void;
     open: boolean;
     onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
     status: DaemonWorkspaceGitStatus;
     gitCwd: string;
+    gitSessionId: string;
     language: 'en' | 'zh-CN';
   }> = {},
 ): void {
@@ -245,11 +248,14 @@ function mount(
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
           gitCwd={overrides.gitCwd}
+          gitSessionId={overrides.gitSessionId}
           status={overrides.status}
           onStatusRefreshed={overrides.onStatusRefreshed}
           onBranchChanged={overrides.onBranchChanged}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
+          onOpenWorktrees={overrides.onOpenWorktrees}
+          onOpenLog={overrides.onOpenLog}
         >
           <button type="button">trigger</button>
         </BranchPickerPopover>
@@ -323,6 +329,96 @@ function mountWithBranches(
 }
 
 describe('BranchPickerPopover actions', () => {
+  it('binds worktree branch queries to the owning session', async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      available: true,
+      current: null,
+      local: [],
+      remote: [],
+      tags: [],
+      recent: [],
+    });
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      branch: 'worktree-test',
+    });
+    mount({
+      gitCwd: '/repo/.qwen/worktrees/test',
+      gitSessionId: 'session-1',
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledWith(
+      '/repo/.qwen/worktrees/test',
+      'session-1',
+    );
+    expect(workspaceGit).toHaveBeenCalledWith({
+      cwd: '/repo/.qwen/worktrees/test',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('binds worktree checkout mutations to the owning session', async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      available: true,
+      local: [{ name: 'main', isHead: false }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'worktree-test',
+      detached: false,
+    });
+    mount({
+      gitCwd: '/repo/.qwen/worktrees/test',
+      gitSessionId: 'session-1',
+    });
+    await flush();
+
+    clickButton('main');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenCalledWith(
+      'main',
+      '/repo/.qwen/worktrees/test',
+      'session-1',
+    );
+  });
+
+  it('binds worktree pull mutations and their timeout to the owning session', async () => {
+    const gitCwd = '/repo/.qwen/worktrees/test';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    workspaceGitBranches.mockResolvedValue({
+      ...BRANCHES,
+      workspaceCwd: gitCwd,
+    });
+    workspaceGitPull.mockResolvedValue({ success: true, output: 'updated' });
+    mount({ gitCwd, gitSessionId: 'session-1' });
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenCalledWith(
+      undefined,
+      gitCwd,
+      'session-1',
+      600_000,
+    );
+  });
+
   it('wires "View Changes" to onOpenDiff and closes', async () => {
     workspaceGitBranches.mockResolvedValue({
       v: 1,
@@ -347,6 +443,94 @@ describe('BranchPickerPopover actions', () => {
     clickButton('View Changes');
 
     expect(onOpenDiff).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the actions visible while the search matches "History"', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({ onOpenLog: vi.fn() });
+    await flush();
+
+    const search = document.body.querySelector(
+      'input[type="text"], input:not([type])',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(search, 'hist');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector('[data-testid="branch-picker-history"]'),
+    ).not.toBeNull();
+  });
+
+  it('wires "History" to onOpenLog and closes', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const onOpenLog = vi.fn();
+    const onOpenChange = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({ onOpenLog, onOpenChange });
+    await flush();
+
+    clickButton('History');
+
+    expect(onOpenLog).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('wires "Worktrees…" to onOpenWorktrees and closes', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const onOpenWorktrees = vi.fn();
+    const onOpenChange = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({ onOpenWorktrees, onOpenChange });
+    await flush();
+
+    clickButton('Worktrees…');
+
+    expect(onOpenWorktrees).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

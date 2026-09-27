@@ -62,27 +62,15 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
-        key: 'dmPolicy',
-        label: 'Direct Message Access',
-        kind: 'enum',
-        required: true,
-        default: 'open',
-        description:
-          'Controls whether direct messages and document notifications can start tasks',
-        options: [
-          { value: 'open', label: 'Open' },
-          { value: 'disabled', label: 'Disabled' },
-        ],
-      },
-      {
-        key: 'senderPolicy',
-        label: 'Sender Policy',
+        key: 'privatePolicy',
+        label: 'Private Policy',
         kind: 'enum',
         required: true,
         default: 'pairing',
         description:
-          'Controls which DingTalk users may start direct-message, document-notification, native-todo, and non-paired group tasks',
+          'Controls which DingTalk users may start direct-message, document-notification, and native-todo tasks',
         options: [
+          { value: 'disabled', label: 'Disabled' },
           { value: 'pairing', label: 'Pairing' },
           { value: 'allowlist', label: 'Allowlist' },
           { value: 'open', label: 'Open' },

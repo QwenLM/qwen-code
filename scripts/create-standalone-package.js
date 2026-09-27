@@ -73,12 +73,16 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'execution-worker.js',
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
   // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
@@ -86,6 +90,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
   'codeModeHost.js',
+  // bwrap sandbox relay + confined file worker; esbuild emits them as
+  // standalone entries that sandboxAsset() resolves from the bundle dir at
+  // execution time (packages/core/src/sandbox/bwrap-execution.ts).
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled',
@@ -541,12 +550,17 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
 // the archive declares the packages in optionalDependencies but ships none of
 // them, so every web terminal creation fails with "PTY not available"
 // (#11872). Missing packages warn-and-degrade locally (like the audio-capture
-// step) rather than failing the build: unlike clipboard this set has a known
-// gap (no pinned linux-arm64 package), so --native-modules-dir cannot be the
-// fatal gate. QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 opts in to the fatal
-// gate; nothing sets it today — release.yml exports only
-// QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD for the archive build — and
-// it cannot be wired unconditionally while linux-arm64 has no pinned package.
+// step) rather than failing the build, so a developer archive still builds for
+// a target whose prebuild the host install does not have: npm skips
+// optionalDependencies whose os/cpu do not match the installing machine, and a
+// staged --native-modules-dir can carry the clipboard packages without this
+// target's node-pty prebuild. An unmapped target is not that case —
+// copyNativeAddon reads the same TARGET_PREBUILD_DIR and its unconditional
+// path.join() throws on the undefined dir name before this step is reached.
+// Release builds cannot degrade silently: release.yml exports
+// QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 for the archive build, turning a
+// missing prebuild into a hard failure now that every shipped target has a
+// pinned package.
 function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
   const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
   const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
@@ -1132,6 +1146,11 @@ function fail(message) {
 
 export {
   TARGET_CLIPBOARD_PACKAGE,
+  // Exported so a test can hold the target map and the manifest's pins
+  // together: the release build now fails on a missing prebuild, so a target
+  // mapped to an unpinned package name would abort the whole archive step
+  // instead of degrading one archive.
+  TARGET_PREBUILD_DIR,
   TARGETS,
   standaloneArchiveName,
   writeSha256Sums,

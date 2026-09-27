@@ -185,7 +185,9 @@ export async function applyProviderInstallPlan(
   );
   const preserveSelection =
     serviceOnly.length > 0 &&
-    serviceOnly.every((model) => model.imageOnly || model.voiceOnly);
+    serviceOnly.every(
+      (model) => model.imageOnly || model.voiceOnly || model.realtimeOnly,
+    );
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
@@ -258,6 +260,7 @@ export async function applyProviderInstallPlan(
               (preserveSelection || patch.mergeStrategy !== 'append'))) &&
           (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
             Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
+            Boolean(existing.realtimeOnly) !== Boolean(model.realtimeOnly) ||
             (isImageGenerationCapable(existing) &&
               !isImageGenerationCapable(model))),
       ),
@@ -268,6 +271,7 @@ export async function applyProviderInstallPlan(
         (existing) =>
           !existing.imageOnly &&
           !existing.voiceOnly &&
+          !existing.realtimeOnly &&
           (patch.ownsModel?.(existing) ??
             patch.models.some((model) => isSameModelIdentity(existing, model))),
       );
@@ -276,7 +280,7 @@ export async function applyProviderInstallPlan(
       patch.mergeStrategy !== 'append' &&
       ownBucketModels.some(
         (existing) =>
-          (existing.imageOnly || existing.voiceOnly) &&
+          (existing.imageOnly || existing.voiceOnly || existing.realtimeOnly) &&
           patch.ownsModel?.(existing) &&
           !patch.models.some((model) => model.id === existing.id),
       );

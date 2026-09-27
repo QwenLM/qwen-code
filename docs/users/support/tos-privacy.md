@@ -60,6 +60,34 @@ When you authenticate with Google Cloud Vertex AI, the applicable Terms of Servi
 >
 > When using Vertex AI, you are subject to [Google Cloud's Terms of Service](https://cloud.google.com/terms) and [Google Cloud Privacy Notice](https://cloud.google.com/privacy), not Qwen Code's terms. Please review Google Cloud's documentation for specific details about data usage, retention, and privacy practices.
 
+## Chrome extension and Browser Use
+
+The Qwen Code Chrome extension connects Chrome to Qwen Code running on your computer. Its side panel displays the local Qwen Code web application, and Browser Use exchanges browser commands and results through a local Native Messaging host. The following describes data handled for browser tasks, separately from the optional usage statistics described below.
+
+### Browser data used for your tasks
+
+Browser tools can access open HTTP(S) tab titles and URLs, page text and structure, screenshots, browser interaction results, and debugging information such as console messages, network activity, and cookies. Explicit browser-history searches return matching URLs, page titles, and visit times within the requested query limits. Depending on the pages and tasks you choose, these results may contain personal identifiers, health information, financial or payment information, authentication information, personal communications, and location information. The extension also uses navigation-source information to associate new pages opened by a recent assistant action with the same browser session.
+
+These capabilities support the browser tasks and web development work you request from Qwen Code. Browser tools operate in your Chrome profile, including pages where you are signed in. Choose the pages and tasks you share with the assistant accordingly.
+
+### Local processing and AI providers
+
+The extension sends browser commands and results to Qwen Code on the same computer. Qwen Code may include those results in conversation context and transmit them to the AI provider configured for that session. The provider's privacy, retention, and model-training terms apply as described elsewhere in this notice. The extension's local connection is one part of this data flow; subsequent processing may take place at your chosen AI provider.
+
+### Stored data and user controls
+
+The extension stores connection preferences, an optional local daemon authentication token, and a persistent browser-instance identifier in Chrome extension local storage. It also stores tab and session ownership state in Chrome session storage to support cleanup after its background service worker restarts.
+
+Browser results included in Qwen Code conversations or saved by browser tools may remain in local conversation records, screenshots, downloads, or other output files. Manage these records using the applicable Qwen Code and filesystem controls. AI-provider retention is governed separately by the selected provider.
+
+You can disable or uninstall the Chrome extension in Chrome's extension manager to stop its browser integration. Clearing extension storage removes its saved preferences, token, and instance identifier. Removing the extension leaves the separately installed Qwen Code application, its Native Messaging host, local conversations and files, and copies already sent to an AI provider to be managed separately.
+
+### Limited use of browser data
+
+Qwen Code's use and transfer of data received through the Chrome extension adhere to the [Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/user-data), including its Limited Use requirements. Browser data is used to provide the extension's single purpose: connecting Chrome to Qwen Code for user-requested browser assistance. It is not sold, used for advertising, or used to determine creditworthiness or lending eligibility. Transfers are limited to providing that functionality, including processing by the AI provider you configure, and other uses permitted by that policy.
+
+For questions about browser data handling, contact the team through the [Qwen Code issue tracker](https://github.com/QwenLM/qwen-code/issues). Share only the details needed to explain the question; remove credentials and private page content from public reports.
+
 ## Usage Statistics and Telemetry
 
 Qwen Code may collect anonymous usage statistics and [telemetry](../../developers/development/telemetry) data to improve the user experience and product quality. This data collection is optional and can be controlled through configuration settings.
@@ -105,7 +133,7 @@ When enabled, Qwen Code may collect:
 - Error reports and crash data
 - General usage patterns
 
-**What is NOT collected by Qwen Code:**
+**What is NOT collected as usage statistics:**
 
 - Your code content
 - Prompts sent to AI models

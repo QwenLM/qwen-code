@@ -17,6 +17,7 @@ import {
   LARGE_PASTE_CHAR_THRESHOLD,
   LARGE_PASTE_LINE_THRESHOLD,
   applyCompletion,
+  atCategoryTabs,
   codePointIndexToDisplayCol,
   codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
@@ -25,11 +26,13 @@ import {
   displayColToCodePointIndex,
   displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
+  filterByCategory,
   freePastePlaceholderId,
   isLargePaste,
   isPerfectMatchForTarget,
   isPerfectSlashMatch,
   largePastePlaceholder,
+  nextCategory,
   nextLargePastePlaceholder,
   normalizePastedText,
   parsePastePlaceholder,
@@ -785,5 +788,57 @@ describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
       expect(displayOffsetToCodePointIndex(text, i)).toBe(i);
       expect(codePointIndexToDisplayOffset(text, i)).toBe(i);
     }
+  });
+});
+
+describe('@ completion category rules (#143)', () => {
+  const row = (value: string, category?: Suggestion['category']): Suggestion =>
+    ({ value, label: value, category }) as Suggestion;
+
+  it('derives tabs in ink CATEGORY_ORDER, not in arrival order', () => {
+    const tabs = atCategoryTabs([
+      row('session:a', 'session'),
+      row('ext', 'extension'),
+      row('file.txt'),
+      row('@server:uri', 'mcp'),
+    ]);
+    expect(tabs).toEqual(['all', 'file', 'session', 'mcp', 'extension']);
+  });
+
+  it('yields no tabs for a single category, which is what hides the bar', () => {
+    expect(atCategoryTabs([row('a.txt'), row('b.txt')])).toEqual(['all']);
+    expect(atCategoryTabs([])).toEqual(['all']);
+  });
+
+  it('counts a category-less row as a file', () => {
+    expect(atCategoryTabs([row('a.txt'), row('session:a', 'session')])).toEqual(
+      ['all', 'file', 'session'],
+    );
+    expect(
+      filterByCategory([row('a.txt'), row('s', 'session')], 'file'),
+    ).toEqual([row('a.txt')]);
+  });
+
+  it('filters to the active tab and passes everything through on all', () => {
+    const rows = [row('a.txt'), row('session:a', 'session')];
+    expect(filterByCategory(rows, 'all')).toEqual(rows);
+    expect(filterByCategory(rows, 'session')).toEqual([
+      row('session:a', 'session'),
+    ]);
+    expect(filterByCategory(rows, 'mcp')).toEqual([]);
+  });
+
+  it('steps tabs with wrap in both directions', () => {
+    const tabs = ['all', 'file', 'session'] as const;
+    expect(nextCategory(tabs, 'all', 1)).toBe('file');
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'all', -1)).toBe('session');
+    expect(nextCategory(tabs, 'file', -1)).toBe('all');
+  });
+
+  it('falls back to all when the active tab left the result set', () => {
+    const tabs = ['all', 'file'] as const;
+    expect(nextCategory(tabs, 'session', 1)).toBe('all');
+    expect(nextCategory(tabs, 'session', -1)).toBe('all');
   });
 });

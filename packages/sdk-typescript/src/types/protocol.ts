@@ -306,6 +306,8 @@ export interface MCPServerConfig {
   tcp?: string;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -604,6 +606,8 @@ export interface SubagentConfig {
   model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
+  /** Requires container execution; cannot lower the operator's backend policy. */
+  executionBackend?: 'container';
   readonly isBuiltin?: boolean;
 }
 

@@ -27,7 +27,8 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
 import type { GoalStateRecordPayloadV2 } from './goal-protocol.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
-  createMigratedGoalState,
+  isGoalRecoveryCandidate,
+  normalizeGoalRecoveryRecord,
   recoverGoalFromRecords,
   selectGoalRecoveryFromRecords,
 } from './goal-persistence.js';
@@ -126,6 +127,36 @@ describe('recoverGoalFromRecords', () => {
       ).toEqual({ kind: 'v2', payload: ACTIVE_PAYLOAD });
     },
   );
+
+  it('treats only goal_state records as recovery candidates', () => {
+    // A restore projection reads candidates and carries their normalized
+    // slice; a legacy goal_status card is neither, so it is never read or
+    // carried for recovery.
+    const legacyCard = record('legacy', {
+      subtype: 'slash_command',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/goal ship it',
+        outputHistoryItems: [
+          { type: 'goal_status', kind: 'set', condition: 'ship it' },
+        ],
+      },
+    });
+    const stateRecord = record('state', {
+      subtype: 'goal_state',
+      systemPayload: ACTIVE_PAYLOAD,
+    });
+
+    expect(isGoalRecoveryCandidate(legacyCard)).toBe(false);
+    expect(normalizeGoalRecoveryRecord(legacyCard)).toBeUndefined();
+    expect(isGoalRecoveryCandidate(stateRecord)).toBe(true);
+    expect(normalizeGoalRecoveryRecord(stateRecord)).toEqual({
+      uuid: 'state',
+      type: 'system',
+      subtype: 'goal_state',
+      systemPayload: ACTIVE_PAYLOAD,
+    });
+  });
 
   it('says in the debug log which newer records it walked past', () => {
     const malformed = {
@@ -229,104 +260,31 @@ describe('recoverGoalFromRecords', () => {
     },
   );
 
-  it('uses only the objective from a legacy active Goal', () => {
-    expect(
-      recoverGoalFromRecords([
-        record('legacy', {
-          subtype: 'slash_command',
-          systemPayload: {
-            phase: 'result',
-            rawCommand: '/goal ship it',
-            outputHistoryItems: [
-              {
-                type: 'goal_status',
-                kind: 'checking',
-                condition: 'ship it',
-                iterations: 19,
-                setAt: 42,
-                lastReason: 'old evidence',
-              },
-            ],
-          },
-        }),
-      ]),
-    ).toEqual({ kind: 'legacy', objective: 'ship it' });
-  });
-
-  it('does not revive a stopped legacy Goal', () => {
-    expect(
-      recoverGoalFromRecords([
-        record('legacy', {
-          subtype: 'slash_command',
-          systemPayload: {
-            phase: 'result',
-            rawCommand: '/goal',
-            outputHistoryItems: [
-              { type: 'goal_status', kind: 'aborted', condition: 'ship it' },
-            ],
-          },
-        }),
-      ]),
-    ).toEqual({ kind: 'none' });
-  });
-
-  it('does not revive a paused legacy Goal', () => {
-    expect(
-      recoverGoalFromRecords([
-        record('legacy', {
-          subtype: 'slash_command',
-          systemPayload: {
-            phase: 'result',
-            rawCommand: '/goal',
-            outputHistoryItems: [
-              { type: 'goal_status', kind: 'paused', condition: 'ship it' },
-            ],
-          },
-        }),
-      ]),
-    ).toEqual({ kind: 'none' });
-  });
-});
-
-describe('legacy migration', () => {
-  it('creates a fresh paused payload at the lifecycle record boundary', () => {
-    expect(
-      createMigratedGoalState({
-        objective: 'ship it',
-        goalId: 'new-goal',
-        recordUuid: 'migration-record',
-        now: 1000,
-      }),
-    ).toEqual({
-      v: 2,
-      cause: 'migrated',
-      snapshot: {
-        v: 2,
-        activity: 'idle',
-        goal: {
-          goalId: 'new-goal',
-          revision: 1,
-          objective: 'ship it',
-          status: 'paused',
-          evidenceCursor: { recordId: 'migration-record' },
-          turnCount: 0,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1000,
-          updatedAt: 1000,
-        },
-      },
-    });
-  });
-
-  it('rejects an empty migrated objective', () => {
-    expect(() =>
-      createMigratedGoalState({
-        objective: '  ',
-        goalId: 'new-goal',
-        recordUuid: 'migration-record',
-        now: 1000,
-      }),
-    ).toThrow('Migrated Goal objective must not be empty');
-  });
+  it.each(['set', 'checking', 'achieved', 'cleared', 'paused'])(
+    'restores no Goal from a transcript whose only Goal records are legacy %s cards',
+    (kind) => {
+      // Builds before #7895 journaled goal_status cards, not state. They are
+      // history: nothing is migrated from them, whatever the card says.
+      expect(
+        recoverGoalFromRecords([
+          record('legacy', {
+            subtype: 'slash_command',
+            systemPayload: {
+              phase: 'result',
+              rawCommand: '/goal ship it',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind,
+                  condition: 'ship it',
+                  iterations: 19,
+                  setAt: 42,
+                },
+              ],
+            },
+          }),
+        ]),
+      ).toEqual({ kind: 'none' });
+    },
+  );
 });

@@ -602,10 +602,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async readWorkspaceFile(filePath) {
+    async readWorkspaceFile(filePath, opts) {
       const client = requireClient(getClient, 'Read workspace file failed');
       return withActionTimeout(
-        client.readWorkspaceFile(filePath),
+        client.readWorkspaceFile(filePath, opts),
         'Read workspace file timed out',
       );
     },

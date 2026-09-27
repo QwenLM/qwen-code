@@ -140,9 +140,9 @@ test('profile identity persists before hello and survives reconnects and worker 
         },
         tabs: {
           query: async () => [],
-          onCreated: event('created'),
           onRemoved: event('removed'),
         },
+        webNavigation: { onCreatedNavigationTarget: event('navigationTarget') },
         debugger: { onDetach: event('detached'), onEvent: event('cdp') },
       },
     });
@@ -232,7 +232,10 @@ test('browser-use-bridge.js drives Chrome over Native Messaging and CDP without 
     'history queries must go through the browser history API',
   );
   assert.match(source, /qwenBrowser\.detached/);
-  assert.match(source, /chrome\.tabs\.onCreated\.addListener/);
+  assert.match(
+    source,
+    /chrome\.webNavigation\.onCreatedNavigationTarget\.addListener/,
+  );
   assert.match(source, /DERIVED_TAB_WINDOW_MS/);
   assert.doesNotMatch(source, /remote-debugging-port|connectOverCDP|WebSocket/);
   assert.doesNotMatch(
@@ -292,6 +295,9 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   let failUngroupTabId: number | undefined;
   let failGroupUpdateOnce = false;
   let hangOverlayCleanup = false;
+  let finishOverlayCleanup: (() => void) | undefined;
+  let finishCursor: (() => void) | undefined;
+  let finishCdp: (() => void) | undefined;
   let hangCursorOverlay = false;
   let nextGroupId = 100;
   const listeners: Record<string, (...args: unknown[]) => unknown> = {};
@@ -415,8 +421,10 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
             if (tab !== undefined) tab.groupId = -1;
           }
         },
-        onCreated: noOpEvent('tabCreated'),
         onRemoved: noOpEvent('tabRemoved'),
+      },
+      webNavigation: {
+        onCreatedNavigationTarget: noOpEvent('navigationTarget'),
       },
       tabGroups: {
         async get(groupId: number) {
@@ -495,21 +503,27 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
             };
           }
           if (method === 'Runtime.callFunctionOn') {
-            return await new Promise(() => undefined);
+            return await new Promise<void>((resolve) => {
+              finishCdp = resolve;
+            });
           }
           if (
             hangOverlayCleanup &&
             method === 'Runtime.evaluate' &&
             String(params.expression).includes('?.destroy()')
           ) {
-            return await new Promise(() => undefined);
+            return await new Promise<void>((resolve) => {
+              finishOverlayCleanup = resolve;
+            });
           }
           if (
             hangCursorOverlay &&
             method === 'Runtime.evaluate' &&
             String(params.expression).includes('?.move(')
           ) {
-            return await new Promise(() => undefined);
+            return await new Promise<void>((resolve) => {
+              finishCursor = resolve;
+            });
           }
           if (method === 'Page.addScriptToEvaluateOnNewDocument')
             return { identifier: `overlay-${tabId}` };
@@ -523,7 +537,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   vm.runInContext(
     // trackDerivedTab persists before it groups, so the barrier must cover the
     // in-flight dispatch as well as groupOperation (cleanupBackendState's shape).
-    `${source}\n;globalThis.__popupTest = { attachedTabs, inFlightDispatches, dispatch, trackDerivedTab, waitForGroups: () => Promise.all([...inFlightDispatches, groupOperation]).then(() => undefined) };`,
+    `${source}\n;globalThis.__popupTest = { attachedTabs, inFlightDispatches, dispatch: (method, params = {}) => dispatch(method, params, 'test-session'), trackDerivedTab: (tab) => trackDerivedTab({ tabId: tab.id, sourceTabId: tab.openerTabId, url: tab.url, timeStamp: Date.now() }), waitForGroups: () => Promise.all([...inFlightDispatches, ...[...sessions.values()].map(s => s.groupOperation)]).then(() => undefined) };`,
     context,
   );
   const api = (
@@ -540,6 +554,8 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
       };
     }
   ).__popupTest;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await api.dispatch('session.open');
   const plain = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
   const listed = async (): Promise<Array<Record<string, unknown>>> =>
     plain(await api.dispatch('tabs.queryOpen')) as Array<
@@ -592,6 +608,8 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     method: 'Page.enable',
     params: {},
   });
+  await waitFor(() => finishOverlayCleanup !== undefined);
+  finishOverlayCleanup!();
   await Promise.all([detaching, reattaching]);
   assert.ok(debuggerAttachedTabIds.has(1));
   hangOverlayCleanup = false;
@@ -636,6 +654,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     params: { type: 'mousePressed', x: 10, y: 10 },
   });
   hangCursorOverlay = false;
+  finishCursor?.();
   assert.ok(
     debuggerCommands.some(
       (command) =>
@@ -663,6 +682,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     [
       {
         type: 'event',
+        browserSessionId: 'test-session',
         tabId: 3,
         method: 'qwenBrowser.derivedTabTracked',
         params: { openerTabId: 1 },
@@ -764,6 +784,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     ) as { ok: boolean; error?: { code: string } } | undefined;
   listeners['nativeMessage']?.({
     type: 'request',
+    browserSessionId: 'test-session',
     id: 'oversized-result',
     method: 'cdp.send',
     params: {
@@ -781,6 +802,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.ok(api.attachedTabs.has(1));
   listeners['nativeMessage']?.({
     type: 'request',
+    browserSessionId: 'test-session',
     id: 'after-oversized-result',
     method: 'cdp.send',
     params: { tabId: 1, method: 'Page.enable', params: {} },
@@ -893,6 +915,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   const chunkedRequest = Buffer.from(
     JSON.stringify({
       type: 'request',
+      browserSessionId: 'test-session',
       id: 'chunked-query',
       method: 'tabs.queryOpen',
       params: {},
@@ -926,12 +949,14 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   const slowCreatedTabId = nextTabId;
   listeners['nativeMessage']?.({
     type: 'request',
+    browserSessionId: 'test-session',
     id: 'slow-create',
     method: 'tabs.create',
     params: {},
   });
   listeners['nativeMessage']?.({
     type: 'request',
+    browserSessionId: 'test-session',
     id: 'hanging-cdp',
     method: 'cdp.send',
     params: {
@@ -945,21 +970,36 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
       (command) => command.method === 'Runtime.callFunctionOn',
     ),
   );
-  hangOverlayCleanup = true;
-  assert.equal(sessionState.sessionName, 'Research run');
+  hangOverlayCleanup = false;
+  assert.equal(
+    vm.runInContext("sessions.get('test-session').name", context),
+    'Research run',
+  );
   listeners['nativeDisconnect']?.();
   releaseSlowCreate();
-  await waitFor(() => detachedTabIds.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    detachedTabIds,
+    [1],
+    'detach terminates renderer work before waiting for its acknowledgement',
+  );
+  assert.equal(vm.runInContext('tabOwners.has(1)', context), true);
+  finishCdp?.();
+  await waitFor(() => !vm.runInContext('tabOwners.has(1)', context));
   assert.deepEqual(detachedTabIds, [1]);
-  assert.deepEqual(ungroupCalls, [[5], [3]]);
+  assert.ok(ungroupCalls.some((ids) => ids.includes(3)));
+  // Never grouped, so its release has nothing to ungroup.
+  await waitFor(
+    () => !vm.runInContext(`tabOwners.has(${slowCreatedTabId})`, context),
+  );
   assert.equal(
     groupCalls.some((call) => call.tabIds.includes(slowCreatedTabId)),
     false,
     'a tab created after disconnect must not regain Browser Use ownership',
   );
   await waitFor(
-    () => !tabs.has(slowCreatedTabId),
-    'a tab created after disconnect must be closed instead of orphaned',
+    () => tabs.has(slowCreatedTabId),
+    'a tab created after disconnect must preserve the page',
   );
   assert.equal(
     postedMessages.some(
@@ -974,12 +1014,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   );
   assert.deepEqual(plain(sessionState.agentOwnedTabs), []);
   assert.deepEqual(plain(sessionState.derivedTabParents), []);
-  assert.deepEqual(plain(sessionState.managedGroupIdsByWindow), []);
-  assert.equal(
-    sessionState.sessionName,
-    'Qwen Browser',
-    'disconnect must reset the session name so a new session does not inherit it',
-  );
+  assert.equal(vm.runInContext("sessions.has('test-session')", context), false);
   assert.equal(api.inFlightDispatches.size, 0);
 });
 

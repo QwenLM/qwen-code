@@ -1851,15 +1851,18 @@ export function registerWorkspaceExtensionRoutes(
 
   app.get('/extensions', async (_req, res) => {
     try {
+      // Catalog-scoped and single-use: the manifest-only catalog never
+      // touches the manager's cache or fingerprint baseline, so nothing here
+      // may read skills/commands/agents/hooks off the returned entries.
       const manager = primaryController.createExtensionManager(
         boundWorkspace,
         true,
       );
-      const snapshot = await manager.refreshCacheWithSnapshot();
+      const { snapshot, extensions } = await manager.refreshCatalogSnapshot();
       res.status(200).json({
         v: 1,
         generation: snapshot.generation,
-        extensions: manager.getLoadedExtensions().map((extension) => {
+        extensions: extensions.map((extension) => {
           const policy = snapshot.extensions[extension.id];
           return {
             id: extension.id,
@@ -2360,14 +2363,16 @@ export function registerWorkspaceExtensionRoutes(
           runtime.workspaceCwd,
           runtime.trusted,
         );
-        const snapshot = await manager.refreshCacheWithSnapshot();
+        const { snapshot, extensions: catalog } =
+          await manager.refreshCatalogSnapshot();
         runtime.generationGuard?.assertOpen();
-        const extensions = manager.getLoadedExtensions().map((extension) => {
-          const activation = manager.getExtensionActivationFromSnapshot(
-            extension.id,
-            snapshot,
-            runtime.workspaceCwd,
-          );
+        const extensions = catalog.map((extension) => {
+          const activation =
+            manager.getExtensionActivationForIdentityFromSnapshot(
+              { id: extension.id, name: extension.name },
+              snapshot,
+              runtime.workspaceCwd,
+            );
           return {
             extensionId: extension.id,
             name: extension.name,

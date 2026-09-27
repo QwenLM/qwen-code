@@ -366,4 +366,54 @@ describe('DroppedNotificationTally', () => {
     );
     expect(summary?.modelText).not.toContain('/tasks');
   });
+
+  it('names a lost peer message without sending the model to /tasks', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record({ kind: 'peer', taskId: 'msg_1' });
+    tally.record({ kind: 'peer', taskId: 'msg_2' });
+
+    const summary = tally.take();
+    expect(summary?.displayText).toBe(
+      'Dropped 2 background notifications (queue full): 2 cross-session ' +
+        'messages (msg_1, msg_2).',
+    );
+    expect(summary?.modelText).toContain(
+      'The cross-session messages were not delivered and will not be ' +
+        'redelivered.',
+    );
+    // A peer message has no entry in the task registry, so the line that
+    // tells the model to go and read one would send it nowhere.
+    expect(summary?.modelText).not.toContain('/tasks');
+  });
+
+  it('still points at /tasks when a task was lost alongside a peer message', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record({ kind: 'peer', taskId: 'msg_1' });
+    tally.record({ kind: 'shell', taskId: 'bg_1' });
+
+    const summary = tally.take();
+    expect(summary?.modelText).toContain('/tasks');
+    expect(summary?.modelText).toContain(
+      'The cross-session messages were not delivered and will not be ' +
+        'redelivered.',
+    );
+  });
+
+  it('evicts a queued peer message like any other terminal notification', () => {
+    const queue: TestItem[] = Array.from(
+      { length: MAX_BACKGROUND_NOTIFICATION_QUEUE },
+      (_, index) => ({ kind: 'peer', taskId: `msg_${index}` }),
+    );
+
+    const admission = decideNotificationAdmission(queue, {
+      kind: 'peer',
+      taskId: 'msg_new',
+    });
+
+    expect(admission).toEqual({
+      action: 'evict',
+      index: 0,
+      evicted: queue[0],
+    });
+  });
 });

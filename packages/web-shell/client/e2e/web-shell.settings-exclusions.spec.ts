@@ -15,7 +15,7 @@ import {
   submitLocalCommand,
 } from './visuals/harness';
 
-test('all live daemon settings have host exclusions @smoke', async ({
+test('live daemon settings honor host inclusion and exclusion lists @smoke', async ({
   page,
 }, testInfo) => {
   test.skip(process.platform === 'win32', 'Daemon harness requires POSIX');
@@ -97,11 +97,67 @@ test('all live daemon settings have host exclusions @smoke', async ({
         json: { error: 'not available in fixture' },
       }),
     );
-    for (const exclude of [[], WEB_SHELL_SETTING_ITEM_IDS]) {
-      const params = new URLSearchParams({
-        sessionId: scenario.sessionId,
-        exclude: exclude.join(','),
-      });
+    // Each case declares its own expectations on the descriptor: `baseline`
+    // marks the unfiltered compatibility case, `language` whether the
+    // language row is expected, and `screenshot` which cases produce the
+    // design-doc PNGs, leaving `name` as only the artifact filename.
+    const cases: Array<{
+      name: string;
+      include?: string;
+      exclude?: string;
+      empty: boolean;
+      mobile?: boolean;
+      baseline?: boolean;
+      language?: boolean;
+      screenshot?: boolean;
+    }> = [
+      {
+        name: 'default',
+        exclude: '',
+        empty: false,
+        baseline: true,
+        screenshot: true,
+      },
+      {
+        name: 'exclude-all',
+        exclude: WEB_SHELL_SETTING_ITEM_IDS.join(','),
+        empty: true,
+      },
+      {
+        name: 'allowlist-desktop',
+        include: 'setting:language,builtin:chat-width',
+        empty: false,
+        screenshot: true,
+      },
+      { name: 'empty-allowlist', include: '', empty: true, screenshot: true },
+      {
+        name: 'conflict',
+        include: 'setting:language,builtin:chat-width',
+        exclude: 'setting:language',
+        empty: false,
+        language: false,
+      },
+      {
+        name: 'allowlist-mobile',
+        include: 'setting:language,builtin:chat-width',
+        empty: false,
+        mobile: true,
+        screenshot: true,
+      },
+    ];
+    for (const scenarioCase of cases) {
+      await page.setViewportSize(
+        scenarioCase.mobile
+          ? { width: 390, height: 844 }
+          : { width: 1280, height: 900 },
+      );
+      const params = new URLSearchParams({ sessionId: scenario.sessionId });
+      if (scenarioCase.include !== undefined) {
+        params.set('include', scenarioCase.include);
+      }
+      if (scenarioCase.exclude !== undefined) {
+        params.set('exclude', scenarioCase.exclude);
+      }
       const loaded = page.waitForResponse(
         (res) =>
           res.url().endsWith('/workspace/settings') &&
@@ -117,17 +173,54 @@ test('all live daemon settings have host exclusions @smoke', async ({
       await submitLocalCommand(page, '/settings');
       await loaded;
       const nav = page.getByRole('navigation', { name: 'Settings' });
-      if (exclude.length === 0) {
-        await nav.getByRole('button', { name: /^Experimental/ }).click();
+      for (const scope of ['Workspace', 'User']) {
+        await page.getByRole('tab', { name: scope, exact: true }).click();
+        if (scenarioCase.baseline) {
+          await nav.getByRole('button', { name: /^Experimental/ }).click();
+          await expect(
+            page.getByText('Enable Omni Media Delivery', { exact: true }),
+          ).toBeVisible();
+        } else if (scenarioCase.empty) {
+          await expect(nav.getByRole('button')).toHaveCount(0);
+          await expect(page.locator('[data-slot="empty"]')).toBeVisible();
+        } else {
+          const languageIncluded = scenarioCase.language ?? true;
+          await expect(nav.getByRole('button')).toHaveCount(
+            languageIncluded ? 2 : 1,
+          );
+          if (languageIncluded) {
+            await nav.getByRole('button', { name: /^General/ }).click();
+            await expect(
+              page.getByText('Language: UI', { exact: true }),
+            ).toBeVisible();
+            await expect(page.getByRole('combobox')).toHaveCount(1);
+          } else {
+            await expect(
+              nav.getByRole('button', { name: /^General/ }),
+            ).toHaveCount(0);
+          }
+          await nav.getByRole('button', { name: /^UI/ }).click();
+          await expect(
+            page.getByText('Chat width', { exact: true }),
+          ).toBeVisible();
+          await expect(page.getByRole('combobox')).toHaveCount(1);
+          await expect(
+            page.getByText('Browser task notifications', { exact: true }),
+          ).toHaveCount(0);
+        }
+      }
+      if (scenarioCase.baseline) {
+        await nav.getByRole('button', { name: /^UI/ }).click();
         await expect(
-          page.getByText('Enable Omni Media Delivery', { exact: true }),
+          page.getByText('Chat width', { exact: true }),
         ).toBeVisible();
-      } else {
-        await expect(nav.getByRole('button')).toHaveCount(0);
-        await expect(page.locator('[data-slot="empty"]')).toBeVisible();
-        await page.getByRole('tab', { name: 'User' }).click();
-        await expect(nav.getByRole('button')).toHaveCount(0);
-        await expect(page.locator('[data-slot="empty"]')).toBeVisible();
+      }
+      if (scenarioCase.screenshot) {
+        await page.screenshot({
+          path: testInfo.outputPath(`${scenarioCase.name}.png`),
+          fullPage: true,
+          animations: 'disabled',
+        });
       }
     }
   } finally {

@@ -1803,6 +1803,10 @@ export default {
     'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated usage, including the conversation':
+    'Оценка использования с учётом беседы',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Данных об использовании от провайдера пока нет. Это локальные оценки с учётом беседы.',
   'Estimated pre-conversation overhead':
     'Оценочные накладные расходы перед беседой',
   'Context window': 'Контекстное окно',
@@ -1817,6 +1821,9 @@ export default {
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
+  'Startup context': 'Стартовый контекст',
+  Unattributed: 'Не распределено',
+  'Cached prefix': 'Кэшированный префикс',
   'Run /context detail for per-item breakdown.':
     'Выполните /context detail для детализации по элементам.',
   active: 'активно',

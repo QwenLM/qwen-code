@@ -340,6 +340,63 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
+  it('rotates the key of a realtime-only provider without touching the conversation selection', async () => {
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_REALTIME`;
+    const existing = [
+      { id: 'omni-realtime', baseUrl, envKey, realtimeOnly: true },
+    ];
+    const plan = buildInstallPlan(
+      customProvider,
+      { baseUrl, apiKey: 'rotated', modelIds: ['omni-realtime'] },
+      existing,
+    );
+    expect(plan.env).toEqual({ [envKey]: 'rotated' });
+    expect(plan.modelProviders![0]!.models).toEqual([
+      expect.objectContaining({ id: 'omni-realtime', realtimeOnly: true }),
+    ]);
+    expect(plan.modelSelection).toBeUndefined();
+
+    const adapter = createAdapter({ openai: existing });
+    const refreshAuth = vi.fn();
+    const previous = process.env[envKey];
+    try {
+      await applyProviderInstallPlan(plan, { settings: adapter, refreshAuth });
+      // A service-role reconnect must not re-point the chat session.
+      expect(adapter.setValue).not.toHaveBeenCalledWith(
+        'security.auth.selectedType',
+        expect.anything(),
+      );
+      expect(adapter.setValue).not.toHaveBeenCalledWith(
+        'model.name',
+        expect.anything(),
+      );
+      expect(refreshAuth).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env[envKey];
+      else process.env[envKey] = previous;
+    }
+  });
+
+  it('refuses a realtime reconnect that would land on another route’s credential key', () => {
+    const inputs = {
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'new',
+      modelIds: ['omni-realtime'],
+    };
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, inputs.baseUrl);
+    expect(() =>
+      buildInstallPlan(customProvider, inputs, [
+        {
+          id: 'omni-realtime',
+          baseUrl: `${inputs.baseUrl}/`,
+          envKey,
+          realtimeOnly: true,
+        },
+      ]),
+    ).toThrow('A service model already uses this credential endpoint');
+  });
+
   it.each(['image', 'voice'] as const)(
     'rekeys a purpose-less %s reconnect at the original credential key',
     (purpose) => {
