@@ -566,6 +566,81 @@ describe('buildDaemonStatusResponse', () => {
     );
   });
 
+  it('counts each live engine of a paired runtime as a child', async () => {
+    // A paired runtime holds one child per engine. Counting runtimes would
+    // under-report children to anything dividing a budget by them, and adding
+    // a reading that covers two children as one sample would misstate
+    // `sampled` in the other direction.
+    const reading = (children: number, heapReported?: number) => ({
+      rssBytes: 100 * children,
+      cpuPercent: 1,
+      ageMs: 10 * children,
+      children,
+      ...(heapReported !== undefined
+        ? {
+            heapReported,
+            heap: {
+              peakOldGenerationBytes: 900,
+              peakLiveSetBytes: 300,
+              peakTotalHeapBytes: 1_200,
+              majorGcCount: 4,
+              majorGcMs: 8,
+              unclassifiedSpaceNames: [],
+            },
+          }
+        : {}),
+    });
+    const bridge = (
+      liveChannelCount: number | undefined,
+      snapshot: ReturnType<typeof reading>,
+    ) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => (liveChannelCount ?? 1) > 0,
+        ...(liveChannelCount !== undefined ? { liveChannelCount } : {}),
+        getChildResourceSnapshot: () => snapshot,
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+    const bridges = [
+      // Both engines live and measured, both with heap marks.
+      bridge(2, reading(2, 2)),
+      // Both engines live, one of them not measured yet.
+      bridge(2, reading(1)),
+      // Deliberately unfaithful: claims more children and heap reporters than
+      // are live, which must not push `sampled` past `activeAcpChildren` or
+      // `heap.reported` past `sampled`.
+      bridge(1, reading(3, 3)),
+      // A bridge predating the count covers exactly one child.
+      bridge(undefined, reading(1)),
+    ];
+    const runtimes = bridges.map((b, i) => ({
+      workspaceId: `w${i}`,
+      workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+      bridge: b,
+    }));
+    const options = makeOptions();
+    options.bridge = bridges[0];
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.activeAcpChildren).toBe(6);
+    expect(response.runtime.memory?.children).toMatchObject({
+      rssBytes: 700,
+      sampled: 5,
+      oldestReadingAgeMs: 30,
+      heap: expect.objectContaining({ reported: 3 }),
+    });
+  });
+
   it('reports a zero age as zero, and ages a mixed-contract sum by the ones that can', async () => {
     // `ageMs` is exactly 0 when a status read lands in the same millisecond as
     // the sampler's stamp. A truthiness guard, or a trailing `|| null`, turns
@@ -1720,6 +1795,73 @@ describe('buildDaemonStatusResponse', () => {
         },
       },
     });
+  });
+
+  it('warns once per workspace about channels its serve.channels did not restore', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () => [
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'feishu',
+          message: 'gateway did not answer',
+        },
+        {
+          workspaceCwd: '/ws/b',
+          channel: 'ghost',
+          message: 'not configured',
+        },
+        {
+          workspaceCwd: '/ws/a',
+          channel: 'dingtalk',
+          message: 'rolled back',
+        },
+      ],
+    });
+
+    expect(
+      response.issues.filter(
+        (issue) => issue.code === 'channel_restore_failed',
+      ),
+    ).toEqual([
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/a were not restored: ' +
+          'feishu (gateway did not answer); dingtalk (rolled back).',
+      },
+      {
+        code: 'channel_restore_failed',
+        severity: 'warning',
+        message:
+          'serve.channels for workspace /ws/b were not restored: ghost (not configured).',
+      },
+    ]);
+    expect(response.status).toBe('warning');
+  });
+
+  it('bounds the restore warning by entry count and channel-name length', async () => {
+    const response = await buildDaemonStatusResponse('summary', {
+      ...makeOptions(),
+      getChannelRestoreFailures: () =>
+        Array.from({ length: 70 }, (_, index) => ({
+          workspaceCwd: '/ws/a',
+          channel: `${'c'.repeat(200)}-${index}`,
+          message: 'down',
+        })),
+    });
+
+    const [issue, ...rest] = response.issues.filter(
+      (item) => item.code === 'channel_restore_failed',
+    );
+    expect(rest).toEqual([]);
+    // 64 entries shown, each name capped at 128, and the remainder counted
+    // rather than silently dropped.
+    expect(issue!.message.split('; ')).toHaveLength(65);
+    expect(issue!.message).toContain(`${'c'.repeat(128)} (down)`);
+    expect(issue!.message).not.toContain('c'.repeat(129));
+    expect(issue!.message).toMatch(/; and 6 more\.$/u);
   });
 
   it('rolls up statuses inside tools, hooks, and extensions', async () => {

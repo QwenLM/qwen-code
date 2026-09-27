@@ -37,13 +37,66 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
 /// PID after the original application exits. The XID owner binds the two parts
 /// of a `get_window_state` target and fails closed when either is stale.
 pub fn window_belongs_to_pid(xid: u64, pid: u32) -> bool {
+    window_owner_matches(window_owner_pid(xid), pid)
+}
+
+pub(crate) fn window_owner_pid(xid: u64) -> Option<u32> {
+    let Ok(xid) = u32::try_from(xid) else {
+        return None;
+    };
+    let Ok((conn, _)) = RustConnection::connect(None) else {
+        return None;
+    };
+    get_window_pid(&conn, xid).ok().flatten()
+}
+
+pub(crate) fn is_minimized(xid: u64) -> bool {
     let Ok(xid) = u32::try_from(xid) else {
         return false;
     };
     let Ok((conn, _)) = RustConnection::connect(None) else {
         return false;
     };
-    window_owner_matches(get_window_pid(&conn, xid).ok().flatten(), pid)
+    let Ok(atom) = get_atom(&conn, "WM_STATE") else {
+        return false;
+    };
+    conn.get_property(false, xid, atom, atom, 0, 2)
+        .ok()
+        .and_then(|reply| reply.reply().ok())
+        .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+        == Some(3)
+}
+
+pub(crate) fn wait_for_restored_capture(xid: u64) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let xid = u32::try_from(xid)?;
+    let (conn, screen) = RustConnection::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let attributes = conn.get_window_attributes(xid)?.reply()?;
+        let geometry = conn.get_geometry(xid)?.reply()?;
+        let origin = conn.translate_coordinates(xid, root, 0, 0)?.reply()?;
+        let desktop = conn.get_geometry(root)?.reply()?;
+        // A WM can report active/viewable before moving an iconic window back
+        // from its off-screen parking position. Full-window XGetImage needs
+        // the restored rectangle inside the screen, not just confirmed focus.
+        if attributes.map_state == MapState::VIEWABLE
+            && geometry.width > 0
+            && geometry.height > 0
+            && origin.dst_x >= 0
+            && origin.dst_y >= 0
+            && i32::from(origin.dst_x) + i32::from(geometry.width) <= i32::from(desktop.width)
+            && i32::from(origin.dst_y) + i32::from(geometry.height) <= i32::from(desktop.height)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "app_window_unavailable: restored X11 window is not ready for a full screenshot"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn window_owner_matches(owner: Option<u32>, requested_pid: u32) -> bool {
@@ -51,12 +104,23 @@ fn window_owner_matches(owner: Option<u32>, requested_pid: u32) -> bool {
 }
 
 pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
+    try_list_windows_inner(filter_pid, false)
+}
+
+pub fn try_list_app_windows(pid: u32) -> Result<Vec<WindowInfo>> {
+    try_list_windows_inner(Some(pid), true)
+}
+
+fn try_list_windows_inner(
+    filter_pid: Option<u32>,
+    include_untitled: bool,
+) -> Result<Vec<WindowInfo>> {
     let (conn, screen_num) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
 
     // Get _NET_CLIENT_LIST_STACKING (or fallback to _NET_CLIENT_LIST).
-    let windows = get_window_list(&conn, root)?;
+    let (windows, stacking_known) = get_window_list(&conn, root)?;
 
     let mut result = Vec::new();
     for (z_index, xid) in windows.into_iter().enumerate() {
@@ -68,7 +132,7 @@ pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
         }
 
         let title = get_window_title(&conn, xid).unwrap_or_default();
-        if title.trim().is_empty() {
+        if !include_untitled && title.trim().is_empty() {
             continue;
         }
         let app_name = get_window_class(&conn, xid)
@@ -98,7 +162,7 @@ pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
             app_name,
             title,
             is_on_screen,
-            z_index: Some(z_index_from_bottom_to_top(z_index)),
+            z_index: stacking_known.then(|| z_index_from_bottom_to_top(z_index)),
             x,
             y,
             width: w,
@@ -109,11 +173,106 @@ pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
     Ok(result)
 }
 
+pub fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
+    let (conn, screen) = RustConnection::connect(None).ok()?;
+    let atom = get_atom(&conn, "_NET_ACTIVE_WINDOW").ok()?;
+    let reply = conn
+        .get_property(
+            false,
+            conn.setup().roots[screen].root,
+            atom,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    let active = reply
+        .value32()
+        .and_then(|mut values| values.next())
+        .map(u64::from);
+    select_app_window_with_owner(windows, active, |window| {
+        let reply = conn
+            .get_property(
+                false,
+                window as u32,
+                AtomEnum::WM_TRANSIENT_FOR,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        let owner = reply.value32()?.next().map(u64::from);
+        owner
+    })
+}
+
+fn select_app_window_with_owner(
+    windows: &[WindowInfo],
+    active: Option<u64>,
+    mut owner_of: impl FnMut(u64) -> Option<u64>,
+) -> Option<u64> {
+    let selected = select_app_window(windows, active)?;
+    let transients: Vec<_> = windows
+        .iter()
+        .filter(|w| w.is_on_screen && w.xid != selected)
+        .filter(|w| {
+            let mut current = w.xid;
+            for _ in 0..32 {
+                let Some(owner) = owner_of(current) else {
+                    return false;
+                };
+                if owner == selected {
+                    return true;
+                }
+                if owner == current {
+                    return false;
+                }
+                current = owner;
+            }
+            false
+        })
+        .cloned()
+        .collect();
+    if transients.is_empty() {
+        Some(selected)
+    } else {
+        select_app_window(&transients, active)
+    }
+}
+
+pub(crate) fn select_app_window(windows: &[WindowInfo], active: Option<u64>) -> Option<u64> {
+    let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    if visible.is_empty() && windows.len() == 1 {
+        return Some(windows[0].xid);
+    }
+    if let Some(window) = visible.iter().find(|w| Some(w.xid) == active) {
+        return Some(window.xid);
+    }
+    if visible.len() == 1 {
+        return Some(visible[0].xid);
+    }
+    // Only native stacking order can identify the app's last active surface.
+    let top = visible
+        .iter()
+        .filter_map(|w| w.z_index.map(|z| (z, w.xid)))
+        .max()?;
+    if visible.iter().any(|w| w.z_index.is_none())
+        || visible.iter().filter(|w| w.z_index == Some(top.0)).count() != 1
+    {
+        return None;
+    }
+    Some(top.1)
+}
+
 fn z_index_from_bottom_to_top(position: usize) -> usize {
     position
 }
 
-fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
+fn get_window_list(conn: &RustConnection, root: Window) -> Result<(Vec<Window>, bool)> {
     let atom_names = ["_NET_CLIENT_LIST_STACKING", "_NET_CLIENT_LIST"];
     for name in &atom_names {
         if let Ok(atom) = get_atom(conn, name) {
@@ -126,7 +285,7 @@ fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
                     .map(|iter| iter.collect())
                     .unwrap_or_default();
                 if client_list_property(reply.type_, windows.as_slice()).is_some() {
-                    return Ok(windows);
+                    return Ok((windows, *name == "_NET_CLIENT_LIST_STACKING"));
                 }
             }
         }
@@ -136,17 +295,19 @@ fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
     // that case only expose mapped root children; unmapped Electron children
     // can otherwise be reported before a late-starting WM reparents them.
     let tree = conn.query_tree(root)?.reply()?;
-    Ok(tree
-        .children
-        .into_iter()
-        .filter(|window| {
-            conn.get_window_attributes(*window)
-                .ok()
-                .and_then(|cookie| cookie.reply().ok())
-                .map(|attributes| fallback_window_is_listable(attributes.map_state))
-                .unwrap_or(false)
-        })
-        .collect())
+    Ok((
+        tree.children
+            .into_iter()
+            .filter(|window| {
+                conn.get_window_attributes(*window)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|attributes| fallback_window_is_listable(attributes.map_state))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        true,
+    ))
 }
 
 fn client_list_property(property_type: Atom, windows: &[Window]) -> Option<&[Window]> {
@@ -304,6 +465,53 @@ fn get_window_class(conn: &RustConnection, xid: Window) -> Option<(String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_window(xid: u64, z_index: Option<usize>) -> WindowInfo {
+        WindowInfo {
+            xid,
+            pid: Some(42),
+            app_name: "Fixture".into(),
+            title: String::new(),
+            is_on_screen: true,
+            z_index,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        }
+    }
+
+    #[test]
+    fn app_target_follows_active_window_and_owned_dialog_then_returns_to_owner() {
+        let mut windows = vec![app_window(1, Some(0)), app_window(2, Some(1))];
+        assert_eq!(
+            select_app_window_with_owner(&windows, Some(1), |id| (id == 2).then_some(1)),
+            Some(2)
+        );
+        windows.pop();
+        assert_eq!(
+            select_app_window_with_owner(&windows, Some(99), |_| None),
+            Some(1)
+        );
+        windows.push(app_window(3, Some(2)));
+        assert_eq!(select_app_window(&windows, Some(99)), Some(3));
+        assert_eq!(select_app_window(&windows, Some(1)), Some(1));
+        windows[1].z_index = None;
+        assert_eq!(select_app_window(&windows, Some(99)), None);
+    }
+
+    #[test]
+    fn app_selection_uses_focus_without_stacking_and_keeps_minimized_identity() {
+        let mut windows = vec![app_window(1, None), app_window(2, None)];
+        assert_eq!(select_app_window(&windows, Some(2)), Some(2));
+        assert_eq!(select_app_window(&windows, None), None);
+        for window in &mut windows {
+            window.is_on_screen = false;
+        }
+        assert_eq!(select_app_window(&windows, None), None);
+        windows.pop();
+        assert_eq!(select_app_window(&windows, None), Some(1));
+    }
 
     #[test]
     fn empty_present_client_list_does_not_fall_back_to_query_tree() {

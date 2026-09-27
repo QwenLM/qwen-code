@@ -79,12 +79,15 @@ function extractContentText(request: PermissionRequest): string {
 }
 
 function isExecKind(request: PermissionRequest): boolean {
+  // `toolKind` carries the ACP frame's kind (`execute` for shell tools);
+  // `PermissionRequest.kind` is never assigned by any producer.
+  const toolKind = request.toolKind?.toLowerCase();
   const toolName = request.toolName?.toLowerCase();
   return (
-    request.kind === 'bash' ||
-    request.kind === 'exec' ||
-    request.kind === 'execute' ||
-    request.kind === 'shell' ||
+    toolKind === 'bash' ||
+    toolKind === 'exec' ||
+    toolKind === 'execute' ||
+    toolKind === 'shell' ||
     toolName === 'run_shell_command'
   );
 }
@@ -338,6 +341,7 @@ export function ToolApproval({
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
+  const contentId = useId();
 
   // Reset only when a NEW request arrives. Reading the safe default through a
   // ref keeps this keyed strictly to request identity: if the same request's
@@ -542,6 +546,13 @@ export function ToolApproval({
   const command = getCommandFromRawInput(request);
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
+  // Exec warnings (e.g. command-substitution notices) arrive as real content
+  // blocks, not the input fallback — render them next to the command instead
+  // of letting the command block swallow them.
+  const execWarningsText =
+    isExec && command && showsContent && !request.contentIsInput
+      ? contentText
+      : null;
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -577,6 +588,7 @@ export function ToolApproval({
         questionId,
         descriptionText ? descId : null,
         showsCommandBlock || isGoal ? commandId : null,
+        execWarningsText ? contentId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -605,11 +617,22 @@ export function ToolApproval({
           content={contentText || (goalObjective ? '' : request.title || '')}
         />
       ) : isExec && command ? (
-        <div className={styles.code}>
-          <pre className={styles.codeBlock} id={commandId} title={command}>
-            {command}
-          </pre>
-        </div>
+        <>
+          <div className={styles.code}>
+            <pre className={styles.codeBlock} id={commandId} title={command}>
+              {command}
+            </pre>
+          </div>
+          {execWarningsText && (
+            <pre
+              className={styles.content}
+              id={contentId}
+              title={execWarningsText}
+            >
+              {execWarningsText}
+            </pre>
+          )}
+        </>
       ) : showsContent ? (
         <pre
           className={`${styles.content}${

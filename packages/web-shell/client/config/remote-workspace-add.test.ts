@@ -170,6 +170,33 @@ describe('remote workspace add navigation', () => {
     );
   });
 
+  it.each(['clear', 'failed-switch'] as const)(
+    'preserves host state and page return context during %s',
+    (operation) => {
+      const state = {
+        host: 'kept',
+        __qwenWebShellNavigation: {
+          basePath: '',
+          source: `${testOrigin}/session/original?workspace=local`,
+        },
+      };
+      window.history.replaceState(
+        state,
+        '',
+        '/plugins?addRemoteWorkspace=browse',
+      );
+      setLocation(`${testOrigin}/plugins?addRemoteWorkspace=browse`);
+      if (operation === 'clear') clearRemoteWorkspaceAddStep();
+      else {
+        navigateToDaemon.mockReturnValue(false);
+        expect(startRemoteWorkspaceAdd('https://remote.example')).toBe(false);
+      }
+      expect(window.history.state).toEqual(state);
+      expect(originalLocation.pathname).toBe('/plugins');
+      expect(originalLocation.search).toBe('');
+    },
+  );
+
   it('reports the add flow inactive outside a document', () => {
     vi.stubGlobal('window', undefined);
     try {

@@ -292,6 +292,51 @@ describe('artifactUtils', () => {
     expect(readFileBytes).not.toHaveBeenCalled();
   });
 
+  it('downloads without host link interception and retains the URL until the browser can consume it', async () => {
+    vi.useFakeTimers();
+    const createObjectURL = vi.fn().mockReturnValue('blob:workspace-file');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+    const hostClick = vi.fn((event: Event) => event.preventDefault());
+    window.addEventListener('click', hostClick);
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.isConnected).toBe(true);
+        expect(this.href).toBe('blob:workspace-file');
+        expect(
+          this.dispatchEvent(
+            new Event('click', { bubbles: true, cancelable: true }),
+          ),
+        ).toBe(true);
+      });
+    try {
+      await downloadWorkspaceFile(
+        {
+          stat: vi.fn().mockResolvedValue({ sizeBytes: 2, modifiedMs: 1 }),
+          readFileBytes: vi.fn().mockResolvedValue({
+            contentBase64: btoa('ab'),
+            offset: 0,
+            returnedBytes: 2,
+            sizeBytes: 2,
+          }),
+        },
+        'reports/result.txt',
+        'text/plain',
+      );
+      expect(click).toHaveBeenCalledOnce();
+      expect(document.querySelector('a[download="result.txt"]')).toBeNull();
+      expect(hostClick).not.toHaveBeenCalled();
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      vi.runAllTimers();
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-file');
+    } finally {
+      window.removeEventListener('click', hostClick);
+      click.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects downloads larger than the default Blob limit', async () => {
     const readFileBytes = vi.fn();
     const stat = vi.fn().mockResolvedValue({

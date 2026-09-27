@@ -135,6 +135,45 @@ function mockAppOnlyMcpServer(): void {
   } as unknown as GenAiLib.CallableTool);
 }
 
+function legacyOptionalMethodTransportError(
+  status = 400,
+  code = -32601,
+  responseBody?: string,
+): Error {
+  const methodMessage =
+    code === -32601 ? 'Method not found' : 'Session not found';
+  const body =
+    responseBody ??
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code, message: methodMessage },
+      id: 1,
+    });
+  return new ClientLib.SdkHttpError(
+    ClientLib.SdkErrorCode.ClientHttpNotImplemented,
+    `Error POSTing to endpoint: ${body}`,
+    { status, statusText: `HTTP ${status}`, text: body },
+  );
+}
+
+function legacyOptionalMethodSseTransportError(
+  status?: number,
+  code = -32601,
+  responseBody?: string,
+): Error {
+  const methodMessage =
+    code === -32601 ? 'Method not found' : 'Session not found';
+  const body =
+    responseBody ??
+    JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code, message: methodMessage },
+      id: null,
+    });
+  const statusMessage = status === undefined ? '' : ` (HTTP ${status})`;
+  return new Error(`Error POSTing to endpoint${statusMessage}: ${body}`);
+}
+
 describe('mcp-client', () => {
   afterEach(() => {
     _setMcpFetchForTest(undefined);
@@ -868,6 +907,238 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
   });
 
   describe('McpClient', () => {
+    it.each(
+      ([400, 404, 405, 422, 501] as const).flatMap((status) => [
+        {
+          status,
+          transport: 'structured HTTP status',
+          makeError: () => legacyOptionalMethodTransportError(status),
+        },
+        {
+          status,
+          transport: 'legacy SSE error message',
+          makeError: () => legacyOptionalMethodSseTransportError(status),
+        },
+      ]),
+    )(
+      'does not disconnect for a legacy HTTP -32601 optional-method response from $transport with status $status',
+      async ({ makeError }) => {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          getInstructions: vi.fn(),
+          onerror: undefined as ((error: Error) => void) | undefined,
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          {} as SdkClientStdioLib.StdioClientTransport,
+        );
+
+        const serverName = 'legacy-optional-method-server';
+        const client = new McpClient(
+          serverName,
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          {
+            getDirectories: vi.fn().mockReturnValue([]),
+          } as unknown as WorkspaceContext,
+          false,
+        );
+        await client.connect();
+
+        mockedClient.onerror?.(makeError());
+
+        expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+        expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+        removeMCPServerStatus(serverName);
+      },
+    );
+
+    it.each([
+      {
+        description: 'an unrelated transport error',
+        error: () => new Error('ECONNRESET'),
+      },
+      {
+        description: 'a JSON-RPC session-not-found response',
+        error: () => legacyOptionalMethodTransportError(400, -32001),
+      },
+      {
+        description: 'a method-not-found response with HTTP 401',
+        error: () => legacyOptionalMethodTransportError(401),
+      },
+      {
+        description: 'a method-not-found response with HTTP 403',
+        error: () => legacyOptionalMethodTransportError(403),
+      },
+      {
+        description: 'a legacy SSE method-not-found response with HTTP 401',
+        error: () => legacyOptionalMethodSseTransportError(401),
+      },
+      {
+        description: 'a legacy SSE method-not-found response without a status',
+        error: () => legacyOptionalMethodSseTransportError(),
+      },
+      {
+        description: 'peer-controlled HTTP metadata on a JSON-RPC error',
+        error: () =>
+          Object.assign(new Error('Unsupported method'), {
+            code: -32601,
+            data: {
+              status: 404,
+              text: JSON.stringify({
+                jsonrpc: '2.0',
+                error: { code: -32601 },
+                id: null,
+              }),
+            },
+          }),
+      },
+      {
+        description: 'an allowlisted legacy SSE status with an HTML body',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            '<html>route not found</html>',
+          ),
+      },
+      {
+        description: 'an allowlisted legacy SSE status with malformed JSON',
+        error: () =>
+          legacyOptionalMethodSseTransportError(400, -32601, '{"jsonrpc":'),
+      },
+      {
+        description:
+          'an allowlisted legacy SSE status without a JSON-RPC version',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            JSON.stringify({ error: { code: -32601 } }),
+          ),
+      },
+      {
+        description: 'a peer-controlled HTTP_STATUS marker under HTTP 401',
+        error: () =>
+          legacyOptionalMethodSseTransportError(
+            401,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: {
+                code: -32601,
+                message: 'Method not found HTTP_STATUS/400',
+              },
+              id: null,
+            }),
+          ),
+      },
+    ])('still disconnects for $description', async ({ error }) => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const serverName = 'unrelated-transport-error-server';
+      const client = new McpClient(
+        serverName,
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      mockedClient.onerror?.(error());
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
+    it('keeps standalone discovery connected for a legacy -32601 error', async () => {
+      const methodNotFoundTransportError =
+        legacyOptionalMethodSseTransportError(
+          400,
+          -32601,
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32601, message: 'Unsupported method' },
+            id: null,
+          }),
+        );
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        getInstructions: vi.fn(),
+        close: vi.fn(),
+        onerror: undefined as ((error: Error) => void) | undefined,
+        request: vi.fn(),
+        listTools: vi.fn(),
+      };
+      mockedClient.request.mockImplementation(async () => {
+        mockedClient.onerror?.(methodNotFoundTransportError);
+        throw methodNotFoundTransportError;
+      });
+      mockedClient.listTools.mockImplementation(async () => {
+        setTimeout(() => {
+          mockedClient.onerror?.(methodNotFoundTransportError);
+        }, 0);
+        return { tools: [{ name: 'healthy-tool' }] };
+      });
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'healthy-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const serverName = 'standalone-legacy-optional-method-server';
+      await connectAndDiscover(
+        serverName,
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        false,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+          onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+        } as unknown as WorkspaceContext,
+        cfgWithResources(),
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      mockedClient.onerror?.(new Error('ECONNRESET'));
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
     it('recovers HTTP connections when the SDK omits the 401 status', async () => {
       const connect = vi
         .fn()
@@ -2509,6 +2780,51 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(result).toEqual([]);
     });
 
+    it('swallows a transport-wrapped -32601 body regardless of message wording', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(
+          legacyOptionalMethodTransportError(
+            400,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32601, message: 'Unsupported method' },
+              id: 1,
+            }),
+          ),
+        ),
+      } as unknown as ClientLib.Client;
+
+      await expect(listMcpPrompts('localized', mockClient)).resolves.toEqual(
+        [],
+      );
+
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('silently accepts a legacy -32601 envelope with alternate wording', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(
+          legacyOptionalMethodSseTransportError(
+            400,
+            -32601,
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32601, message: 'Unsupported method' },
+              id: null,
+            }),
+          ),
+        ),
+      } as unknown as ClientLib.Client;
+
+      await expect(
+        listMcpPrompts('legacy-wording', mockClient),
+      ).resolves.toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
     it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
       const mockClient = {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
@@ -2633,6 +2949,24 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await listMcpResources('no-method', mockClient);
       expect(result).toEqual([]);
       expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('does not swallow a method-not-found phrase inside an HTTP 401 body', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValue(legacyOptionalMethodSseTransportError(401)),
+      } as unknown as ClientLib.Client;
+
+      await expect(
+        listMcpResources('unauthorized', mockClient),
+      ).resolves.toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Error discovering resources from unauthorized:',
+        ),
+      );
     });
 
     it('does NOT swallow an unrelated error that merely contains "method not found" (case-sensitive)', async () => {
@@ -2975,6 +3309,28 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(response.statusText).toBe('Method Not Allowed');
         expect(await response.text()).toBe('');
       });
+
+      it.each([422, 501])(
+        'treats %i from optional GET SSE stream as unsupported',
+        async (status) => {
+          const fetchFn = vi
+            .fn<typeof fetch>()
+            .mockResolvedValue(new Response('gateway rejection', { status }));
+          const fetchWithFallback = createStreamableHttpCompatibilityFetch(
+            `gateway-${status}`,
+            fetchFn,
+          );
+
+          const response = await fetchWithFallback('http://test-server/mcp', {
+            method: 'GET',
+            headers: { Accept: 'text/event-stream' },
+          });
+
+          expect(response.status).toBe(405);
+          expect(response.statusText).toBe('Method Not Allowed');
+          expect(await response.text()).toBe('');
+        },
+      );
 
       it('does not rewrite non-SSE GET 404 responses', async () => {
         const fetchFn = vi

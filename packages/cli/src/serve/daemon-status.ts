@@ -43,6 +43,11 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -50,7 +55,10 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import type { WorkspaceRegistry } from './workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
@@ -103,6 +111,7 @@ export interface DaemonStatusIssue {
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
+    | 'channel_restore_failed'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
@@ -136,6 +145,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -666,18 +676,21 @@ export async function buildDaemonStatusResponse(
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Count managed runtimes whose channel is live (non-dying), not what is
+    // Count the live (non-dying) channels of managed runtimes, not what is
     // merely active-state. `list()` (active-state only) drops workspaces
     // mid-replacement or blocked, which would under-report children in exactly
     // the window an admission policy must not treat as free capacity.
     // `listManaged()` is the managed set; `listEntries()` is the registration
     // count. A workspace whose kill has started but whose child has not exited
     // is excluded (dying channel); registered-but-dormant workspaces have no
-    // live child, so the registered count remains unsafe to divide by.
+    // live child, so the registered count remains unsafe to divide by. A
+    // paired runtime holds up to one live child per engine.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
+    const liveChildren = (runtime: WorkspaceRuntime): number =>
+      runtime.bridge.liveChannelCount ??
+      (runtime.bridge.isChannelLive() ? 1 : 0);
     const activeAcpChildCount = managedRuntimes
-      ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())
-          .length
+      ? managedRuntimes.reduce((sum, runtime) => sum + liveChildren(runtime), 0)
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
       ? (
@@ -713,11 +726,14 @@ export async function buildDaemonStatusResponse(
       // leaning on it would make `sampled <= activeAcpChildren` — the one
       // thing this block promises — hold by coincidence instead of by
       // construction.
-      if (!runtime.bridge.isChannelLive()) continue;
+      const children = liveChildren(runtime);
+      if (children === 0) continue;
       const snapshot = runtime.bridge.getChildResourceSnapshot?.();
       if (!snapshot) continue;
       childRssBytesTotal += snapshot.rssBytes;
-      childRssSampled += 1;
+      // Capped by the same count `activeAcpChildCount` added for this runtime.
+      const sampled = Math.min(children, snapshot.children ?? 1);
+      childRssSampled += sampled;
       // Absent on bridges predating the field; such a child still counts
       // toward the sum, it just cannot say how old its reading is.
       if (snapshot.ageMs !== undefined) {
@@ -731,7 +747,7 @@ export async function buildDaemonStatusResponse(
       // honest denominator for the maxima.
       const heap = snapshot.heap;
       if (!heap) continue;
-      heapReported += 1;
+      heapReported += Math.min(sampled, snapshot.heapReported ?? 1);
       peakOldGenerationBytes = Math.max(
         peakOldGenerationBytes,
         heap.peakOldGenerationBytes,
@@ -1358,6 +1374,47 @@ function pushRuntimeIssues(
   const workers = groupedWorkers ?? [channelWorker];
   for (const worker of workers) {
     pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+  pushChannelRestoreIssues(issues, input.getChannelRestoreFailures?.() ?? []);
+}
+
+// A channel that failed to restore has no worker, so nothing above sees it.
+// One issue per workspace, naming each channel with its own error; the same
+// error is the channel's `runtime.lastError` in the workspace channel list.
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
+  issues: DaemonStatusIssue[],
+  failures: readonly ChannelRestoreFailure[],
+): void {
+  const byWorkspace = new Map<string, ChannelRestoreFailure[]>();
+  for (const failure of failures) {
+    const list = byWorkspace.get(failure.workspaceCwd) ?? [];
+    list.push(failure);
+    byWorkspace.set(failure.workspaceCwd, list);
+  }
+  for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
+    issues.push({
+      code: 'channel_restore_failed',
+      severity: 'warning',
+      message:
+        `serve.channels for workspace ${workspaceCwd} were not restored: ` +
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
+    });
   }
 }
 

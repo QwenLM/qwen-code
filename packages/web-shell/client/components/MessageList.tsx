@@ -128,7 +128,8 @@ export interface MessageListProps {
    * Identity of the session whose transcript `messages` show. Block ids are
    * per-session ordinals, so changing it resets every session-scoped UI state
    * (collapse overrides, pagination keep-open, pending page snapshots, the
-   * scroll anchor) — a direct session switch never renders empty messages.
+   * scroll anchor, the settled-stale-message latch) — a direct session switch
+   * never renders empty messages.
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
@@ -143,7 +144,11 @@ export interface MessageListProps {
   transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
-   * expanded and un-collapsible so streaming output is never hidden.
+   * expanded and un-collapsible so streaming output is never hidden. When
+   * false, stale assistant/thinking/tool-group-thought streaming flags left
+   * by a restored replay are settled before render — and stay settled when
+   * the session responds again, for as long as their content is unchanged —
+   * which is what hosts observe through MarkdownRenderContext.isStreaming.
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
@@ -166,6 +171,7 @@ export interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -506,6 +512,61 @@ function updateCompactStreamingThinkingTail(
       : {}),
   };
   return result;
+}
+
+function settleStaleStreamingMessage(message: Message): Message {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.isStreaming ? { ...message, isStreaming: false } : message;
+  }
+  if (message.role !== 'tool_group' || !message.thoughts?.length)
+    return message;
+  let changed = false;
+  const thoughts = message.thoughts.map((thought) => {
+    if (!thought.isStreaming) return thought;
+    changed = true;
+    return { ...thought, isStreaming: false };
+  });
+  return changed ? { ...message, thoughts } : message;
+}
+
+/**
+ * The content a settleable message carries, ignoring streaming flags. The
+ * idle-settle latch records it so a responding render can tell a stale replay
+ * row (content never changes) from a genuinely live row that reused the id
+ * (content grows every tick).
+ */
+function staleStreamingContentSignature(message: Message): string | undefined {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.content;
+  }
+  if (message.role === 'tool_group' && message.thoughts?.length) {
+    return JSON.stringify(message.thoughts.map((thought) => thought.content));
+  }
+  return undefined;
+}
+
+/** Settled copies are pure in the source message; reuse them per source
+ * object instead of recloning the same latched rows every streaming frame. */
+function settleStaleStreamingMessageCached(
+  cache: WeakMap<Message, Message>,
+  message: Message,
+): Message {
+  const cached = cache.get(message);
+  if (cached !== undefined) return cached;
+  const next = settleStaleStreamingMessage(message);
+  cache.set(message, next);
+  return next;
+}
+
+/**
+ * Ids an idle render settled, mapped to the content they held at settle time.
+ * Reads ignore latches recorded for another `sessionKey`: block ids are
+ * per-projection ordinals, so a different session's latch can never be
+ * trusted to denote the rows on screen.
+ */
+interface SettledStaleMessages {
+  sessionKey: string | undefined;
+  ids: ReadonlyMap<string, string>;
 }
 
 export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
@@ -2313,6 +2374,11 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -2576,7 +2642,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2846,6 +2914,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -2968,6 +3037,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -3036,6 +3106,21 @@ export const MessageList = memo(
         }
       | undefined
     >(undefined);
+    // Rows an idle render found still carrying a streaming flag stay settled
+    // when the session responds again, but only while their content matches
+    // the recorded signature — a stale replay row never grows, so growth
+    // releases the id and lets a genuinely live row that reused it stream
+    // again. Advanced only post-commit — render-phase writes go to the
+    // pending ref.
+    const settledStaleMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const pendingSettledMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const settledStaleCopiesRef = useRef<WeakMap<Message, Message> | undefined>(
+      undefined,
+    );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
@@ -3070,8 +3155,119 @@ export const MessageList = memo(
         pendingApproval,
         value,
       };
-      return value;
-    }, [compactMode, messages, pendingApproval, streamingTailContentOnly]);
+      // A restored replay can retain streaming flags on assistant/thinking
+      // text after the daemon has already reported the whole session idle,
+      // and nothing repairs them at the source. Idle renders settle those
+      // flags for display — stale tool statuses are not covered — and record
+      // the settled ids so responding renders keep them settled instead of
+      // reviving them until the next idle render. The cache keeps the
+      // unsettled array so the compact thinking-tail patcher can still find
+      // the streaming flag it patches on.
+      const settleCopyCache = (settledStaleCopiesRef.current ??= new WeakMap());
+      const committedLatch = settledStaleMessagesRef.current;
+      const settledIds =
+        committedLatch !== undefined && committedLatch.sessionKey === sessionKey
+          ? committedLatch.ids
+          : undefined;
+      if (isResponding) {
+        // Only the branch that produced a pending latch may promote it; a
+        // discarded idle render's write must not leak into this commit.
+        pendingSettledMessagesRef.current = undefined;
+        if (!settledIds?.size) return value;
+        let surviving: Map<string, string> | undefined;
+        let changed = false;
+        const settled = value.map((message) => {
+          // A latched aggregated group also latches its first member's id so
+          // the row stays settled when a pending approval force-expands the
+          // run; keep that entry alive while the group is present.
+          const memberId = summaryRunFirstMemberId(message.id);
+          if (memberId !== undefined) {
+            const memberSignature = settledIds.get(memberId);
+            if (memberSignature !== undefined) {
+              (surviving ??= new Map()).set(memberId, memberSignature);
+            }
+          }
+          // The standalone first member of a latched group re-aggregates once
+          // the pending approval resolves; keep the group entry alive too.
+          const groupSignature = settledIds.get(summaryRunId(message.id));
+          if (groupSignature !== undefined) {
+            (surviving ??= new Map()).set(
+              summaryRunId(message.id),
+              groupSignature,
+            );
+          }
+          const signature = settledIds.get(message.id);
+          if (signature === undefined) return message;
+          if (staleStreamingContentSignature(message) !== signature) {
+            // The content moved past the settle point: this row is genuinely
+            // live, not stale — release the id and let it stream.
+            return message;
+          }
+          (surviving ??= new Map()).set(message.id, signature);
+          changed = true;
+          return settleStaleStreamingMessageCached(settleCopyCache, message);
+        });
+        // Release and prune post-commit: rows no longer present and rows
+        // whose content changed drop out of the latch.
+        if ((surviving?.size ?? 0) !== settledIds.size) {
+          pendingSettledMessagesRef.current = {
+            sessionKey,
+            ids: surviving ?? new Map(),
+          };
+        }
+        return changed ? settled : value;
+      }
+      let stale: Map<string, string> | undefined;
+      const settled = value.map((message) => {
+        const next = settleStaleStreamingMessageCached(
+          settleCopyCache,
+          message,
+        );
+        if (next !== message) {
+          const signature = staleStreamingContentSignature(message);
+          if (signature !== undefined) {
+            (stale ??= new Map()).set(message.id, signature);
+            // The aggregated group's synthetic id dissolves when a pending
+            // approval force-expands the run; latch the first member's id too
+            // so its standalone re-emission stays settled.
+            const memberId = summaryRunFirstMemberId(message.id);
+            const firstThought =
+              message.role === 'tool_group'
+                ? message.thoughts?.[0]?.content
+                : undefined;
+            if (memberId !== undefined && firstThought !== undefined) {
+              stale.set(memberId, firstThought);
+            }
+            if (message.role === 'thinking') {
+              stale.set(
+                summaryRunId(message.id),
+                JSON.stringify([message.content]),
+              );
+            }
+          }
+        }
+        return next;
+      });
+      if (!stale) return value;
+      pendingSettledMessagesRef.current = {
+        sessionKey,
+        ids: new Map([...(settledIds ?? []), ...stale]),
+      };
+      return settled;
+    }, [
+      compactMode,
+      isResponding,
+      messages,
+      pendingApproval,
+      sessionKey,
+      streamingTailContentOnly,
+    ]);
+    useLayoutEffect(() => {
+      const pending = pendingSettledMessagesRef.current;
+      if (!pending) return;
+      settledStaleMessagesRef.current = pending;
+      pendingSettledMessagesRef.current = undefined;
+    }, [mergedMessages]);
     const displayItemsCache = useRef<
       | {
           sourceMessages: readonly Message[];
@@ -5373,6 +5569,8 @@ export const MessageList = memo(
         // pre-clear snapshot survives into the next session and can mislabel
         // a complete turn as keep-open (block ids are per-session ordinals).
         pendingPaginationTurnCompares.current.clear();
+        settledStaleMessagesRef.current = undefined;
+        pendingSettledMessagesRef.current = undefined;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
         setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
@@ -5615,6 +5813,7 @@ export const MessageList = memo(
                 changes={displayItem.changes}
                 turnId={displayItem.turnId}
                 artifacts={displayItem.artifacts}
+                sourceSessionId={sourceSessionId}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
                 onOpenRequest={onTurnOutputOpen}
@@ -5834,6 +6033,7 @@ export const MessageList = memo(
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
+        sourceSessionId,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,
@@ -5943,6 +6143,7 @@ export const MessageList = memo(
             </div>
           )}
         <SessionTimeline
+          action={timelineAction}
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}

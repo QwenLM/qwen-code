@@ -14,10 +14,12 @@ export function ToolFilePreviewButton({
   tool,
   workspaceCwd,
   onOpen,
+  iconOnly,
 }: {
   tool: ACPToolCall;
   workspaceCwd?: string;
   onOpen?: (request: TurnOutputOpenRequest) => void;
+  iconOnly?: boolean;
 }) {
   const renderMode = useTranscriptRenderMode();
   const filePath = getToolFilePath(tool);
@@ -35,6 +37,7 @@ export function ToolFilePreviewButton({
       workspaceCwd={workspaceCwd}
       tool={tool}
       onOpen={onOpen}
+      iconOnly={iconOnly}
     />
   );
 }
@@ -44,11 +47,13 @@ function AvailableFileButton({
   workspaceCwd,
   tool,
   onOpen,
+  iconOnly,
 }: {
   filePath: string;
   workspaceCwd: string;
   tool: ACPToolCall;
   onOpen: (request: TurnOutputOpenRequest) => void;
+  iconOnly?: boolean;
 }) {
   const { t } = useI18n();
   const { status } = useWorkspace();
@@ -117,14 +122,20 @@ function AvailableFileButton({
     <Button
       type="button"
       variant="ghost"
-      size="xs"
+      size={iconOnly ? 'icon-xs' : 'xs'}
       className="ml-auto text-muted-foreground"
       title={t('tool.viewCurrentFile')}
-      onClick={() => void open()}
-    >
-      {t(
+      aria-label={t(
         getImageMimeTypeFromPath(filePath) ? 'tool.viewImage' : 'tool.viewFile',
       )}
+      onClick={() => void open()}
+    >
+      {!iconOnly &&
+        t(
+          getImageMimeTypeFromPath(filePath)
+            ? 'tool.viewImage'
+            : 'tool.viewFile',
+        )}
       <SquareArrowOutUpRightIcon aria-hidden="true" />
     </Button>
   );
