@@ -45,6 +45,7 @@ jobs:
       issue_number: '${{ steps.plan.outputs.issue_number }}'
       title: '${{ steps.plan.outputs.title }}'
       body: '${{ steps.plan.outputs.body }}'
+      adopted_stub: '${{ steps.plan.outputs.adopted_stub }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -191,6 +192,7 @@ jobs:
           # early and injecting fresh outputs (GitHub's own hardening guidance).
           delim="QWEN_MAIN_CI_FAILURE_BODY_$(openssl rand -hex 16)"
           {
+            echo "adopted_stub=$(jq -r '.adopted_stub' "${plan}")"
             echo "issue_number=${existing_issue}"
             echo "title=$(jq -r '.title' "${plan}")"
             echo "body<<${delim}"
@@ -219,6 +221,7 @@ jobs:
           EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
+          ADOPTED_STUB: '${{ needs.analyze.outputs.adopted_stub }}'
           AUTOFIX_BOT: 'qwen-code-dev-bot'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
@@ -233,6 +236,17 @@ jobs:
 
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
+
+          # A per-test run can reach a per-commit stub through the workflow
+          # bridge. The body is rewritten into the identified-test shape, but
+          # editing an already-routed issue does not re-arm qwen-autofix (its
+          # webhook triggers are labels/assignment, and the cron excludes
+          # claimed issues). Keep the old stub intact and file the adopted
+          # body as a fresh issue so the normal create-time route fires.
+          if [[ "${ADOPTED_STUB}" == 'true' && -n "${EXISTING_ISSUE}" ]]; then
+            echo "Bridge-matched per-commit stub #${EXISTING_ISSUE}; filing a fresh identified-test issue."
+            EXISTING_ISSUE=''
+          fi
 
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             existing_author="$(gh issue view "${EXISTING_ISSUE}" \

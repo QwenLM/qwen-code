@@ -287,6 +287,16 @@ const FAILED_JOB_LINE =
   /^ {2}- `[^`]+`(?: — failed in steps? `[^`]+`(?:, `[^`]+`)*)?$/;
 const PREVIOUS_FAILED_JOBS_BLOCK =
   /\n*## Previous failed jobs[^\n]*\n+(?: {2}- [^\n]*)(?:\n {2}- [^\n]*)*/g;
+const PREVIOUS_FAILED_JOBS_HEADING =
+  /^## Previous failed jobs(?: \(.+, last reported for run \S+\))?$/;
+
+function isMachineHeaderLine(line) {
+  return (
+    /^- (?:Workflow|Run|Run ID|Commit): /.test(line) ||
+    /^- Failed jobs(?: \(last reported for run \S+\))?:$/.test(line) ||
+    FAILED_JOB_LINE.test(line)
+  );
+}
 
 function parsePerCommitHeaderBlock(block) {
   const lines = block.trim().split('\n');
@@ -325,12 +335,10 @@ function parsePerCommitHeaderBlock(block) {
     failedJobRunId = lines[failedJobsIndex].match(
       /^- Failed jobs(?: \(last reported for run (\S+)\))?:$/,
     )[1];
-    for (
-      let index = failedJobsIndex + 1;
-      lines[index]?.startsWith('  - ');
-      index += 1
-    ) {
-      failedJobLineCount += 1;
+    const failedJobsEnd =
+      runField.index > failedJobsIndex ? runField.index : lines.length;
+    for (let index = failedJobsIndex + 1; index < failedJobsEnd; index += 1) {
+      if (lines[index].startsWith('  - ')) failedJobLineCount += 1;
       if (FAILED_JOB_LINE.test(lines[index])) {
         failedJobLines.push(lines[index]);
         machineFieldIndexes.add(index);
@@ -351,7 +359,11 @@ function parsePerCommitHeaderBlock(block) {
     runIdField.index === runField.index + 1 &&
     shaField.index === runIdField.index + 1;
   const remainder = fieldsUnique
-    ? lines.filter((_, index) => !machineFieldIndexes.has(index))
+    ? lines.filter(
+        (line, index) =>
+          !machineFieldIndexes.has(index) &&
+          (wellFormed || !isMachineHeaderLine(line)),
+      )
     : lines;
   return {
     workflow,
@@ -431,7 +443,7 @@ function renderPerCommitHeader({
 
 function replacePerCommitHeader(head, headerBlock, remainder = []) {
   const header = extractPerCommitHeader(head);
-  if (!header?.wellFormed) return head;
+  if (!header?.wellFormed || !header.fieldsUnique) return head;
   const replacement = [
     PER_COMMIT_HEADER_START,
     headerBlock,
@@ -456,20 +468,37 @@ const MACHINE_MARKER_LINE_RE =
  * Never harvest later quoted SHA markers into the bounded machine history.
  */
 function topMachineMarkers(text) {
-  const markers = [];
-  for (const rawLine of String(text ?? '').split('\n')) {
-    const line = rawLine.trim();
-    if (!line) {
-      if (markers.length) break;
+  const lines = String(text ?? '').split('\n');
+  const blocks = [];
+  let current = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (MACHINE_MARKER_LINE_RE.test(line)) {
+      current ??= { markers: [], end: index + 1 };
+      current.markers.push(line.slice('<!-- '.length, -' -->'.length));
+      current.end = index + 1;
       continue;
     }
-    if (!MACHINE_MARKER_LINE_RE.test(line)) {
-      if (markers.length) break;
-      continue;
+    if (current) {
+      blocks.push(current);
+      current = null;
     }
-    markers.push(line.slice('<!-- '.length, -' -->'.length));
   }
-  return markers;
+  if (current) blocks.push(current);
+
+  if (!blocks.length) return [];
+  // A whole-line marker quoted in a triage prefix can be separated from the
+  // real machine block by prose. Prefer a block followed by the renderer's
+  // own issue introduction; this still keeps a normal human prefix (which has
+  // no marker-shaped line) valid, while skipping an isolated quoted marker.
+  const renderedBlock = blocks.find(({ end }) => {
+    const nextContent = lines
+      .slice(end)
+      .map((line) => line.trim())
+      .find(Boolean);
+    return nextContent?.startsWith('A main-branch ');
+  });
+  return (renderedBlock ?? blocks[0]).markers;
 }
 
 function hasMarkerLine(text, marker) {
@@ -536,20 +565,34 @@ function preservedJobNotes(section) {
 }
 
 function preservedPerCommitProse(head, header, legacyMarkers) {
+  const archivedFailedJobLines = [];
+  let archivedFailedJobHeading;
   const outsideMachineRange = [
     head.slice(0, header.replaceStart),
     header.remainder.join('\n'),
     head.slice(header.replaceEnd),
   ]
     .join('\n')
-    .replace(
-      PREVIOUS_FAILED_JOBS_BLOCK,
-      (section) => `\n\n${preservedJobNotes(section)}`,
-    );
+    .replace(PREVIOUS_FAILED_JOBS_BLOCK, (section) => {
+      const sectionLines = section.trim().split('\n');
+      const heading = sectionLines.find((line) =>
+        PREVIOUS_FAILED_JOBS_HEADING.test(line.trim()),
+      );
+      if (heading) archivedFailedJobHeading = heading.trim();
+      archivedFailedJobLines.push(
+        ...sectionLines.filter((line) => FAILED_JOB_LINE.test(line)),
+      );
+      const notes = preservedJobNotes(section);
+      return notes ? `\n\n${notes}` : '';
+    });
   const prose = stripPerCommitMachineLines(outsideMachineRange, {
     removeMarkerLines: legacyMarkers,
   });
-  return prose ? prose.split('\n') : [];
+  return {
+    lines: prose ? prose.split('\n') : [],
+    failedJobLines: [...new Set(archivedFailedJobLines)],
+    failedJobHeading: archivedFailedJobHeading,
+  };
 }
 
 function appendPreviousFailedJobs(head, failedJobs, runId, workflow) {
@@ -585,8 +628,12 @@ function renderPerTestHead({
   testLines,
   additionalMarkers = [],
   preservedFailedJobLines = [],
+  preservedFailedJobHeading,
   preservedRemainder = [],
 }) {
+  const previousFailedJobsHeading =
+    preservedFailedJobHeading ??
+    (preservedFailedJobLines.length ? '## Previous failed jobs' : null);
   return [
     `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
     ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
@@ -598,8 +645,13 @@ function renderPerTestHead({
     '',
     ...testLines,
     '',
-    ...(preservedFailedJobLines.length
-      ? ['## Previous failed jobs', '', ...preservedFailedJobLines, '']
+    ...(previousFailedJobsHeading
+      ? [
+          previousFailedJobsHeading,
+          '',
+          ...preservedFailedJobLines,
+          ...(preservedFailedJobLines.length ? [''] : []),
+        ]
       : []),
     ...preservedRemainder,
     ...(preservedRemainder.length ? [''] : []),
@@ -697,7 +749,7 @@ export function renderIssueBody({
     const ownsHeader =
       !existingHeader || existingHeader.workflow === analysis.workflow;
     const refreshed =
-      existingHeader?.wellFormed && ownsHeader
+      existingHeader?.wellFormed && existingHeader.fieldsUnique && ownsHeader
         ? replacePerCommitHeader(
             withoutHeading,
             headerBlock,
@@ -753,8 +805,12 @@ export function renderIssueBody({
       ? []
       : [
           ...new Set(
-            headMachineMarkers(existingBody).filter((marker) =>
-              marker.startsWith(WORKFLOW_MARKER_PREFIX),
+            headMachineMarkers(existingBody).filter(
+              (marker) =>
+                marker ===
+                workflowBridgeMarker(
+                  existingHeader?.workflow ?? analysis.workflow,
+                ),
             ),
           ),
         ].slice(0, 1);
@@ -768,7 +824,7 @@ export function renderIssueBody({
       !hasTopMarker(head, TEST_MARKER_PREFIX);
     const hasAnyBridge = workflowMarkers.length > 0;
     const headerCanBridge =
-      existingHeader?.wellFormed &&
+      existingHeader?.fieldsUnique &&
       hasTopMarker(head, LEGACY_MARKER_PREFIX) &&
       existingHeader.workflow === analysis.workflow &&
       Boolean(existingHeader?.runId && existingHeader?.sha);
@@ -847,18 +903,32 @@ export function renderIssueBody({
     : [];
   const headProse = adoptsStub
     ? stubHeader
-      ? renderPerTestHead({
-          analysis,
-          bodyMarkers,
-          testLines,
-          additionalMarkers: legacyMarkers,
-          preservedFailedJobLines: stubHeader.failedJobLines,
-          preservedRemainder: preservedPerCommitProse(
+      ? (() => {
+          const preserved = preservedPerCommitProse(
             withoutHeading,
             stubHeader,
             legacyMarkers,
-          ),
-        })
+          );
+          const preservedFailedJobLines = [
+            ...new Set([
+              ...stubHeader.failedJobLines,
+              ...preserved.failedJobLines,
+            ]),
+          ];
+          return renderPerTestHead({
+            analysis,
+            bodyMarkers,
+            testLines,
+            additionalMarkers: legacyMarkers,
+            preservedFailedJobLines,
+            preservedFailedJobHeading:
+              preserved.failedJobHeading ??
+              (preservedFailedJobLines.length
+                ? '## Previous failed jobs'
+                : undefined),
+            preservedRemainder: preserved.lines,
+          });
+        })()
       : [
           renderPerTestHead({
             analysis,
@@ -975,6 +1045,11 @@ export function runCli(argv) {
     const existingBody = options.existing
       ? readFileSync(options.existing, 'utf8')
       : '';
+    const adoptedStub =
+      Boolean(existingBody.trim()) &&
+      analysis.tests.length > 0 &&
+      hasTopMarker(existingBody, LEGACY_MARKER_PREFIX) &&
+      !hasTopMarker(existingBody, TEST_MARKER_PREFIX);
     const occurrence = {
       sha: options.sha,
       runUrl: options['run-url'],
@@ -985,6 +1060,7 @@ export function runCli(argv) {
       `${JSON.stringify({
         title: renderIssueTitle({ analysis, occurrence }),
         body: renderIssueBody({ analysis, existingBody, occurrence }),
+        adopted_stub: adoptedStub,
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers
           : [

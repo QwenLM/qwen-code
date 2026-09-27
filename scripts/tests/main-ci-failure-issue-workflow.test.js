@@ -76,6 +76,19 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('apply_autofix_route "${issue_url}"');
   });
 
+  it('files adopted per-test stubs separately so autofix is re-armed', () => {
+    expect(workflow).toContain(
+      "adopted_stub: '${{ steps.plan.outputs.adopted_stub }}'",
+    );
+    expect(workflow).toContain(
+      "ADOPTED_STUB: '${{ needs.analyze.outputs.adopted_stub }}'",
+    );
+    expect(workflow).toContain(
+      'if [[ "${ADOPTED_STUB}" == \'true\' && -n "${EXISTING_ISSUE}" ]]; then',
+    );
+    expect(workflow).toContain('filing a fresh identified-test issue.');
+  });
+
   it('deduplicates by failing test and includes run context', () => {
     // The dedupe key is the failing test, not the commit: a standing red used to
     // open one issue per merge. The markers themselves live in the helper.
