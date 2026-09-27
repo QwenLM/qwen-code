@@ -72,10 +72,12 @@ While the episode lasts:
   and no work the child reports holding. The close is authorized locally and
   bounded, as for any condemned channel. Once the channel holds no work, it is
   retired early.
-- No current cause ends the episode early. The #12737 decision lets only a
-  validated acknowledgement of a missing workspace change clear a quarantine
-  before the deadline; B2b adds that cause. An overdue settlement therefore
-  retires the channel even if the late work settles afterwards.
+- The #12737 decision lets only a validated acknowledgement of a missing
+  workspace change clear a quarantine before the deadline;
+  [the second part of B2b](./2026-09-27-paired-engine-workspace-change-propagation.md)
+  adds that cause and its early end. No other cause ends an episode early, so
+  an overdue settlement retires the channel even if the late work settles
+  afterwards.
 
 At the deadline, the Bridge requests cancellation of running turns and then
 terminates the channel with the existing escalation. The deadline triggers

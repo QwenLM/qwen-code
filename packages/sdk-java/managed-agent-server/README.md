@@ -350,18 +350,23 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-To exercise an admitted in-flight Turn at the tool-intent boundary, run:
+The in-flight and continuation variants are not yet runnable. Both drive their
+assertion through a physical tool execution, and the Hosted Harness no-tool
+slice refuses every tool call by design, so the modes exit immediately with a
+not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
+lands:
 
 ```bash
-npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
+npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
 ```
 
-This mode holds the first Broker `:start` request after the Harness has durably
-committed its `await_runtime` checkpoint, kills the original Spring and Hosted
-Harness process trees, deletes their homes, and starts replacement owners. It
-requires the replacement Harness to use the original `executionCallId`, execute
-the physical tool exactly once, continue the original Prompt without replay,
-and commit one public terminal event.
+Once enabled, the in-flight mode holds the first Broker `:start` request after
+the Harness has durably committed its `await_runtime` checkpoint, kills the
+original Spring and Hosted Harness process trees, deletes their homes, and
+starts replacement owners. It requires the replacement Harness to use the
+original `executionCallId`, execute the physical tool exactly once, continue
+the original Prompt without replay, and commit one public terminal event.
 
 Once the missing integration lands, a zero-delay run can check the real-model
 path. A controlled cold-start delay can then test output before Runtime
