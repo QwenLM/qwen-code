@@ -46,3 +46,9 @@ npx vitest run src/models/model-catalog.test.ts src/models/model-catalog-refresh
 These suites cover real bundled configuration resolution, explicit overrides, offline switches, invalid data, normalized conflicts, corrections, cache freshness, 304 revalidation, failed fetches and concurrent refreshes. Global suites retain regex-only setup; the catalog-specific suite explicitly enables the real catalog in an isolated QWEN_HOME.
 
 For a real lifecycle check, resolve qwen3.8-max with an explicit context and modalities, construct and initialize Config, refresh authentication, then initialize a second Config without those explicit values. The first must retain its values and the second must receive the catalog defaults with no PDF capability. No live model request is necessary for this configuration invariant.
+
+## Current-head evidence and explicit output budgets
+
+The snapshot now contains 194 entries (25,287 bytes). The earlier 195-entry measurements above describe the historical payload before the unreachable DeepSeek alias was removed. Public [round-2 verification](https://github.com/QwenLM/qwen-code/pull/11959#issuecomment-5851908713) and its [scripts and raw results](https://github.com/wenshao/qwen-code/tree/assets-pr11959/pr11959/round2) cover the real CLI, endpoint benefits, cache recovery and project environment isolation at `9088f00b`.
+
+The remaining explicit-budget regression is corrected: catalog-only output limits provide defaults without clipping explicit request or environment budgets. Existing curated output caps and context-window clamping remain. Real bundled-data provider tests cover QwQ-32B, Kimi-K2-Thinking and QVQ-Max defaults and explicit 32,768 requests, plus the unchanged GLM-4.7 cap. An explicitly excessive budget can still be rejected by its backend, as before this PR.

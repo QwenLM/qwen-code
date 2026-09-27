@@ -8,6 +8,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Config } from '../config/config.js';
+import { DefaultOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/default.js';
 import { AuthType } from '../core/contentGenerator.js';
 import {
   defaultOutputCeiling,
@@ -184,7 +186,44 @@ describe('model catalog', () => {
     expect(defaultOutputCeiling('glm-4.7')).toBe(16_384);
     expect(tokenLimit('qwen-vl-max', 'output')).toBe(32_768);
     expect(tokenLimit('new-model', 'output')).toBe(8_000);
-    expect(hasExplicitOutputLimit('new-model')).toBe(true);
+    expect(hasExplicitOutputLimit('new-model')).toBe(false);
+  });
+
+  it('uses catalog output defaults without clipping explicit provider requests', () => {
+    const previous = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+    try {
+      for (const [model, defaultTokens] of [
+        ['qwq-32b', 8_192],
+        ['kimi-k2-thinking', 16_384],
+        ['qvq-max', 8_192],
+      ] as const) {
+        const provider = new DefaultOpenAICompatibleProvider(
+          { model },
+          {} as Config,
+        );
+        const request = { model, messages: [] };
+        delete process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+        expect(provider.buildRequest(request, 'test').max_tokens).toBe(
+          defaultTokens,
+        );
+        expect(
+          provider.buildRequest({ ...request, max_tokens: 32_768 }, 'test')
+            .max_tokens,
+        ).toBe(32_768);
+        process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'] = '32768';
+        expect(provider.buildRequest(request, 'test').max_tokens).toBe(32_768);
+      }
+      const provider = new DefaultOpenAICompatibleProvider(
+        { model: 'glm-4.7' },
+        {} as Config,
+      );
+      expect(
+        provider.buildRequest({ model: 'glm-4.7', messages: [] }, 'test')
+          .max_tokens,
+      ).toBe(16_384);
+    } finally {
+      restoreEnv('QWEN_CODE_MAX_OUTPUT_TOKENS', previous);
+    }
   });
 
   it('requires explicit Qwen PDF support for both bundled and refreshed data', () => {

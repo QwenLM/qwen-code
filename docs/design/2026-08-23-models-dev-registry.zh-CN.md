@@ -16,11 +16,13 @@ status: '已在 PR #11959 实现'
 
 ## 解析与优先级
 
-显式模型配置仍优先于目录推断值。对于推断的上下文窗口，客户端维护的纠正优先于选中的目录；缺失字段回退到现有正则表和通用默认值。输出上限优先使用现有正则表，保留按 endpoint 维护的请求上限；目录只补充表中没有匹配项的模型。模态取目录与正则能力的并集，保留现有支持。显式配置的模态仍具有最高优先级。
+显式模型配置仍优先于目录推断值。对于推断的上下文窗口，客户端维护的纠正优先于选中的目录；缺失字段回退到现有正则表和通用默认值。输出上限优先使用现有正则表，保留按 endpoint 维护的请求上限；目录只为表中没有匹配项的模型提供默认输出上限，不用这些目录值截断显式请求或环境变量预算。原有人工维护的输出上限和上下文窗口裁剪仍然生效。模态取目录与正则能力的并集，保留现有支持。显式配置的模态仍具有最高优先级。
 
 仅当运行时缓存的 ISO `fetchedAt` 时间戳比内置快照新时，才以缓存替代内置快照。新旧判断不使用文件系统修改时间。刷新缓存不会重写已经解析的会话配置；后续解析可看到刷新后的数据。
 
 即使缓存仍记录已退役的 1M beta 上限，Sonnet 4.5 的上下文也纠正为 200,000 tokens。Sonnet 4.6 与 Sonnet 5 保留目录中的上限。依据见 [Anthropic 上下文窗口文档](https://platform.claude.com/docs/en/build-with-claude/context-windows)。
+
+preset 或显式配置的上下文窗口仍以该配置为准。自动检测使用目录，因此同一模型 id 可能与 preset 不同。保留这一优先级以提供已验证的元数据更新；endpoint 特有的覆盖使用现有模型设置。模态并集也保持不变，因为它启用了 DashScope 上已验证的图片支持。按 provider 对齐留待后续，不把所有空的家族回退都解释为能力否决。
 
 ## 数据投影与 endpoint 歧义
 
@@ -42,6 +44,6 @@ status: '已在 PR #11959 实现'
 
 定向测试覆盖缓存选择、非法条目、冲突拒绝、别名归一化、逐字段回退、纠正、刷新节流和失败处理。真实来源冒烟还需覆盖内置目录开关对照和真实 models.dev 刷新；mock fetch 无法证明上游数据准确。
 
-[DashScope PDF 文档](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) 说明 qwen3.8-max 在北京和新加坡支持通过 Chat Completions 使用 `file_data` 与 `filename` 传入 PDF，并明确排除 Responses API 的 PDF 传递。因此目录不自动启用 qwen3.8-max 的 PDF。查询纠正同时覆盖内置和刷新的数据；用户可针对已验证 endpoint 显式配置 `generationConfig.modalities.pdf`。图片、视频能力和其他模型保持不变。自动推断 PDF 留待查询能识别 endpoint 和协议并完成真实识别测试后启用。
+[DashScope PDF 文档](https://www.alibabacloud.com/help/en/model-studio/pdf-understanding) 说明 qwen3.8-max 在北京和新加坡支持通过 Chat Completions 使用 `file_data` 与 `filename` 传入 PDF，并明确排除 Responses API 的 PDF 传递。因此目录不自动启用 qwen3.8-max 的 PDF。查询纠正同时覆盖内置和刷新的数据；用户可针对已验证 endpoint 显式配置 `generationConfig.modalities.pdf`。这项 PDF 纠正不移除目录中的图片和视频能力。目录可能在正则表基础上增加模态，但不保证每个 endpoint 都支持。自动推断 PDF 留待查询能识别 endpoint 和协议并完成真实识别测试后启用。
 
 命令、结果和剩余交付门槛统一记录在[验证记录](../verification/models-dev-catalog/README.md)。最终 head 必须通过必要检查，PR 描述必须区分显式 PDF 配置与目录默认值。

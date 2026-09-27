@@ -348,20 +348,12 @@ function findTokenLimit(
 }
 
 /**
- * Check if a model has an explicitly defined output token limit.
- * This distinguishes between models with known limits in the models.dev
- * catalog or OUTPUT_PATTERNS and unknown models that would fallback to
- * DEFAULT_OUTPUT_TOKEN_LIMIT.
- *
- * @param model - The model name to check
- * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
+ * Whether a curated output limit caps explicit requests. Catalog-only limits
+ * supply defaults, but must not clamp a user's endpoint-specific override.
  */
 export function hasExplicitOutputLimit(model: Model): boolean {
   const norm = normalize(model);
-  return (
-    lookupModelCatalog(norm)?.output !== undefined ||
-    OUTPUT_PATTERNS.some(([regex]) => regex.test(norm))
-  );
+  return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
 }
 
 export function knownTokenLimit(

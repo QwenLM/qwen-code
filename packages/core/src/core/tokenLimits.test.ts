@@ -664,7 +664,7 @@ describe('models.dev catalog', () => {
     expect(tokenLimit('catalog-model', 'input')).toBe(123_456);
     expect(tokenLimit('catalog-model', 'output')).toBe(7_890);
     expect(knownTokenLimit('catalog-model', 'output')).toBe(7_890);
-    expect(hasExplicitOutputLimit('catalog-model')).toBe(true);
+    expect(hasExplicitOutputLimit('catalog-model')).toBe(false);
   });
 
   it('falls back per field when the catalog entry is partial', () => {
