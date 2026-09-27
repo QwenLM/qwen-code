@@ -1,0 +1,271 @@
+{
+  "schemaVersion": 1,
+  "collectionComplete": true,
+  "meaning": "All selected source bytes were stable and copied; capability/health outcomes are preserved separately, including failed and incomplete attempts.",
+  "baseline": "37412a57d473525a81f87e4ca36447981950d9a9",
+  "measuredSnapshot": "f678cfa38173b4195fb88087b213343b4e916d50",
+  "retainedSourceCommits": ["58f407c906", "ac99ffd917", "cdafe6b390"],
+  "rawArchive": {
+    "file": ".qwen/testloc-evidence/round6-raw.tar.gz",
+    "sha256": "c848a842bd30dc3b268a7b9abc63137bede84a33842264f84ecc39023b886714",
+    "bytes": 22276213
+  },
+  "memberIndex": {
+    "archiveMember": "raw-files.json",
+    "sha256": "25f58554e05c11e82c615e31ff3cb8d2b6cfd4d497474420fae8f85066d6f3d8",
+    "files": 2238,
+    "sourceBytes": 102978332
+  },
+  "verification": {
+    "everyArchiveMemberHashMatches": true,
+    "verifiedSourceMembers": 2238,
+    "additionalIndexMember": 1,
+    "referencesFullyClassified": true,
+    "schemaReplay": {
+      "command": [
+        "/Users/andy/.nvm/versions/node/v22.23.2/bin/node",
+        ".qwen/testloc-evidence/round6-replay-verify/compare.mjs",
+        "mutation",
+        ".qwen/testloc-evidence/round6-replay-verify/before.json",
+        ".qwen/testloc-evidence/round6-replay-verify/after.json",
+        "--expected",
+        ".qwen/testloc-evidence/round6-replay-verify/expected.json"
+      ],
+      "exit": 1,
+      "ok": false,
+      "lostKills": 0,
+      "gainedKills": 4,
+      "inconclusive": 19,
+      "comparisonSha256": "675f54e26566ce08d9ae7a2df0e465468dc2c281d238ea84b09a93ad8babf09f",
+      "method": "Reports and original comparator were extracted from the archive; the original strict false result is reproduced."
+    }
+  },
+  "sourcePolicy": "All VM round6 evidence outside the two checkouts, explicit tool/config subsets, runtime without dependencies, and every local round6 file; no outcome filtering.",
+  "collectorSha256": "2ea5d3ddb63e4e5fc8b5460abd20594db85ca1a907172c797209e4258c676d05",
+  "excludedDirectories": [
+    "/tmp/qwen-testloc-round5/measurement/node_modules",
+    "/tmp/qwen-testloc-round6/baseline",
+    "/tmp/qwen-testloc-round6/baseline/scripts/test-loc/evidence",
+    "/tmp/qwen-testloc-round6/candidate",
+    "/tmp/qwen-testloc-round6/candidate/scripts/test-loc/evidence"
+  ],
+  "unresolvedReferences": [],
+  "referenceAssessment": [
+    {
+      "path": "/tmp/qwen-testloc-round5/measurement/node_modules/@stryker-mutator/api/dist/src/test-runner/run-result-helpers.js",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round5/measurement/node_modules/@stryker-mutator/vitest-runner/dist/src/index.js",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/node_modules",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/node_modules/typescript/package.json",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/node_modules/vitest/package.json",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/node_modules/vitest/vitest.mjs",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/packages/core/.round6-provider-cf54c69e746f4da4bdc0f82edef2630a-config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/packages/core/.round6-provider-cf54c69e746f4da4bdc0f82edef2630a-setup.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/packages/core/.test-loc-mutation-replay-5yw4it.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/packages/core/.test-loc-mutation-replay-8c8XlG.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/baseline/packages/core/.test-loc-mutation-replay-JHjEws.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules/eslint/bin/eslint.js",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules/prettier/bin/prettier.cjs",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules/typescript/package.json",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules/vitest/package.json",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/node_modules/vitest/vitest.mjs",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "dependency",
+      "explanation": "Installed runtime excluded; pinned lockfiles and version/configuration hashes are archived."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.round6-provider-e955ffbafef140e5a882bb18b60c22c8-config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.round6-provider-e955ffbafef140e5a882bb18b60c22c8-setup.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.test-loc-4cc850ce-2241-4247-a1c1-5677073265db-config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.test-loc-815915e4-8b4e-4237-8073-09dfa97b84cb-config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.test-loc-mutation-replay-RmeObT.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.test-loc-mutation-replay-ZYmzkT.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/.test-loc-mutation-replay-leGV5g.config.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/src/hooks/.test-loc-4cc850ce-2241-4247-a1c1-5677073265db.test.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    },
+    {
+      "path": "/tmp/qwen-testloc-round6/candidate/packages/core/src/utils/.test-loc-815915e4-8b4e-4237-8073-09dfa97b84cb.test.ts",
+      "status": "excluded-checkout-or-dependency",
+      "classification": "cleaned-temporary-file",
+      "explanation": "Owned temporary test/config/setup removed by runner cleanup; archived gate/replay/capture source and command arguments reconstruct it. Baseline test bytes are pinned by baseline commit and source hashes."
+    }
+  ],
+  "plans": [
+    {
+      "file": "plans/faults-plan.json.gz",
+      "sha256": "6fbd991edca169e6600c468f22f47cab6bf152a0b53e08baaadca38aad8c4f09",
+      "decompressedSha256": "5610cbdbf0cdbb58d0800934b92fa509d0b9d8f898664a8136a5baecc15813c9",
+      "originalPath": "/tmp/qwen-testloc-round6/faults-plan.json",
+      "kind": "frozen-historical-faults",
+      "items": 9,
+      "profile": null,
+      "maxWorkers": 4
+    },
+    {
+      "file": "plans/mutations-hooks-plan.json.gz",
+      "sha256": "663e094bbda7cbafe6dbfc1c750c643275f188ac9d82c95a2869e122422c522f",
+      "decompressedSha256": "d748b1f8968adc5960f9ceb535c79ae4e4e7c171fc9149ca03de80c9ededcac0",
+      "originalPath": "/tmp/qwen-testloc-round6/mutations-hooks-plan.json",
+      "kind": "frozen-mutation-samples",
+      "items": 2,
+      "profile": "deletion",
+      "maxWorkers": 4
+    },
+    {
+      "file": "plans/mutations-providers-plan.json.gz",
+      "sha256": "7874a23aba03c0f71ed9d9322f8cc3681bd34f87b6f5fea76f2e24aa799e97a3",
+      "decompressedSha256": "d3ae8464ebc4b87d5067e0868348dacf886251fa016aad6eb0f2e1c6f22bb390",
+      "originalPath": "/tmp/qwen-testloc-round6/mutations-providers-plan.json",
+      "kind": "frozen-mutation-samples",
+      "items": 6,
+      "profile": "deletion",
+      "maxWorkers": 4
+    },
+    {
+      "file": "plans/mutations-schema-plan.json.gz",
+      "sha256": "f60479567175e2c96651da2ffa6e5e6d02dd741460dde96ed0bef37f6ef49ea1",
+      "decompressedSha256": "1961671139d0ac380e3db30de4842da2c174a0e620d8f20d15099fbe733c67cb",
+      "originalPath": "/tmp/qwen-testloc-round6/mutations-schema-plan.json",
+      "kind": "frozen-mutation-samples",
+      "items": 1,
+      "profile": "deletion",
+      "maxWorkers": 4
+    }
+  ],
+  "results": {
+    "trackedFile": "results.json",
+    "trackedSha256": "2ee3444e8ceb60a5c4143e5ccaa237c4752a3ada1f63b83c1ad01ec309dda740",
+    "rawArchiveMember": "local/results.json",
+    "rawSha256": "dec0c9fbc49640d0de278d6dc32db538280b73310adf04fbf489091d7fe0ceb7",
+    "relationship": "JSON values are identical; the tracked file is formatted with Prettier."
+  },
+  "reproducibility": {
+    "collector": "local/collect-evidence.py",
+    "summarizer": "local/summarize-round6.py",
+    "snapshotBundle": "vm/tmp/qwen-testloc-round6/measured-snapshot/candidate.bundle",
+    "snapshotProvenance": "vm/tmp/qwen-testloc-round6/measured-snapshot/provenance.json",
+    "fullCaseMappingCheck": "local/full-case-mapping-check.json",
+    "failedCollectionAttempts": [
+      "local/collector-attempt1/",
+      "local/collector-attempt2/"
+    ]
+  }
+}
