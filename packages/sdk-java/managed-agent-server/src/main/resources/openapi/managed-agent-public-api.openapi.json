@@ -2820,7 +2820,7 @@
       },
       "PublicEvent": {
         "type": "object",
-        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Reload the Items until their snapshot_through_sequence reaches the sequence of the stream.reconciled event, then resume after it; the Snapshot is rebuilt meanwhile.",
+        "description": "A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no item_id or content_part_id, and that later deltas may name other Parts. Reload the Items until the snapshot_through_sequence they return reaches the sequence of the stream.reconciled event, then resume after that snapshot_through_sequence, not after the stream.reconciled event; the Snapshot is rebuilt meanwhile.",
         "required": [
           "schema_version",
           "projection_version",

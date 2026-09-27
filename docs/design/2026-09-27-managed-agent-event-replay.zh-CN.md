@@ -75,7 +75,8 @@ resync。
 - `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
   是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。由于 Snapshot
   在它之后重建，公共客户端要重新读取 Items，直到其 `snapshot_through_sequence`
-  达到该事件。
+  达到该事件，然后从这个 `snapshot_through_sequence` 之后继续。如果改为从
+  `stream.reconciled` 事件之后继续，就会再次应用 Snapshot 中已有的增量。
 
 ### 4.2 版本与身份
 

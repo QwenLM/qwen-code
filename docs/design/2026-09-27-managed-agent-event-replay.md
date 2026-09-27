@@ -89,7 +89,9 @@ correct `cursor_expired` or resync.
   and identity they were accepted with, except after a `stream.reconciled`
   event, which the contract did not mention before (see 4.2). A public client
   reloads the Items until their `snapshot_through_sequence` reaches that
-  event, because the Snapshot is rebuilt after it.
+  event, because the Snapshot is rebuilt after it, and then resumes after that
+  `snapshot_through_sequence`. Resuming after the `stream.reconciled` event
+  instead would apply again the deltas that the Snapshot already holds.
 
 ### 4.2 Versions and identity
 
