@@ -135,6 +135,13 @@ export class BranchPointInvalidError extends Error {
   }
 }
 
+export class SessionForkSourceUnavailableError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Source session not found or empty: ${sessionId}`);
+    this.name = 'SessionForkSourceUnavailableError';
+  }
+}
+
 export interface ForkSessionOptions {
   atRecordId?: string;
   title?: string;
@@ -4046,7 +4053,7 @@ export class SessionService {
     );
     const records = snapshot?.records ?? [];
     if (records.length === 0) {
-      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+      throw new SessionForkSourceUnavailableError(sourceSessionId);
     }
     assertSessionExecutionEngine(
       snapshot?.executionEngine,
@@ -4117,7 +4124,7 @@ export class SessionService {
         ),
     );
     if (sourceRecords.length === 0) {
-      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+      throw new SessionForkSourceUnavailableError(sourceSessionId);
     }
     const sourceEngine = records.find(
       (record) =>

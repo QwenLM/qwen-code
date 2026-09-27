@@ -465,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    expect(runServeSource).not.toMatch(/import \{ SessionService \} from/);
+    expect(runServeSource).toMatch(
+      /await import\(\s*'@qwen-code\/qwen-code-core\/services\/sessionService\.js'/,
+    );
     // web-shell-static (express-static/CSP machinery) must stay out of the
     // fast-path static closure at every depth, including transitive edges
     // through server/self-origin.js and web-shell-preauth.js; the static
