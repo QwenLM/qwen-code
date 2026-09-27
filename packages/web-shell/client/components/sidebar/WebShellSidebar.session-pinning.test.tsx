@@ -230,6 +230,7 @@ function renderSidebar(
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
+          onLeaveCurrentStandaloneForDelete={async () => false}
           onLoadSession={loadSession}
           onError={onError}
         />

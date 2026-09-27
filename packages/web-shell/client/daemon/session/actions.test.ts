@@ -5849,6 +5849,7 @@ describe('createDaemonSessionActions', () => {
     const session = createMockSession('session-a');
     const detach = createDeferred<void>();
     session.detach.mockReturnValueOnce(detach.promise);
+    const manualSessionClearRef = { current: false };
     const { actions, getConnection } = createActionsHarness({
       connection: {
         status: 'connected',
@@ -5856,6 +5857,7 @@ describe('createDaemonSessionActions', () => {
         clientId: session.clientId,
       },
       session,
+      manualSessionClearRef,
     });
 
     let completed = false;
@@ -5866,6 +5868,7 @@ describe('createDaemonSessionActions', () => {
       });
     await vi.waitFor(() => expect(session.detach).toHaveBeenCalledOnce());
     expect(completed).toBe(false);
+    expect(manualSessionClearRef.current).toBe(true);
 
     detach.resolve();
     await clearing;
@@ -5896,6 +5899,40 @@ describe('createDaemonSessionActions', () => {
     ).rejects.toThrow('detach failed');
   });
 
+  it('rejects a strict clear when the connection attachment changed', async () => {
+    const session = createMockSession('session-a');
+    const manualSessionClearRef = { current: false };
+    const { actions, replaceConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        clientId: session.clientId,
+      },
+      session,
+      manualSessionClearRef,
+    });
+
+    replaceConnection({
+      status: 'connected',
+      sessionId: 'session-b',
+      clientId: session.clientId,
+    });
+    await expect(
+      actions.clearSession({ requireDetachSessionId: session.sessionId }),
+    ).rejects.toThrow('Current session changed before detach');
+
+    replaceConnection({
+      status: 'connected',
+      sessionId: session.sessionId,
+      clientId: 'another-client',
+    });
+    await expect(
+      actions.clearSession({ requireDetachSessionId: session.sessionId }),
+    ).rejects.toThrow('Current session attachment is not ready for detach');
+    expect(session.detach).not.toHaveBeenCalled();
+    expect(manualSessionClearRef.current).toBe(false);
+  });
+
   it('rejects a strict clear without a client id instead of accepting a no-op detach', async () => {
     const session = createMockSession('session-a');
     Object.assign(session, { clientId: undefined });
@@ -5906,7 +5943,7 @@ describe('createDaemonSessionActions', () => {
 
     await expect(
       actions.clearSession({ requireDetachSessionId: session.sessionId }),
-    ).rejects.toThrow('Current session changed before detach');
+    ).rejects.toThrow('Current session attachment is not ready for detach');
     expect(session.detach).not.toHaveBeenCalled();
     expect(getConnection().sessionId).toBe(session.sessionId);
   });

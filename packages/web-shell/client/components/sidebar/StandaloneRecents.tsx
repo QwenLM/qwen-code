@@ -50,7 +50,7 @@ interface StandaloneRecentsProps {
     },
   ) => ReactNode;
   onLoadSession: (sessionId: string) => Promise<void> | void;
-  onLeaveCurrentSession?: (sessionId: string) => Promise<boolean>;
+  onLeaveCurrentSession: (sessionId: string) => Promise<boolean>;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -379,7 +379,7 @@ export function StandaloneRecents({
       let leftCurrentSession = false;
       const succeeded = await run(session.sessionId, async () => {
         if (session.sessionId === currentSessionId && !leftCurrentSession) {
-          if (!(await onLeaveCurrentSession?.(session.sessionId))) return false;
+          if (!(await onLeaveCurrentSession(session.sessionId))) return false;
           leftCurrentSession = true;
         }
         const result = await workspace.client.deleteStandaloneSessions([
@@ -697,13 +697,14 @@ export function StandaloneRecents({
                 type="button"
                 variant="destructive"
                 disabled={!!busySessionId}
+                aria-busy={deleteBusy}
                 onClick={() => {
                   void deleteSession(deleteCandidate).then((succeeded) => {
                     if (succeeded) setDeleteCandidate(undefined);
                   });
                 }}
               >
-                {t('sidebar.delete')}
+                {deleteBusy ? t('delete.deleting') : t('sidebar.delete')}
               </Button>
             </div>
           </div>

@@ -2386,13 +2386,15 @@ export function createDaemonSessionActions({
       if (requiredSessionId) {
         const connection = getConnection();
         if (
-          session?.sessionId !== requiredSessionId ||
-          !session.clientId ||
+          !session ||
+          session.sessionId !== requiredSessionId ||
           sessionRef.current !== session ||
-          connection.sessionId !== requiredSessionId ||
-          connection.clientId !== session.clientId
+          connection.sessionId !== requiredSessionId
         ) {
           throw new Error('Current session changed before detach');
+        }
+        if (!session.clientId || connection.clientId !== session.clientId) {
+          throw new Error('Current session attachment is not ready for detach');
         }
         manualSessionClearRef.current = true;
       }

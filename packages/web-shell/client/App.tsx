@@ -13550,7 +13550,12 @@ export function App({
             : undefined;
         }
       }
-      if (sessionOpenInvocationRef.current !== invocation) return false;
+      if (sessionOpenInvocationRef.current !== invocation) {
+        if (opts?.requireDetachSessionId) {
+          pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
+        }
+        return false;
+      }
       const targetWorkspaceCwd =
         nextContext?.kind === 'workspace' ? nextContext.cwd : undefined;
       const previousPendingContext = pendingSessionContextRef.current;
@@ -13609,6 +13614,7 @@ export function App({
           opts?.requireDetachSessionId &&
           sessionOpenInvocationRef.current !== invocation
         ) {
+          pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
           return false;
         }
         if (
@@ -13634,7 +13640,14 @@ export function App({
         if (composerFocusRequestRef.current === focusRequest) {
           composerFocusRequestRef.current += 1;
         }
-        reportError(error, 'Failed to start a new chat');
+        if (opts?.requireDetachSessionId) {
+          reportError(
+            new Error(t('sidebar.standaloneLeaveFailed'), { cause: error }),
+            t('sidebar.standaloneLeaveFailed'),
+          );
+        } else {
+          reportError(error, 'Failed to start a new chat');
+        }
         return false;
       }
     },
@@ -13663,6 +13676,7 @@ export function App({
         current.sessionId !== sessionId ||
         current.sessionContext?.kind !== 'standalone'
       ) {
+        pushToast('warning', t('sidebar.standaloneDeleteCancelled'));
         return Promise.resolve(false);
       }
       if (currentSessionRunningRef.current) {

@@ -424,7 +424,7 @@ interface WebShellSidebarProps {
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
-  onLeaveCurrentStandaloneForDelete?: (sessionId: string) => Promise<boolean>;
+  onLeaveCurrentStandaloneForDelete: (sessionId: string) => Promise<boolean>;
   currentSessionRunning?: boolean;
   onLoadSession: (
     sessionId: string,
@@ -4515,17 +4515,21 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
-      const currentStandalone = Boolean(standalone?.active);
+      const currentStandaloneNotReady = Boolean(
+        standalone?.active &&
+          (connection.status !== 'connected' ||
+            !connection.clientId ||
+            connection.error ||
+            connection.loadingTranscript ||
+            connection.catchingUp),
+      );
       const deleteDisabled =
-        busy ||
-        (currentStandalone && !onLeaveCurrentStandaloneForDelete) ||
-        (isCurrent && running);
-      const deleteDisabledTitle =
-        currentStandalone && !onLeaveCurrentStandaloneForDelete
-          ? t('sidebar.currentStandaloneDeleteDisabled')
-          : isCurrent && running
-            ? t('sidebar.currentDeleteDisabled')
-            : undefined;
+        busy || currentStandaloneNotReady || (isCurrent && running);
+      const deleteDisabledTitle = currentStandaloneNotReady
+        ? t('sidebar.currentStandaloneNotReady')
+        : isCurrent && running
+          ? t('sidebar.currentDeleteDisabled')
+          : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
@@ -4913,6 +4917,11 @@ export function WebShellSidebar({
     },
     [
       busySessionIds,
+      connection.catchingUp,
+      connection.clientId,
+      connection.error,
+      connection.loadingTranscript,
+      connection.status,
       canDeleteSession,
       currentSessionRunning,
       canShowDeleteSession,
@@ -4941,7 +4950,6 @@ export function WebShellSidebar({
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
-      onLeaveCurrentStandaloneForDelete,
       openGroupMenuFromAnchor,
       saveRename,
       searchQuery,

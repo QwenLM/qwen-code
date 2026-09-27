@@ -184,7 +184,9 @@ describe('StandaloneRecents', () => {
           onNewSession={options.onNewSession}
           renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
-          onLeaveCurrentSession={options.onLeaveCurrentSession}
+          onLeaveCurrentSession={
+            options.onLeaveCurrentSession ?? vi.fn().mockResolvedValue(false)
+          }
           onError={onError}
           onRenameSession={onRenameSession}
           onMutated={onMutated}
@@ -554,7 +556,10 @@ describe('StandaloneRecents', () => {
     await act(async () => dialogButton('sidebar.delete').click());
     expect(onLeaveCurrentSession).toHaveBeenCalledExactlyOnceWith('active');
     expect(mocks.deleteSession).not.toHaveBeenCalled();
-    expect(dialogButton('sidebar.delete').disabled).toBe(true);
+    expect(dialogButton('delete.deleting').disabled).toBe(true);
+    expect(dialogButton('delete.deleting').getAttribute('aria-busy')).toBe(
+      'true',
+    );
     expect(dialogButton('common.cancel').disabled).toBe(true);
     expect(
       container
@@ -617,6 +622,37 @@ describe('StandaloneRecents', () => {
       expect.objectContaining({ message: 'Still open' }),
       'sidebar.standaloneActionFailed',
     );
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+  });
+
+  it('retries a refused delete after leaving without detaching again', async () => {
+    const onLeaveCurrentSession = vi.fn().mockResolvedValue(true);
+    mocks.deleteSession
+      .mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        fileCleanupPending: [],
+        errors: [
+          { sessionId: 'active', code: 'session_busy', message: 'Still open' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        removed: ['active'],
+        notFound: [],
+        fileCleanupPending: [],
+        errors: [],
+      });
+    await render({ currentSessionId: 'active', onLeaveCurrentSession });
+
+    await act(async () => deleteRow('Active chat').click());
+    await act(async () => dialogButton('sidebar.delete').click());
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+    await render({ currentSessionId: undefined, onLeaveCurrentSession });
+    await act(async () => dialogButton('sidebar.delete').click());
+
+    expect(onLeaveCurrentSession).toHaveBeenCalledExactlyOnceWith('active');
+    expect(mocks.deleteSession).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain('Active chat');
   });
 
   it('deletes a different chat without leaving the current one', async () => {

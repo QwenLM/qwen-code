@@ -120,6 +120,7 @@ const {
     connection: {
       status: 'connected',
       sessionId: null as string | null,
+      clientId: undefined as string | undefined,
       sessionContext: undefined as
         | { kind: 'workspace'; cwd: string }
         | { kind: 'standalone' }
@@ -465,7 +466,8 @@ function renderSidebar(
           onNewSession={overrides.onNewSession ?? (() => false)}
           onNewStandaloneSession={overrides.onNewStandaloneSession}
           onLeaveCurrentStandaloneForDelete={
-            overrides.onLeaveCurrentStandaloneForDelete
+            overrides.onLeaveCurrentStandaloneForDelete ??
+            vi.fn().mockResolvedValue(false)
           }
           currentSessionRunning={overrides.currentSessionRunning}
           onLoadSession={overrides.onLoadSession ?? (() => {})}
@@ -788,6 +790,8 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   connection.sessionId = null;
+  connection.clientId = undefined;
+  connection.status = 'connected';
   connection.sessionContext = undefined;
   connection.workspaceCwd = '/tmp/project';
   connection.supportedCommands = undefined;
@@ -6903,6 +6907,7 @@ describe('WebShellSidebar standalone grouping', () => {
     connection.capabilities = standaloneCapabilities;
     workspace.capabilities = standaloneCapabilities;
     connection.sessionId = 'standalone-current';
+    connection.clientId = 'current-client';
     listStandaloneSessionsPage.mockImplementation(
       async ({ archiveState }: { archiveState: string }) => ({
         sessions:
@@ -6960,6 +6965,7 @@ describe('WebShellSidebar standalone grouping', () => {
       'standalone-current',
     );
 
+    connection.clientId = undefined;
     renderSidebar({
       onLoadStandaloneSession: vi.fn(),
       onStandaloneNotice: vi.fn(),
@@ -6971,6 +6977,9 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(
       inlineSessionAction('Current standalone chat', 'Delete')?.disabled,
     ).toBe(true);
+    expect(
+      inlineSessionAction('Current standalone chat', 'Delete')?.title,
+    ).toContain('not ready yet');
   });
 
   it('keeps delete disabled on a running current no-workspace row', async () => {
@@ -6981,6 +6990,7 @@ describe('WebShellSidebar standalone grouping', () => {
     connection.capabilities = standaloneCapabilities;
     workspace.capabilities = standaloneCapabilities;
     connection.sessionId = 'standalone-running';
+    connection.clientId = 'running-client';
     listStandaloneSessionsPage.mockResolvedValue({
       sessions: [
         {

@@ -1566,6 +1566,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onLeaveCurrentStandaloneForDelete?: (
         sessionId: string,
       ) => Promise<boolean>;
+      currentSessionRunning?: boolean;
       onNewWorktreeSession?: (
         workspaceCwd?: string,
       ) => Promise<boolean> | boolean | void;
@@ -1597,6 +1598,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
+          'data-current-session-running': String(
+            Boolean(props.currentSessionRunning),
+          ),
           'data-show-session-source-switch': String(
             props.showSessionSourceSwitch,
           ),
@@ -31353,13 +31357,18 @@ describe('App session callbacks', () => {
       features: ['standalone_sessions_v1'],
       workspaces: [],
     } as typeof mockWorkspace.capabilities;
-    renderApp();
+    const onToast = vi.fn();
+    renderApp({ onToast });
     await flush();
 
     const leave = testState.latestLeaveCurrentStandaloneForDelete;
     expect(leave).toBeTypeOf('function');
     expect(await leave?.('another-session')).toBe(false);
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('Deletion was cancelled'),
+    );
 
     let left = false;
     await act(async () => {
@@ -31382,7 +31391,8 @@ describe('App session callbacks', () => {
     mockSessionActions.clearSession.mockRejectedValueOnce(
       new Error('detach failed'),
     );
-    renderApp();
+    const onToast = vi.fn();
+    renderApp({ onToast });
     await flush();
 
     let left = true;
@@ -31393,6 +31403,10 @@ describe('App session callbacks', () => {
         )) ?? true;
     });
     expect(left).toBe(false);
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Nothing was deleted'),
+    );
   });
 
   it('does not leave a standalone chat that became active after its list loaded', async () => {
@@ -31403,10 +31417,25 @@ describe('App session callbacks', () => {
       features: ['standalone_sessions_v1'],
       workspaces: [],
     } as typeof mockWorkspace.capabilities;
-    testState.streamingState = 'responding';
     const onToast = vi.fn();
-    renderApp({ onToast });
+    const { container, rerender } = renderApp({ onToast });
     await flush();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-current-session-running'),
+    ).toBe('false');
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-current-session-running'),
+    ).toBe('true');
 
     let left = true;
     await act(async () => {
@@ -31430,7 +31459,8 @@ describe('App session callbacks', () => {
     } as typeof mockWorkspace.capabilities;
     const clear = deferred<void>();
     mockSessionActions.clearSession.mockReturnValueOnce(clear.promise);
-    const { container } = renderApp();
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
     await flush();
 
     let leaving!: Promise<boolean>;
@@ -31453,6 +31483,10 @@ describe('App session callbacks', () => {
     await act(async () => clear.resolve());
 
     expect(await leaving).toBe(false);
+    expect(onToast).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('Deletion was cancelled'),
+    );
   });
 
   it('lands in the no-workspace area after deleting the current standalone session', async () => {
