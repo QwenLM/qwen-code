@@ -122,6 +122,39 @@ const EN: Messages = {
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
+  'managed.phase.created': 'Created',
+  'managed.workspaceCreateTitle': 'Create a Workspace session',
+  'managed.workspaceLabel': 'Workspace',
+  'managed.workspaceChoose': 'Choose a Workspace',
+  'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceCreate': 'Create session',
+  'managed.workspaceBound': 'Bound Workspace',
+  'managed.workspaceExecutionUnavailable':
+    'Workspace is bound. Message execution is not available in this service yet.',
+  'managed.workspaceSharedFiles':
+    'Sessions in the same Workspace share files. Directory availability is checked before execution.',
+  'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.workspaceUnsupported':
+    'This service does not support Workspace binding.',
+  'managed.workspacePermission':
+    'You do not have permission to discover Workspaces.',
+  'managed.workspaceLoadFailed': 'Could not load Workspaces.',
+  'managed.workspaceStorageUnavailable':
+    'Browser session storage is unavailable. Creation cannot start safely.',
+  'managed.workspaceUncertain':
+    'Creation is unconfirmed. Retry the saved request or read the saved session.',
+  'managed.workspaceRetryRead': 'Retry reading session',
+  'managed.workspaceSessionId': 'Session ID',
+  'managed.workspaceProtocolError': (v) =>
+    `Session ${v?.sessionId ?? ''} was created, but its Workspace binding could not be confirmed.`,
+  'managed.workspaceAbandon': 'Abandon local confirmation',
+  'managed.workspaceAbandonWarning':
+    'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceSwitchTitle': 'Switch Workspace?',
+  'managed.workspaceSwitchDescription':
+    'Switching resets the relative directory to the Workspace root.',
+  'managed.workspaceKeep': 'Keep selection',
+  'managed.workspaceSwitch': 'Switch',
   'managed.phase.admitted': 'Accepted',
   'managed.phase.runtime_starting': 'Preparing environment',
   'managed.phase.agent_running': 'Thinking / responding',
@@ -2113,6 +2146,18 @@ const EN: Messages = {
     'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+  'branch.dialog.title': 'Branch session',
+  'branch.dialog.current.title': 'Current workspace',
+  'branch.dialog.current.description':
+    'Copy the conversation and continue using the current checkout.',
+  'branch.dialog.worktree.title': 'New worktree',
+  'branch.dialog.worktree.description':
+    'Create an isolated checkout from the current Git HEAD. Files are not restored to the state of this response.',
+  'branch.dialog.cancel': 'Cancel',
+  'branch.dialog.confirm': 'Branch',
+  'branch.dialog.creating': 'Creating…',
+  'branch.worktreeActivationFailed':
+    'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
@@ -4149,6 +4194,36 @@ const ZH: Messages = {
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
+  'managed.phase.created': '已创建',
+  'managed.workspaceCreateTitle': '创建工作区会话',
+  'managed.workspaceLabel': '工作区',
+  'managed.workspaceChoose': '选择工作区',
+  'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceCreate': '创建会话',
+  'managed.workspaceBound': '已绑定工作区',
+  'managed.workspaceExecutionUnavailable':
+    '工作区已绑定；当前服务暂未开放消息执行。',
+  'managed.workspaceSharedFiles':
+    '同一工作区的会话共享文件；目录可用性将在执行前验证。',
+  'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
+  'managed.workspacePermission': '没有发现工作区的权限。',
+  'managed.workspaceLoadFailed': '加载工作区失败。',
+  'managed.workspaceStorageUnavailable':
+    '浏览器会话存储不可用，无法安全地开始创建。',
+  'managed.workspaceUncertain':
+    '创建结果尚未确认。可重试已保存的请求，或读取已返回的会话。',
+  'managed.workspaceRetryRead': '重试读取会话',
+  'managed.workspaceSessionId': '会话 ID',
+  'managed.workspaceProtocolError': (v) =>
+    `会话 ${v?.sessionId ?? ''} 已创建，但无法确认其工作区绑定。`,
+  'managed.workspaceAbandon': '放弃本地确认记录',
+  'managed.workspaceAbandonWarning':
+    '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceSwitchTitle': '切换工作区？',
+  'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
+  'managed.workspaceKeep': '保留原选择',
+  'managed.workspaceSwitch': '切换',
   'managed.phase.admitted': '已接收',
   'managed.phase.runtime_starting': '环境准备中',
   'managed.phase.agent_running': '思考／生成中',
@@ -6077,6 +6152,17 @@ const ZH: Messages = {
     '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'branch.dialog.title': '分支会话',
+  'branch.dialog.current.title': '当前工作区',
+  'branch.dialog.current.description': '复制对话，并继续使用当前检出目录。',
+  'branch.dialog.worktree.title': '新 Worktree',
+  'branch.dialog.worktree.description':
+    '从当前 Git HEAD 创建隔离检出目录；不会把文件恢复到这条回复时的状态。',
+  'branch.dialog.cancel': '取消',
+  'branch.dialog.confirm': '创建分支',
+  'branch.dialog.creating': '正在创建…',
+  'branch.worktreeActivationFailed':
+    '分支会话已创建，但无法自动打开它的 Worktree。请从会话列表重新打开。',
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',
