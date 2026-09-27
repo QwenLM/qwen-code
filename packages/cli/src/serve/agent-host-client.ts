@@ -358,7 +358,7 @@ async function executeAssignment(
       ...(steps ? { steps } : {}),
     };
   };
-  const progressHeartbeat = setInterval(() => void flush(), 1000);
+  const progressHeartbeat = setInterval(() => void flush(), 2000);
   progressHeartbeat.unref?.();
   renew.unref?.();
   let summary: string | undefined;
