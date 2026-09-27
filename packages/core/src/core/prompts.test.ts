@@ -70,6 +70,26 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
   });
 
+  it('keeps the merged verification and faithful-reporting rules', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('NEVER assume standard commands.');
+    expect(prompt).toContain(
+      'Read-only or explanatory turns do not require verification.',
+    );
+    expect(prompt).toContain(
+      'if you did not run a verification step — including when you could not',
+    );
+  });
+
+  it('separates the workflow from the general context rules with a blank line', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'or broken work as done.\n\n- Tool results and user messages',
+    );
+  });
+
   it('does not advertise todo_write by default', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();
@@ -262,6 +282,44 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).not.toContain('VERY frequently');
     expect(prompt).not.toContain('EXTREMELY helpful');
     expect(prompt).not.toContain('write 10 items to the todo list');
+  });
+
+  it('states the todo usage rules once, in the Task Management section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'interactive',
+      undefined,
+      true,
+    );
+
+    // The Plan bullet and the tool-guidance bullet only point at the section.
+    expect(prompt).toContain(
+      "Track complex, ambiguous, or multi-step work with 'todo_write'",
+    );
+    expect(prompt).toContain("'# Task Management' governs its use");
+    expect(prompt).not.toContain(
+      'If a todo list exists, keep it current as the scope or approach changes',
+    );
+    expect(prompt.match(/outcome-oriented/g)?.length).toBe(1);
+    expect(prompt.match(/simple or single-step/g)?.length).toBe(1);
+  });
+
+  it('states the comment rule once', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Default to none. Add one only when the _why_ cannot be conveyed',
+    );
+    // The removed sentences are covered by the why-only criterion and the
+    // 'Tools vs. Text' rule; they must not creep back as a second statement.
+    expect(prompt).not.toContain(
+      'talk to the user or describe your changes through comments',
+    );
+    expect(prompt.match(/Default to none/g)?.length).toBe(1);
   });
 
   it('adapts final response detail to the request', () => {
@@ -773,6 +831,11 @@ describe('Core System Prompt (prompts.ts)', () => {
         nonCoding,
       );
       expect(prompt).not.toContain('## Software Engineering Tasks');
+      expect(prompt).not.toContain('**Report outcomes faithfully:**');
+      expect(prompt).toContain(
+        '# Primary Workflows\n\n- Tool results and user messages',
+      );
+      expect(prompt).toContain('- When you see a <persisted-output> tag');
       // Everything else the base prompt carries must survive — dropping the
       // safety rules along with the workflow guidance would be a regression.
       expect(prompt).toContain('# Core Mandates');
@@ -791,6 +854,7 @@ describe('Core System Prompt (prompts.ts)', () => {
         concise,
       );
       expect(prompt).toContain('## Software Engineering Tasks');
+      expect(prompt).toContain('did not run a verification step');
     });
 
     it('omits Learning from headless prompts that cannot receive a reply', () => {
@@ -1356,6 +1420,7 @@ describe('resident tool gating (#12032)', () => {
     expect(prompt).toContain('**Denied Tool Calls:**');
     expect(prompt).toContain('## Security and Safety Rules');
     expect(prompt).toContain('**Report outcomes faithfully:**');
+    expect(prompt).toContain('did not run a verification step');
   });
 
   it('keeps only examples whose tools are all declared', () => {
@@ -1421,17 +1486,14 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 1.4k characters of policy text for a file-work allowlist', () => {
+  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
-    // 1,421 characters (~355 tokens) with the monitor bullet gated too, all
-    // of it policy bullets: the examples only call file tools and the shell,
-    // so this allowlist keeps every one of them. 1,104 is the subagent and
-    // codebase bullets; the remaining 317 is the monitor bullet, which goes
-    // because `monitor` is not in this allowlist either. The band is loose
-    // enough for wording edits and tight enough that a lost saving, or newly
-    // added ungated tool text, shows up here instead of silently.
+    // 无声明快照的基线假定所有工具都可用，因此共移除 1,135 字符：
+    // 委派与搜索规则占 818，未列入白名单的 monitor 规则占 317。
+    // 示例仅调用文件工具和 shell，全部保留。字符区间允许措辞精简，
+    // 同时检测节省量丢失；此口径不同于默认不声明 monitor 的真实会话。
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
     expect(saved).toBeLessThan(1_500);
@@ -1685,6 +1747,23 @@ describe('CodeModeOnly tool guidance', () => {
     expect(prompt).toContain('as `tools.<name>(args)`');
     expect(prompt).toContain('To read files use `tools.read_file`');
     expect(prompt).not.toContain("To read files use 'read_file'");
+  });
+
+  it.each([
+    [
+      'shell reservation',
+      '  - Reserve `tools.run_shell_command` for system commands and terminal operations that require shell execution.',
+    ],
+    [
+      'subagent delegation',
+      "- **Subagent Delegation:** Use the 'agent' tool with specialized agents when the task at hand matches the agent's description. Do not duplicate work a subagent is already doing — if you delegate research to a subagent, do not perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.",
+    ],
+    [
+      'directed search',
+      "- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) call `tools.grep_search` or `tools.glob` yourself. For broader codebase exploration and deep research, use the 'agent' tool with subagent_type=Explore — it is slower, so only when a directed search proves insufficient or the task clearly requires more than 3 queries.",
+    ],
+  ])('keeps the condensed %s rule', (_name, rule) => {
+    expect(codeModePrompt().split('\n')).toContain(rule);
   });
 
   it('does not advertise todo_write when it is disabled', () => {

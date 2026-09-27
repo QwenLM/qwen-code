@@ -27,6 +27,8 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
@@ -91,6 +93,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -116,6 +119,7 @@ import {
 } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 import {
   printRemoteQuickstart,
   tokenQrNoEffectReason,
@@ -203,6 +207,7 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -210,6 +215,7 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  pushChannelRestoreIssues,
   toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
@@ -220,6 +226,7 @@ import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
+  ChannelStartupAttemptFailure,
   ChannelWorkerSupervisor,
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
@@ -241,6 +248,11 @@ import {
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailure,
+  type ChannelRestoreFailureInput,
+} from './channel-restore-failures.js';
 import {
   resolveChannelWorkspaceGroups,
   type ChannelWorkspaceGroup,
@@ -2082,6 +2094,8 @@ function buildProviderSetupInputs(
 }
 
 export interface RunQwenServeDeps {
+  /** Only CLI entrypoints opt into replacing their own daemon process. */
+  updateRestartArgv?: readonly string[];
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /** Test/embed override for the plain HTTP server constructor. */
@@ -2409,7 +2423,9 @@ function currentServeFeaturesForRunQwenServe(
     scratchWorkspaceRegistrationAvailable: true,
     standaloneSessionsAvailable: true,
     workspaceTrustHotReloadAvailable: true,
-    acpHttpEnabled: resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
+    acpHttpEnabled:
+      opts.profile !== 'hosted-harness' &&
+      resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2608,6 +2624,7 @@ function createBootstrapServeApp(input: {
     ChannelWorkerSupervisor['snapshot']
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures: () => readonly ChannelRestoreFailure[];
   onHealthServed?: () => void;
 }): Application {
   const {
@@ -2626,6 +2643,7 @@ function createBootstrapServeApp(input: {
     getRuntimeError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    getChannelRestoreFailures,
     onHealthServed,
   } = input;
   const app = express();
@@ -2647,6 +2665,12 @@ function createBootstrapServeApp(input: {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
     app.use(denyBrowserOriginCors);
+  }
+  if (opts.profile === 'hosted-harness') {
+    app.use((req, res, next) => {
+      if (req.path === '/health' || req.path === '/capabilities') next();
+      else res.sendStatus(404);
+    });
   }
 
   const healthHandler = (req: Request, res: Response): void => {
@@ -2682,6 +2706,11 @@ function createBootstrapServeApp(input: {
   }
 
   app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
+    if (opts.profile === 'hosted-harness') {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({ error: 'Hosted Harness is starting.' });
+      return;
+    }
     if (multiWorkspaceCapabilitiesRequireRuntime) {
       const runtimeError = getRuntimeError();
       if (runtimeError === undefined) {
@@ -2745,6 +2774,10 @@ function createBootstrapServeApp(input: {
         };
     const daemonLogStatus = daemonLog.getStatus();
     const issues: DaemonStatusIssue[] = [issue];
+    // Boot restore records are written before the runtime app exists, and
+    // this route never waits for it, so this is the only response that can
+    // carry them during the cold window.
+    pushChannelRestoreIssues(issues, getChannelRestoreFailures());
     if (daemonLogStatus.health === 'degraded') {
       issues.push({
         code: 'daemon_log_degraded',
@@ -3282,6 +3315,36 @@ export async function runQwenServe(
   }
 }
 
+function bridgeHasLiveSessionWithin(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  worktreePath: string,
+): boolean {
+  return bridge.listWorkspaceSessions(workspaceCwd).some((session) => {
+    try {
+      return isWithinRoot(
+        path.resolve(
+          bridge.getSessionExecutionSnapshot(session.sessionId).effectiveCwd,
+        ),
+        path.resolve(worktreePath),
+      );
+    } catch {
+      return true;
+    }
+  });
+}
+
+async function createBranchRecoverySessionService(
+  runtime: WorkspaceRuntime,
+): Promise<SessionService> {
+  const { SessionService } = await import(
+    '@qwen-code/qwen-code-core/services/sessionService.js'
+  );
+  return new SessionService(runtime.workspaceCwd, {
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+  });
+}
+
 let brokenPipeGuardInstalled = false;
 
 /**
@@ -3314,7 +3377,10 @@ async function runQwenServeImpl(
   // copy before freezing runtime environments or starting auxiliary workers.
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
-  let shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
+  let shouldPreheat =
+    optsIn.profile !== 'hosted-harness' &&
+    !deps.bridge &&
+    shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
       Date.now() - Math.round(process.uptime() * 1000),
@@ -3349,6 +3415,23 @@ async function runQwenServeImpl(
     deps.bootSettings ?? {},
     'serve / ACP / web terminals',
   );
+
+  const { token, generated: generatedToken } = resolveRemoteServeToken(
+    optsIn.token,
+    isLoopbackBind(optsIn.hostname),
+  );
+  const hostedHarnessCapabilityDigest =
+    optsIn.hostedHarnessCapabilityDigest ??
+    (optsIn.profile === 'hosted-harness'
+      ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
+      : undefined);
+  validateHostedHarnessProfile({
+    ...optsIn,
+    token,
+    requireAuth:
+      optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
+    hostedHarnessCapabilityDigest,
+  });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
@@ -3416,14 +3499,15 @@ async function runQwenServeImpl(
     optsIn.hostname.toLowerCase() === 'localhost'
       ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
       : optsIn.hostname;
+  if (optsIn.profile === 'hosted-harness' && !isLoopbackAddress(bindHostname)) {
+    throw new Error(
+      '--profile hosted-harness resolved outside the loopback interface.',
+    );
+  }
   // Generation keys on the operator's spelling (with the literal `localhost`
   // resolved once). The fail-closed backstop for a spelling that resolves
   // off-loopback is the resolved-address refusal further below — it must not
   // be folded into this operand, which by construction never sees it.
-  const { token, generated: generatedToken } = resolveRemoteServeToken(
-    optsIn.token,
-    isLoopbackBind(optsIn.hostname),
-  );
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
@@ -3475,22 +3559,30 @@ async function runQwenServeImpl(
   const opts: ServeOptions = {
     ...optsIn,
     hostname: bindHostname,
+    requireAuth:
+      optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     maxRegisteredWorkspaces: resolveMaxRegisteredWorkspaces(
       optsIn.maxRegisteredWorkspaces,
       daemonRuntimeBaseEnv,
     ),
     token,
+    hostedHarnessCapabilityDigest,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
     clientMcpOverWs:
-      optsIn.clientMcpOverWs ??
-      (!envFlagDisabled(clientMcpOverWsEnv) &&
-        clientMcpOverWsEnv !== undefined),
+      optsIn.profile === 'hosted-harness'
+        ? false
+        : (optsIn.clientMcpOverWs ??
+          (!envFlagDisabled(clientMcpOverWsEnv) &&
+            clientMcpOverWsEnv !== undefined)),
     cdpTunnelOverWs:
-      optsIn.cdpTunnelOverWs ??
-      (!envFlagDisabled(cdpTunnelOverWsEnv) &&
-        (cdpTunnelOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
+      optsIn.profile === 'hosted-harness'
+        ? false
+        : (optsIn.cdpTunnelOverWs ??
+          (!envFlagDisabled(cdpTunnelOverWsEnv) &&
+            (cdpTunnelOverWsEnv !== undefined ||
+              chromeExtensionOriginAllowed))),
   };
   let channelRuntime = opts.channelSelection
     ? await loadChannelWorkerRuntime()
@@ -4106,6 +4198,35 @@ async function runQwenServeImpl(
   // is re-materialized, and repeating the restore there would undo an operator
   // who stopped one of those channels in between.
   const lateRestoredWorkspaces = new Set<string>();
+  // Every workspace that listed each boot name in its own `serve.channels`, so
+  // a name the boot restore drops is reported against the workspaces that
+  // asked for it.
+  let bootChannelClaimants: ReadonlyMap<string, readonly string[]> = new Map();
+  // `serve.channels` names this daemon did not bring up, for the workspace
+  // channel list and daemon status: a name that failed to restore never joins
+  // the committed selection, so neither would otherwise see it.
+  //
+  // A record retires by itself once the state it describes is no longer true,
+  // rather than on an event: the name can be committed later by another
+  // workspace's restore, and the workspace can be disposed while its own
+  // restore is still queued on the channel-control lane, so there is no one
+  // event to hook. An unavailable registry means the daemon is still coming
+  // up, which is not evidence that a workspace has gone.
+  const channelRestoreFailures = createChannelRestoreFailures({
+    isStale: (failure) => {
+      if (
+        channelWorkerManager?.committedChannelNames().includes(failure.channel)
+      ) {
+        return true;
+      }
+      const registry = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+        'workspaceRegistry'
+      ] as WorkspaceRegistry | undefined;
+      return registry
+        ? !registry.getByWorkspaceCwd(failure.workspaceCwd)
+        : false;
+    },
+  });
   // Whether an operator stopped channel hosting through `DELETE
   // /workspace/channel`. The manager cannot say so on its own: one created by
   // a read — listing channels creates it — and one whose hosting was stopped
@@ -4186,6 +4307,7 @@ async function runQwenServeImpl(
    * that "was not restored".
    */
   const startupChannelsForWorkspace = (workspaceCwd: string): string[] => {
+    if (opts.profile === 'hosted-harness') return [];
     const restored = resolveStartupChannelSelection({
       // Never the primary workspace, and read from disk rather than from the
       // boot snapshot: this runs long after boot, and the file may have been
@@ -4200,6 +4322,7 @@ async function runQwenServeImpl(
     return restored.selection?.mode === 'names' ? restored.selection.names : [];
   };
   if (
+    opts.profile !== 'hosted-harness' &&
     !opts.channelSelection &&
     (bootSettings?.serve?.channels !== undefined ||
       startupChannelWorkspaces.length > 1)
@@ -4224,6 +4347,7 @@ async function runQwenServeImpl(
         }
         channelOwnerHints = new Map(bootChannelOwnerHints);
         channelStartupTolerantNames = restored.tolerantNames;
+        bootChannelClaimants = restored.claimants;
         channelRuntime = await ensureChannelRuntime();
         daemonLog.info('restoring channels from workspace serve.channels', {
           channels: channelSelectionNames(opts.channelSelection),
@@ -4575,6 +4699,16 @@ async function runQwenServeImpl(
   // collapses to "did we resolve real assets".
   const webShellMounted = !!webShellDir;
   const serveAppLifecycle = new ServeAppLifecycleController();
+  const restartForUpdate = deps.updateRestartArgv
+    ? createDaemonUpdateRestarter({
+        argv: deps.updateRestartArgv,
+        env: daemonRuntimeBaseEnv,
+        token,
+        externalToolGuardToken: optsIn.externalToolGuard?.token,
+        getPort: () => actualPort,
+        close: () => serveAppLifecycle.close(),
+      })
+    : undefined;
   const liveDiscoveryStableBaseDir = path.resolve(
     deps.liveDiscoveryStableBaseDir ?? path.join(os.homedir(), '.qwen'),
   );
@@ -4746,7 +4880,48 @@ async function runQwenServeImpl(
     // Cleared after the commit, not before: a selection that fails leaves
     // hosting exactly as stopped as it was.
     channelHostingStoppedByOperator = false;
+    // The operator chose the whole selection; what the restores did before it
+    // is no longer the state anyone needs to act on.
+    channelRestoreFailures.clearAll();
     return result;
+  };
+  // What a failed late restore left unhosted. A name the worker itself
+  // reported gets its own error; every other requested name was rolled back
+  // with it (or never started) and carries the restore's error. A name that
+  // is committed anyway — hosted before this restore — did not fail.
+  // The adapter's own error for each channel a failed startup reported, by
+  // channel name. Read structurally: the manager module is loaded lazily, and
+  // these run for errors raised before it exists too.
+  const channelStartupMessages = (err: unknown): Map<string, string> => {
+    const startupFailures = (err as { startupFailures?: unknown } | null)
+      ?.startupFailures;
+    // Keyed by channel alone. The failures belong to one startup attempt, and
+    // the supervisor stamps each with the workspace whose settings define the
+    // channel — which is not the workspace that listed it when a workspace
+    // lists a name another one configures, so matching on that would throw
+    // away exactly the adapter error this record exists to carry.
+    return new Map(
+      (Array.isArray(startupFailures)
+        ? (startupFailures as ChannelStartupAttemptFailure[])
+        : []
+      ).map((failure) => [failure.channel, failure.message] as const),
+    );
+  };
+  const lateRestoreFailures = (
+    workspaceCwd: string,
+    requested: readonly string[],
+    err: unknown,
+  ): ChannelRestoreFailureInput[] => {
+    const committed = new Set(channelWorkerManager?.committedChannelNames());
+    const reported = channelStartupMessages(err);
+    const message = err instanceof Error ? err.message : String(err);
+    return requested
+      .filter((channel) => !committed.has(channel))
+      .map((channel) => ({
+        workspaceCwd,
+        channel,
+        message: reported.get(channel) ?? message,
+      }));
   };
   // The same entry checks as `setChannelWorkerSelection`, for a change that
   // adds names instead of replacing the selection: the manager computes the
@@ -4779,7 +4954,13 @@ async function runQwenServeImpl(
     const result = await manager.stopSelection();
     // Only a stop that stopped something is a decision to remember; an
     // idempotent `DELETE` against hosting that was never on is not.
-    if (result.changed) channelHostingStoppedByOperator = true;
+    // Both lines read the same result: a stop that stopped nothing is not an
+    // operator decision to remember, and not one that supersedes what the
+    // restores reported either.
+    if (result.changed) {
+      channelHostingStoppedByOperator = true;
+      channelRestoreFailures.clearAll();
+    }
     return result;
   };
   const reloadChannelWorker = async (): Promise<ChannelWorkerSnapshot> => {
@@ -4895,6 +5076,7 @@ async function runQwenServeImpl(
     if (!app || stoppedRuntimeAppProducers.has(app)) return;
     stoppedRuntimeAppProducers.add(app);
     const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
@@ -4912,6 +5094,7 @@ async function runQwenServeImpl(
         );
       }
     };
+    stopSafely('MCP App sandbox', locals.stopMcpAppSandbox);
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
@@ -6147,7 +6330,8 @@ async function runQwenServeImpl(
       workspaceSkillsStatusProvider,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
@@ -6193,6 +6377,23 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
+    if (trustedWorkspace) {
+      await recoverBranchWorktreePreparations({
+        workspaceCwd: boundWorkspace,
+        sessionService: await createBranchRecoverySessionService(
+          workspaceRuntimes[0],
+        ),
+        assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
+        isWorktreeOccupied: (worktreePath) =>
+          bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
+        warn: (message, fields) => daemonLog.warn(message, fields),
+      }).catch((error: unknown) => {
+        daemonLog.warn('branch worktree recovery sweep failed', {
+          workspace: boundWorkspace,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
 
     const createRuntimeEnvMetadata = (
       workspace: string,
@@ -6652,7 +6853,9 @@ async function runQwenServeImpl(
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
-        isChannelLive: () => secondaryBridge.isChannelLive(),
+        isChannelLive: () =>
+          secondaryBridge.isWorkspaceControlLive?.() ??
+          secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
@@ -6886,9 +7089,10 @@ async function runQwenServeImpl(
           primaryEntry.state === 'active'
             ? primaryEntry.current?.runtime.bridge
             : undefined;
-        // The ring's `childRssBytes` gauge stays the PRIMARY child's reading —
-        // its published meaning is "ACP child process RSS", singular. The
-        // aggregate across every workspace is reported separately, under
+        // The ring's `childRssBytes` gauge stays the PRIMARY workspace's
+        // reading — its published meaning is "ACP child process RSS", which on
+        // a paired Bridge is the sum of its engines' children. The aggregate
+        // across every workspace is reported separately, under
         // `runtime.memory.children` in daemon status.
         const child = primaryRuntimeBridge?.getChildResourceSnapshot?.();
         // Only poll the child's resources when someone is watching: the
@@ -6900,7 +7104,7 @@ async function runQwenServeImpl(
           // this warms are what `runtime.memory.children` sums, and a child
           // nobody refreshed reads as unmeasured there. No `isChannelLive`
           // filter is needed — `refreshChildResource` already no-ops without a
-          // live channel and is single-flight per bridge.
+          // live channel and is single-flight per child.
           for (const managed of workspaceRegistry.listManaged()) {
             // The shipped bridge's `refreshChildResource` never rejects: it
             // catches the RPC failure itself, keeps the last good cache, and
@@ -7365,7 +7569,8 @@ async function runQwenServeImpl(
           ...(buildOptions?.primary === true
             ? {}
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
-          isChannelLive: () => wsBridge.isChannelLive(),
+          isChannelLive: () =>
+            wsBridge.isWorkspaceControlLive?.() ?? wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
@@ -7578,6 +7783,21 @@ async function runQwenServeImpl(
           });
         }
       }
+      if (wsRuntime.primary && wsRuntime.trusted) {
+        await recoverBranchWorktreePreparations({
+          workspaceCwd: cwd,
+          sessionService: await createBranchRecoverySessionService(wsRuntime),
+          assertGenerationOpen: () => generationGuard.assertOpen(),
+          isWorktreeOccupied: (worktreePath) =>
+            bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),
+          warn: (message, fields) => daemonLog.warn(message, fields),
+        }).catch((error: unknown) => {
+          daemonLog.warn('branch worktree recovery sweep failed', {
+            workspace: cwd,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       return wsRuntime;
     };
 
@@ -7692,6 +7912,11 @@ async function runQwenServeImpl(
               )}`,
               null,
               { workspaceCwd },
+            );
+            // Shutting down is not a restore failure to report.
+            if (channelControlDraining) return;
+            channelRestoreFailures.record(
+              lateRestoreFailures(workspaceCwd, requested, err),
             );
           })
           .finally(() => {
@@ -7993,6 +8218,7 @@ async function runQwenServeImpl(
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
           manager: await ensureChannelWorkerManager(),
+          restoreFailures: channelRestoreFailures,
         });
       })();
       channelManagementServices.set(targetRuntime, pending);
@@ -8046,6 +8272,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      restartForUpdate,
       maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
       liveDiscoveryStableBaseDir,
@@ -8074,7 +8301,7 @@ async function runQwenServeImpl(
       // The real long-running daemon keeps scheduled-task sessions resident
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
-      manageScheduledTaskSessions: true,
+      manageScheduledTaskSessions: opts.profile !== 'hosted-harness',
       currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
@@ -8085,6 +8312,7 @@ async function runQwenServeImpl(
       daemonLog,
       getChannelWorkerSnapshot,
       getChannelWorkerSnapshots,
+      getChannelRestoreFailures: () => channelRestoreFailures.list(),
       getChannelWorkerControl,
       isChannelControlDraining: () => channelControlDraining,
       isChannelControlInitializing: () =>
@@ -8503,6 +8731,7 @@ async function runQwenServeImpl(
     getRuntimeError: () => runtimeStartupError,
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
+    getChannelRestoreFailures: () => channelRestoreFailures.list(),
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
@@ -9553,6 +9782,29 @@ async function runQwenServeImpl(
               throw error;
             }
             closeServerAfterChannelWorkerStartupFailure = false;
+            // Recorded before the names are discarded on the next line. This
+            // branch keeps the daemon serving without the channels it was
+            // configured to host, which is the shape a single-workspace
+            // daemon fails in, so leaving it to the log alone is the gap this
+            // record exists to close. An `all` selection carries no names to
+            // attribute and stays log-only.
+            if (opts.channelSelection?.mode === 'names') {
+              const reported = channelStartupMessages(error);
+              const message =
+                error instanceof Error ? error.message : String(error);
+              channelRestoreFailures.record(
+                opts.channelSelection.names.flatMap((channel) => {
+                  const owners = bootChannelClaimants.get(channel) ?? [
+                    boundWorkspace,
+                  ];
+                  return owners.map((workspaceCwd) => ({
+                    workspaceCwd,
+                    channel,
+                    message: reported.get(channel) ?? message,
+                  }));
+                }),
+              );
+            }
             opts.channelSelection = undefined;
             reportConfiguredChannelStartupFailure(error);
             try {
@@ -9991,6 +10243,11 @@ async function runQwenServeImpl(
                   daemonLog,
                 );
                 const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
+                await (
+                  appForCleanup?.locals?.['cleanupDaemonUpdate'] as
+                    | (() => Promise<void>)
+                    | undefined
+                )?.();
                 const workspaceManagementHandle = appForCleanup?.locals?.[
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;
@@ -10136,6 +10393,15 @@ async function runQwenServeImpl(
               code: skip.code,
               channel: skip.channel,
             });
+            channelRestoreFailures.record(
+              (bootChannelClaimants.get(skip.channel) ?? []).map(
+                (workspaceCwd) => ({
+                  workspaceCwd,
+                  channel: skip.channel,
+                  message: skip.message,
+                }),
+              ),
+            );
           }
           if (resolved.skipped.length > 0) {
             // The committed selection has to name exactly what the groups

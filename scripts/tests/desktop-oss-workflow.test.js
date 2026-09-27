@@ -29,7 +29,7 @@ const syncWorkflow = readFileSync(
   'utf8',
 );
 const tauriConfig = JSON.parse(
-  readFileSync('packages/desktop-shell/src-tauri/tauri.conf.json', 'utf8'),
+  readFileSync('packages/desktop/src-tauri/tauri.conf.json', 'utf8'),
 );
 const hasJq = (() => {
   try {
