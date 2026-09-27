@@ -1309,6 +1309,9 @@ describe('BackgroundAgentResumeService', () => {
       false,
     ],
     ['lists tools without skill', { tools: ['read_file'] }, false],
+    // `tools: []` means "inherit everything" at the definition layer, so the
+    // launch keeps the SkillManager and the resume must keep the listing.
+    ['declares an empty tools list', { tools: [] }, true],
   ])(
     'matches the launch-time skill listing when the definition %s',
     async (_label, toolFields, expectListing) => {

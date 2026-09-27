@@ -120,15 +120,19 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  * for the agent, so a resumed agent is shown the skill listing exactly when
  * its Config holds a SkillManager (#12424).
  *
- * Names are matched as written. The launch path resolves display names through
- * `convertToRuntimeConfig` and this helper does not, so a definition that uses
- * one can still drift — pre-existing, and outside #12424's measured scope.
+ * An empty list is normalized the way the launch path normalizes it: `tools: []`
+ * is the definition layer's "inherit everything" marker, while the `ToolConfig`
+ * layer reads it as deny-all. Names are otherwise matched as written — the
+ * launch path also resolves display names through `convertToRuntimeConfig` and
+ * this helper does not, so a definition that uses one can still drift.
+ * Pre-existing, and outside #12424's measured scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
 ): boolean {
+  const tools = subagentConfig?.tools;
   return toolConfigAllowsSkill({
-    tools: subagentConfig?.tools ?? ['*'],
+    tools: tools?.length ? tools : ['*'],
     disallowedTools: subagentConfig?.disallowedTools,
   });
 }
