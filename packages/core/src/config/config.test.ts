@@ -917,6 +917,25 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
+    // installProxyDispatcher: false keeps this test from pinning a
+    // process-global undici dispatcher; the wiring under test (the two
+    // constructor options reaching ExtensionManager) is unaffected.
+    const config = new Config({
+      ...baseParams,
+      usageStatisticsEnabled: false,
+      proxy: 'http://127.0.0.1:8080',
+      installProxyDispatcher: false,
+    });
+
+    const manager = config.getExtensionManager() as unknown as {
+      usageStatisticsEnabled?: boolean;
+      proxy?: string;
+    };
+    expect(manager.usageStatisticsEnabled).toBe(false);
+    expect(manager.proxy).toBe('http://127.0.0.1:8080');
+  });
+
   describe('setHooksFromSettings', () => {
     const systemHooks = {
       SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],

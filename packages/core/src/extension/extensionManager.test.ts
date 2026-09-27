@@ -45,6 +45,7 @@ import {
 import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { getGlobalDispatcher } from 'undici';
 
 const mockGit = {
   clone: vi.fn(),
@@ -4259,6 +4260,7 @@ describe('extension tests', () => {
         version: '1.0.0',
       });
 
+      const dispatcherBefore = getGlobalDispatcher();
       const manager = createExtensionManager({
         proxy: 'http://127.0.0.1:7890',
       });
@@ -4267,6 +4269,14 @@ describe('extension tests', () => {
 
       const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
       expect(config.getProxy()).toBe('http://127.0.0.1:7890');
+      // The throwaway telemetry Config must NOT install the process-global
+      // undici dispatcher: in `qwen serve` one process hosts many
+      // workspaces, and a per-event global install would re-route the
+      // daemon's own plain `fetch` through a proxy another workspace
+      // configured. Give the (unguarded) async installer every chance to
+      // run, then assert the dispatcher is untouched.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(getGlobalDispatcher()).toBe(dispatcherBefore);
     });
 
     it('keeps usage statistics enabled by default when the option is omitted', async () => {

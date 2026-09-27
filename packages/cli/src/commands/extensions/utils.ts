@@ -9,6 +9,7 @@ import {
   redactUrlCredentials,
   getExtensionDisplayName,
   getExtensionDescription,
+  resolveExtensionTelemetryProxy,
   resolveUsageStatisticsEnabled,
   type Extension,
 } from '@qwen-code/qwen-code-core';
@@ -39,12 +40,7 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
     usageStatisticsEnabled: resolveUsageStatisticsEnabled(
       settings.privacy?.usageStatisticsEnabled,
     ),
-    proxy:
-      settings.proxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+    proxy: resolveExtensionTelemetryProxy(settings.proxy),
   });
   await extensionManager.refreshCache();
   return extensionManager;

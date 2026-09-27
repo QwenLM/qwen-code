@@ -2802,6 +2802,7 @@ export function createServeApp(
     sendBridgeError,
     workspaceRegistry,
     conversationRuntimeActivity,
+    env: primaryRuntimeEffectiveEnv,
     ...(primaryRuntimeTrustAuthoritative
       ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
       : {}),

@@ -28,6 +28,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   parseInstallSource: mockParseInstallSource,
   resolveUsageStatisticsEnabled: (settingsValue?: boolean) =>
     settingsValue ?? true,
+  resolveExtensionTelemetryProxy: (settingsProxy?: string) => settingsProxy,
   isExtensionCommittedWithWarningsError: (error: unknown) =>
     error instanceof Error &&
     (error as Error & { code?: string; committed?: boolean }).code ===
@@ -105,6 +106,37 @@ describe('handleInstall', () => {
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "http-extension" installed successfully and enabled.',
+    );
+
+    processSpy.mockRestore();
+  });
+
+  it('forwards the resolved telemetry opt-out and proxy to the ExtensionManager', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    const { ExtensionManager } = await import('@qwen-code/qwen-code-core');
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        privacy: { usageStatisticsEnabled: false },
+        proxy: 'http://settings-proxy:8080',
+      },
+    });
+    mockParseInstallSource.mockResolvedValue({
+      type: 'http',
+      url: 'http://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'http-extension' });
+
+    await handleInstall({
+      source: 'http://google.com',
+    });
+
+    expect(ExtensionManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usageStatisticsEnabled: false,
+        proxy: 'http://settings-proxy:8080',
+      }),
     );
 
     processSpy.mockRestore();

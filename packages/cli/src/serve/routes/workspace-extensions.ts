@@ -508,6 +508,9 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /** The owning runtime's resolved env, forwarded to the controller so
+   * extension telemetry consent/proxy never read ambient `process.env`. */
+  env?: Readonly<NodeJS.ProcessEnv>;
   // Enables V2 workspace projection and targeted reconciliation routes.
   workspaceRegistry?: WorkspaceRegistry;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
@@ -554,6 +557,7 @@ export function registerWorkspaceExtensionRoutes(
       bridge: wsBridge,
       workspace: wsService,
       ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
+      ...(deps.env ? { env: deps.env } : {}),
       ...(ws === boundWorkspace && deps.captureGenerationAssertion
         ? { captureGenerationAssertion: deps.captureGenerationAssertion }
         : {}),

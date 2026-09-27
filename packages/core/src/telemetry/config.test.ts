@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
+  resolveExtensionTelemetryProxy,
   resolveTelemetrySettings,
   resolveUsageStatisticsEnabled,
 } from './config.js';
@@ -62,6 +63,45 @@ describe('telemetry/config helpers', () => {
           QWEN_USAGE_STATISTICS_ENABLED: 'random',
         }),
       ).toBe(false);
+    });
+  });
+
+  describe('resolveExtensionTelemetryProxy', () => {
+    it('returns undefined when nothing is configured', () => {
+      expect(resolveExtensionTelemetryProxy(undefined, {})).toBeUndefined();
+    });
+
+    it('prefers settings.proxy over every env key', () => {
+      expect(
+        resolveExtensionTelemetryProxy('http://settings:1', {
+          HTTPS_PROXY: 'http://env:2',
+        }),
+      ).toBe('http://settings:1');
+    });
+
+    it('falls back to env keys in canonical order (uppercase first)', () => {
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTPS_PROXY: 'http://upper-https:1',
+          https_proxy: 'http://lower-https:2',
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://upper-https:1');
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://lower-http:4');
+    });
+
+    it('returns the raw value without normalizing (normalization lives in getTelemetryConfig)', () => {
+      // A SOCKS value must pass through untouched: getTelemetryConfig drops
+      // it in a try/catch so telemetry can never abort the mutation.
+      expect(resolveExtensionTelemetryProxy('socks5h://h:1', {})).toBe(
+        'socks5h://h:1',
+      );
+      expect(resolveExtensionTelemetryProxy('host:8080', {})).toBe('host:8080');
     });
   });
 

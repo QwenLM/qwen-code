@@ -299,6 +299,12 @@ export interface ExtensionManagerOptions {
   /**
    * Resolved proxy URL forwarded to the throwaway telemetry Config so RUM
    * uploads go through the configured proxy.
+   *
+   * Note: `QwenLogger` is a process-wide singleton bound to the first
+   * Config that opens its opt-in gate, so in a multi-workspace daemon the
+   * proxy of whichever workspace logs first wins for the process lifetime;
+   * later workspaces' values are ignored (pre-existing singleton behavior,
+   * newly visible now that the proxy differs per workspace).
    */
   proxy?: string;
   config?: Config;
@@ -586,6 +592,13 @@ export class ExtensionManager {
       telemetry: this.telemetrySettings,
       usageStatisticsEnabled: this.usageStatisticsEnabled,
       proxy,
+      // Telemetry-only Config: the RUM logger pins its own proxy agent from
+      // `config.getProxy()` at upload time, so the proxy must stay visible —
+      // but installing the process-global undici dispatcher (which nothing
+      // ever restores) would re-route the host process's plain `fetch` on
+      // every lifecycle event. In `qwen serve` that would leak one
+      // workspace's proxy into every other workspace the daemon hosts.
+      installProxyDispatcher: false,
       interactive: false,
       targetDir: cwd,
       cwd,

@@ -8,13 +8,14 @@ import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
   redactUrlCredentials,
+  resolveExtensionTelemetryProxy,
   resolveUsageStatisticsEnabled,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   detectSystemLanguage,
@@ -63,16 +64,20 @@ const RECONCILE_SLOW_MS = 30_000;
 const resolveExtensionLocale = (
   workspaceDir: string,
   workspaceTrusted?: boolean,
+  preloadedSettings?: Settings,
 ): string => {
-  const configuredLanguage = loadSettings(
-    workspaceDir,
-    workspaceTrusted === undefined
-      ? true
-      : {
-          skipWorkspaceSettings: !workspaceTrusted,
-          workspaceTrusted,
-        },
-  ).merged.general?.language as string | undefined;
+  const configuredLanguage = (
+    preloadedSettings ??
+    loadSettings(
+      workspaceDir,
+      workspaceTrusted === undefined
+        ? true
+        : {
+            skipWorkspaceSettings: !workspaceTrusted,
+            workspaceTrusted,
+          },
+    ).merged
+  ).general?.language as string | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -215,6 +220,13 @@ export interface CreateExtensionsControllerDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /**
+   * The owning runtime's resolved environment (a boot-time snapshot), used
+   * for the usage-statistics consent and telemetry proxy fallback instead
+   * of the daemon's ambient `process.env` — per-request settings loads must
+   * not be able to decide another workspace's telemetry egress (#12770).
+   */
+  env?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -313,23 +325,37 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
-    const settings = loadSettings(workspaceDir).merged;
+    // Resolve against the owning runtime's env, never the daemon's ambient
+    // process.env: a per-request settings load must not let one workspace's
+    // .env decide another workspace's telemetry consent or egress.
+    const env = deps.env ?? {};
+    // One load, gated on the trust resolved above: an untrusted workspace's
+    // settings/env must not drive telemetry consent, proxy, or leak into the
+    // daemon's shared process.env (skipLoadEnvironment). The undefined-trust
+    // branch keeps the full load so getWorkspaceTrustStatus can still
+    // classify the workspace from its own security.folderTrust.
+    const settings = loadSettings(
+      workspaceDir,
+      workspaceTrusted === undefined
+        ? true
+        : {
+            skipWorkspaceSettings: !workspaceTrusted,
+            workspaceTrusted,
+            skipLoadEnvironment: true,
+          },
+    ).merged;
     return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
+      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted, settings),
       isWorkspaceTrusted:
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
           'trusted',
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
+        env,
       ),
-      proxy:
-        settings.proxy ||
-        process.env['HTTPS_PROXY'] ||
-        process.env['https_proxy'] ||
-        process.env['HTTP_PROXY'] ||
-        process.env['http_proxy'],
+      proxy: resolveExtensionTelemetryProxy(settings.proxy, env),
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??

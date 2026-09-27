@@ -13,6 +13,7 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
+import { loadSettings } from '../../config/settings.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -23,6 +24,23 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
   return {
     ...actual,
     resolveLanguageSetting: vi.fn().mockReturnValue('en'),
+  };
+});
+
+// Spied (not stubbed) so tests can count createExtensionManager's settings
+// loads. The file-wide afterEach restoreAllMocks clears vi.fn
+// implementations, so the describe beforeEach re-installs the real one.
+const actualLoadSettings = vi.hoisted(() => ({
+  fn: undefined as unknown as typeof import('../../config/settings.js').loadSettings,
+}));
+
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  actualLoadSettings.fn = actual.loadSettings;
+  return {
+    ...actual,
+    loadSettings: vi.fn(actual.loadSettings),
   };
 });
 
@@ -42,6 +60,7 @@ describe('redactExtensionDisplaySource', () => {
 describe('createExtensionsController', () => {
   beforeEach(() => {
     vi.mocked(resolveLanguageSetting).mockReturnValue('en');
+    vi.mocked(loadSettings).mockImplementation(actualLoadSettings.fn);
   });
 
   afterEach(() => {
@@ -62,6 +81,88 @@ describe('createExtensionsController', () => {
     };
 
     expect(manager.networkPolicy).toBeUndefined();
+  });
+
+  it('loads settings once per manager and resolves consent and proxy from that same merge', async () => {
+    const extensionDir = await mkdtemp(
+      join(tmpdir(), 'qwen-ext-controller-telemetry-'),
+    );
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    try {
+      await mkdir(join(extensionDir, '.qwen'));
+      await writeFile(
+        join(extensionDir, '.qwen', 'settings.json'),
+        JSON.stringify({
+          privacy: { usageStatisticsEnabled: false },
+          proxy: 'http://workspace-settings:8080',
+        }),
+      );
+      const controller = createExtensionsController({
+        boundWorkspace: extensionDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        env: {},
+      });
+      const loadSettingsSpy = vi.mocked(loadSettings);
+      loadSettingsSpy.mockClear();
+
+      const manager = controller.createExtensionManager(
+        extensionDir,
+        true,
+      ) as unknown as {
+        usageStatisticsEnabled?: boolean;
+        proxy?: string;
+      };
+
+      // One load total: the locale read must reuse the same merged object
+      // instead of loading again (#12770 follow-up).
+      expect(loadSettingsSpy).toHaveBeenCalledTimes(1);
+      expect(manager.usageStatisticsEnabled).toBe(false);
+      expect(manager.proxy).toBe('http://workspace-settings:8080');
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(extensionDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores an untrusted workspace settings file when resolving telemetry consent and proxy', async () => {
+    const extensionDir = await mkdtemp(
+      join(tmpdir(), 'qwen-ext-controller-untrusted-'),
+    );
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    try {
+      await mkdir(join(extensionDir, '.qwen'));
+      await writeFile(
+        join(extensionDir, '.qwen', 'settings.json'),
+        JSON.stringify({
+          privacy: { usageStatisticsEnabled: true },
+          proxy: 'http://evil:8080',
+        }),
+      );
+      const controller = createExtensionsController({
+        boundWorkspace: extensionDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => false,
+        env: {},
+      });
+
+      const manager = controller.createExtensionManager() as unknown as {
+        usageStatisticsEnabled?: boolean;
+        proxy?: string;
+      };
+
+      // skipWorkspaceSettings drops the untrusted workspace file, so its
+      // proxy can never reach the telemetry Config.
+      expect(manager.proxy).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(extensionDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
   });
 
   it('releases the commit lane when a manual refresh times out', async () => {

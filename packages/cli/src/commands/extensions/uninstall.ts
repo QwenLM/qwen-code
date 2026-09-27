@@ -9,6 +9,7 @@ import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   ExtensionManager,
+  resolveExtensionTelemetryProxy,
   resolveUsageStatisticsEnabled,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -38,12 +39,7 @@ export async function handleUninstall(args: UninstallArgs) {
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
       ),
-      proxy:
-        settings.proxy ||
-        process.env['HTTPS_PROXY'] ||
-        process.env['https_proxy'] ||
-        process.env['HTTP_PROXY'] ||
-        process.env['http_proxy'],
+      proxy: resolveExtensionTelemetryProxy(settings.proxy),
     });
     await extensionManager.refreshCache();
     const result = await extensionManager.uninstallExtension(args.name, false);
