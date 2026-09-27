@@ -1638,19 +1638,19 @@ export function matchesDomainPattern(
  * `toolName` is the registered provider-safe name and `rawToolName` the
  * pre-normalization `mcp__<server>__<tool>` spelling, resolved from the
  * tool's advertised `permissionAliases` by `resolveRawMcpIdentity`. Patterns
- * are compared *literally* against those two spellings — never through
+ * are compared *literally* against those spellings — never through
  * `sanitizeToolNameForProvider`, which is what let a rule for the server
  * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
- * The wildcard arm additionally reads the legacy reduction of the raw
- * identity, because a persisted prefix was copied from the spelling settings
- * showed when it was written.
+ * Prefix patterns additionally read the legacy reduction of the raw
+ * identity, gated by `resolveLegacyMcpSpelling`, because a persisted rule
+ * was copied from the spelling settings showed when it was written.
  *
  * A rule written provider-safe (`mcp__foo_bar`) still matches any server
  * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
  * registered spelling a literal comparison runs against *is* that reduction.
  * A lost match is fail-closed on `allow` and fail-open on `deny`/`ask` and
- * `disallowedTools`, which is why every reachable caller threads the alias
- * channel.
+ * `disallowedTools`, which is why the gates thread the alias channel (the
+ * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
  */
 export function matchesMcpPattern(
   pattern: string,
@@ -1674,12 +1674,18 @@ export function matchesMcpPattern(
   }
 
   // Spellings a prefix pattern may match literally: the registered name (what
-  // the model and the UI show, so rules copied from there keep working) plus
-  // the raw identity when it is known.
+  // the model and the UI show, so rules copied from there keep working), the
+  // raw identity when it is known, and its provenance-gated legacy reduction —
+  // the spelling a pre-normalization entry was persisted in. Losing that match
+  // is fail-open on `deny`/`ask`/`disallowedTools`.
   const spellings =
     rawToolName === undefined || rawToolName === toolName
       ? [toolName]
       : [toolName, rawToolName];
+  const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
+  if (legacySpelling !== undefined && !spellings.includes(legacySpelling)) {
+    spellings.push(legacySpelling);
+  }
   const matchesPrefixLiterally = (prefix: string): boolean =>
     spellings.some((spelling) => spelling.startsWith(prefix));
 
@@ -1694,17 +1700,7 @@ export function matchesMcpPattern(
     if (prefix === '') {
       return false;
     }
-    // A persisted prefix was copied from the spelling settings showed when it
-    // was written, which for a pre-normalization entry is the legacy
-    // reduction. Losing that match is a fail-open on `deny`/`ask`/
-    // `disallowedTools`. Wildcard arm only: exact rules reach every advertised
-    // spelling through `matchesAdvertisedExactName`, server-level rules
-    // through `spellings`.
-    const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
-    return (
-      matchesPrefixLiterally(prefix) ||
-      (legacySpelling !== undefined && legacySpelling.startsWith(prefix))
-    );
+    return matchesPrefixLiterally(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -1751,8 +1747,8 @@ function resolveRawMcpIdentity(
 
 /**
  * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
- * for a wildcard prefix persisted in that spelling — or `undefined` when the
- * reduction cut the name.
+ * for a rule persisted in that spelling — or `undefined` when the reduction
+ * cut the name.
  *
  * Character substitution is length-preserving, so the server segment stays
  * recognizable. Past 63 characters the reduction instead cuts at
@@ -1776,20 +1772,28 @@ function resolveLegacyMcpSpelling(
 }
 
 /**
- * Whether a 3-part entry names the tool in one of its advertised spellings —
- * the exact raw identity or the legacy reduction — so an exact rule written
- * in either spelling still covers the tool. The aliases are the tool's own
- * advertised `permissionAliases`, resolved by the caller from the registry
- * or the invocation, so they are authentic by construction.
+ * Whether a 3-part entry names the tool in the legacy spelling, so an exact
+ * rule persisted before provider-safe names still covers the tool. The entry
+ * is matched only against the provenance-gated legacy reduction of the
+ * tool's vouched raw identity: an advertised alias proves nothing on its own,
+ * because two different long server keys publish one byte-identical
+ * middle-truncated reduction, and a truncated reduction vouches for no
+ * server.
  */
 function matchesAdvertisedExactName(
   pattern: string,
   toolAliases: readonly string[] | undefined,
+  rawToolName: string | undefined,
 ): boolean {
+  if (pattern.endsWith('*') || pattern.split('__').length < 3) {
+    return false;
+  }
+  const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
   return (
-    !pattern.endsWith('*') &&
-    pattern.split('__').length >= 3 &&
-    (toolAliases ?? []).some((alias) => pattern === resolveToolName(alias))
+    legacySpelling !== undefined &&
+    (toolAliases ?? []).some(
+      (alias) => resolveToolName(alias) === legacySpelling,
+    )
   );
 }
 
@@ -1801,8 +1805,13 @@ function matchesAdvertisedExactName(
  * declaration filter and the callers that predict it cannot disagree.
  *
  * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
- * are fail-open on a lost match, so every reachable caller resolves them from
- * the registry rather than matching on the registered name alone.
+ * are fail-open on a lost match, so every enforcement gate resolves them from
+ * the registry rather than matching on the registered name alone. The one
+ * caller that cannot is `narrowAgentTools`: it is synchronous and receives
+ * only already-resolved name lists, so a legacy-spelled entry it cannot match
+ * loses the up-front "every requested tool is denied" message, not
+ * enforcement — the declaration filter, the invocation re-check and the
+ * scheduler's enablement gate all thread the channel.
  */
 export function matchesToolPattern(
   pattern: string,
@@ -1812,12 +1821,10 @@ export function matchesToolPattern(
   if (!toolName.startsWith('mcp__')) {
     return pattern === toolName;
   }
+  const rawMcpToolName = resolveRawMcpIdentity(toolName, toolAliases);
   return (
-    matchesMcpPattern(
-      pattern,
-      toolName,
-      resolveRawMcpIdentity(toolName, toolAliases),
-    ) || matchesAdvertisedExactName(pattern, toolAliases)
+    matchesMcpPattern(pattern, toolName, rawMcpToolName) ||
+    matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName)
   );
 }
 
@@ -1892,7 +1899,7 @@ export function matchesRule(
     );
     const matchesMcpName =
       matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
-      matchesAdvertisedExactName(rule.toolName, toolAliases);
+      matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName);
     if (!matchesMcpName) {
       return false;
     }

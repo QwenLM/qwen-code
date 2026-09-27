@@ -2082,7 +2082,7 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
-    it('matches a legacy truncated MCP permission alias', async () => {
+    it('refuses a legacy truncated MCP permission alias on an exact entry', async () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
       const providerSafeName = normalizeToolNameForProvider(rawName);
@@ -2091,12 +2091,18 @@ describe('PermissionManager', () => {
       );
       pm2.initialize();
 
+      // The middle-truncated window keeps only the first 23 characters of
+      // the server key, so two different servers publish it byte-identically:
+      // the spelling names no single server, and the exact arm refuses it —
+      // the same provenance the prefix arms require. The unambiguous
+      // spellings (the raw identity, a length-preserving legacy reduction)
+      // still match; see mcp-server-rule-collision.test.ts (R8-1).
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
           toolAliases: [legacyName],
         }),
-      ).toBe('allow');
+      ).toBe('default');
     });
 
     it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {

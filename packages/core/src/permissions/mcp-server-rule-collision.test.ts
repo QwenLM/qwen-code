@@ -735,3 +735,173 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
     ).toBe(true);
   });
 });
+
+// A bare `mcp__<server>` rule is the `__*` prefix without the glob, so it
+// lives in the server-level arm — which used to compare only the registered
+// name and the raw identity, never the legacy reduction the entry was
+// persisted in. For a server key the reduction rewrote (`/`, `:`, `+` …) the
+// bare form failed open while its `__*` twin still denied: `evaluate`
+// answered `default` where the pre-normalization matcher answered `deny`.
+// The reduction now joins `spellings`, so both prefix arms see it — this is
+// the server-level half of the maintainer ruling this file's wildcard
+// describe already covers (R4-1).
+describe('legacy-spelled bare server rules keep covering their own server', () => {
+  // `github.com/octocat` reduces to `mcp__github.com_octocat` — the `/` is
+  // out of the legacy set, the `.` is not — length-preserving, so the
+  // reduction vouches.
+  const slashed = prodTool('github.com/octocat', 'search');
+  const slashedRule = 'mcp__github.com_octocat';
+
+  // `foo.bar+baz` reduces to `mcp__foo.bar_baz` — the class whose wildcard
+  // rows in the describe above pin the rewritten server segment.
+  const mixed = prodTool('foo.bar+baz', 'get+data');
+  const mixedRule = 'mcp__foo.bar_baz';
+
+  it.each([
+    ['slash-keyed server', slashed, slashedRule],
+    ['rewritten server segment', mixed, mixedRule],
+  ])(
+    'keeps a bare legacy deny/ask effective for a %s',
+    async (_label, tool, bareRule) => {
+      // The bare form is the witness (red without the hoist); the `__*` twin
+      // already matched and is the control.
+      for (const spelling of [bareRule, `${bareRule}__*`]) {
+        expect(
+          matchesToolPattern(spelling, tool.name, tool.permissionAliases),
+        ).toBe(true);
+        expect(
+          matchesRule(
+            parseRule(spelling),
+            tool.name,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            tool.permissionAliases,
+          ),
+        ).toBe(true);
+
+        const denyPm = new PermissionManager(
+          makeConfig({ permissionsDeny: [spelling] }),
+        );
+        denyPm.initialize();
+        expect(
+          await denyPm.evaluate({
+            toolName: tool.name,
+            toolAliases: tool.permissionAliases,
+          }),
+        ).toBe('deny');
+        expect(
+          await denyPm.getToolRegistrationStatus(
+            tool.name,
+            tool.permissionAliases,
+          ),
+        ).toBe('disabled');
+
+        const askPm = new PermissionManager(
+          makeConfig({ permissionsAsk: [spelling] }),
+        );
+        askPm.initialize();
+        expect(
+          await askPm.evaluate({
+            toolName: tool.name,
+            toolAliases: tool.permissionAliases,
+          }),
+        ).toBe('ask');
+      }
+    },
+  );
+
+  it('keeps the provider-safe bare rule matching through the registered name (control)', () => {
+    // `foo:bar` registers as `mcp__foo_bar__…`, so the provider-safe bare
+    // rule matched before the hoist and after — nothing changed here.
+    const colon = prodTool('foo:bar', 'a.b');
+    expect(
+      matchesToolPattern('mcp__foo_bar', colon.name, colon.permissionAliases),
+    ).toBe(true);
+  });
+});
+
+// Past 63 characters `generateLegacyMcpToolName` middle-truncates at
+// slice(0, 28) + '___' + slice(-32), which keeps only the first 23 characters
+// of the server key — so two different long keys publish one byte-identical
+// legacy alias. An exact entry written in that shared spelling names no
+// single server, so the exact arm accepts the legacy spelling only when the
+// reduction did not cut the name — the same provenance the prefix arms
+// require. Pre-fix the ungated arm matched BOTH servers, and a deny entry
+// written for one stripped the other's tool (R8-1).
+describe('exact entries refuse a truncated legacy spelling shared by two servers', () => {
+  const sharedTool = 'get_extended_forecast_for_next_week';
+  const own = prodTool('weather-forecast-server', sharedTool);
+  const sibling = prodTool('weather-forecast-server-premium', sharedTool);
+  const sharedLegacy = generateLegacyMcpToolName(
+    `mcp__weather-forecast-server__${sharedTool}`,
+  );
+
+  it('publishes one byte-identical legacy alias for both servers (premise)', () => {
+    expect(own.name).not.toBe(sibling.name);
+    expect(sharedLegacy).toBe(
+      generateLegacyMcpToolName(
+        `mcp__weather-forecast-server-premium__${sharedTool}`,
+      ),
+    );
+    expect(own.permissionAliases).toContain(sharedLegacy);
+    expect(sibling.permissionAliases).toContain(sharedLegacy);
+  });
+
+  it.each([
+    ['own server', own],
+    ['sibling server', sibling],
+  ])(
+    'matches no exact entry in the shared spelling against the %s',
+    async (_label, tool) => {
+      expect(
+        matchesToolPattern(sharedLegacy, tool.name, tool.permissionAliases),
+      ).toBe(false);
+      expect(
+        matchesRule(
+          parseRule(sharedLegacy),
+          tool.name,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          tool.permissionAliases,
+        ),
+      ).toBe(false);
+
+      const pm = new PermissionManager(
+        makeConfig({ permissionsDeny: [sharedLegacy] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+      expect(
+        await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
+      ).toBe('registered');
+    },
+  );
+
+  it('still matches the exact raw identity and the own-server wildcard (controls)', () => {
+    const ownRaw = `mcp__weather-forecast-server__${sharedTool}`;
+    expect(own.permissionAliases[0]).toBe(ownRaw);
+    expect(matchesToolPattern(ownRaw, own.name, own.permissionAliases)).toBe(
+      true,
+    );
+    expect(
+      matchesToolPattern(
+        'mcp__weather-forecast-server__*',
+        own.name,
+        own.permissionAliases,
+      ),
+    ).toBe(true);
+  });
+});

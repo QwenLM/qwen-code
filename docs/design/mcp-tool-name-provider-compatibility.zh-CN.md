@@ -29,8 +29,8 @@ Qwen Code 目前按 Gemini 的字符集接受 MCP 工具名。诸如 `literature
 
 - 每个 `DiscoveredMCPTool` 都声明 `permissionAliases`：首先是**精确的原始身份** `mcp__<server>__<tool>`，然后是与之不同的 legacy `generateLegacyMcpToolName` 归约拼写。逐字注册的 provider 安全名字没有任何损失，因此不声明 alias。注册表（`ToolRegistry.getPermissionAliases`）与调用对象（`permissionFlow.ts`）读取的是同一个数组。
 - 一个 alias 只有在它自己的归一化结果**就是**注册名时，才会被接受为该工具的原始身份，因此另一个 server 的工具永远无法提供规则所匹配的身份。原始前缀来自用户配置中的 server 键，而不是来自 server。
-- 精确、server 级与通配模式随后与注册名和原始身份做**字面**比较。在这个匹配器内部不做任何重建，也不做任何哈希：尾部只是模仿归一化哈希的注册名什么也证明不了。早期的设计会重建候选原始名并用无密钥的 FNV-1a 名字哈希做验证；那只能证明一个存在性命题（规则前缀下存在某个原始名归一化后等于该注册名），而且可以被伪造，因此被删除而不是再加闸门（#10199）。
-- 通配分支也会读取 legacy 归约，但仅当归约**没有截断**名字时。字符替换会保留 server 段的可识别性；超过 63 字符时 `generateLegacyMcpToolName` 会截成 `slice(0, 28) + '___' + slice(-32)`，这既缩短了较长的 server 键，又注入了前缀匹配所需的 `__` 分隔符，于是两个不同的长键可能落进同一个窗口。被截断过的归约不为任何 server 作证。
+- 精确、server 级与通配模式随后与注册名、原始身份，以及下一条所述经过闸门的 legacy 归约做**字面**比较。在这个匹配器内部不做任何重建，也不做任何哈希：尾部只是模仿归一化哈希的注册名什么也证明不了。早期的设计会重建候选原始名并用无密钥的 FNV-1a 名字哈希做验证；那只能证明一个存在性命题（规则前缀下存在某个原始名归一化后等于该注册名），而且可以被伪造，因此被删除而不是再加闸门（#10199）。
+- 前缀模式（server 级与通配）与精确条目都会读取 legacy 归约，但仅当归约**没有截断**名字时。字符替换会保留 server 段的可识别性；超过 63 字符时 `generateLegacyMcpToolName` 会截成 `slice(0, 28) + '___' + slice(-32)`，server 键只剩前 23 个字符，于是两个不同的长键可能落进同一个窗口——并发布逐字节相同的 legacy alias，因此用这种共享拼写书写的精确条目同样无法唯一指认一个 server。被截断过的归约在任何分支都不为 server 作证。
 - `disabledTools` 根本不会到达 `rule-parser.ts`。`ToolRegistry.isToolDisabled` 单独匹配它：既按精确集合成员关系读取这同一个 `permissionAliases` 数组，也仍然把 `normalizeMcpToolName(条目)` 与注册名做比较，因此历史拼写的条目也可能禁用另一个冲突 server 的工具。该归一化分支早于 #10199 存在且是失效关闭的——请勿仅凭本文档就删除它而不做一次行为决策。
 - legacy 的 `sanitizeToolNameForProvider` 归约被特意从匹配中移除：它让 `mcp__foo.bar` 规则能命中以不同名字注册的 server `foo_bar`。请勿重新引入。另一个方向上，用 provider 安全拼写书写的规则（`mcp__foo_bar`）仍然能字面命中任何归一化后落在该前缀下的 server——这是一处被接受的残留行为。
 - 裸 `*` 不是 MCP 模式，不匹配任何 MCP 工具；`mcp__*` 和 `mcp__server__*` 保持其文档语义。
