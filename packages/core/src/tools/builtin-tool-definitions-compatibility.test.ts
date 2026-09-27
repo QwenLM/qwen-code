@@ -93,7 +93,7 @@ describe('builtin tool definition compatibility', () => {
     expect(
       definitions.map((definition) => managedToolDigest(definition)),
     ).toEqual([
-      'd7fa8eae1ba88e20d8c038ca7d0e8353d18a81a2a8f3a3d79784d8ce067e6294',
+      'd5b328f40ce098c8e85ba52a1c03b126da64f5e42debf8c650320c7d5f9e947d',
       'ea0b31c92cb8ad7e4a63414bba9c9e6e579736392b3d48ba3c0b62950344d1f0',
     ]);
     expect(

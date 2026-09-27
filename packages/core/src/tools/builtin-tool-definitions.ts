@@ -113,7 +113,7 @@ export function getGrepToolDefinition(): ManagedToolDescriptor {
     ...defineTool(
       ToolNames.GREP,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n',
+      'A powerful search tool for finding patterns in files\n- ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command.\n- Supports full regex syntax; special regex characters need escaping.\n- Filter files with glob parameter (e.g., "*.js", "**/*.tsx").\n- Case-insensitive by default.',
       Kind.Search,
       {
         properties: {
@@ -131,45 +131,6 @@ export function getGrepToolDefinition(): ManagedToolDescriptor {
             type: 'string',
             description:
               'Directory to search in; file paths are also supported. Defaults to the workspace directories.',
-          },
-          limit: {
-            type: 'integer',
-            minimum: 1,
-            description:
-              'Maximum matching lines to return. Must be a positive integer. Configured output limits still apply when omitted.',
-          },
-        },
-        required: ['pattern'],
-        type: 'object',
-      },
-    ),
-    maxOutputChars: 20_000,
-  };
-}
-
-export function getRipGrepToolDefinition(): ManagedToolDescriptor {
-  return {
-    ...defineTool(
-      ToolNames.GREP,
-      ToolDisplayNames.GREP,
-      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
-      Kind.Search,
-      {
-        properties: {
-          pattern: {
-            type: 'string',
-            description:
-              'The regular expression pattern to search for in file contents',
-          },
-          glob: {
-            type: 'string',
-            description:
-              'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")',
-          },
-          path: {
-            type: 'string',
-            description:
-              'Directory to search in; file paths are also supported by the ripgrep backend. Defaults to the workspace directories.',
           },
           limit: {
             type: 'integer',
@@ -235,7 +196,7 @@ export function getReadFileToolDefinition(): ManagedToolDescriptor {
     ...defineTool(
       ToolNames.READ_FILE,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. For text files, the tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs. For notebooks, provide 'file_path' and omit 'offset', 'limit', and 'pages' or set them to null.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. For text files, the tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. Jupyter notebooks return structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {

@@ -29,7 +29,7 @@ import {
   QwenIgnoreParser,
 } from '../utils/qwenIgnoreParser.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { getRipGrepToolDefinition } from './builtin-tool-definitions.js';
+import { getGrepToolDefinition } from './builtin-tool-definitions.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
@@ -732,7 +732,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
   }
 
   constructor(private readonly config: Config) {
-    const definition = getRipGrepToolDefinition();
+    const definition = getGrepToolDefinition();
     super(
       definition.name,
       definition.displayName,
