@@ -269,6 +269,14 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
+Flyway V12 aligns the Runtime tables with the Broker's own `schema.sql`, which
+its JDBC repositories are written against. `RuntimeBrokerFlywaySchemaTest`
+fails when the two definitions differ, so a change to either one needs a
+matching change to the other. V12 replaces two primary keys. MySQL rejects this
+when `sql_require_primary_key` is set: V12 fails before it changes anything, and
+Flyway records the failure. Unset the variable, run Flyway `repair`, and start
+the server again.
+
 ### Private Workspace tool execution (W0c-3)
 
 The worker entry is the built CLI bundle; the server launches it with
