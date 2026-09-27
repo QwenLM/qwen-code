@@ -131,7 +131,9 @@ The direct creators keep their own vocabulary. `LocalManagedRuntimeProvider`
 maps a live-ID rejection to its non-retryable
 `managed_runtime_identity_conflict`. The standalone service maps an undispatched
 live-ID rejection to `standalone_session_conflict` instead of
-`standalone_creation_rolled_back`.
+`standalone_creation_rolled_back`. It does not check that nothing was persisted
+for that ID, because the live owner's own transcript is expected there; finding
+it must not quarantine the runtime.
 
 ## Files and consumers
 
@@ -178,4 +180,5 @@ classification changes.
 - The selector is not wired. B2d must construct it with the runtime's session
   base directory and decide new-session selection. The questions in #12737
   about selector inputs, propagation failure, quarantine recovery and the
-  Hosted boundary are not decided by this slice.
+  Hosted boundary are not decided by this slice. B2d is designed in
+  [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
