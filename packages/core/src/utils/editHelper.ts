@@ -513,6 +513,59 @@ function lineEndingBefore(content: string, index: number): string | null {
 }
 
 /**
+ * The first line ending in `content`, or `'\n'` when it has none.
+ *
+ * This is a last resort for text that sits on a line with no break in front of
+ * it and none after it, which in a file whose only break is at the very end means
+ * the first line of the file. It is reached only from code that has already
+ * established the content contains a CRLF, so a bare `'\n'` here would put an LF
+ * into a CRLF file.
+ */
+function firstLineEnding(content: string): string {
+  const index = content.indexOf('\n');
+  if (index === -1) {
+    return '\n';
+  }
+  return index > 0 && content[index - 1] === '\r' ? '\r\n' : '\n';
+}
+
+/**
+ * Answers "which line ending most recently precedes this index" for a series of
+ * indices that only move forwards.
+ *
+ * Matches are consumed in increasing order within one splice, so the character
+ * before the current index has usually already been looked at for the previous
+ * match. Scanning backwards from every match again makes `replace_all` over a
+ * file that is essentially one long line quadratic in the file size, because each
+ * match walks the whole distance back to the start. Carrying the answer forward
+ * makes the total work linear.
+ */
+class PrecedingLineEnding {
+  private readonly content: string;
+  private scanned = 0;
+  private ending: string | null = null;
+
+  constructor(content: string) {
+    this.content = content;
+  }
+
+  at(index: number): string | null {
+    if (index < this.scanned) {
+      // Not expected: the caller only ever moves forward. Answer directly rather
+      // than trusting the cursor, so a future caller cannot get a wrong answer.
+      return lineEndingBefore(this.content, index);
+    }
+    for (let i = this.scanned; i < index; i++) {
+      if (this.content[i] === '\n') {
+        this.ending = i > 0 && this.content[i - 1] === '\r' ? '\r\n' : '\n';
+      }
+    }
+    this.scanned = index;
+    return this.ending;
+  }
+}
+
+/**
  * The line ending `content[end - 1]` ends with, when the span `content.slice(
  * start, end)` itself finishes on a line break.
  */
@@ -605,6 +658,7 @@ export function applyReplacementPreservingLineEndings(
   let result = '';
   let copiedUpTo = 0;
   let searchFrom = 0;
+  const preceding = new PrecedingLineEnding(rawContent);
   for (;;) {
     const matchAt = normalizedContent.indexOf(oldString, searchFrom);
     if (matchAt === -1) {
@@ -643,19 +697,23 @@ export function applyReplacementPreservingLineEndings(
     // terminates. The guard above has already pulled a dropped `\r` into the
     // span, so its first character says which kind it was.
     const matchedLeadingEnding = rawContent[rawStart] === '\r' ? '\r\n' : '\n';
-    // Any further breaks are new lines sitting where the span was, and take the
-    // ending of that region: the span's own trailing break, else the one after
-    // it, else the one before it.
-    const ending =
-      spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
-      lineEndingAfter(rawContent, rawEnd) ??
-      lineEndingBefore(rawContent, rawStart) ??
-      '\n';
     // When the span starts on a break, the inserted text continues the line that
-    // break terminated, so every break it adds takes the same kind.
+    // break terminated, so every break it adds takes the same kind. Decided first,
+    // because in that case the span's own region is never consulted and the lookups
+    // below would be performed only to be discarded.
     const spanStartsWithBreak =
       rawContent[rawStart] === '\n' || rawContent[rawStart] === '\r';
-    const insertedEnding = spanStartsWithBreak ? matchedLeadingEnding : ending;
+    // Otherwise the breaks the edit adds sit where the span was and take the ending
+    // of that region: the span's own trailing break, else the one right after it,
+    // else the one that opened the line, else -- when the span is the whole file
+    // around it and there is no break either side -- the file's first ending.
+    const ending = spanStartsWithBreak
+      ? matchedLeadingEnding
+      : (spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
+        lineEndingAfter(rawContent, rawEnd) ??
+        preceding.at(rawStart) ??
+        firstLineEnding(rawContent));
+    const insertedEnding = ending;
     const inserted = newString
       .split(/\r\n|\n/)
       .map((text, index) => (index === 0 ? text : `${insertedEnding}${text}`))

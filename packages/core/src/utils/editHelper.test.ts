@@ -348,6 +348,12 @@ describe('applyReplacementPreservingLineEndings', () => {
       ['const a = 1;\nconst b = 2;', 'const B = 2;\nconst A = 1;'],
       ['const b = 2;', 'const B = 2;\nconst extra = 3;'],
       ['one', 'ONE\ninserted'],
+      // An edit that starts on the first line and stops mid-line, with ordinary
+      // text between it and the break that ends that line. Nothing above reaches
+      // that shape: the other entries either sit on a later line or run right up
+      // to a break, and both of those find an ending without a fallback.
+      ['const a', 'const A\nextra = 0;'],
+      ['const a = 1;', 'const A = 1;\nconst b = 0;'],
     ];
 
     const previous = (raw: string, oldString: string, newString: string) => {
@@ -390,5 +396,55 @@ describe('applyReplacementPreservingLineEndings', () => {
     expect(splice('one\r\ntwo\r\nthree\r\n', 'two\n', '')).toBe(
       'one\r\nthree\r\n',
     );
+  });
+
+  it('gives an edit on the first line the ending of the file', () => {
+    // The span starts at offset 0, so there is no break in front of it, and it
+    // stops mid-line, so there is no break right after it either. The only
+    // remaining source of an ending is the file itself, and this one is CRLF
+    // throughout -- so the breaks the edit introduces have to be CRLF too. An LF
+    // here would leave the file with mixed endings and nothing downstream would
+    // correct it.
+    expect(
+      splice('const a = 1;\r\nconst b = 2;\r\n', 'const a', 'CONST\nA'),
+    ).toBe('CONST\r\nA = 1;\r\nconst b = 2;\r\n');
+  });
+
+  it('gives an edit on the first line the ending of a mixed file', () => {
+    // Same shape, but the file's first break is LF and a later one is CRLF. The
+    // first ending is the closest thing to a verdict this position has.
+    expect(splice('one\r\ntwo\r\nthree\nfour\n', 'one', 'ONE\nAGAIN')).toBe(
+      'ONE\r\nAGAIN\r\ntwo\r\nthree\nfour\n',
+    );
+  });
+
+  it('stays linear when replacing every match on one long line', () => {
+    // `replace_all` over a file that is essentially a single line used to rescan
+    // backwards to the previous break for every match, which made the whole
+    // operation quadratic in the file size -- a 256 KB input took about 8.5 s
+    // and 512 KB about 42 s, with the loop synchronous throughout, so the event
+    // loop was blocked for the duration. Carrying the preceding break forward
+    // makes it linear: the same 256 KB now takes about 0.16 s and 512 KB about
+    // 0.6 s.
+    //
+    // 256 KB is the size used rather than the reviewer's 1 MB because the point is
+    // a threshold this test can assert, not the largest input that fits: 8.5 s
+    // before the change is comfortably over the 2.5 s budget and 0.16 s after it
+    // is comfortably under, so the assertion is not sensitive to a slow machine.
+    const raw = 'var x=1;'.repeat(29_136) + '\r\n';
+    const started = performance.now();
+    const out = applyReplacementPreservingLineEndings(
+      raw,
+      normalized(raw),
+      'var',
+      'let',
+    );
+    const elapsed = performance.now() - started;
+
+    // Correctness first: every match replaced, and no ending invented.
+    expect(out.startsWith('let x=1;')).toBe(true);
+    expect(out).not.toContain('var');
+    expect(out.match(/(?<!\r)\n/g)).toBeNull();
+    expect(elapsed).toBeLessThan(2500);
   });
 });
