@@ -111,6 +111,18 @@ function relativeInside(root: string, filePath: string): string | undefined {
   return relative.split(path.sep).join('/');
 }
 
+function isTeamRootInRepository(root: string, resolvedRoot: string): boolean {
+  const repoRoot = path.dirname(path.dirname(root));
+  return (
+    resolvedRoot ===
+    path.join(
+      realpathNearestExisting(repoRoot),
+      QWEN_DIR,
+      TEAM_AUTO_MEMORY_DIRNAME,
+    )
+  );
+}
+
 /**
  * Classify an absolute path as a managed-memory document.
  * User, then project, then team. Scheduling files outside `memory/` are not
@@ -142,14 +154,8 @@ export function describeMemoryFileChange(
   for (const candidate of candidates) {
     const resolvedRoot = realpathNearestExisting(candidate.root);
     if (candidate.scope === 'team') {
-      const repoRoot = path.dirname(path.dirname(candidate.root));
-      const expectedRoot = path.join(
-        realpathNearestExisting(repoRoot),
-        QWEN_DIR,
-        TEAM_AUTO_MEMORY_DIRNAME,
-      );
       if (
-        resolvedRoot !== expectedRoot ||
+        !isTeamRootInRepository(candidate.root, resolvedRoot) ||
         !isTeamAutoMemPath(absolutePath, projectRoot)
       ) {
         continue;
@@ -539,13 +545,15 @@ async function readMemoryDocuments(
     unreadable: new Set(),
     complete: true,
   };
-  await Promise.all(
-    [
-      getUserAutoMemoryRoot(),
-      getAutoMemoryRoot(projectRoot),
-      getTeamAutoMemoryRoot(projectRoot),
-    ].map((root) => readMemoryTree(realpathNearestExisting(root), snapshot)),
+  const roots = [getUserAutoMemoryRoot(), getAutoMemoryRoot(projectRoot)].map(
+    (root) => realpathNearestExisting(root),
   );
+  const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+  const resolvedTeamRoot = realpathNearestExisting(teamRoot);
+  if (isTeamRootInRepository(teamRoot, resolvedTeamRoot)) {
+    roots.push(resolvedTeamRoot);
+  }
+  await Promise.all(roots.map((root) => readMemoryTree(root, snapshot)));
   return snapshot;
 }
 

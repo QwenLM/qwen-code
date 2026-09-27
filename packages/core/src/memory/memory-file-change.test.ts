@@ -479,6 +479,71 @@ describe('memory file change hook', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'does not read outside documents through a relocated team snapshot root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const file = path.join(outsideRoot, 'a.md');
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(file, 'outside');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideRoot, getTeamAutoMemoryRoot(workspace), 'dir');
+      const outsideFile = await fs.realpath(file);
+      const readFile = vi.spyOn(fs, 'readFile');
+
+      await withCoalescedMemoryChanges(workspace, undefined, async () => {});
+
+      expect(readFile).not.toHaveBeenCalledWith(outsideFile, 'utf-8');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps private notifications when a relocated team snapshot root is not a directory',
+    async () => {
+      const workspace = await setup();
+      const outsideFile = path.join(tempDir!, 'outside');
+      await fs.writeFile(outsideFile, 'not a directory');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideFile, getTeamAutoMemoryRoot(workspace));
+      const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
+      const projectFile = path.join(getAutoMemoryRoot(workspace), 'project.md');
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        workspace,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await withCoalescedMemoryChanges(
+          workspace,
+          registration.id,
+          async () => {
+            for (const file of [userFile, projectFile]) {
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, 'new memory');
+            }
+          },
+        );
+      } finally {
+        registration();
+      }
+      expect(seen).toEqual([
+        expect.objectContaining({
+          scope: 'user',
+          operation: 'create',
+          relativePaths: ['user.md'],
+        }),
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['project.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'emits a coalesced alias write exactly once with a readable path',
     async () => {
       await setup();
