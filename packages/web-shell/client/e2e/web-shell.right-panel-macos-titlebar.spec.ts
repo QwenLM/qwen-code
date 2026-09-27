@@ -56,8 +56,9 @@ test('macOS desktop titlebar drag region does not occlude the panel toggle', asy
 }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => {
-    (window as unknown as { __QWEN_CODE_MACOS_TITLEBAR__?: boolean })
-      .__QWEN_CODE_MACOS_TITLEBAR__ = true;
+    (
+      window as unknown as { __QWEN_CODE_MACOS_TITLEBAR__?: boolean }
+    ).__QWEN_CODE_MACOS_TITLEBAR__ = true;
   });
   const baseURL = String(testInfo.project.use.baseURL);
   const headerToggle = await openSessionWithMockDaemon(page, baseURL);
