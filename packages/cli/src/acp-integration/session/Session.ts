@@ -290,6 +290,7 @@ import {
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
+  MAX_DAEMON_ATTACHMENT_REFERENCES,
   readDaemonAttachmentReferences,
   readDaemonNativeResourceIndexes,
   snapshotReplayableEmbeddedResources,
@@ -4863,18 +4864,6 @@ export class Session implements SessionContext {
         'Invocation context session does not match the active session',
       );
     }
-    const promptMeta = (params as { _meta?: Record<string, unknown> })._meta;
-    snapshotReplayableEmbeddedResources(
-      params.prompt,
-      readDaemonNativeResourceIndexes(
-        promptMeta?.[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY],
-        params.prompt,
-        readDaemonAttachmentReferences(
-          promptMeta?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-          params.prompt.length,
-        ),
-      ),
-    );
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
     const channelTask =
@@ -5874,17 +5863,17 @@ export class Session implements SessionContext {
       ._meta;
     const attachmentReferences = readDaemonAttachmentReferences(
       promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-    );
-    const nativeReferences = readDaemonAttachmentReferences(
-      promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-      params.prompt.length,
+      Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, params.prompt.length),
     );
     const nativeResourceIndexes = readDaemonNativeResourceIndexes(
       promptMetadata?.[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY],
       params.prompt,
-      nativeReferences,
+      attachmentReferences,
     );
-    const embeddedResources = snapshotReplayableEmbeddedResources(
+    const {
+      resources: embeddedResources,
+      truncated: embeddedResourcesTruncated,
+    } = snapshotReplayableEmbeddedResources(
       params.prompt,
       nativeResourceIndexes,
     );
@@ -6122,7 +6111,8 @@ export class Session implements SessionContext {
                   inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0 ||
-                  embeddedResources.length > 0
+                  embeddedResources.length > 0 ||
+                  embeddedResourcesTruncated
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
@@ -6131,6 +6121,9 @@ export class Session implements SessionContext {
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                       ...(embeddedResources.length > 0
                         ? { embeddedResources }
+                        : {}),
+                      ...(embeddedResourcesTruncated
+                        ? { embeddedResourcesTruncated: true }
                         : {}),
                     }
                   : undefined,
@@ -6220,13 +6213,17 @@ export class Session implements SessionContext {
                   goalTurn?.permit,
                   promptDisplayText !== undefined ||
                     inputAnnotations ||
-                    embeddedResources.length > 0
+                    embeddedResources.length > 0 ||
+                    embeddedResourcesTruncated
                     ? {
                         displayText: promptDisplayText ?? promptText,
                         hookContext: '',
                         ...(inputAnnotations ? { inputAnnotations } : {}),
                         ...(embeddedResources.length > 0
                           ? { embeddedResources }
+                          : {}),
+                        ...(embeddedResourcesTruncated
+                          ? { embeddedResourcesTruncated: true }
                           : {}),
                       }
                     : undefined,

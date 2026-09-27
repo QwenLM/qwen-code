@@ -11350,25 +11350,35 @@ describe('Session', () => {
       },
     );
 
-    it('rejects text resources that exceed the per-prompt replay budget before recording', async () => {
-      await expect(
-        session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [
-            {
-              type: 'resource',
-              resource: {
-                uri: 'context://example/oversized',
-                text: 'x'.repeat(256 * 1024),
-              },
+    it('does not retain text resources that exceed the per-prompt replay budget', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/oversized',
+              text: 'x'.repeat(256 * 1024),
             },
-          ],
-        }),
-      ).rejects.toThrow(
-        'Embedded text resources exceed the 256 KiB replay limit',
+          },
+        ],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          hookContext: '',
+          embeddedResourcesTruncated: true,
+        },
+        undefined,
       );
-      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
     it('records daemon attachment references for transcript replay', async () => {
@@ -11603,6 +11613,16 @@ describe('Session', () => {
         },
       });
       expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          hookContext: '',
+          attachmentReferences,
+        },
+        undefined,
+      );
     });
 
     it('records empty file attachment references', async () => {
@@ -27981,6 +28001,52 @@ describe('Session', () => {
                 reference: { id: 'work', kind: 'file', value: 'work' },
               },
             ],
+          },
+          'daemon-advisor',
+        );
+      });
+
+      it('records the truncation marker for a deferred custom advisor command with an oversized resource', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'context://example/oversized',
+                  text: 'x'.repeat(256 * 1024),
+                },
+              },
+            ],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            hookContext: '',
+            embeddedResourcesTruncated: true,
           },
           'daemon-advisor',
         );

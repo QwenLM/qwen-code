@@ -27,7 +27,6 @@ import type {
   SetSessionModelResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
-import { snapshotReplayableEmbeddedResources } from './embedded-resource-replay.js';
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
@@ -11258,10 +11257,6 @@ export function createSessionControlPlane(
                     !directBlocks.has(block)
                       ? [index]
                       : [],
-                );
-                snapshotReplayableEmbeddedResources(
-                  resolvedPrompt,
-                  nativeResourceIndexes,
                 );
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {

@@ -9,7 +9,7 @@ import type { BridgeEvent } from './eventBus.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 
 describe('daemon embedded-resource admission', () => {
-  it('rejects an oversized direct text resource before the peer echo or child prompt', async () => {
+  it('admits an oversized direct text resource; the bound limits retention only', async () => {
     const handle = makeChannel();
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const abort = new AbortController();
@@ -37,22 +37,19 @@ describe('daemon embedded-resource admission', () => {
             },
           ],
         }),
-      ).rejects.toThrow(
-        'Embedded text resources exceed the 256 KiB replay limit',
-      );
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(1);
       await vi.waitFor(() =>
-        expect(events.some((event) => event.type === 'turn_error')).toBe(true),
+        expect(
+          events.some((event) => {
+            if (event.type !== 'session_update') return false;
+            return (
+              (event.data as { update?: { sessionUpdate?: string } }).update
+                ?.sessionUpdate === 'user_message_chunk'
+            );
+          }),
+        ).toBe(true),
       );
-      expect(handle.agent.promptCalls).toHaveLength(0);
-      expect(
-        events.filter((event) => {
-          if (event.type !== 'session_update') return false;
-          return (
-            (event.data as { update?: { sessionUpdate?: string } }).update
-              ?.sessionUpdate === 'user_message_chunk'
-          );
-        }),
-      ).toEqual([]);
       abort.abort();
       await collecting;
     } finally {
@@ -97,7 +94,7 @@ describe('daemon embedded-resource admission', () => {
     }
   });
 
-  it('does not exempt a direct oversized resource just because it shares a native attachment URI', async () => {
+  it('admits a direct oversized resource sharing a native attachment URI, exempting only the expansion', async () => {
     const handle = makeChannel();
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     try {
@@ -123,10 +120,11 @@ describe('daemon embedded-resource admission', () => {
             },
           ],
         }),
-      ).rejects.toThrow(
-        'Embedded text resources exceed the 256 KiB replay limit',
-      );
-      expect(handle.agent.promptCalls).toHaveLength(0);
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        _meta: { 'qwen.daemon.attachmentResourceIndexes': [0] },
+      });
     } finally {
       await bridge.shutdown();
     }

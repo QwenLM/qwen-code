@@ -479,6 +479,8 @@ export interface UserPromptRecordPayload {
   resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
   /** Bounded original ACP text resources, independent of model-input expansion. */
   embeddedResources?: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  /** True when replayable embedded text resources exceeded the retention bounds and were not journaled. */
+  embeddedResourcesTruncated?: boolean;
 }
 
 export interface UserPromptAttachmentReference {
@@ -1211,9 +1213,8 @@ export class ChatRecordingService {
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
+        this.trackUserDisplayTextForTitlePayload(
+          record.systemPayload as UserPromptRecordPayload | undefined,
         );
       }
       if (record.type !== 'system') continue;
@@ -1251,6 +1252,20 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+  }
+
+  // A resource-only record stores displayText '' but hides no model context,
+  // unlike a channel projection marker — it must not flip the title
+  // projection on, or the session loses auto-titling.
+  private trackUserDisplayTextForTitlePayload(
+    payload: UserPromptRecordPayload | undefined,
+  ): void {
+    this.trackUserDisplayTextForTitle(
+      payload?.displayText === '' &&
+        (payload.embeddedResources?.length ?? 0) > 0
+        ? undefined
+        : payload?.displayText,
+    );
   }
 
   private trackUserDisplayTextForTitle(displayText: string | undefined): void {
@@ -1950,7 +1965,7 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
+      this.trackUserDisplayTextForTitlePayload(promptPayload);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),

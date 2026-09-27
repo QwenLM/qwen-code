@@ -5,12 +5,12 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
 
 export const MAX_RECORDED_EMBEDDED_RESOURCES_BYTES = 256 * 1024;
-const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
+export const MAX_RECORDED_EMBEDDED_RESOURCES = 256;
+export const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
 
 export function readDaemonAttachmentReferences(
   value: unknown,
@@ -54,19 +54,34 @@ export function readDaemonAttachmentReferences(
   return references;
 }
 
+export interface ReplayableEmbeddedResourcesSnapshot {
+  resources: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  /** True when replayable text resources were dropped by the retention bounds. */
+  truncated: boolean;
+}
+
+/**
+ * Selects the prompt's replayable embedded text resources for the durable
+ * user record. The bounds limit retention only — they never reject the
+ * prompt — so callers must surface `truncated` to keep the loss explicit.
+ */
 export function snapshotReplayableEmbeddedResources(
   prompt: ContentBlock[],
   nativeResourceIndexes: readonly number[] = [],
-): Array<Extract<ContentBlock, { type: 'resource' }>> {
+): ReplayableEmbeddedResourcesSnapshot {
   const resources: Array<Extract<ContentBlock, { type: 'resource' }>> = [];
   let retainedBytes = 0;
+  let truncated = false;
   const nativeIndexes = new Set(nativeResourceIndexes);
   for (const [index, block] of prompt.entries()) {
     if (
       !block ||
       block.type !== 'resource' ||
       !block.resource ||
-      typeof block.resource !== 'object' ||
+      // A resource without a non-empty URI can never be replayed
+      // (transcript-replay.ts drops it), so it is neither retained nor charged.
+      typeof block.resource.uri !== 'string' ||
+      block.resource.uri.length === 0 ||
       !('text' in block.resource) ||
       typeof block.resource.text !== 'string'
     ) {
@@ -75,16 +90,19 @@ export function snapshotReplayableEmbeddedResources(
     if (nativeIndexes.has(index)) {
       continue;
     }
-    retainedBytes += Buffer.byteLength(JSON.stringify(block), 'utf8');
-    if (retainedBytes > MAX_RECORDED_EMBEDDED_RESOURCES_BYTES) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Embedded text resources exceed the 256 KiB replay limit',
-      );
+    if (resources.length >= MAX_RECORDED_EMBEDDED_RESOURCES) {
+      truncated = true;
+      continue;
     }
+    const blockBytes = Buffer.byteLength(JSON.stringify(block), 'utf8');
+    if (retainedBytes + blockBytes > MAX_RECORDED_EMBEDDED_RESOURCES_BYTES) {
+      truncated = true;
+      continue;
+    }
+    retainedBytes += blockBytes;
     resources.push(structuredClone(block));
   }
-  return resources;
+  return { resources, truncated };
 }
 
 export function readDaemonNativeResourceIndexes(
@@ -124,6 +142,15 @@ export function readDaemonNativeResourceIndexes(
   if (!Array.isArray(value) || value.length > (references?.length ?? 0)) {
     return [];
   }
+  const nativeUris = new Set(
+    (references ?? [])
+      .filter((reference) => reference.type === 'resource')
+      .map(
+        (reference) =>
+          `attachment:///${encodeURIComponent(reference.attachmentId)}`,
+      ),
+  );
+  const seenIndexes = new Set<number>();
   const indexes: number[] = [];
   for (const index of value) {
     if (
@@ -131,7 +158,7 @@ export function readDaemonNativeResourceIndexes(
       !Number.isSafeInteger(index) ||
       index < 0 ||
       index >= prompt.length ||
-      indexes.includes(index)
+      seenIndexes.has(index)
     ) {
       return [];
     }
@@ -139,15 +166,11 @@ export function readDaemonNativeResourceIndexes(
     if (
       block?.type !== 'resource' ||
       !block.resource ||
-      !references?.some(
-        (reference) =>
-          reference.type === 'resource' &&
-          block.resource.uri ===
-            `attachment:///${encodeURIComponent(reference.attachmentId)}`,
-      )
+      !nativeUris.has(block.resource.uri)
     ) {
       return [];
     }
+    seenIndexes.add(index);
     indexes.push(index);
   }
   return indexes;
