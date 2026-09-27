@@ -2,23 +2,34 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
  * Checks the planned Stage H task schemas with valid and invalid instances.
  * The API contract test validates only operations that are not planned, so
- * these invariants have no other gate until H0c maps the task routes.
+ * these invariants have no other gate until H0c maps the task routes. Every
+ * instance is written in the public shape and also checked, renamed to
+ * camelCase, against the WebShell mirror, whose conditionals are copied.
  */
 class PlannedTaskContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String SESSION =
             "6f1c7d7e-3a4b-4c2d-9e8f-0123456789ab";
+    private static final Map<String, String> MIRRORS = Map.of(
+            "PublicTask", "WebShellTask",
+            "PublicTaskList", "WebShellTaskPage",
+            "PublicTaskEvent", "WebShellTaskEvent",
+            "PublicTaskEventList", "WebShellTaskEventPage",
+            "PublicCommandOperation", "WebShellCommandOperation",
+            "PublicOperation", "WebShellOperation");
 
     private final List<String> failures = new ArrayList<>();
 
@@ -54,19 +65,7 @@ class PlannedTaskContractTest {
         }
         ObjectNode untyped = task("running", 2L, null);
         untyped.remove("object");
-        reject("missing object", untyped);
-
-        ObjectNode webShell = JSON.createObjectNode().put("taskId", "task-1")
-                .put("sessionId", SESSION).put("kind", "monitor")
-                .put("state", "completed").put("createdAt", 1L)
-                .put("startedAt", 2L).put("settledAt", 3L);
-        webShell.putArray("artifactRefs");
-        ArrayNode actions = webShell.putArray("actionCapabilities");
-        actions.add("read_output");
-        check("WebShellTask", "WebShell completed", webShell, true);
-        actions.add("cancel");
-        check("WebShellTask", "WebShell terminal still cancellable",
-                webShell, false);
+        checkPublic("PublicTask", "missing object", untyped, false);
         assertThat(failures).isEmpty();
     }
 
@@ -79,6 +78,8 @@ class PlannedTaskContractTest {
                 true);
         check("PublicTaskEvent", "artifact",
                 event("artifact").put("artifact_id", "artifact-1"), true);
+        check("PublicTaskEvent", "a later event type",
+                event("input_received"), true);
 
         check("PublicTaskEvent", "state_changed with text",
                 event("state_changed").put("state", "running")
@@ -92,9 +93,12 @@ class PlannedTaskContractTest {
         check("PublicTaskEvent", "artifact with truncated", event("artifact")
                 .put("artifact_id", "artifact-1").put("truncated", true),
                 false);
-        ObjectNode uncursored = event("output").put("text", "x");
-        uncursored.remove("cursor");
-        check("PublicTaskEvent", "event without cursor", uncursored, false);
+        for (String field : List.of("cursor", "schema_version",
+                "projection_version")) {
+            ObjectNode partial = event("output").put("text", "x");
+            partial.remove(field);
+            check("PublicTaskEvent", "event without " + field, partial, false);
+        }
         assertThat(failures).isEmpty();
     }
 
@@ -102,24 +106,19 @@ class PlannedTaskContractTest {
     void listsAndPagesKeepTheirCursors() {
         ObjectNode tasks = JSON.createObjectNode().put("object", "list")
                 .put("has_more", true);
-        tasks.putArray("data");
+        tasks.putArray("data").add(task("running", 2L, null));
         tasks.putNull("next_cursor");
         check("PublicTaskList", "more tasks without a cursor", tasks, false);
         tasks.put("next_cursor", "cursor-1");
         check("PublicTaskList", "more tasks with a cursor", tasks, true);
 
-        ObjectNode page = JSON.createObjectNode().put("hasMore", true);
-        page.putArray("data");
-        check("WebShellTaskPage", "WebShell page without a cursor", page,
-                false);
-
         ObjectNode events = JSON.createObjectNode().put("object", "list")
                 .put("has_more", false);
-        events.putArray("data");
+        events.putArray("data").add(event("output").put("text", "x"));
         events.putNull("next_cursor");
         check("PublicTaskEventList", "null event cursor", events, false);
-        events.put("next_cursor", "cursor-0");
-        check("PublicTaskEventList", "empty page keeps its position", events,
+        events.put("next_cursor", "cursor-1");
+        check("PublicTaskEventList", "last page keeps its position", events,
                 true);
         assertThat(failures).isEmpty();
     }
@@ -145,16 +144,24 @@ class PlannedTaskContractTest {
         resolved.put("type", "action_response").remove("task_id");
         check("PublicCommandOperation", "the same resolution on its own type",
                 resolved, true);
+        assertThat(failures).isEmpty();
+    }
 
-        ObjectNode webShell = JSON.createObjectNode()
-                .put("operationId", "operation-1").put("sessionId", SESSION)
-                .put("type", "task_cancel").put("status", "pending")
-                .put("admissionStage", "java_durable")
-                .put("deliveryState", "pending").put("replayed", false);
-        check("WebShellCommandOperation", "WebShell task_cancel without taskId",
-                webShell, false);
-        webShell.put("taskId", "task-1");
-        check("WebShellOperation", "WebShell task_cancel", webShell, true);
+    @Test
+    void webShellTaskRequestsRequireTheirKeys() {
+        ObjectNode cancel = JSON.createObjectNode().put("sessionId", SESSION)
+                .put("taskId", "task-1").put("idempotencyKey", "key-1");
+        checkPublic("WebShellTaskCancelRequest", "cancel", cancel, true);
+        cancel.remove("idempotencyKey");
+        checkPublic("WebShellTaskCancelRequest", "cancel without a key",
+                cancel, false);
+        ObjectNode events = JSON.createObjectNode().put("sessionId", SESSION)
+                .put("taskId", "task-1").put("after", "cursor-1")
+                .put("limit", 100);
+        checkPublic("WebShellTaskEventQueryRequest", "events", events, true);
+        events.put("limit", 101);
+        checkPublic("WebShellTaskEventQueryRequest", "events over the limit",
+                events, false);
         assertThat(failures).isEmpty();
     }
 
@@ -177,7 +184,8 @@ class PlannedTaskContractTest {
     }
 
     private static ObjectNode event(String type) {
-        return JSON.createObjectNode().put("task_id", "task-1")
+        return JSON.createObjectNode().put("schema_version", 1)
+                .put("projection_version", 1).put("task_id", "task-1")
                 .put("session_id", SESSION).put("type", type)
                 .put("cursor", "cursor-1").put("created_at", 1L);
     }
@@ -197,7 +205,15 @@ class PlannedTaskContractTest {
         check("PublicTask", label, task, false);
     }
 
+    /** Checks the public instance and its camelCase WebShell mirror. */
     private void check(String schema, String label, ObjectNode instance,
+            boolean valid) {
+        checkPublic(schema, label, instance, valid);
+        String id = schema.contains("Operation") ? "operationId" : "taskId";
+        checkPublic(MIRRORS.get(schema), label, webShell(instance, id), valid);
+    }
+
+    private void checkPublic(String schema, String label, JsonNode instance,
             boolean valid) {
         boolean actual = CONTRACT.validate("/components/schemas/" + schema,
                 instance).isEmpty();
@@ -205,5 +221,43 @@ class PlannedTaskContractTest {
             failures.add(schema + " " + label + ": expected "
                     + (valid ? "valid" : "invalid") + " " + instance);
         }
+    }
+
+    /**
+     * Renames a public instance to the WebShell shape: camelCase names, the
+     * resource ID under its WebShell name, and no {@code object}.
+     */
+    private static JsonNode webShell(JsonNode node, String id) {
+        if (node.isArray()) {
+            ArrayNode items = JSON.createArrayNode();
+            node.forEach(item -> items.add(webShell(item, id)));
+            return items;
+        }
+        if (!node.isObject()) {
+            return node;
+        }
+        ObjectNode renamed = JSON.createObjectNode();
+        node.properties().forEach(field -> {
+            String name = field.getKey();
+            if (!name.equals("object")) {
+                renamed.set(name.equals("id") ? id : camelCase(name),
+                        webShell(field.getValue(), id));
+            }
+        });
+        return renamed;
+    }
+
+    private static String camelCase(String name) {
+        StringBuilder out = new StringBuilder();
+        boolean upper = false;
+        for (char c : name.toCharArray()) {
+            if (c == '_') {
+                upper = true;
+            } else {
+                out.append(upper ? Character.toUpperCase(c) : c);
+                upper = false;
+            }
+        }
+        return out.toString();
     }
 }

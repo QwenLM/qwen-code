@@ -1755,7 +1755,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task; 409 cursor_expired means that the cursor is older than the retained events: read the task Artifacts, then continue from the task output_cursor.",
+            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. 409 cursor_expired means that the cursor is older than the retained events; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that reads the task Artifacts and then the retained events from the start (without after) misses no output; joining the two without overlap is defined with output segmentation in Stage H3.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1802,7 +1802,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Cancel durably recorded for the task owner. A retry with the same Idempotency-Key and request replays the original operation before any state or capability check, even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. A new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict.",
+            "description": "Cancel durably recorded for the task owner. A retry by the same actor with the same Idempotency-Key and request replays the original operation after the caller's access is re-checked and before any task-state or action_capabilities check, even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. 400 invalid_request when Idempotency-Key is missing or malformed; 403 task_forbidden when the caller can read the task but may not cancel it; a new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2248,7 +2248,7 @@
         "name": "after",
         "in": "query",
         "required": false,
-        "description": "Opaque task event cursor: a page next_cursor or a task output_cursor. Omit it to read from the oldest retained event.",
+        "description": "Opaque task event cursor: an event cursor, a page next_cursor or a task output_cursor. Omit it to read from the oldest retained event.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -5790,8 +5790,24 @@
       "PublicTaskEvent": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["task_id", "session_id", "type", "created_at", "cursor"],
+        "required": [
+          "schema_version",
+          "projection_version",
+          "task_id",
+          "session_id",
+          "type",
+          "created_at",
+          "cursor"
+        ],
         "properties": {
+          "schema_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "projection_version": {
+            "type": "integer",
+            "minimum": 1
+          },
           "task_id": {
             "type": "string",
             "minLength": 1,
@@ -6122,8 +6138,24 @@
       "WebShellTaskEvent": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["taskId", "sessionId", "type", "createdAt", "cursor"],
+        "required": [
+          "schemaVersion",
+          "projectionVersion",
+          "taskId",
+          "sessionId",
+          "type",
+          "createdAt",
+          "cursor"
+        ],
         "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "projectionVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
           "taskId": {
             "type": "string",
             "minLength": 1,
@@ -6272,7 +6304,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The cursor of the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event the server examined, including events this caller does not receive, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6368,8 +6400,10 @@
       },
       "TaskEventType": {
         "type": "string",
-        "enum": ["state_changed", "output", "artifact"],
-        "x-qwen-implementation-status": "planned"
+        "minLength": 1,
+        "maxLength": 128,
+        "x-qwen-implementation-status": "planned",
+        "description": "state_changed, output or artifact. The set is open: later versions may add types, and clients ignore types they do not know, as with Session events."
       },
       "PublicTaskEventList": {
         "type": "object",
@@ -6393,7 +6427,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The cursor of the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event the server examined, including events this caller does not receive, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"

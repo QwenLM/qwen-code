@@ -106,13 +106,13 @@ by JSON Pointer into the spec, so `$ref` resolves inside the one file.
 
 ### 5.1 Routes
 
-The test reads every route under `/v1/agents` and `/api/agent/web-shell/v1`
+The test reads every route under `/v1/agent` and `/api/agent/web-shell/v1`
 from Spring's `RequestMappingHandlerMapping` and compares them with the spec.
-A mapped route that is absent from the spec or marked `planned` fails; so does
-a `partial` or `implemented` route that is not mapped. There are no route gaps
-after 4.3. The [H0a task contract](2026-09-27-managed-agent-task-contract.md)
-adds `/v1/agent-automations` and `/v1/agent-channels` to the prefixes it reads,
-because their planned routes do not start with `/v1/agents`.
+The first prefix covers `/v1/agents` and the `/v1/agent-*` resources that the
+[H0a task contract](2026-09-27-managed-agent-task-contract.md) names; D1 read
+only `/v1/agents`. A mapped route that is absent from the spec or marked
+`planned` fails; so does a `partial` or `implemented` route that is not mapped.
+There are no route gaps after 4.3.
 
 ### 5.2 Records
 

@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-Status: H0a implemented in this change, as a contract only (every added route, schema and property is `planned`); H0b, H0c and H1 to H6 pending
+Status: H0a implemented in this change, as a contract only (every added route and schema, and every property added to an existing schema, is `planned`); H0b, H0c and H1 to H6 pending
 Date: 2026-09-27
 Issue: [#12827](https://github.com/QwenLM/qwen-code/issues/12827), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -49,20 +49,23 @@ has nothing to plan against except those daemon routes.
 
 ## 4. Decisions
 
-### 4.1 Every added route, schema and property is `planned`
+### 4.1 Everything added is `planned`
 
-Every route, schema and property added here carries
-`x-qwen-implementation-status: planned`, including the properties added to
-the existing `PublicCommandOperation`, `WebShellCommandOperation`,
-`SessionCapabilities` and `WebShellSession.capabilities` schemas. The generator
-drops them, and the Java contract test fails if the server maps any of the
-routes. The version becomes `1.14.0` because routes are added.
+Every route and schema added here carries
+`x-qwen-implementation-status: planned`, and so does every property added to
+an existing schema (`PublicCommandOperation`, `WebShellCommandOperation`,
+`SessionCapabilities` and `WebShellSession.capabilities`). The properties of
+the new schemas and the two new parameters need no marker of their own: only
+planned operations reach them. The generator drops all of it, and the Java
+contract test fails if the server maps any of the routes. The version becomes
+`1.14.0` because routes are added.
 
 An enum value cannot carry the marker. The new `task_cancel` command type is
-therefore visible to readers of the command operation today, as the planned
-`action_response` and `close` types already are, and it reaches the generated
-WebShell types as soon as any WebShell route that returns
-`WebShellCommandOperation` becomes `partial`. Until then it has no effect.
+therefore already visible in the public spec, because the `partial` archive
+and delete routes answer `202` with `PublicCommandOperation`, as the planned
+`action_response` and `close` types are. Only the generated WebShell types are
+insulated, until any WebShell route that returns `WebShellCommandOperation`
+becomes `partial`.
 
 ### 4.2 `PublicTask`
 
@@ -87,7 +90,9 @@ resources:
 
 The enums are shared components (`TaskKind`, `TaskState`, `TaskRuntimeState`,
 `TaskActionCapability`, and `TaskEventType` for events), as
-`CwdOperationStatus` already is, so the two surfaces cannot drift apart.
+`CwdOperationStatus` already is. The conditionals and bounds are copied into
+each surface, so `PlannedTaskContractTest` checks every instance against both
+(section 5).
 
 The design's shape changes in five places:
 
@@ -95,8 +100,8 @@ The design's shape changes in five places:
   `PublicCommandOperation` name their identifier `id`; WebShell keeps
   `taskId`, as it keeps `actionId` and `operationId`.
 - **`object`.** The Session, Turn, Item, Artifact and Workspace resources
-  carry an `object` discriminator and their lists carry `object: "list"`; only
-  the planned Action family omits it. `PublicTask`, `PublicTaskList` and
+  carry an `object` discriminator and their lists carry `object: "list"`;
+  operations, events and the planned Action family do not. `PublicTask`, `PublicTaskList` and
   `PublicTaskEventList` carry it too, because adding a required field later
   would break clients.
 - **Timestamps.** The public API uses `int64` epoch milliseconds everywhere
@@ -142,14 +147,21 @@ These invariants are schema conditionals:
   the chunk was cut and the full output is in an Artifact;
 - `artifact`, the `artifact_id` of an Artifact that received task output.
 
-Conditionals forbid the fields of one type on another. High-volume logs and
-Monitor raw lines go into Artifacts, never one event per line, as design
-section 11 requires.
+Conditionals forbid the fields of one type on another. The set of types is
+open, as for Session events: later versions may add types, and clients ignore
+the ones they do not know. Every event carries `schema_version` and
+`projection_version`, as section 5 of the API contract requires of public
+events. High-volume logs and Monitor raw lines go into Artifacts, never one
+event per line, as design section 11 requires, and events are retained for a
+bounded time rather than kept forever.
 
-Every event carries `cursor`, the position after it. A consumer that stores
-the cursor with each event it applies resumes after a crash without applying
-an output chunk twice. A page's `next_cursor` is the cursor of its last event,
-or the requested position when the page is empty. Unlike list pages,
+Every event carries `cursor`, the position after it, which also serves as its
+identity. A consumer that stores the cursor with each event it applies resumes
+after a crash without applying an output chunk twice. A page's `next_cursor`
+is the position after the last event the server examined, including events
+this caller does not receive, so a page that filtered everything out still
+advances; when nothing was examined, it is the requested position, or the
+start of the retained events when `after` was omitted. Unlike list pages,
 `next_cursor` is required and never `null`: a running task can produce more
 events, so a caller that reached the end still needs a position to poll from.
 `after` accepts an event's or a page's cursor, or a task's `output_cursor`;
@@ -187,10 +199,12 @@ Cancel reuses the command operation model instead of a new one:
   gains `taskId` in the same way.
 - The operation is read back through the existing
   `GET .../operations/{operationId}` and WebShell `operations/query`.
-- A retry with the same `Idempotency-Key` and request replays the original
-  operation before any state or capability check, even after the task
-  settled, as the cwd change and API contract section 3 require. A lost `202`
-  therefore never turns into a `409` for the caller that made the request.
+- A retry by the same actor with the same `Idempotency-Key` and request
+  replays the original operation after the caller's access is re-checked and
+  before any task-state or `action_capabilities` check, even after the task
+  settled, as the cwd change and API contract sections 3 and 10 require. A
+  lost `202` therefore never turns into a `409` for the caller that made the
+  request.
 - `202` and a `completed` operation mean that the authority recorded the
   cancel, not that the task stopped. The task becomes `cancelled` only after
   its physical execution settles, and an unknown outcome becomes
@@ -239,28 +253,36 @@ to those slices.
 
 Errors keep `ErrorEnvelope` and the shared `BadRequest`, `Forbidden`,
 `NotFound`, `Conflict` and `CursorExpired` responses. The codes are those the
-API contract already froze, plus two task codes:
+API contract already froze, plus three task codes:
 
 | Status | Code                      | When                                                                                     |
 | ------ | ------------------------- | ---------------------------------------------------------------------------------------- |
 | `400`  | `invalid_cursor`          | The task list cursor is malformed.                                                       |
 | `400`  | `invalid_event_cursor`    | `after` is malformed or belongs to another task.                                         |
 | `400`  | `invalid_limit`           | `limit` is outside 1 to 100.                                                             |
+| `400`  | `invalid_request`         | `Idempotency-Key` is missing or malformed.                                               |
+| `403`  | `task_forbidden`          | The caller can read the task but may not cancel it. New.                                 |
 | `404`  | `session_not_found`       | The Session is absent or outside the caller's scope.                                     |
 | `404`  | `task_not_found`          | The task is absent or outside the caller's scope. New.                                   |
 | `409`  | `cursor_expired`          | `after` is older than the retained events.                                               |
 | `409`  | `task_action_unavailable` | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New. |
 | `409`  | `idempotency_conflict`    | The key was used with a different request.                                               |
 
-After `cursor_expired` the caller reads the task's Artifacts and continues
-from its current `output_cursor`.
+A caller that cannot read a task gets `404`, not `403`, as API contract
+section 10 requires. `cursor_expired` leaves the envelope's
+`replay_floor_sequence` and `snapshot_through_sequence` absent, because task
+cursors are opaque. An output event expires only after its text is in an
+Artifact, so a caller that reads the task's Artifacts and then the retained
+events from the start misses no output. Joining the two without overlap
+depends on how output is segmented, which H3 defines.
 
 ## 5. Contract test changes
 
 `ManagedAgentApiContractTest` compares mapped routes with the spec only under
 its `API_PREFIXES`. `/v1/agent-channels` and `/v1/agent-automations` do not
 start with `/v1/agents`, so a server that mapped them would pass unnoticed.
-Both are added to `API_PREFIXES`, and section 5.1 of the
+The prefix becomes `/v1/agent`, which covers `/v1/agents` and every
+`/v1/agent-*` resource a later slice adds, and section 5.1 of the
 [D1 design](2026-09-27-managed-agent-api-contract.md) now says so. No gap line
 is added to `contract-known-gaps.txt`.
 
@@ -268,27 +290,34 @@ The same test validates only operations that are not `planned`, so nothing
 would catch a broken conditional in the task schemas until H0c maps the
 routes. A new `PlannedTaskContractTest` validates valid and invalid instances
 against them with the same validator: the task invariants, forbidden fields,
-one shape per event type, list and page cursors, and the `task_cancel`
-operation, including through the `PublicOperation` and `WebShellOperation`
-unions.
+one shape per event type, the event versions, list and page cursors, and the
+`task_cancel` operation, including through the `PublicOperation` and
+`WebShellOperation` unions. Each instance is written once in the public shape
+and checked again, renamed to camelCase, against the WebShell mirror, so a
+conditional copied wrongly into one surface fails the test. The WebShell
+cancel and event query requests are checked as well.
 
 ## 6. Validation
 
 - `npm run generate:managed-agent-api` in `packages/web-shell` leaves
   `client/components/managed/generated/managed-agent-api.ts` unchanged, and
   `managed-agent-api.test.ts` passes.
-- `ManagedAgentApiContractTest` (3 tests), `PlannedTaskContractTest` (4
-  tests, 44 instances) and `ManagedSessionStoreContractFixtureTest` (3 tests)
-  pass without new gap lines.
+- `ManagedAgentApiContractTest` (3 tests), `PlannedTaskContractTest` (5
+  tests, 87 validations: 42 public, 41 WebShell mirrors and 4 WebShell
+  requests) and `ManagedSessionStoreContractFixtureTest` (3 tests) pass
+  without new gap lines.
 - Mutations fail the matching gate:
   - Removing the conditionals of `PublicTask`, `PublicTaskEvent` and the
     `task_cancel` rule of `PublicCommandOperation` fails
     `PlannedTaskContractTest` on 15 instances.
+  - Removing the conditionals of `WebShellTask`, `WebShellTaskEvent` and
+    `WebShellTaskPage`, and the minimum output length of `WebShellTaskEvent`,
+    fails it on 10 mirrored instances.
   - Marking `cancelWebShellTask` `partial` fails the route and scenario checks
     ("is partial but not mapped") and adds 75 lines to the generated types,
     including `task_cancel` in the command type (section 4.1).
   - A probe controller mapping `GET /v1/agent-automations` fails with "is
-    mapped but planned", and passes silently with the old `API_PREFIXES`.
+    mapped but planned", and passes silently with the previous prefixes.
 - `openapi-typescript` parses the full spec, including public routes.
 
 ## 7. Follow-up
@@ -302,15 +331,19 @@ unions.
   defines the Session events that announce task changes. Marking the routes
   alone is not enough: `PublicCommandOperation.task_id`,
   `WebShellCommandOperation.taskId` and both `capabilities.tasks` flags are
-  `planned` properties of their own, and stay out of the generated types until
-  they are marked too.
+  `planned` properties of their own, as is the `WebShellSession.capabilities`
+  object that holds one of them, and they stay out of the generated types
+  until they are marked too.
+- **Output recovery.** H3 defines output segmentation, and with it how a
+  caller joins the task's Artifacts with the retained events after
+  `cursor_expired` without overlap.
 - **Artifact attribution.** `PublicArtifact` has no task reference and the
   artifact list has no task filter, so an Artifact beyond the newest 100 in
   `artifact_refs` cannot be tied back to its task. The Artifact slices (O2,
   O4) should add one of the two before a task can rotate that many.
 - **Legacy states.** The daemon's task status includes `paused`, and
-  workflow runs add `pausing`; `TaskState` has neither. The adapter slice (H3 or H4) maps them, most
-  likely to `waiting`, or the design adds a state.
+  workflow runs add `pausing`; `TaskState` has neither. The adapter slice (H3
+  or H4) maps them, most likely to `waiting`, or the design adds a state.
 - **Later additions.** Query filters (`kind`, `state`), a `send_input` route
   and any display label are additive `planned` changes. `SessionTaskView`
   has no title; the first slice that renders tasks in WebShell should decide

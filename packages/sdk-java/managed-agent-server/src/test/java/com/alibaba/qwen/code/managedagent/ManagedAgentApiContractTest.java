@@ -89,8 +89,7 @@ class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",
             "record", "request", "response");
-    private static final List<String> API_PREFIXES = List.of("/v1/agents",
-            "/v1/agent-automations", "/v1/agent-channels",
+    private static final List<String> API_PREFIXES = List.of("/v1/agent",
             "/api/agent/web-shell/v1");
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
     private static final String TENANT = TenantContextFilter.HEADER;

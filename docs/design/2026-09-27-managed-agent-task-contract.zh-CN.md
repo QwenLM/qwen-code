@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-状态：H0a 已在本次变更中实现，仅限契约（新增的每个路由、schema 和属性均为 `planned`）；H0b、H0c 和 H1～H6 待实现
+状态：H0a 已在本次变更中实现，仅限契约（新增的每个路由和 schema，以及加到现有 schema 的每个属性，均为 `planned`）；H0b、H0c 和 H1～H6 待实现
 日期：2026-09-27
 Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -38,17 +38,18 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
 
 ## 4. 决定
 
-### 4.1 新增的每个路由、schema 和属性均为 `planned`
+### 4.1 新增内容均为 `planned`
 
-这里新增的每个路由、schema 和属性都带 `x-qwen-implementation-status: planned`，
-包括加到现有 `PublicCommandOperation`、`WebShellCommandOperation`、`SessionCapabilities`
-和 `WebShellSession.capabilities` 中的属性。生成器会去掉它们；服务端若映射其中任何路由，
+这里新增的每个路由和 schema 都带 `x-qwen-implementation-status: planned`，加到现有 schema
+（`PublicCommandOperation`、`WebShellCommandOperation`、`SessionCapabilities` 和
+`WebShellSession.capabilities`）的每个属性也带。新 schema 内部的属性和两个新参数不需要单独标记：
+只有 planned 的 operation 会引用它们。生成器会去掉这些内容；服务端若映射其中任何路由，
 Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
 
-枚举值无法携带这个标记。因此新增的 `task_cancel` 命令类型现在就对命令 operation
-的读者可见，与已有的 planned 类型 `action_response` 和 `close` 相同；只要任何返回
-`WebShellCommandOperation` 的 WebShell 路由变为 `partial`，它就会进入生成的 WebShell
-类型。在那之前它没有任何作用。
+枚举值无法携带这个标记。因此新增的 `task_cancel` 命令类型在公共规范中已经可见，
+因为 `partial` 的归档与删除路由以 `PublicCommandOperation` 作为 `202` 响应，与 planned 类型
+`action_response` 和 `close` 相同。只有生成的 WebShell 类型不受影响，直到任何返回
+`WebShellCommandOperation` 的 WebShell 路由变为 `partial`。
 
 ### 4.2 `PublicTask`
 
@@ -71,14 +72,15 @@ Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
 | `actionCapabilities` | `action_capabilities` | `actionCapabilities` | `TaskActionCapability`，值不重复。        |
 
 枚举都是共用组件（`TaskKind`、`TaskState`、`TaskRuntimeState`、`TaskActionCapability`，
-以及事件用的 `TaskEventType`），与已有的 `CwdOperationStatus` 做法相同，两个接口面因此不会各自漂移。
+以及事件用的 `TaskEventType`），与已有的 `CwdOperationStatus` 做法相同。条件约束和上下限在两个接口面各有一份，
+所以 `PlannedTaskContractTest` 用每个实例同时校验两者（见第 5 节）。
 
 与设计中的结构相比有五处变化：
 
 - **`id`。** `PublicSession`、`PublicAction`、`PublicArtifact` 和 `PublicCommandOperation`
   都把自身标识命名为 `id`；WebShell 保留 `taskId`，与它保留 `actionId` 和 `operationId` 一致。
 - **`object`。** Session、Turn、Item、Artifact 和 Workspace 资源都带 `object` 判别字段，
-  它们的列表带 `object: "list"`；只有 planned 的 Action 家族省略它。`PublicTask`、
+  它们的列表带 `object: "list"`；operation、事件和 planned 的 Action 家族不带。`PublicTask`、
   `PublicTaskList` 和 `PublicTaskEventList` 也带上它，因为以后再加必填字段会破坏客户端。
 - **时间戳。** 公共 API 统一用 `int64` epoch 毫秒（`created_at`、`expires_at`），
   服务端由 `clock.millis()` 填写。
@@ -114,11 +116,15 @@ Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
   则带 `truncated`；
 - `artifact`，收到任务输出的 Artifact 的 `artifact_id`。
 
-条件约束禁止一种类型带另一种类型的字段。按设计第 11 节的要求，高频日志和 Monitor
-原始行进入 Artifact，绝不每行一个事件。
+条件约束禁止一种类型带另一种类型的字段。类型集合与 Session 事件一样是开放的：后续版本可以增加类型，
+客户端忽略不认识的类型。按 API 契约第 5 节对公共事件的要求，每个事件都带 `schema_version` 和
+`projection_version`。按设计第 11 节的要求，高频日志和 Monitor 原始行进入 Artifact，绝不每行一个事件；
+事件只保留有限时间，不会永久保存。
 
-每个事件都带 `cursor`，即该事件之后的位置。消费方为每个已应用的事件保存游标，崩溃后恢复时就不会把同一段输出应用两次。
-一页的 `next_cursor` 是最后一个事件的游标；空页时是请求时的位置。与列表页不同，`next_cursor`
+每个事件都带 `cursor`，即该事件之后的位置，它同时也是事件的标识。消费方为每个已应用的事件保存游标，
+崩溃后恢复时就不会把同一段输出应用两次。一页的 `next_cursor` 是服务端检查过的最后一个事件之后的位置，
+包括该调用方收不到的事件，因此即使一页的事件全被过滤掉，游标也会前进；没有检查任何事件时，它是请求时的位置，
+不带 `after` 时则是保留事件的起点。与列表页不同，`next_cursor`
 必填且不为 `null`：运行中的任务还会产生事件，读到末尾的调用方仍需要一个继续轮询的位置。
 `after` 接受事件或分页的游标，或任务的 `output_cursor`；不带 `after` 时从最早保留的事件开始。
 
@@ -146,8 +152,9 @@ Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
   必须带它，其他类型都不能带。`task_cancel` 绝不带 `action_resolution`。WebShell
   镜像以同样方式增加 `taskId`。
 - 通过已有的 `GET .../operations/{operationId}` 和 WebShell `operations/query` 读回该 operation。
-- 使用同一个 `Idempotency-Key` 和相同请求的重试，会在任何状态或能力检查之前重放原 operation，
-  即使任务已经结算，与 cwd 切换和 API 契约第 3 节的要求一致。因此丢失的 `202`
+- 同一 actor 使用同一个 `Idempotency-Key` 和相同请求的重试，会在复核调用方的访问权限之后、
+  任何任务状态或 `action_capabilities` 检查之前重放原 operation，即使任务已经结算，
+  与 cwd 切换以及 API 契约第 3 节和第 10 节的要求一致。因此丢失的 `202`
   绝不会让发起请求的调用方收到 `409`。
 - `202` 和 `completed` 的 operation 表示 authority 已记录这次取消，不表示任务已停止。
   任务只有在物理执行结算后才变为 `cancelled`，结果未知时变为 `recovery_blocked`。
@@ -189,46 +196,57 @@ Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
 ### 4.7 错误
 
 错误沿用 `ErrorEnvelope` 以及共用的 `BadRequest`、`Forbidden`、`NotFound`、`Conflict` 和
-`CursorExpired` 响应。错误码是 API 契约已冻结的那些，另加两个任务错误码：
+`CursorExpired` 响应。错误码是 API 契约已冻结的那些，另加三个任务错误码：
 
 | 状态  | 错误码                    | 何时返回                                                                 |
 | ----- | ------------------------- | ------------------------------------------------------------------------ |
 | `400` | `invalid_cursor`          | 任务列表游标格式错误。                                                   |
 | `400` | `invalid_event_cursor`    | `after` 格式错误或属于另一个任务。                                       |
 | `400` | `invalid_limit`           | `limit` 不在 1～100 之间。                                               |
+| `400` | `invalid_request`         | 缺少 `Idempotency-Key` 或格式错误。                                      |
+| `403` | `task_forbidden`          | 调用方可以读取该任务，但无权取消它。新增。                               |
 | `404` | `session_not_found`       | Session 不存在或不在调用方范围内。                                       |
 | `404` | `task_not_found`          | 任务不存在或不在调用方范围内。新增。                                     |
 | `409` | `cursor_expired`          | `after` 早于保留的事件。                                                 |
 | `409` | `task_action_unavailable` | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。 |
 | `409` | `idempotency_conflict`    | 同一个键用于不同的请求。                                                 |
 
-遇到 `cursor_expired` 后，调用方读取任务的 Artifact，再从任务当前的 `output_cursor` 继续。
+按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。`cursor_expired`
+的错误封装中 `replay_floor_sequence` 和 `snapshot_through_sequence` 保持缺省，因为任务游标是不透明的。
+输出事件只有在其文本已进入 Artifact 后才会过期，因此调用方先读取任务的 Artifact、再从头读取保留的事件，
+不会漏掉任何输出。两者之间如何无重叠地衔接取决于输出如何分段，由 H3 定义。
 
 ## 5. 契约测试变更
 
 `ManagedAgentApiContractTest` 只在 `API_PREFIXES` 范围内比较已映射路由与规范。
 `/v1/agent-channels` 和 `/v1/agent-automations` 不以 `/v1/agents` 开头，服务端即使映射了它们也不会被发现。
-两者都已加入 `API_PREFIXES`，[D1 设计](2026-09-27-managed-agent-api-contract.zh-CN.md)第 5.1 节也已相应更新。
+前缀改为 `/v1/agent`，它覆盖 `/v1/agents` 以及后续切片新增的每个 `/v1/agent-*` 资源，
+[D1 设计](2026-09-27-managed-agent-api-contract.zh-CN.md)第 5.1 节也已相应更新。
 `contract-known-gaps.txt` 没有新增任何行。
 
 同一个测试只校验非 `planned` 的 operation，所以在 H0c 映射路由之前，任务 schema 中的条件约束即使写错也无人发现。
 新增的 `PlannedTaskContractTest` 使用同一个校验器，用合法与非法实例校验这些 schema：
-任务不变式、禁止字段、每种事件类型只有一种结构、列表与分页游标，以及 `task_cancel` operation
-（包括经由 `PublicOperation` 和 `WebShellOperation` union 的校验）。
+任务不变式、禁止字段、每种事件类型只有一种结构、事件版本、列表与分页游标，以及 `task_cancel` operation
+（包括经由 `PublicOperation` 和 `WebShellOperation` union 的校验）。每个实例按公共形状只写一次，
+再改名为 camelCase 后针对 WebShell 镜像校验一遍，因此条件约束在某一个接口面抄错时测试会失败。
+WebShell 的取消请求和事件查询请求也在校验之列。
 
 ## 6. 验证
 
 - 在 `packages/web-shell` 中运行 `npm run generate:managed-agent-api`，
   `client/components/managed/generated/managed-agent-api.ts` 没有变化，`managed-agent-api.test.ts` 通过。
-- `ManagedAgentApiContractTest`（3 个测试）、`PlannedTaskContractTest`（4 个测试，44 个实例）和
+- `ManagedAgentApiContractTest`（3 个测试）、`PlannedTaskContractTest`（5 个测试，87 次校验：
+  42 次公共形状、41 次 WebShell 镜像、4 次 WebShell 请求）和
   `ManagedSessionStoreContractFixtureTest`（3 个测试）通过，没有新增 gap 行。
 - 变异都会使对应门禁失败：
   - 删除 `PublicTask`、`PublicTaskEvent` 的条件约束以及 `PublicCommandOperation` 的
     `task_cancel` 规则后，`PlannedTaskContractTest` 在 15 个实例上失败。
+  - 删除 `WebShellTask`、`WebShellTaskEvent` 和 `WebShellTaskPage` 的条件约束以及
+    `WebShellTaskEvent` 的输出最小长度后，它在 10 个镜像实例上失败。
   - 把 `cancelWebShellTask` 标为 `partial`，路由检查和场景检查失败（"is partial but not mapped"），
     生成的类型多出 75 行，其中包括命令类型中的 `task_cancel`（见第 4.1 节）。
   - 探针 controller 映射 `GET /v1/agent-automations` 时报 "is mapped but planned"；
-    换回旧的 `API_PREFIXES` 则静默通过。
+    换回之前的前缀则静默通过。
 - `openapi-typescript` 能解析包括公共路由在内的完整规范。
 
 ## 7. 后续工作
@@ -238,7 +256,10 @@ Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
   中的问题 1（`monitor_run` 是否加入封闭的 v1 领域索引）。
 - **H0c。** 实现任务投影，把这些路由标为 `partial`，并定义宣告任务变化的 Session 事件。
   只标记路由还不够：`PublicCommandOperation.task_id`、`WebShellCommandOperation.taskId`
-  和两个 `capabilities.tasks` 标志都是独立的 `planned` 属性，在它们也被标记之前不会进入生成的类型。
+  和两个 `capabilities.tasks` 标志都是独立的 `planned` 属性，承载其中一个标志的
+  `WebShellSession.capabilities` 对象本身也是 planned，在它们也被标记之前不会进入生成的类型。
+- **输出恢复。** H3 定义输出分段，并随之定义 `cursor_expired` 之后调用方如何无重叠地衔接任务的
+  Artifact 与保留的事件。
 - **Artifact 归属。** `PublicArtifact` 没有任务引用，artifact 列表也没有按任务过滤，
   所以 `artifact_refs` 中最新 100 个之外的 Artifact 无法追溯到其任务。Artifact 切片（O2、O4）
   应在任务能轮转出这么多 Artifact 之前加上两者之一。
