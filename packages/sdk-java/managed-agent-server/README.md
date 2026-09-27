@@ -33,7 +33,8 @@ same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
-projection versions and the Item and Part identity they were accepted with. A
+projection versions and the Item and Part identity they were accepted with,
+except that a `stream.reconciled` event announces retracted deltas. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |

@@ -292,6 +292,8 @@ class ManagedEventReplayTest {
                 + "\ndata:";
         String frame = content(stream);
         assertThat(frame).startsWith(prefix).endsWith("\n\n");
+        assertThat(frame.indexOf("\n\n")).as("frames in %s", frame)
+                .isEqualTo(frame.length() - 2);
         return objectMapper.readTree(frame.substring(prefix.length()));
     }
 
@@ -300,8 +302,8 @@ class ManagedEventReplayTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         // Only an overflow or the end of catch-up makes the stream read
         // the store again.
-        properties.getEvents().setPollInterval(Duration.ofSeconds(30));
-        properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(30));
+        properties.getEvents().setPollInterval(Duration.ofSeconds(60));
+        properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
         return new ManagedEventStreamService(agentService, hub, executor,
                 properties) {
             @Override

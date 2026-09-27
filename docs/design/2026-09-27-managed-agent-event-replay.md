@@ -87,7 +87,9 @@ correct `cursor_expired` or resync.
   `limit` bounds the event pages otherwise.
 - `PublicEvent` and `WebShellEvent` state that events replay with the versions
   and identity they were accepted with, except after a `stream.reconciled`
-  event, which the contract did not mention before (see 4.2).
+  event, which the contract did not mention before (see 4.2). A public client
+  reloads the Items until their `snapshot_through_sequence` reaches that
+  event, because the Snapshot is rebuilt after it.
 
 ### 4.2 Versions and identity
 
@@ -164,7 +166,8 @@ follows tells clients to reload the Snapshot.
 - `PublicSession.replay_floor_sequence` returns the stored floor.
 - A stream reconciliation discards the Snapshot, so its covered sequence is `0`
   until the Items are rebuilt. With a raised floor, a public client told to
-  resync during that time would get `409` again until the rebuild finishes.
+  resync during that time would find its cursor expired again, with `409` or
+  another resync frame, until the rebuild finishes.
   Nothing raises the floor in production yet; the retention work must close
   this window before it does.
 - The WebShell transcript does not check the floor. Once events are pruned,

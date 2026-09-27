@@ -73,7 +73,9 @@ resync。
   返回全部 Items、Snapshot 之前除输入、文本增量与工具调用更新以外的事件，以及之后的
   所有事件；其他情况下由 `limit` 限定事件分页。
 - `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
-  是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。
+  是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。由于 Snapshot
+  在它之后重建，公共客户端要重新读取 Items，直到其 `snapshot_through_sequence`
+  达到该事件。
 
 ### 4.2 版本与身份
 
@@ -134,8 +136,8 @@ Snapshot。
   调用它。
 - `PublicSession.replay_floor_sequence` 返回已存储的下限。
 - 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`。
-  如果下限已被提升，这段时间内收到 resync 的公共客户端会一直得到 `409`，直到重建
-  完成。生产环境中目前没有任何路径提升下限；保留策略的工作必须在提升下限之前消除
+  如果下限已被提升，这段时间内收到 resync 的公共客户端会发现游标再次过期（得到
+  `409` 或又一帧 resync），直到重建完成。生产环境中目前没有任何路径提升下限；保留策略的工作必须在提升下限之前消除
   这段窗口。
 - WebShell transcript 不检查下限。事件被清理之后，它的更早分页必须止于下限；这同样
   属于保留策略的工作。
