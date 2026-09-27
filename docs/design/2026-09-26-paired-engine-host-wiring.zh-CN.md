@@ -89,7 +89,9 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
   强制 writer lease 才被认证；双引擎 Bridge 会把这一要求扩展到一个它永远用不上的
   Managed factory。
 - 通过 `deps.bridge` 注入的 Bridge 或注入的工作区 registry 仍由调用方控制；开关既不
-  包装也不替换它们。
+  包装也不替换它们。`qwen serve` 自身会把工作区 registry 注入 serve app，因此在其中
+  起作用的是 `runQwenServe` 的三处构造点；嵌入式默认 Bridge 由两者都不注入、并设置了
+  该选项的嵌入方配对。
 - 嵌入式默认 Bridge 从嵌入进程的 runtime 目录读取 owner，与它读取 artifact 快照和
   附件的位置相同；而它的子进程根据自身环境与工作区 settings 解析 runtime 目录。如果
   嵌入方的工作区 settings 改变了 runtime 目录，嵌入方需为自身进程设置
@@ -262,12 +264,13 @@ runtime 的作用域，其错误分类沿用 B2a。
 
 ## 风险与待定问题
 
-- 在 Managed 引擎落地之前，开关不会在 Managed 上运行任何内容，但仍会在两方面改变
+- 在 Managed 引擎落地之前，开关不会在 Managed 上运行任何内容，但仍会在三方面改变
   Legacy 的行为。Legacy 会话从创建起就是持久的，并带来 B2a 所述的未使用会话只含 owner
   的 transcript。被隔离的 Legacy 通道遵循 B2c 的策略：拒绝新 prompt、关闭已结算的
   会话，并在排空期限内退役；而未配对的通道允许其会话继续 prompt 直至排空。因此，B2c
   批准时要求在 B2d 启用配对之前完成的后续项（#12811：隔离期间结束的后台任务不能卡住
-  排空，退出核验须在开始终止时启动）同样适用于只有 Legacy 的双引擎宿主。
+  排空，退出核验须在开始终止时启动）同样适用于只有 Legacy 的双引擎宿主。此外，冷恢复
+  会再读一遍 transcript 以核验 owner，因此更严格，见下面几项。
 - 在引擎切片落地之前，serve app 的 Managed 引擎依赖项没有生产调用方；测试用它注册
   替身。
 - 双引擎宿主的恢复比未配对宿主更严格。transcript 如果因为某行无法完整解析、或某条

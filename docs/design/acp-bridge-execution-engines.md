@@ -168,9 +168,10 @@ branch/side-task requests reject before mutating history.
 | Session routing     | `session-control-plane.ts`, `BridgeClient` callbacks                                       |
 | Verification        | Collocated Bridge/lifecycle tests and isolated process test script                         |
 
-Every constructor stays on the single-factory path unless
-`qwen serve --experimental-paired-engines` pairs the daemon's ordinary workspace
-runtimes and the serve app's default Bridge
+Every constructor stays on the single-factory path unless paired engines are
+enabled: `qwen serve --experimental-paired-engines` pairs the daemon's ordinary
+workspace runtimes, and an embedder that sets the same serve option pairs the
+serve app's default Bridge
 ([paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)). There
 are no new daemon routes. Workspace control is workspace scoped;
 all session operations belong to the live session owner. A missing or failed

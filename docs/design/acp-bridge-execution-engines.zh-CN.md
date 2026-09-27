@@ -128,9 +128,10 @@ Managed branch/side-task 在修改历史前拒绝。
 | 会话路由 | `session-control-plane.ts`、`BridgeClient` 回调                             |
 | 验证     | 同目录 Bridge/lifecycle 测试与隔离进程脚本                                  |
 
-除 `qwen serve --experimental-paired-engines` 为 daemon 的普通工作区 runtime 与 serve
-app 默认 Bridge 配对外（见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)），
-所有构造方保持单 factory 路径，不增加 daemon route。
+除非启用双引擎，所有构造方保持单 factory 路径：`qwen serve --experimental-paired-engines`
+为 daemon 的普通工作区 runtime 配对，设置同一 serve 选项的嵌入方为 serve app 的默认
+Bridge 配对（见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)）。
+不增加 daemon route。
 工作区控制归工作区，所有会话操作归活跃 Session owner。Managed owner 缺失或失败
 时绝不回退到 Legacy 或 primary runtime。
 

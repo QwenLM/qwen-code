@@ -113,6 +113,9 @@ B2d adds no operator setting for them.
   paired Bridge would extend to a Managed factory it can never use.
 - A Bridge injected through `deps.bridge` or an injected workspace registry
   stays under its caller's control; the opt-in neither wraps nor replaces it.
+  `qwen serve` itself injects its workspace registry into the serve app, so
+  there the three `runQwenServe` sites do the work; the embedded default is
+  paired when an embedder that injects neither sets the option.
 - The embedded default reads owners from the embedding process's runtime
   directory, where it already reads artifact snapshots and attachments, while
   its children resolve theirs from their environment and the workspace
@@ -330,7 +333,7 @@ classification is B2a's.
 ## Risks and open questions
 
 - Until a Managed engine lands, the opt-in runs nothing on Managed, but it still
-  changes Legacy behavior in two ways. Legacy sessions are durable from
+  changes Legacy behavior in three ways. Legacy sessions are durable from
   creation, with the owner-only transcripts for unused sessions described in
   B2a. A quarantined Legacy channel follows the B2c policy: it refuses new
   prompts, closes settled sessions and retires by the drain deadline, where an
@@ -338,7 +341,9 @@ classification is B2a's.
   follow-ups the B2c approval requires before B2d enables pairing (#12811: a
   background job finishing during a quarantine must not stall the drain, and
   exit verification must start when termination starts) therefore apply to
-  paired Legacy-only hosts too.
+  paired Legacy-only hosts too. And a cold restore reads the transcript once
+  more to verify its owner, which makes it stricter, as the items below
+  describe.
 - The serve app's Managed-engine dependency has no production caller until the
   engine slice lands; tests use it for the double.
 - Paired hosts restore more strictly than unpaired ones. A transcript that

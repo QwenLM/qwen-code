@@ -128,12 +128,11 @@ function restore(
   operation: 'load' | 'resume',
   managed?: ManagedExecutionEngine,
   sessionId = SESSION_ID,
-  daemonOwnedStandalone = false,
 ): Promise<BridgeExecutionEngine> {
   return createSessionExecutionEngineSelector({ runtimeBaseDir, managed })({
     operation,
     request: { workspaceCwd, sessionId },
-    daemonOwnedStandalone,
+    daemonOwnedStandalone: false,
   });
 }
 
@@ -279,15 +278,47 @@ describe('createSessionExecutionEngineSelector: cold restore', () => {
     },
   );
 
-  it('restores a daemon-owned session by its owner, not by its purpose', async () => {
-    await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);
-    await expect(
-      restore('load', undefined, SESSION_ID, true),
-    ).rejects.toBeInstanceOf(SessionExecutionEngineError);
-    await expect(
-      restore('load', managedEngine(COMPATIBLE), SESSION_ID, true),
-    ).resolves.toBe('managed');
-  });
+  // Restores carry the session's creation metadata, but the owner already
+  // reflects its purpose, so none of it is evaluated again.
+  const RESTORE_PURPOSES = [
+    ['a parent', { parentSessionId: 'parent-session' }, false],
+    ['a channel source', { sourceType: 'channel' }, false],
+    [
+      'a scheduled run source',
+      { sourceType: 'default', sourceId: 'scheduled_task_run:task-1' },
+      false,
+    ],
+    ['daemon-owned standalone restore', {}, true],
+  ] as const;
+
+  it.each(RESTORE_PURPOSES)(
+    'restores a Managed owner with %s on Managed without re-checking its purpose',
+    async (_name, metadata, daemonOwnedStandalone) => {
+      await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);
+      const managed = managedEngine(COMPATIBLE);
+      await expect(
+        createSessionExecutionEngineSelector({ runtimeBaseDir, managed })({
+          operation: 'load',
+          request: { workspaceCwd, sessionId: SESSION_ID, ...metadata },
+          daemonOwnedStandalone,
+        }),
+      ).resolves.toBe('managed');
+    },
+  );
+
+  it.each(RESTORE_PURPOSES)(
+    'refuses a Managed owner with %s while no Managed engine exists',
+    async (_name, metadata, daemonOwnedStandalone) => {
+      await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);
+      await expect(
+        createSessionExecutionEngineSelector({ runtimeBaseDir })({
+          operation: 'load',
+          request: { workspaceCwd, sessionId: SESSION_ID, ...metadata },
+          daemonOwnedStandalone,
+        }),
+      ).rejects.toBeInstanceOf(SessionExecutionEngineError);
+    },
+  );
 
   it('restores a Managed owner on a compatible Managed engine', async () => {
     await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);

@@ -283,15 +283,31 @@ describe('createServeApp default bridge wiring', () => {
       { experimentalPairedEngines: true },
       { managedChildProcesses },
     );
-    // Options that are off by default, so a paired Bridge that reset them
-    // would differ.
-    const enabled = { token: 'secret', enableSessionShell: true };
+    // Options that are off or unset by default, so a paired Bridge that reset
+    // one would differ.
+    const enabled = {
+      token: 'secret',
+      enableSessionShell: true,
+      restoreAskUserQuestion: true,
+      maxSessions: 7,
+      maxPendingPromptsPerSession: 8,
+      eventRingSize: 1234,
+      compactedReplayMaxBytes: 2_345_678,
+      maxJournalEvents: 3456,
+      maxJournalBytes: 4_567_890,
+      initializeTimeoutMs: 12_345,
+      permissionResponseTimeoutMs: 56_789,
+    };
     const plainEnabled = build(enabled);
     const pairedEnabled = build({
       ...enabled,
       experimentalPairedEngines: true,
     });
-    expect(plainEnabled.sessionShellCommandEnabled).toBe(true);
+    expect(plainEnabled).toMatchObject({
+      sessionShellCommandEnabled: true,
+      initializeTimeoutMs: 12_345,
+      permissionResponseTimeoutMs: 56_789,
+    });
     const withArgs = spawnFactories.filter((created) =>
       created.extraArgs?.includes('--experimental-lsp'),
     );
@@ -318,20 +334,20 @@ describe('createServeApp default bridge wiring', () => {
     expect(managed.evaluate).not.toHaveBeenCalled();
 
     // With it, only the channel factory is replaced by the pair.
-    expect(comparableBridgeOptions(paired)).toEqual(
-      comparableBridgeOptions(plain),
+    expect(comparableBridgeOptions([paired])).toEqual(
+      comparableBridgeOptions([plain]),
     );
-    expect(comparableBridgeOptions(pairedWithArgs)).toEqual(
-      comparableBridgeOptions(plainWithArgs),
+    expect(comparableBridgeOptions([pairedWithArgs])).toEqual(
+      comparableBridgeOptions([plainWithArgs]),
     );
-    expect(comparableBridgeOptions(pairedWithEngine)).toEqual(
-      comparableBridgeOptions(engineOnly),
+    expect(comparableBridgeOptions([pairedWithEngine])).toEqual(
+      comparableBridgeOptions([engineOnly]),
     );
-    expect(comparableBridgeOptions(pairedWithChildren)).toEqual(
-      comparableBridgeOptions(plainWithChildren),
+    expect(comparableBridgeOptions([pairedWithChildren])).toEqual(
+      comparableBridgeOptions([plainWithChildren]),
     );
-    expect(comparableBridgeOptions(pairedEnabled)).toEqual(
-      comparableBridgeOptions(plainEnabled),
+    expect(comparableBridgeOptions([pairedEnabled])).toEqual(
+      comparableBridgeOptions([plainEnabled]),
     );
     for (const options of [
       paired,

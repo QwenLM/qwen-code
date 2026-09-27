@@ -94,7 +94,9 @@ callback in the CLI serve layer from the runtime's session base directory
   check; see [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
 - Load and resume resolve the persisted spelling that the ACP child restores
   (case-insensitive lookup), then read the whole active transcript with the
-  strict owner accumulator and return the verified owner. A complete history
+  strict owner accumulator and return the verified owner; since B2d, a Managed
+  owner runs only when a registered Managed engine proves it compatible, and
+  is otherwise refused with `SessionExecutionEngineError`. A complete history
   without an owner record is Legacy. A missing or empty transcript is
   `SessionNotFoundError`. Invalid, conflicting or incomplete owner evidence is
   `SessionExecutionEngineError`. A restore never uses the host default.
