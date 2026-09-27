@@ -99,6 +99,12 @@ export function getCommandSourceBadge(
         : '[Extension]';
     case 'mcp-prompt':
       return '[MCP]';
+    case 'workflow-command':
+      // Only an extension workflow names an owner; project and user workflows
+      // keep their unbadged rows.
+      return command.sourceDetail === 'extension' && command.sourceLabel
+        ? `[${truncateToWidth(command.sourceLabel, MAX_EXTENSION_OWNER_LABEL_WIDTH)}]`
+        : null;
     case 'builtin-command':
     default:
       return null;

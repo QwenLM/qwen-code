@@ -438,6 +438,10 @@ function isRegexContext(source: string, i: number): boolean {
   return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
 }
 
+import {
+  readWorkflowStepId,
+  type WorkflowCallTrace,
+} from '../workflow-correlation.js';
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -445,7 +449,10 @@ import {
   REASONING_EFFORT_TIERS,
   type ReasoningEffort,
 } from '../../core/reasoning-effort.js';
-import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import {
+  canonicalAgentToolName,
+  describeAgentToolAllowEntryProblem,
+} from './workflow-agent-tools.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
@@ -474,6 +481,7 @@ const ARGS_MAX_DEPTH = 64;
  * like `scema` before they reach dispatch.
  */
 export interface WorkflowAgentOpts {
+  stepId?: string;
   label?: string;
   phase?: string;
   schema?: object;
@@ -521,6 +529,17 @@ export interface WorkflowAgentOpts {
    * of name never change the resume key.
    */
   disallowedTools?: string[];
+  /**
+   * The only tools this agent may be declared, as exact tool names. It only
+   * narrows: the dispatch bounds it by the agentType's own allowlist and then
+   * removes the workflow floor and every deny, so it never brings a tool back.
+   * `'*'`, other patterns, a whole MCP server and `exec` are refused, and so is
+   * an entry that names no tool. The sandbox hands the host a sorted,
+   * de-duplicated list with built-in display names mapped to tool names;
+   * any other name is compared as written, so only those two differences leave
+   * the resume key unchanged.
+   */
+  tools?: string[];
   // The index signature exists so TypeScript accepts forward-compat opt names
   // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
@@ -545,6 +564,15 @@ export interface WorkflowBudget {
   total: number | null;
   spent(): number;
   remaining(): number;
+  /**
+   * Host-only, never bridged into the script: this run's own agents' output
+   * tokens, and the cap that applies to this run alone. The run registry
+   * mirrors these, so a run's numbers never include tokens spent outside it
+   * when `spent()` measures the whole turn. A budget without them (test
+   * doubles) reports `spent()` / `total` instead.
+   */
+  runSpent?(): number;
+  runCap?(): number | null;
 }
 
 /**
@@ -563,6 +591,8 @@ export interface WorkflowBudget {
  * workflow does not flood the registry with thousands of events.
  */
 export interface WorkflowOrchestratorEmitter {
+  workflowCallUpdated?(call: WorkflowCallTrace): void;
+  workflowCallsTruncated?(): void;
   /** Sandbox `phase(title)` was called. */
   phaseStarted?(title: string): void;
   /** Sandbox `log(...)` produced one line of output (or `console.log`). */
@@ -573,6 +603,8 @@ export interface WorkflowOrchestratorEmitter {
   agentCompleted?(label?: string, error?: string): void;
   /** A dispatch was issued and joined to the runtime dependency graph. */
   dispatchQueued?(event: {
+    stepId?: string;
+    workflowCallId?: string;
     id: string;
     label?: string;
     prompt: string;
@@ -644,6 +676,7 @@ export interface SandboxOptions {
   workflow?: (
     nameOrRef: string | { scriptPath: string },
     args: unknown,
+    stepId?: string,
   ) => Promise<unknown>;
   budget?: WorkflowBudget;
   /**
@@ -1005,7 +1038,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushPhase: safePhase,
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
-    hostAgent: opts.dispatch,
+    hostAgent: (
+      prompt: string,
+      agentOpts: WorkflowAgentOpts,
+      stepId: unknown,
+    ) => {
+      const validatedStepId = readWorkflowStepId(stepId);
+      const hostOpts = { ...agentOpts };
+      delete hostOpts.stepId;
+      if (validatedStepId !== undefined) hostOpts.stepId = validatedStepId;
+      return opts.dispatch(prompt, hostOpts);
+    },
     // Effort tiers are resolved host-side so the sandbox accepts exactly the
     // aliases `/effort` does without a second copy of the alias table. Takes
     // and returns primitives only.
@@ -1014,9 +1057,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     effortTiers: REASONING_EFFORT_TIERS.join(', '),
     // A built-in tool named by its display name or a legacy alias becomes its
     // tool name, so both spellings share one resume key; any other entry comes
-    // back as given for the host to judge. Primitives only.
-    canonicalDenyName: (raw: unknown): string | null =>
-      typeof raw === 'string' ? (resolveBuiltinToolName(raw) ?? raw) : null,
+    // back as given for the host to judge. Used for both disallowedTools and
+    // tools. Primitives only.
+    canonicalToolName: (raw: unknown): string | null =>
+      typeof raw === 'string' ? canonicalAgentToolName(raw) : null,
+    // Why a tools entry cannot name a tool to allow (a pattern, a whole MCP
+    // server, exec), already stripped of control characters, or null.
+    // Primitives only.
+    toolAllowEntryProblem: (raw: unknown): string | null => {
+      if (typeof raw !== 'string') return null;
+      const problem = describeAgentToolAllowEntryProblem(raw);
+      return problem === null ? null : stripAnsiAndControl(problem);
+    },
     // JSON.stringify escapes only C0: strip DEL / C1 (incl. NEL) from a
     // script-controlled echo so it cannot fragment a rejection message.
     sanitizeForMessage: (raw: unknown): string =>
@@ -1098,7 +1150,16 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
-    hostWorkflow: opts.workflow,
+    hostWorkflow: (
+      ref: string | { scriptPath: string },
+      args: unknown,
+      stepId: unknown,
+    ) => {
+      const validated = readWorkflowStepId(stepId);
+      return validated === undefined
+        ? opts.workflow!(ref, args)
+        : opts.workflow!(ref, args, validated);
+    },
     budgetTotal: opts.budget ? opts.budget.total : null,
     hostBudgetSpent: opts.budget ? opts.budget.spent.bind(opts.budget) : null,
     hostBudgetRemaining: opts.budget
@@ -1521,7 +1582,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools'];
+      const KNOWN_AGENT_OPTS = ['stepId', 'label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools', 'tools'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1597,12 +1658,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             String(e && e.message != null ? e.message : e)
           );
         }
-        // effort and disallowedTools are validated on the REVIVED copy: that
-        // is the object the host dispatch and the resume key see, so a getter
-        // cannot show one value here and hand another to the dispatch. Both
-        // are normalized in place (an effort alias becomes its tier; a deny
-        // list has built-in display names mapped to tool names and is sorted
-        // and de-duplicated) so equivalent spellings share one resume key.
+        // effort, disallowedTools and tools are validated on the REVIVED
+        // copy: that is the object the host dispatch and the resume key see,
+        // so a getter cannot show one value here and hand another to the
+        // dispatch. All three are normalized in place (an effort alias becomes
+        // its tier; a tool list has built-in display names mapped to tool
+        // names and is sorted and de-duplicated) so equivalent spellings share
+        // one resume key.
         if (safeOpts.effort !== undefined) {
           var tier = __b.normalizeEffort(safeOpts.effort);
           if (tier === null) {
@@ -1628,7 +1690,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           }
           var uniqueDenied = [];
           for (var d = 0; d < denied.length; d++) {
-            var deniedName = __b.canonicalDenyName(denied[d]);
+            var deniedName = __b.canonicalToolName(denied[d]);
             if (uniqueDenied.indexOf(deniedName) === -1) uniqueDenied.push(deniedName);
           }
           uniqueDenied.sort();
@@ -1637,6 +1699,35 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           } else {
             safeOpts.disallowedTools = uniqueDenied;
           }
+        }
+        // An empty allowlist would leave the agent nothing to call, so unlike
+        // an empty deny list it is refused rather than dropped.
+        if (safeOpts.tools !== undefined) {
+          var allowed = safeOpts.tools;
+          if (
+            !Array.isArray(allowed) ||
+            allowed.length === 0 ||
+            allowed.some(function (name) {
+              return typeof name !== 'string' || name.length === 0 || name !== name.trim();
+            })
+          ) {
+            throw new Error(
+              "agent({tools}): must be a non-empty array of tool-name strings " +
+              "without surrounding whitespace, e.g. ['run_shell_command', 'read_file']. " +
+              "Omit tools to keep every tool."
+            );
+          }
+          var uniqueAllowed = [];
+          for (var a = 0; a < allowed.length; a++) {
+            var problem = __b.toolAllowEntryProblem(allowed[a]);
+            if (problem !== null) {
+              throw new Error("agent({tools}): " + problem);
+            }
+            var allowedName = __b.canonicalToolName(allowed[a]);
+            if (uniqueAllowed.indexOf(allowedName) === -1) uniqueAllowed.push(allowedName);
+          }
+          uniqueAllowed.sort();
+          safeOpts.tools = uniqueAllowed;
         }
         // The phase is recorded only once every option gate above has passed,
         // so a call its options rejected leaves no phase that dispatched
@@ -1674,7 +1765,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // value isn't a tool_call payload. logRevivalFailure surfaces
         // the actionable detail (slot 0 + the error string) to operators
         // so a real trigger in production isn't silent.
-        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+        return __b.hostAgent(prompt, safeOpts, safeOpts.stepId).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
           }
@@ -1777,7 +1868,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // single-level nesting limit is enforced (a nested sandbox is created
       // without a workflow impl, so its workflow() lands in the else branch).
       if (__b.hasWorkflow) {
-        const callWorkflow = vmAsync(function (nameOrRef, wfArgs) {
+        const callWorkflow = vmAsync(function (nameOrRef, wfArgs, wfOpts) {
+          if (wfOpts !== undefined && (wfOpts === null || typeof wfOpts !== 'object' || Array.isArray(wfOpts) || Object.keys(wfOpts).some(function (key) { return key !== 'stepId'; }))) {
+            throw new Error('workflow() options must be an object containing only stepId.');
+          }
+          const stepId = wfOpts === undefined ? undefined : wfOpts.stepId;
           // Sanitize args through a JSON round-trip BEFORE crossing so the
           // host only ever sees vm-realm plain objects (same defense as
           // agent()'s safeOpts). nameOrRef may be a string or {scriptPath}.
@@ -1796,7 +1891,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               String(e && e.message != null ? e.message : e)
             );
           }
-          return __b.hostWorkflow(safeRef, safeArgs).then(function (value) {
+          return __b.hostWorkflow(safeRef, safeArgs, stepId).then(function (value) {
             if (value === null || typeof value !== 'object') {
               return value;
             }
@@ -1808,8 +1903,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             }
           });
         });
-        globalThis.workflow = function workflow(nameOrRef, wfArgs) {
-          return callWorkflow(nameOrRef, wfArgs);
+        globalThis.workflow = function workflow(nameOrRef, wfArgs, wfOpts) {
+          return callWorkflow(nameOrRef, wfArgs, wfOpts);
         };
       } else {
         globalThis.workflow = function workflow() {

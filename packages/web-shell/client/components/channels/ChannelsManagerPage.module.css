@@ -340,49 +340,51 @@
   height: 14px;
 }
 
-@container panel-body (max-width: 760px) {
-  .platformGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@container panel-body (max-width: 620px) {
-  .pageBody {
-    padding-inline: 20px;
+@supports (container-type: inline-size) {
+  @container panel-body (max-width: 760px) {
+    .platformGrid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
-  .toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
+  @container panel-body (max-width: 620px) {
+    .pageBody {
+      padding-inline: 20px;
+    }
 
-  .toolbarActions {
-    align-items: stretch;
-    flex-wrap: wrap;
-  }
+    .toolbar {
+      align-items: stretch;
+      flex-direction: column;
+    }
 
-  .workspacePicker {
-    min-width: 0;
-    flex: 1 1 100%;
-  }
+    .toolbarActions {
+      align-items: stretch;
+      flex-wrap: wrap;
+    }
 
-  .workspacePickerTrigger {
-    width: 100%;
-  }
+    .workspacePicker {
+      min-width: 0;
+      flex: 1 1 100%;
+    }
 
-  .channelHeader {
-    display: flex;
-    align-items: stretch;
-    flex-direction: column;
-  }
+    .workspacePickerTrigger {
+      width: 100%;
+    }
 
-  .cardActionGroup {
-    width: 100%;
-    justify-content: flex-end;
-  }
+    .channelHeader {
+      display: flex;
+      align-items: stretch;
+      flex-direction: column;
+    }
 
-  .platformGrid {
-    grid-template-columns: 1fr;
+    .cardActionGroup {
+      width: 100%;
+      justify-content: flex-end;
+    }
+
+    .platformGrid {
+      grid-template-columns: 1fr;
+    }
   }
 }
 

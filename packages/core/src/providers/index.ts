@@ -24,6 +24,7 @@ export {
   buildProviderTemplate,
   computeModelListVersion,
   findExistingProviderModels,
+  getModelsForProviderProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   providerMatchesCredentials,
@@ -87,3 +88,5 @@ export {
   type ApplyProviderInstallPlanOptions,
   type ApplyProviderInstallPlanResult,
 } from './install.js';
+
+export { preserveModelProviderPlaceholders } from './model-config-serialization.js';

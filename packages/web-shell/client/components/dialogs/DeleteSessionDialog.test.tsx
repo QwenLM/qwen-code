@@ -150,6 +150,21 @@ afterEach(() => {
 });
 
 describe('DeleteSessionDialog selection', () => {
+  it('excludes Qwen Live tasks from permanent deletion', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        sourceType: 'qwen-live',
+        displayName: 'Live task',
+      },
+      initialSessions[1],
+    ];
+    mount();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('S1');
+    expect(container!.textContent).not.toContain('Live task');
+  });
+
   it('keeps the keyboard cursor separate from the checked set; Enter only toggles', () => {
     mount();
 
@@ -192,14 +207,54 @@ describe('DeleteSessionDialog selection', () => {
     expect(isChecked(rows()[0])).toBe(true);
   });
 
-  it('does not check the current session row', () => {
+  it('checks and deletes the current session row when it is idle', async () => {
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['me'],
+      notFound: [],
+      errors: [],
+    });
+    mount();
+
+    // A click checks the current session row like any other row (#12619).
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Keyboard Enter toggles the current row's checkbox too.
+    press('ArrowDown');
+    press('ArrowDown');
+    press('ArrowDown');
+    expect(isCursor(rows()[2])).toBe(true);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(false);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(true);
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['me']);
+    expect(onDeleted).toHaveBeenCalledWith(['me'], {
+      attachedSessionId: 'me',
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current session row unselectable while it is running', () => {
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], hasActivePrompt: true },
+    ];
     mount();
 
     clickRow(2);
     expect(isChecked(rows()[2])).toBe(false);
     expect(dangerButton().disabled).toBe(true);
 
-    // Keyboard Enter on the current session row must not check it either.
+    // Keyboard Enter on the running current row must not check it either.
     press('ArrowDown');
     press('ArrowDown');
     press('ArrowDown');
@@ -292,7 +347,9 @@ describe('DeleteSessionDialog selection', () => {
     });
 
     expect(deleteSessionsMock).toHaveBeenCalledWith(['s0', 's1']);
-    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1']);
+    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1'], {
+      attachedSessionId: 'me',
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });

@@ -28,6 +28,10 @@ import {
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
 import type { Config } from '../../config/config.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
 import {
   expandDynamicHeaders,
@@ -203,7 +207,7 @@ export class LlmContentGenerator implements ContentGenerator {
         'frequencyPenalty',
       ),
       thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(),
+        this.buildThinkingConfig(request.model, requestConfig.thinkingConfig),
         'thinkingConfig',
         {
           includeThoughts: true,
@@ -213,10 +217,20 @@ export class LlmContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildThinkingConfig():
-    | { includeThoughts: boolean; thinkingLevel?: ThinkingLevel }
-    | undefined {
-    const reasoning = this.contentGeneratorConfig?.reasoning;
+  private buildThinkingConfig(
+    model?: string,
+    requestThinking?: GenerateContentConfig['thinkingConfig'],
+  ): GenerateContentConfig['thinkingConfig'] {
+    const generation = this.contentGeneratorConfig;
+    const resolved =
+      generation && this.cliConfig
+        ? resolveReasoningForModel(this.cliConfig, generation, model)
+        : undefined;
+    if (resolved && requestThinking?.includeThoughts === false)
+      return requestThinking;
+    const reasoning = generation
+      ? getEffectiveReasoning(generation, resolved)
+      : undefined;
 
     if (reasoning === false) {
       return { includeThoughts: false };

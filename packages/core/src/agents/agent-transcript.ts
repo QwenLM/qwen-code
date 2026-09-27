@@ -134,8 +134,10 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
-  /** Whether the original launch used temporary worktree isolation. */
-  isolation?: 'worktree';
+  /** Container launches use this legacy field so older readers refuse resume. */
+  isolation?: 'worktree' | 'container';
+  executionBackend?: 'container';
+  workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
@@ -146,6 +148,14 @@ export interface AgentMeta {
    * exclusion; an empty list means deny-all.
    */
   executionAllowedTools?: string[];
+  /**
+   * Launch-time per-agent tool blocklist of a fork, persisted beside
+   * `executionAllowedTools`: the resume path rebuilds the fork's toolConfig
+   * from this sidecar alone, so dropping it would let a backgrounded fork
+   * resume past the blocklist — the only thing bounding a wildcard allowlist
+   * entry such as `mcp__*`. Legacy absence means no blocklist.
+   */
+  disallowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
@@ -813,8 +823,8 @@ export function attachJsonlTranscriptWriter(
           {
             functionCall: {
               id: event.callId,
-              name: event.name,
-              args: event.args,
+              name: event.modelFacingName ?? event.name,
+              args: event.modelFacingArgs ?? event.args,
             },
           },
         ],

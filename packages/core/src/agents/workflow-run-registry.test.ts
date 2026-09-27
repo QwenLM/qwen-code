@@ -14,7 +14,10 @@ import {
 } from './runtime/agent-events.js';
 import type { WorkflowRunHandle } from './runtime/workflow-runner.js';
 import { MAX_FAILURE_LINES } from './workflow-failure-lines.js';
-import { RESUME_ARGS_TOO_LARGE_NOTE } from './workflow-resume-call.js';
+import {
+  NO_JOURNAL_NO_RESUME_NOTE,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
 import {
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
@@ -1120,6 +1123,44 @@ describe('WorkflowRunRegistry', () => {
     expect(r.register(reg(runId)).status).toBe('running');
   });
 
+  // A second start under a live id would run two copies of its agents against
+  // one journal, so each refusal says what to do about the run that holds it.
+  it('says what to do about a run id that is still live', () => {
+    const r = new WorkflowRunRegistry();
+    const fresh = () => new AbortController();
+
+    const running = r.register(reg('wf_live_running'));
+    expect(() => r.reserveStart(running.runId, fresh)).toThrow(
+      'Workflow run wf_live_running is still running. Starting it again now would run two copies of its agents against the same journal: cancel it from /workflows first, or wait for it to settle.',
+    );
+
+    const pausedRefusal =
+      'Workflow run wf_live_paused is paused, not finished. Starting it again now would run two copies of its agents against the same journal: resume it from /workflows, or cancel it there and wait for it to exit.';
+    const paused = r.register(reg('wf_live_paused'));
+    r.onDispatchStateChange(paused.runId, 'pausing');
+    expect(r.get(paused.runId)?.status).toBe('pausing');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(
+      'Workflow run wf_live_paused is pausing, not finished. Starting it again now would run two copies of its agents against the same journal: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.',
+    );
+    r.onDispatchStateChange(paused.runId, 'paused');
+    expect(r.get(paused.runId)?.status).toBe('paused');
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
+
+    const exiting = r.register(reg('wf_live_exiting'));
+    r.attachHandle({
+      runId: exiting.runId,
+      abort: vi.fn(),
+    } as unknown as WorkflowRunHandle);
+    r.fail(exiting.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(exiting.runId, fresh)).toThrow(
+      'Workflow run wf_live_exiting is not running but its run has not exited yet. Starting it again now would run two copies of its agents against the same journal: wait for it to exit.',
+    );
+
+    const settled = r.register(reg('wf_settled'));
+    r.fail(settled.runId, 'boom', 2_000);
+    expect(() => r.reserveStart(settled.runId, fresh)).not.toThrow();
+  });
+
   it('reserves a run id while a workflow is starting', () => {
     const r = new WorkflowRunRegistry();
     const runId = 'wf_starting';
@@ -1131,7 +1172,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting(runId)).toBe(true);
     expect(r.hasRunningEntries()).toBe(true);
     expect(() => r.reserveStart(runId, () => competing)).toThrow(
-      /already active/,
+      /already starting/,
     );
     expect(() => r.register(reg(runId))).toThrow(/already active/);
 
@@ -1168,7 +1209,7 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting('wf_starting')).toBe(true);
     expect(() =>
       r.reserveStart('wf_starting', () => new AbortController()),
-    ).toThrow(/already active/);
+    ).toThrow(/already starting/);
     r.releaseStart('wf_starting', controller);
     expect(r.hasRunningEntries()).toBe(false);
   });
@@ -2251,6 +2292,124 @@ describe('WorkflowRunRegistry', () => {
     expect(modelText).not.toContain('<recovery>');
   });
 
+  // A qualified run name only comes from the extension tier; the advice must
+  // not call a third-party file the user's saved workflow, and must name a
+  // destination the next extension update will not overwrite.
+  it('names an extension workflow in the recovery and diagnostics advice', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const failed = r.register(
+      reg('wf_ext_fail', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_fail/journal.jsonl',
+      }),
+    );
+    failed.workflowName = 'gcp:audit';
+    r.fail(failed.runId, 'boom', 2_000);
+
+    const recovery = completion.mock.calls[0][1] as string;
+    expect(recovery).toContain(
+      'This reads the /gcp:audit workflow the gcp extension ships; copy it into .qwen/workflows before making a run-specific change.',
+    );
+    expect(recovery).not.toContain('saved /gcp:audit');
+
+    const completed = r.register(
+      reg('wf_ext_done', {
+        isBackgrounded: true,
+        scriptPath: '/home/u/.qwen/extensions/gcp/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_ext_done/journal.jsonl',
+      }),
+    );
+    completed.workflowName = 'gcp:audit';
+    r.complete(completed.runId, [], 3_000);
+
+    const diagnostics = completion.mock.calls[1][1] as string;
+    expect(diagnostics).toContain('Re-run the /gcp:audit extension workflow:');
+    expect(diagnostics).not.toContain('Re-run the saved /gcp:audit');
+  });
+
+  // In a name-only session the model may not pass a script path, so the
+  // notification must not offer one: a run resumes by the name the runner
+  // verified, and any other run is only its starter's to retry.
+  it('resumes by the verified name in a name-only session, and says who can retry the rest', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNameOnly(true);
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const named = r.register(
+      reg('wf_named', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_named/journal.jsonl',
+      }),
+    );
+    r.fail(named.runId, 'boom', 2_000);
+    const namedText = completion.mock.calls[0][1] as string;
+    expect(namedText).toContain(
+      'Resume: Workflow({ name: "audit", resumeFromRunId: "wf_named" })',
+    );
+    expect(namedText).not.toContain('scriptPath:');
+    expect(namedText).not.toContain('only whoever started it');
+
+    // A name without a verified resume name — one recorded from a path that
+    // a lookup would not lead back to — is not offered.
+    const shadowed = r.register(
+      reg('wf_shadowed', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        scriptPath: '/home/u/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
+      }),
+    );
+    r.fail(shadowed.runId, 'boom', 3_000);
+    const shadowedText = completion.mock.calls[1][1] as string;
+    expect(shadowedText).toContain('<recovery>');
+    expect(shadowedText).toContain(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
+    expect(shadowedText).not.toContain('Workflow({');
+
+    const completed = r.register(
+      reg('wf_named_done', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/journal.jsonl',
+      }),
+    );
+    r.complete(completed.runId, [], 4_000);
+    expect(completion.mock.calls[2][1] as string).toContain(
+      'Re-run the saved /audit workflow: Workflow({ name: "audit", resumeFromRunId: "wf_named_done" })',
+    );
+  });
+
+  // Outside the lock a verified name changes nothing: the call names the path.
+  it('ignores the resume name outside a name-only session', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_unlocked', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runs/wf_unlocked/journal.jsonl',
+      }),
+    );
+    r.fail(entry.runId, 'boom', 2_000);
+    const text = completion.mock.calls[0][1] as string;
+    expect(text).toContain(
+      'Workflow({ scriptPath: "/proj/.qwen/workflows/audit.js", resumeFromRunId: "wf_unlocked" })',
+    );
+    expect(text).not.toContain('only whoever started it');
+  });
+
   // An unpersisted inline script (no storage, symlinked root) leaves nothing
   // to resume from, and a run with no journal has nothing to read: the
   // notification must then say neither rather than name a path that is not
@@ -2270,6 +2429,36 @@ describe('WorkflowRunRegistry', () => {
 
   // Args that cannot be pasted back are NAMED, never truncated: half a JSON
   // literal in a resume call is a call that fails to parse.
+  // A resume replays the run's journal. A run that wrote none is told so, in
+  // place of a call the runner would refuse.
+  it('offers no resume call for a run that wrote no journal', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    r.register(
+      reg('wf_nojournal', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal.js',
+      }),
+    );
+    r.fail('wf_nojournal', 'boom', 2_000);
+    const failedText = completion.mock.calls[0][1] as string;
+    expect(failedText).toContain(NO_JOURNAL_NO_RESUME_NOTE);
+    expect(failedText).not.toContain('resumeFromRunId:');
+    expect(failedText).not.toContain('runs live');
+
+    r.register(
+      reg('wf_nojournal_done', {
+        isBackgrounded: true,
+        scriptPath: '/runtime/workflows/generated/inline/wf_nojournal_done.js',
+      }),
+    );
+    r.complete('wf_nojournal_done', [], 3_000);
+    const doneText = completion.mock.calls[1][1] as string;
+    expect(doneText).not.toContain('resumeFromRunId:');
+    expect(doneText).not.toContain('Re-run');
+  });
+
   it('names oversized args instead of truncating the resume call', () => {
     const r = new WorkflowRunRegistry();
     const completion = vi.fn();
@@ -2278,6 +2467,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs.js',
+        journalPath: '/runs/wf_bigargs/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );
@@ -2297,6 +2487,7 @@ describe('WorkflowRunRegistry', () => {
       reg('wf_bigargs_done', {
         isBackgrounded: true,
         scriptPath: '/runtime/workflows/generated/inline/wf_bigargs_done.js',
+        journalPath: '/runs/wf_bigargs_done/journal.jsonl',
         args: { blob: 'x'.repeat(400) },
       }),
     );
@@ -2660,4 +2851,50 @@ describe('workflow status guards', () => {
       expect(isTerminalWorkflowStatus(status)).toBe(false);
     },
   );
+});
+
+// The registry keeps the first large-run warning and nothing after it: the flag
+// tells the user a run grew past what was expected, once, while it can still
+// be stopped.
+describe('WorkflowRunRegistry.onSizeWarning', () => {
+  const warning = {
+    axis: 'agents' as const,
+    scheduledAgents: 16,
+    totalTokens: 0,
+    projectedTokens: 1_120_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 1_700_000_000_500,
+  };
+
+  it('records the first warning, logs it and notifies, and ignores later ones', () => {
+    const r = new WorkflowRunRegistry();
+    const changes = vi.fn();
+    r.setStatusChangeCallback(changes);
+    const entry = r.register(reg('wf_size'));
+    changes.mockClear();
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(true);
+    expect(r.get(entry.runId)?.sizeWarning).toEqual(warning);
+    expect(r.get(entry.runId)?.recentLogs.at(-1)).toBe(
+      '[size] Large workflow: 16 agents scheduled (warning threshold 15, from the size guideline) — /workflows to stop.',
+    );
+    expect(changes).toHaveBeenCalled();
+
+    expect(
+      r.onSizeWarning(entry.runId, { ...warning, scheduledAgents: 40 }),
+    ).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning?.scheduledAgents).toBe(16);
+  });
+
+  it('does not flag a run that has already settled, or one it does not know', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_settled'));
+    r.complete(entry.runId, [], 1_700_000_001_000);
+
+    expect(r.onSizeWarning(entry.runId, warning)).toBe(false);
+    expect(r.get(entry.runId)?.sizeWarning).toBeUndefined();
+    expect(r.onSizeWarning('wf_unknown', warning)).toBe(false);
+  });
 });

@@ -188,16 +188,17 @@ export function DialogShell({
             onMouseUp: handleBackdropMouseUp,
             onClick: handleBackdropClick,
           }}
-          className={`${themeClass} ${
+          className={`${styles.viewportPanel} ${themeClass} ${
             theme === WebShellThemeId.Dark ? 'dark' : ''
-          } flex max-h-[min(80vh,calc(100vh-48px))] flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
+          } flex flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
             fullscreen
-              ? 'h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
+              ? 'max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
               : sizeClass[size]
           }`}
           aria-label={title}
           data-keyboard-scope
           data-web-shell-dialog
+          data-fullscreen={fullscreen ? 'true' : undefined}
           data-web-shell-dialog-title={title}
           onPointerDownOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {

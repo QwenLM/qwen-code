@@ -935,6 +935,33 @@ describe('daemon event schema', () => {
         id: 1,
         v: 1,
         type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: true,
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: 'true',
+        },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
         data: { sessionId: 's-1', reason: 'client_close' },
       }),
     ).toBeDefined();

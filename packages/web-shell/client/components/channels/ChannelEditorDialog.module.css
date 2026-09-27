@@ -263,9 +263,11 @@
   box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 12%, transparent);
 }
 
-.sessionScopeOption:has(.sessionScopeRadio:focus-visible) {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
+@supports (selector(:has(*))) {
+  .sessionScopeOption:has(.sessionScopeRadio:focus-visible) {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
 }
 
 .sessionScopeRadio {

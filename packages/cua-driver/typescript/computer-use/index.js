@@ -858,14 +858,13 @@ export class ComputerUse {
   }
 
   async listApps(options = {}) {
-    let platform;
     try {
-      platform = await this.getPlatform({ signal: options.signal });
+      await this.getPlatform({ signal: options.signal });
     } catch (error) {
       if (error?.code !== "driver_platform_unavailable") throw error;
     }
     const apps = await this.#listAppsDetailed(options);
-    return platform === "macos" ? apps.map(compactApp) : apps;
+    return apps.map(compactApp);
   }
 
   async getApp(selector, options = {}) {
@@ -875,7 +874,13 @@ export class ComputerUse {
       this.#apps.set(identity, new ComputerUseApp(
         this,
         app,
-        (signal) => this.#invoke("launchApp", { name: identity }, { signal }),
+        async (signal) => {
+          const platform = await this.getPlatform({ signal });
+          const input = platform === "windows" && app.launch_path
+            ? { name: app.name, launchPath: app.launch_path }
+            : { name: app.launch_path || app.bundle_id || app.name };
+          return this.#invoke("launchApp", input, { signal });
+        },
         (listOptions) => this.#listAppsDetailed(listOptions),
       ));
     }
@@ -1031,6 +1036,8 @@ export class ComputerUse {
       }
       if (
         !retriedIncompleteCapture &&
+        !capture.incompleteDetails.some((detail) =>
+          detail === "walk_deadline_reached" || detail === "element_bounds_timeout") &&
         capture.complete === false &&
         (!capture.truncated || capture.readComplete === false) &&
         envelope?.stable_element_ids !== true &&
@@ -1206,6 +1213,7 @@ export class ComputerUse {
 
   async scroll(options) {
     const input = this.#windowAddress(options);
+    if (options?.appContext) input.appContext = true;
     input.direction = this.#scrollDirection(options?.direction);
     if (options?.amount !== undefined) {
       input.amount = BigInt(requireIntegerRange("amount", options.amount, 1, 50));

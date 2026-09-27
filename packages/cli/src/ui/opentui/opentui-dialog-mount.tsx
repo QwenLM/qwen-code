@@ -35,7 +35,11 @@ import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { toOriginalKey } from './key-map.js';
 import { t } from '../../i18n/index.js';
-import { MessageType } from '../types.js';
+import {
+  MessageType,
+  type HistoryItemError,
+  type HistoryItemInfo,
+} from '../types.js';
 import { HelpOverlay } from './help-overlay.js';
 import {
   buildHelpCommandsLines,
@@ -105,13 +109,13 @@ import {
   OpenTuiDeleteDialog,
   OpenTuiDiffDialog,
   OpenTuiEditorDialog,
-  OpenTuiHooksDialog,
   OpenTuiResumeDialog,
   OpenTuiRewindDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
   OpenTuiTrustDialog,
 } from './dialogs-misc.js';
+import { OpenTuiHooksDialog } from './dialogs-hooks.js';
 
 export interface OpenTuiDialogMountProps {
   request: OpenTuiDialogRequest;
@@ -136,6 +140,31 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const { request, host, config, settings, commands, onClose, notify } = props;
   const isHelp = request.dialog === 'help';
   const dimensions = useTerminalDimensions();
+
+  /**
+   * ink writes these dialog outcomes to the transcript, and for the commands
+   * whose result phase closes while the dialog is still open it records the
+   * same row, so nothing else would replay on resume. The shell's notify slot
+   * is transient and closes with the dialog. A null `rawCommand` is a command
+   * ink keeps out of the recording (`SLASH_COMMANDS_SKIP_RECORDING`).
+   */
+  const reportResult = (
+    rawCommand: string | null,
+    text: string,
+    level: 'info' | 'error' = 'info',
+  ) => {
+    const item: HistoryItemInfo | HistoryItemError =
+      level === 'error'
+        ? { type: MessageType.ERROR, text }
+        : { type: MessageType.INFO, text };
+    host.addItem(item, Date.now());
+    if (!rawCommand) return;
+    config.getChatRecordingService?.()?.recordSlashCommand({
+      phase: 'result',
+      rawCommand,
+      outputHistoryItems: [{ ...item }],
+    });
+  };
 
   // --- permission rules (rebuild after add/delete) ------------------------
   const [permissions, setPermissions] = useState(() =>
@@ -256,7 +285,15 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const modelSelectionInFlightRef = useRef(false);
 
   // --- help overlay interaction -------------------------------------------
-  const [helpTab, setHelpTab] = useState<HelpTab>('general');
+  const [helpTab, setHelpTabState] = useState<HelpTab>('general');
+  // A held Tab hands the whole burst to the handler from the last render, so
+  // the cycle must read where the previous key of the burst landed.
+  const helpTabRef = useRef(helpTab);
+  helpTabRef.current = helpTab;
+  const setHelpTab = (next: HelpTab) => {
+    helpTabRef.current = next;
+    setHelpTabState(next);
+  };
   const [helpScroll, setHelpScroll] = useState(0);
   const dialogWidth = dialogAreaWidth(dimensions.width);
   const helpBodyRows = computeHelpBodyRows(dimensions.height);
@@ -282,7 +319,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return;
     }
     const tabCount = HELP_TABS.length;
-    const activeIndex = HELP_TABS.findIndex((entry) => entry.tab === helpTab);
+    const activeIndex = HELP_TABS.findIndex(
+      (entry) => entry.tab === helpTabRef.current,
+    );
     if (name === 'tab') {
       const step = shift ? -1 : 1;
       setHelpTab(HELP_TABS[(activeIndex + step + tabCount) % tabCount]!.tab);
@@ -373,7 +412,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           initialError={request.initialError}
           onClose={onClose}
-          notify={notify}
+          notify={(text) =>
+            reportResult(request.openedViaCommand ? '/auth' : null, text)
+          }
         />
       );
 
@@ -383,7 +424,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text) => reportResult('/editor', text)}
         />
       );
 
@@ -443,6 +484,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          notify={(text, level) => reportResult('/effort', text, level)}
         />
       );
 
@@ -452,7 +494,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text, level) => reportResult('/output-style', text, level)}
         />
       );
 
@@ -462,7 +504,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text, level) => reportResult(null, text, level)}
         />
       );
 
@@ -477,7 +519,14 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           }
           onSelect={(sessionId) => {
             void host.handleResume(sessionId).catch((error: unknown) => {
-              notify(error instanceof Error ? error.message : String(error));
+              // handleResumeSession reports the failures it handles as
+              // transcript rows itself; this only catches a throw from outside
+              // its try, where no row was written.
+              reportResult(
+                null,
+                error instanceof Error ? error.message : String(error),
+                'error',
+              );
             });
             onClose();
           }}
@@ -511,6 +560,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiHooksDialog
           config={config}
           settings={settings}
+          notice={
+            config?.getHookSystem()
+              ? [
+                  t('Reopen this menu to reload hook definitions.'),
+                  t(
+                    'Hook controls and HTTP security settings require a restart.',
+                  ),
+                ].join('\n')
+              : undefined
+          }
           onClose={onClose}
         />
       );
@@ -536,7 +595,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return <OpenTuiRewindDialog settings={settings} onClose={onClose} />;
 
     case 'diff':
-      return <OpenTuiDiffDialog settings={settings} onClose={onClose} />;
+      return (
+        <OpenTuiDiffDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      );
 
     case 'stats':
       return <OpenTuiStatsDialog config={config} onClose={onClose} />;
@@ -547,7 +612,12 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           mode={request.mode}
           onClose={onClose}
-          notify={notify}
+          notify={
+            request.mode === 'select' || request.mode === 'stop'
+              ? (text, level) =>
+                  reportResult(`/arena ${request.mode}`, text, level)
+              : notify
+          }
           // Enter in the model picker starts an arena session by writing the
           // command into the composer, which the entry layer owns. Without that
           // owner the selection would vanish behind a closed dialog, so say so.
@@ -586,11 +656,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         entries,
         mode: request.mode,
       });
-      // ink writes all three model outcomes to the transcript — a pick, an
-      // escape, an auxiliary pick — so the row outlives the dialog. The shell's
-      // notify slot is transient and closes with it.
       const reportModel = (text: string) =>
-        host.addItem({ type: MessageType.INFO, text }, Date.now());
+        reportResult(request.mode === 'advisor' ? '/advisor' : '/model', text);
       return (
         <OpenTuiModelDialog
           entries={entries}

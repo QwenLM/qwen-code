@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  extractRawOutputText,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -100,6 +101,37 @@ describe('toolFormatting', () => {
         '/workspace/project',
       ),
     ).toBe('README.md');
+  });
+
+  it.each([
+    'packages/web-shell/client/messageTypes.ts (lines 161-200)',
+    'packages/.../MessageList.dom.test.tsx (lines 277-298)',
+    './src/index.ts',
+    '../src/index.ts',
+    '~/project/src/index.ts',
+    'Writing to src/index.ts',
+    "'TODO' in path 'src/components' (filter: '**/*.ts')",
+    'https://example.com/docs/index.html',
+  ])('preserves separators in title description %s', (description) => {
+    const call = tool({ title: `ReadFile: ${description}` });
+    expect(getToolDescription(call, '/workspace/project')).toBe(description);
+    expect(getToolSummaryDescription(call, '/workspace/project')).toBe(
+      description,
+    );
+  });
+
+  it.each([
+    ["'/workspace/project/src/index.ts'", "'src/index.ts'"],
+    ['"/workspace/project/src/index.ts"', '"src/index.ts"'],
+    ['(/workspace/project/src/index.ts)', '(src/index.ts)'],
+    ['C:/workspace/project/src/index.ts', 'index.ts'],
+  ])('normalizes an embedded absolute path %s', (path, expected) => {
+    expect(
+      getToolDescription(
+        tool({ title: `Writing to ${path}` }),
+        '/workspace/project',
+      ),
+    ).toBe(`Writing to ${expected}`);
   });
 
   it('falls back to a workspace-relative file path', () => {
@@ -299,6 +331,19 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('ignores blank or non-string file descriptions', () => {
+    for (const description of ['   ', 42, {}]) {
+      expect(
+        getToolDescription(
+          tool({
+            toolName: 'read_file',
+            args: { file_path: 'src/orders.ts', description },
+          }),
+        ),
+      ).toBe('src/orders.ts');
+    }
+  });
+
   it('uses semantic shell descriptions for summaries', () => {
     const shellTool = tool({
       toolName: 'run_shell_command',
@@ -353,6 +398,34 @@ describe('toolFormatting', () => {
         }),
       ),
     ).toBe('3 line(s)');
+  });
+
+  it('extracts free-form Advisor advice without JSON wrappers', () => {
+    expect(
+      extractRawOutputText({
+        type: 'advisor_advice',
+        model: 'advisor-model',
+        text: 'Check the retry boundary.',
+      }),
+    ).toBe('Check the retry boundary.');
+  });
+
+  it('formats structured Advisor output as readable markdown', () => {
+    const advisor = tool({
+      toolName: 'advisor',
+      rawOutput: {
+        type: 'advisor_review',
+        verdict: 'Sound approach.',
+        risks: 'Retry handling is unclear.',
+        missingEvidence: 'No integration result.',
+        recommendation: 'Run the integration test.',
+      },
+    });
+
+    expect(extractRawOutputText(advisor.rawOutput)).toContain(
+      '## Verdict\nSound approach.',
+    );
+    expect(getToolResultSummary(advisor)).toBe('Sound approach.');
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {

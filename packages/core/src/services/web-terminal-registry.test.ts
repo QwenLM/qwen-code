@@ -9,10 +9,10 @@ import pkg from '@xterm/headless';
 
 const { Terminal } = pkg;
 
-const { spawn, getPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
+const { spawn, loadPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
   () => ({
     spawn: vi.fn(),
-    getPty: vi.fn(),
+    loadPty: vi.fn(),
     spawnSync: vi.fn(),
     osPlatform: vi.fn(),
     loadXtermHeadless: vi.fn(),
@@ -20,7 +20,7 @@ const { spawn, getPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
 );
 
 vi.mock('node:child_process', () => ({ spawnSync }));
-vi.mock('../utils/getPty.js', () => ({ getPty }));
+vi.mock('../utils/getPty.js', () => ({ loadPty }));
 vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
 // conpty-host reads os.platform() for its win32 release gate, and the
 // registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
@@ -101,12 +101,31 @@ describe('WebTerminalRegistry', () => {
     spawnSync.mockReturnValue({ stdout: '' });
     osPlatform.mockReturnValue(process.platform);
     spawn.mockImplementation(() => createSpawnedPty());
-    getPty.mockResolvedValue({ module: { spawn }, name: 'node-pty' });
+    loadPty.mockResolvedValue({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
     loadXtermHeadless.mockResolvedValue({ Terminal });
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('runs an explicit SSH command with the existing terminal lifecycle', async () => {
+    const registry = new WebTerminalRegistry();
+    const command = {
+      file: 'ssh',
+      args: ['-tt', 'host', 'cd /srv/project && exec sh -l'],
+    };
+    await registry.create({ workspaceCwd: '/local/anchor', command });
+    expect(spawn).toHaveBeenCalledWith(
+      command.file,
+      command.args,
+      expect.objectContaining({ cwd: '/local/anchor' }),
+    );
+    registry.releaseWorkspace('/local/anchor');
+    expect(kill).toHaveBeenCalled();
   });
 
   it('uses the resolved workspace and normalizes its environment', async () => {
@@ -152,7 +171,7 @@ describe('WebTerminalRegistry', () => {
 
   it('marks concurrent creation as retryable while rejecting established duplicates', async () => {
     let resolvePty: ((value: unknown) => void) | undefined;
-    getPty.mockReturnValueOnce(
+    loadPty.mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePty = resolve;
       }),
@@ -172,7 +191,10 @@ describe('WebTerminalRegistry', () => {
       error: 'Web terminal terminal:manual-1 is being created',
       retryable: true,
     });
-    resolvePty?.({ module: { spawn }, name: 'node-pty' });
+    resolvePty?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
     await first;
 
     await expect(
@@ -194,7 +216,7 @@ describe('WebTerminalRegistry', () => {
       });
     }
     let resolvePty: ((value: unknown) => void) | undefined;
-    getPty.mockReturnValueOnce(
+    loadPty.mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePty = resolve;
       }),
@@ -213,7 +235,10 @@ describe('WebTerminalRegistry', () => {
       error: 'Web terminal limit reached',
       retryable: true,
     });
-    resolvePty?.({ module: { spawn }, name: 'node-pty' });
+    resolvePty?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
     await pending;
 
     registry.release('terminal:0');
@@ -230,10 +255,38 @@ describe('WebTerminalRegistry', () => {
     // inbox backend — covered by the bundled-backend cases below.
     osPlatform.mockReturnValue('linux');
     const registry = new WebTerminalRegistry();
-    getPty.mockResolvedValueOnce(null);
+    // The shape a broken standalone archive produces: the wrapper is present
+    // but its native module cannot be dlopen'd, which loadPty() reports as
+    // `impl: null` plus a reason on that same call (#11872). The message must
+    // name that cause rather than claim no backend module was found.
+    loadPty.mockResolvedValueOnce({
+      impl: null,
+      loadError:
+        'Failed to load native module: pty.node, checked: build/Release',
+    });
     await expect(
       registry.create({ workspaceCwd: '/workspace' }),
-    ).resolves.toEqual({ error: 'PTY not available' });
+    ).resolves.toEqual({
+      error: `PTY not available: no loadable PTY backend (@lydell/node-pty or node-pty) for linux/${process.arch}: Failed to load native module: pty.node, checked: build/Release`,
+    });
+
+    // No backend and nothing recorded: the message stays reason-free instead of
+    // inventing one.
+    loadPty.mockResolvedValueOnce({ impl: null, loadError: null });
+    await expect(
+      registry.create({ workspaceCwd: '/workspace' }),
+    ).resolves.toEqual({
+      error: `PTY not available: no loadable PTY backend (@lydell/node-pty or node-pty) for linux/${process.arch}`,
+    });
+
+    // Defensive arm: loadPty() currently always resolves, so this pins the
+    // handler rather than a production path.
+    loadPty.mockRejectedValueOnce(new Error('native load failed'));
+    await expect(
+      registry.create({ workspaceCwd: '/workspace' }),
+    ).resolves.toEqual({
+      error: `PTY not available: PTY support failed to load on linux/${process.arch}: native load failed`,
+    });
 
     spawn.mockImplementationOnce(() => {
       throw new Error('spawn failed');
@@ -1021,7 +1074,7 @@ describe('WebTerminalRegistry', () => {
 
   it('does not spawn a PTY after disposal wins an in-flight create', async () => {
     let resolvePty: ((value: unknown) => void) | undefined;
-    getPty.mockReturnValueOnce(
+    loadPty.mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePty = resolve;
       }),
@@ -1033,7 +1086,10 @@ describe('WebTerminalRegistry', () => {
     });
 
     registry.dispose();
-    resolvePty?.({ module: { spawn }, name: 'node-pty' });
+    resolvePty?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
 
     await expect(creating).resolves.toEqual({
       error: 'Web terminal registry disposed',
@@ -1045,7 +1101,7 @@ describe('WebTerminalRegistry', () => {
     'cancels in-flight creation when releasing its %s',
     async (scope) => {
       let resolvePty: ((value: unknown) => void) | undefined;
-      getPty.mockReturnValueOnce(
+      loadPty.mockReturnValueOnce(
         new Promise((resolve) => {
           resolvePty = resolve;
         }),
@@ -1061,7 +1117,10 @@ describe('WebTerminalRegistry', () => {
       } else {
         registry.releaseWorkspace('/workspace');
       }
-      resolvePty?.({ module: { spawn }, name: 'node-pty' });
+      resolvePty?.({
+        impl: { module: { spawn }, name: 'node-pty' },
+        loadError: null,
+      });
 
       await expect(creating).resolves.toEqual({
         error: 'Web terminal creation cancelled',
@@ -1073,7 +1132,7 @@ describe('WebTerminalRegistry', () => {
   it('keeps another workspace in-flight when one workspace is released', async () => {
     let resolveA: ((value: unknown) => void) | undefined;
     let resolveB: ((value: unknown) => void) | undefined;
-    getPty
+    loadPty
       .mockReturnValueOnce(
         new Promise((resolve) => {
           resolveA = resolve;
@@ -1095,8 +1154,14 @@ describe('WebTerminalRegistry', () => {
     });
 
     registry.releaseWorkspace('/workspace-a');
-    resolveA?.({ module: { spawn }, name: 'node-pty' });
-    resolveB?.({ module: { spawn }, name: 'node-pty' });
+    resolveA?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
+    resolveB?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
 
     await expect(creatingA).resolves.toEqual({
       error: 'Web terminal creation cancelled',
@@ -1112,7 +1177,7 @@ describe('WebTerminalRegistry', () => {
 
   it('does not let another workspace cancel an in-flight terminal', async () => {
     let resolvePty: ((value: unknown) => void) | undefined;
-    getPty.mockReturnValueOnce(
+    loadPty.mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePty = resolve;
       }),
@@ -1124,7 +1189,10 @@ describe('WebTerminalRegistry', () => {
     });
 
     expect(registry.release('terminal:pending', '/workspace-b')).toBe(false);
-    resolvePty?.({ module: { spawn }, name: 'node-pty' });
+    resolvePty?.({
+      impl: { module: { spawn }, name: 'node-pty' },
+      loadError: null,
+    });
 
     await expect(creating).resolves.toEqual({
       terminalId: 'terminal:pending',

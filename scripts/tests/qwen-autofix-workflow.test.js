@@ -276,80 +276,6 @@ const hasSha256sum =
     stdio: 'ignore',
   }).status === 0;
 
-// GitHub Actions expressions return operand VALUES from &&/||, not
-// booleans: && yields the first falsy operand (else the last operand), ||
-// the first truthy (else the last), '' is falsy, and && binds tighter
-// than ||. A ternary can therefore read right and evaluate wrong, which
-// text pins cannot see — so the cache choice is also pinned semantically
-// with this minimal evaluator.
-function evalGhaExpression(expression, facts) {
-  let pos = 0;
-  const truthy = (value) =>
-    value !== false && value !== null && value !== 0 && value !== '';
-  const skipSpace = () => {
-    while (/\s/.test(expression[pos] ?? '')) {
-      pos += 1;
-    }
-  };
-  const parsePrimary = () => {
-    skipSpace();
-    if (expression[pos] === "'") {
-      const end = expression.indexOf("'", pos + 1);
-      const value = expression.slice(pos + 1, end);
-      pos = end + 1;
-      return value;
-    }
-    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
-    pos += name.length;
-    if (name === 'true') {
-      return true;
-    }
-    if (name === 'false') {
-      return false;
-    }
-    if (name === 'null') {
-      return null;
-    }
-    return facts[name];
-  };
-  const parseComparison = () => {
-    const left = parsePrimary();
-    skipSpace();
-    const op = expression.slice(pos, pos + 2);
-    if (op !== '==' && op !== '!=') {
-      return left;
-    }
-    pos += 2;
-    const right = parsePrimary();
-    return op === '==' ? left === right : left !== right;
-  };
-  const parseAnd = () => {
-    let left = parseComparison();
-    for (;;) {
-      skipSpace();
-      if (expression.slice(pos, pos + 2) !== '&&') {
-        return left;
-      }
-      pos += 2;
-      const right = parseComparison();
-      left = truthy(left) ? right : left;
-    }
-  };
-  const parseOr = () => {
-    let left = parseAnd();
-    for (;;) {
-      skipSpace();
-      if (expression.slice(pos, pos + 2) !== '||') {
-        return left;
-      }
-      pos += 2;
-      const right = parseAnd();
-      left = truthy(left) ? left : right;
-    }
-  };
-  return parseOr();
-}
-
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -830,7 +756,7 @@ describe('qwen-autofix workflow', () => {
         { env: { ...process.env }, encoding: 'utf8' },
       );
     const started = '2026-08-10T10:05:49Z';
-    // A live review-pr blocks — in every pending-ish status the rollup uses.
+    // Only a running review blocks; a queued review has no work to lose.
     for (const status of [
       'QUEUED',
       'IN_PROGRESS',
@@ -847,7 +773,7 @@ describe('qwen-autofix workflow', () => {
             startedAt: started,
           },
         ]),
-      ).toBe('true');
+      ).toBe(status === 'IN_PROGRESS' ? 'true' : 'false');
     }
     expect(
       run([
@@ -874,103 +800,7 @@ describe('qwen-autofix workflow', () => {
       run([{ name: 'Test (ubuntu-latest, Node 22.x)', status: 'IN_PROGRESS' }]),
     ).toBe('false');
 
-    // Delay-window fallback: during the review workflow's 10-minute delay the
-    // review-pr check-run does not exist yet, so the rollup alone misses it;
-    // the scan falls back to queued runs of the review workflow by head SHA.
-    expect(reviewScanJob).toContain('REVIEW_WF_ID=');
-    expect(reviewScanJob).toContain(
-      'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
-    );
-    expect(reviewScanJob).not.toContain(
-      'REVIEW_RUNS_JSON="$(gh api --paginate',
-    );
-    expect(reviewScanJob).toContain(
-      'IN("queued", "waiting", "pending", "requested", "in_progress")',
-    );
-    expect(reviewScanJob).not.toContain(
-      "grep -qE '^(queued|waiting|pending)$'",
-    );
-    expect(reviewScanJob).toContain('REVIEW_RUN_STARTED_AT=');
-    expect(reviewScanJob).toContain('.run_started_at // .created_at');
-    expect(reviewScanJob).toContain('any(.pull_requests[]?');
-    expect(reviewScanJob).toContain(
-      'select((.event // "") == "pull_request_target")',
-    );
-
-    // Replay the REAL runs-API fallback filter over fixtures (R1-8): the
-    // toContain pins above would still pass if the jq body were dead.
-    const runsFilter = reviewScanJob.match(
-      /REVIEW_RUN_STARTED_AT="\$\(jq -r[\s\S]*?<<< "\$\{REVIEW_RUNS_JSON\}"\)"/,
-    )?.[0];
-    expect(runsFilter).toBeTruthy();
-    const runRuns = (runs) =>
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
-        ],
-        { env: { ...process.env }, encoding: 'utf8' },
-      );
-    const runs = (...overrides) => ({
-      workflow_runs: overrides.map((o) => ({
-        workflow_id: 77,
-        event: 'pull_request_target',
-        status: 'in_progress',
-        head_sha: 'abc123',
-        head_branch: 'feat/x',
-        run_started_at: '2026-08-13T01:00:00Z',
-        pull_requests: [],
-        ...o,
-      })),
-    });
-    // A live automatic review on the head blocks — every pending-ish status
-    // the runs API uses, including requested/in_progress (R2-2).
-    for (const status of [
-      'queued',
-      'waiting',
-      'pending',
-      'requested',
-      'in_progress',
-    ]) {
-      expect(runRuns(runs({ status }))).toBe('2026-08-13T01:00:00Z');
-    }
-    // An explicit-trigger run is NOT cancelable by synchronize — no hold (R2-1).
-    expect(runRuns(runs({ event: 'issue_comment' }))).toBe('');
-    // A run of another workflow id never blocks (R2-1 binding).
-    expect(runRuns(runs({ workflow_id: 99 }))).toBe('');
-    // A concluded run does not block.
-    expect(runRuns(runs({ status: 'completed' }))).toBe('');
-    // A fork-controlled bare branch name alone is not identity.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'other',
-          head_branch: 'feat/x',
-          pull_requests: [],
-        }),
-      ),
-    ).toBe('');
-    // Immutable head SHA alone is still enough.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'abc123',
-          head_branch: 'other',
-          pull_requests: [],
-        }),
-      ),
-    ).toBe('2026-08-13T01:00:00Z');
-    // Matching also works via pull_requests association, not only head SHA.
-    expect(
-      runRuns(
-        runs({
-          head_sha: 'other',
-          head_branch: 'other',
-          pull_requests: [{ number: 42 }],
-        }),
-      ),
-    ).toBe('2026-08-13T01:00:00Z');
+    expect(reviewScanJob).not.toContain('REVIEW_RUNS_JSON');
 
     // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
     // visible acknowledgment per in-flight review run (marker keyed on the
@@ -978,9 +808,6 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
     expect(reviewScanJob).toContain('autofix-review-deferred');
     expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
-    expect(reviewScanJob).toContain(
-      '[[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"',
-    );
     expect(workflow).toContain(
       "review_sender: '${{ github.event.review.user.login }}'",
     );
@@ -9421,7 +9248,7 @@ exit 1
       );
       expect(forkMain.split('\n').pop()).toBe('false 0');
       expect(measureBlock).toContain(
-        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude,glob)**/pnpm-lock.yaml' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -10679,7 +10506,7 @@ exit 1
     // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-autofix');
     expect(buildCliJob).toContain(ecsRunsOn);
     for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
       const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
@@ -10873,7 +10700,7 @@ exit 1
     for (const step of installAndBuildSteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
       expect(step).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       expect(step).toContain('sleep $((attempt * 15))');
       expect(step).toContain('npm run build');
@@ -10894,15 +10721,11 @@ exit 1
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      // The cache is the one input that is NOT the same on both pools — see
-      // 'does not restore the remote npm cache on the persistent pool'. The
-      // inputs are still identical across the three steps, which is what
-      // this test is for.
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
-      );
+      // No setup-node step restores a cache: dependencies install with pnpm,
+      // and nothing restores the pnpm store either, as pinned by
+      // 'does not restore a remote cache on the persistent pool'.
+      expect(step).not.toMatch(/^\s*cache(-dependency-path)?:/m);
       expect(step).toContain('package-manager-cache: false');
-      expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
 
@@ -10999,7 +10822,9 @@ exit 1
     // The leg itself never rebuilds the base bundle — that is the entire
     // point of the fan-out.
     const legInstall = stepOf(reviewAddressJob, 'Install dependencies');
-    expect(legInstall).toContain('npm ci --prefer-offline');
+    expect(legInstall).toContain(
+      'pnpm install --frozen-lockfile --prefer-offline',
+    );
     expect(legInstall).not.toContain('npm run build');
     expect(legInstall).not.toContain('npm run bundle');
   });
@@ -12817,38 +12642,22 @@ exit 1
     }
   });
 
-  it('does not restore the remote npm cache on the persistent pool', () => {
+  it('does not restore a remote cache on the persistent pool', () => {
     // Measured on one review-address leg: `Set up Node.js` took 339s, of
     // which Node itself was free (already in the runner tool cache) and
     // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
     // an `npm ci` that took 29s in the very next step. Every leg pays it,
-    // up to ten per scan, plus build-cli and issue-autofix.
-    // All three consumers, so a fourth job with a hardcoded cache fails
-    // here rather than quietly paying 2.65 GB per run — counted by step
-    // name, so no choice of inputs can dodge the capture.
+    // up to ten per scan, plus build-cli and issue-autofix. Dependencies now
+    // install with pnpm, whose store stays on the pool's disk. Nothing
+    // restores it remotely: the hosted fallback installs cold, because the
+    // shared pnpm-store-cache action is a local `uses: './...'` step, which
+    // 'pins the persistent-pool hygiene steps into every heavy job' forbids.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      expect(step).toContain(
-        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
-      );
+      expect(step).not.toMatch(/^\s*cache:/m);
     }
-    // Text pins cannot tell a ternary that works from one that GHA's
-    // operand-value &&/|| semantics defeat — this PR's first attempt read
-    // correctly and still restored the cache on BOTH pools. Evaluate the
-    // pinned expression the way Actions does: '' on the persistent pool,
-    // 'npm' on the ephemeral hosted fallback.
-    const cacheExpression =
-      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
-    for (const [environment, expected] of [
-      ['self-hosted', ''],
-      ['github-hosted', 'npm'],
-    ]) {
-      expect(
-        evalGhaExpression(cacheExpression, {
-          'runner.environment': environment,
-        }),
-      ).toBe(expected);
-    }
+    expect(workflow).not.toContain('actions/cache');
+    expect(workflow).not.toContain('pnpm-store-cache');
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
@@ -13478,7 +13287,7 @@ exit 1
           workspaces: [
             'packages/*',
             'packages/channels/*',
-            '!packages/desktop-shell',
+            '!packages/desktop',
           ],
         }),
       );
@@ -13487,7 +13296,7 @@ exit 1
         'packages/brandnew', // a new top-level workspace the branch adds
         'packages/channels/base',
         'packages/channels/newchannel', // a new nested workspace the branch adds
-        'packages/desktop-shell', // excluded by the ! glob
+        'packages/desktop', // excluded by the ! glob
         'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
@@ -13499,7 +13308,7 @@ exit 1
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/desktop-shell/src/d.ts', // excluded workspace -> dropped
+          'packages/desktop/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
@@ -13515,7 +13324,7 @@ exit 1
       ]);
       expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
-      expect(out).not.toContain('packages/desktop-shell'); // ! negation honoured
+      expect(out).not.toContain('packages/desktop'); // ! negation honoured
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -13961,10 +13770,13 @@ exit 1
       'packages/channels/github/tsconfig.json',
       'package-lock.json',
       'packages/cli/package-lock.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      '.pnpmfile.mjs',
       'patches/ink+7.0.3.patch',
       '.gitattributes',
       'packages/core/.gitattributes',
-      'packages/desktop-shell/.npmrc',
+      'packages/desktop/.npmrc',
       'eslint.legacy-filenames.mjs',
       'eslint.legacy-core-barrel-imports.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
@@ -13985,12 +13797,15 @@ exit 1
     );
     expect(classes).toContain('package-lock.json=supply-chain');
     expect(classes).toContain('packages/cli/package-lock.json=supply-chain');
+    expect(classes).toContain('pnpm-lock.yaml=supply-chain');
+    expect(classes).toContain('pnpm-workspace.yaml=supply-chain');
+    expect(classes).toContain('.pnpmfile.mjs=supply-chain');
     expect(classes).toContain('patches/ink+7.0.3.patch=supply-chain');
     expect(classes).toContain('.gitattributes=measurement-config');
     expect(classes).toContain(
       'packages/core/.gitattributes=measurement-config',
     );
-    expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
+    expect(classes).toContain('packages/desktop/.npmrc=toolchain-config');
     expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
     expect(classes).toContain(
       'eslint.legacy-core-barrel-imports.mjs=lint-config',

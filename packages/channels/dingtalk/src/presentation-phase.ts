@@ -57,6 +57,15 @@ export function isChinesePresentationLanguage(language?: string): boolean {
   return normalized === 'zh' || normalized === 'zh-cn';
 }
 
+export function partialOutputLabel(language?: string): string {
+  return isChinesePresentationLanguage(language) ? '（部分）' : '(partial)';
+}
+
+export function markPartialOutput(text: string, language?: string): string {
+  const label = partialOutputLabel(language);
+  return !text.trim() || text.startsWith(label) ? text : `${label}\n\n${text}`;
+}
+
 export function presentationPhaseLabel(
   phase: DingtalkPresentationPhase,
   language?: string,

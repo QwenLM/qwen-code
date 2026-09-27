@@ -121,6 +121,31 @@ describe('InProcessBackend', () => {
     await expect(backend.init()).resolves.toBeUndefined();
   });
 
+  it('rejects a container requirement before constructing team or Arena resources', async () => {
+    const config = new Config({
+      model: 'test-model',
+      targetDir: process.cwd(),
+      cwd: process.cwd(),
+      debugMode: false,
+      agentExecutionBackend: 'container',
+    });
+    const createRegistry = vi.spyOn(config, 'createToolRegistry');
+    const contentGeneratorCalls = vi.mocked(createContentGenerator).mock.calls
+      .length;
+    const coreCalls = vi.mocked(AgentCore).mock.calls.length;
+    const containedBackend = new InProcessBackend(config);
+
+    await expect(
+      containedBackend.spawnAgent(createSpawnConfig('contained-team-agent')),
+    ).rejects.toThrow('team and Arena agents are unsupported');
+
+    expect(createRegistry).not.toHaveBeenCalled();
+    expect(createContentGenerator).toHaveBeenCalledTimes(contentGeneratorCalls);
+    expect(AgentCore).toHaveBeenCalledTimes(coreCalls);
+    expect(containedBackend.getAgent('contained-team-agent')).toBeUndefined();
+    expect(containedBackend.getActiveAgentId()).toBeNull();
+  });
+
   it('should throw when spawning without inProcess config', async () => {
     const config: AgentSpawnConfig = {
       agentId: 'test',

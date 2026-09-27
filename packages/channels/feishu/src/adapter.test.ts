@@ -1079,11 +1079,12 @@ describe('FeishuChannel', () => {
       label: 'sender pairing with a bot parent',
       config: { senderPolicy: 'pairing' as const },
       parentType: 'app',
-      expectedSubject: { type: 'user', id: 'ou_user' },
+      expectedSubject: undefined,
+      expectedAllowed: true,
     },
   ])(
-    'defers $label until parent authorship is resolved',
-    async ({ config, parentType, expectedSubject }) => {
+    'resolves parent authorship before admission under $label',
+    async ({ config, parentType, expectedSubject, expectedAllowed }) => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-pairing-'));
       process.env['QWEN_HOME'] = qwenHome;
@@ -1127,7 +1128,10 @@ describe('FeishuChannel', () => {
           reply,
         );
 
-        await vi.waitFor(() => expect(preflight).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => {
+          if (expectedAllowed) expect(bridge.prompt).toHaveBeenCalledOnce();
+          else expect(preflight).toHaveBeenCalledTimes(2);
+        });
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         const requests = new PairingStore('test', '/tmp').listPending();
@@ -1137,10 +1141,14 @@ describe('FeishuChannel', () => {
           expect(sendMessage).toHaveBeenCalledOnce();
         } else {
           expect(requests).toEqual([]);
-          expect(sendMessage).not.toHaveBeenCalled();
+          if (!expectedAllowed) expect(sendMessage).not.toHaveBeenCalled();
         }
-        expect(fetchSpy).toHaveBeenCalledOnce();
-        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(
+          fetchSpy.mock.calls.filter(([url]) =>
+            String(url).includes('/im/v1/messages/om_parent?'),
+          ),
+        ).toHaveLength(1);
+        expect(bridge.prompt).toHaveBeenCalledTimes(expectedAllowed ? 1 : 0);
       } finally {
         fetchSpy.mockRestore();
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];

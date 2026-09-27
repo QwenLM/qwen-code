@@ -13,12 +13,14 @@ vi.mock('./channel-registry.js', () => ({
         requiredConfigFields?: string[];
         envResolvableConfigFields?: string[];
         defaultSessionScope?: string;
+        supportsOutputMode?: boolean;
       }
     > = {
       telegram: { channelType: 'telegram', requiredConfigFields: ['token'] },
       dingtalk: {
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
+        supportsOutputMode: true,
       },
       wecom: {
         channelType: 'wecom',
@@ -87,6 +89,40 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('normalizes message routes and resolves the default route', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+      defaultMessageRoute: ' /QA ',
+    });
+    expect(config.messageRoutes).toEqual({
+      '/review': 'Review code.',
+      '/QA': '',
+    });
+    expect(config.defaultMessageRoute).toBe('/QA');
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid message routing %j', async (routing) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', ...routing }),
+    ).rejects.toThrow(/messageRoutes|defaultMessageRoute/);
+  });
+
   it('throws when type is missing', async () => {
     await expect(parseChannelConfig('bot', {})).rejects.toThrow(
       'missing required field "type"',
@@ -165,6 +201,52 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('Channel "bot" field "clientSecret" must be a string.');
   });
 
+  it.each([
+    [{}, 'allowlist'],
+    [{ senderPolicy: 'open' }, 'open'],
+    [{ senderPolicy: 'pairing' }, 'pairing'],
+    [{ senderPolicy: 'pairing', dmPolicy: 'disabled' }, 'disabled'],
+    [
+      {
+        privatePolicy: 'open',
+        dmPolicy: 'disabled',
+        senderPolicy: 'allowlist',
+      },
+      'open',
+    ],
+    [{ privatePolicy: 'disabled', senderPolicy: 'open' }, 'disabled'],
+    [{ privatePolicy: 'allowlist', senderPolicy: 'open' }, 'allowlist'],
+    [
+      { privatePolicy: 'pairing', senderPolicy: 'open', dmPolicy: 'disabled' },
+      'pairing',
+    ],
+  ])('resolves private access for %j', async (config, expected) => {
+    const result = await parseChannelConfig('bot', { type: 'bare', ...config });
+    expect(result.privatePolicy).toBe(expected);
+  });
+
+  it.each(['opne', '', null, false, 1])(
+    'rejects invalid explicit privatePolicy %j',
+    async (privatePolicy) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'bare',
+          privatePolicy,
+          senderPolicy: 'open',
+        }),
+      ).rejects.toThrow('Channel privatePolicy must be one of:');
+    },
+  );
+
+  it('rejects removed group senders inherit', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { '*': { senders: 'inherit' } },
+      }),
+    ).rejects.toThrow('must be one of: open, allowlist');
+  });
+
   it('parses minimal valid config with defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
@@ -181,7 +263,64 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({});
     expect(result.identity).toBeUndefined();
     expect(result.memoryScope).toBeUndefined();
+    expect(result.outputMode).toBeUndefined();
   });
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'accepts shared outputMode %s for an opted-in adapter',
+    async (outputMode) => {
+      const result = await parseChannelConfig('bot', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: 'secret',
+        outputMode,
+      });
+      expect(result.outputMode).toBe(outputMode);
+    },
+  );
+
+  it('defaults output mode to per turn for an opted-in adapter when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'dingtalk',
+      clientId: 'client-id',
+      clientSecret: 'secret',
+    });
+    expect(result.outputMode).toBe('per_turn');
+  });
+
+  it.each([
+    'final_only',
+    'process_and_result',
+    'all',
+    '',
+    null,
+    false,
+    1,
+    '$OUTPUT_MODE',
+  ])(
+    'rejects invalid shared outputMode %j before adapter startup',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          clientSecret: 'secret',
+          outputMode,
+        }),
+      ).rejects.toThrow(
+        'Channel "bot" outputMode must be "per_task", "per_response", or "per_turn".',
+      );
+    },
+  );
+
+  it.each(['per_task', 'per_response', 'per_turn'])(
+    'rejects outputMode %s for adapters that have not opted in',
+    async (outputMode) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', outputMode }),
+      ).rejects.toThrow('Channel "bot" does not support outputMode.');
+    },
+  );
 
   it.each(['  /review  ', false])(
     'treats an old messagePrefix value as unknown configuration data: %s',
@@ -466,6 +605,79 @@ describe('parseChannelConfig', () => {
       }),
     ).rejects.toThrow(
       'Channel "bot" field "approvalMode" must be one of: plan, default, auto-edit, auto, yolo.',
+    );
+  });
+
+  it('rejects an unknown group senders value instead of widening access', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { '*': { senders: 'opne' } },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "groups.*.senders" must be one of: open, allowlist.',
+    );
+  });
+
+  it('keeps per-group senders and allowedUsers when they are configured', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      groups: { ops: { senders: 'allowlist', allowedUsers: ['member1'] } },
+    });
+
+    expect(result.groups['ops']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['member1'],
+    });
+  });
+
+  it('rejects a non-array per-group allowedUsers', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        groups: { ops: { allowedUsers: 'member1' } },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "groups.ops.allowedUsers" must be an array of user IDs.',
+    );
+  });
+
+  it.each([
+    ['groupSenderPolicy', 'open', 'groups["*"].senders'],
+    ['allowedGroupUsers', ['member1'], 'groups["*"].allowedUsers'],
+  ])(
+    'points the moved top-level %s at its new home',
+    async (key, value, newHome) => {
+      await expect(
+        parseChannelConfig('bot', { type: 'bare', [key]: value }),
+      ).rejects.toThrow(`Channel "bot" field "${key}" moved to ${newHome}.`);
+    },
+  );
+
+  it('parses an operators list, keeping an empty one distinct from unset', async () => {
+    const listed = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: ['admin'],
+    });
+    const empty = await parseChannelConfig('bot', {
+      type: 'bare',
+      operators: [],
+    });
+    const unset = await parseChannelConfig('bot', { type: 'bare' });
+
+    expect(listed.operators).toEqual(['admin']);
+    expect(empty.operators).toEqual([]);
+    expect(unset.operators).toBeUndefined();
+  });
+
+  it('rejects a non-array operators list', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        operators: 'admin',
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "operators" must be an array of user IDs.',
     );
   });
 

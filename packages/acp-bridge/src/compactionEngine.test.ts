@@ -1161,7 +1161,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       );
     });
 
-    it('retains nested usage frames in the summary journal', () => {
+    it('omits nested usage frames from the summary journal', () => {
       const engine = new TurnBoundaryCompactionEngine();
       const usage = makeTextChunkWithParent(1, '', 'agent-1');
       (
@@ -1172,7 +1172,7 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       expect(
         engine.snapshot('summary').liveJournal.map((event) => event.id),
-      ).toEqual([1]);
+      ).toEqual([]);
     });
 
     it('excludes parented tool frames from the summary journal under cap pressure', () => {

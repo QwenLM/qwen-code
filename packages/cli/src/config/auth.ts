@@ -7,6 +7,7 @@
 import {
   AuthType,
   hasVertexProjectConfigured,
+  resolveModelSelectionAuthType,
   VERTEX_ADC_HINT,
   type Config,
   type ModelProvidersConfig,
@@ -130,13 +131,25 @@ function hasApiKeyForAuth(
   // that accounts for CLI args, env vars, and settings. Fall back to the
   // persisted settings.model.{name,baseUrl}.
   const { modelId, baseUrl } = resolveSelectedModel(settings, config);
+  const modelAuthType =
+    !config &&
+    (authType === AuthType.USE_OPENAI ||
+      authType === AuthType.USE_OPENAI_RESPONSES)
+      ? resolveModelSelectionAuthType(
+          authType,
+          modelId,
+          modelProviders,
+          settings.providerProtocol,
+          baseUrl,
+        )
+      : authType;
 
   // Try to find model-specific envKey from modelProviders, disambiguating by
   // baseUrl so duplicate-id providers resolve to the selected one.
   const modelConfig = findModelConfig(
     modelProviders,
     settings.providerProtocol,
-    authType,
+    modelAuthType,
     modelId,
     baseUrl,
   );

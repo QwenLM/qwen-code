@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -20,8 +21,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
@@ -32,12 +35,14 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
@@ -60,6 +65,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
@@ -396,8 +402,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const status =
-      err.code === 'invalid_request'
+    const status = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -409,13 +416,33 @@ export function sendBridgeError(
               err.code === 'working_directory_recovery_failed'
             ? 500
             : 409;
-    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
-    if (err.retryable) res.set('Retry-After', '5');
+    if (status === 500) {
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
+      recordExpectedBridgeError(
+        safeError,
+        {
+          ...ctx,
+          sessionId:
+            ctx?.sessionId ??
+            err.creationDiagnostic?.sessionId ??
+            err.sessionId,
+        },
+        daemonLog,
+      );
+    }
+    if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
       code: err.code,
       errorKind: err.code,
       retryable: err.retryable,
+      ...(err.capacity ? { capacity: err.capacity } : {}),
       ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
     });
     return;
@@ -427,6 +454,19 @@ export function sendBridgeError(
     res.status(503).json({
       error: err.message,
       code: 'runtime_still_starting',
+    });
+    return;
+  }
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    recordExpectedBridgeError(capacityError, ctx, daemonLog);
+    res.status(503).json({
+      error: capacityError.message,
+      code: capacityError.code,
+      errorKind: capacityError.code,
+      maxConcurrentChildren: capacityError.maxConcurrentChildren,
+      committedAcpChildren: capacityError.committedAcpChildren,
     });
     return;
   }
@@ -453,6 +493,15 @@ export function sendBridgeError(
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
+  if (err instanceof SessionExecutionEngineError) {
+    res.status(409).json({
+      error:
+        'This session cannot be resumed with the current execution engine.',
       code: err.errorKind,
       errorKind: err.errorKind,
     });
@@ -597,6 +646,27 @@ export function sendBridgeError(
       error: err.message,
       code: 'branch_while_prompt_active',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'managed_session_branch_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    if (err.errorKind === 'invalid_session_id') {
+      res.status(400).json({ error: err.message, code: err.errorKind });
+      return;
+    }
+    res.status(409).json({
+      error: err.message,
+      code: err.errorKind,
+      sessionId: err.sessionId,
+      conflict: 'live',
     });
     return;
   }
@@ -802,6 +872,13 @@ export function sendBridgeError(
     });
     return;
   }
+  if (isSessionStartupConfigError(err)) {
+    res.status(err.code === 'invalid_startup_config' ? 400 : 422).json({
+      error: err.message,
+      code: err.code,
+    });
+    return;
+  }
   if (err instanceof InvalidSessionScopeError) {
     // Same wire shape as the route-layer 400 (`server.ts` validates
     // body['sessionScope'] before calling the bridge). A direct embed
@@ -922,6 +999,14 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      const workflowStatus = workflowRequestErrorStatus(kind);
+      if (workflowStatus !== undefined) {
+        res.status(workflowStatus).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({
@@ -966,6 +1051,15 @@ export function sendBridgeError(
       if (kind === 'session_writer_unavailable') {
         res.status(503).json({
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_execution_engine_unavailable') {
+        res.status(409).json({
+          error:
+            'This session cannot be resumed with the current execution engine.',
           code: kind,
           errorKind: kind,
         });

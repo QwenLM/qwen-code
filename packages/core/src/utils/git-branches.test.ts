@@ -33,6 +33,7 @@ import {
   gitPush,
   isValidCheckoutRef,
   parseDroppedStashSha,
+  streamGitRecords,
 } from './git-branches.js';
 import { getDefaultBranch } from './github-prs.js';
 
@@ -232,6 +233,7 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      GIT_ALLOW_PROTOCOL: 'https:ssh:ext',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
@@ -250,6 +252,22 @@ describe('gitEnv (R12 env isolation)', () => {
     ]) {
       expect(env[key]).toBeUndefined();
     }
+    // GIT_ALLOW_PROTOCOL is normalized, not deleted: the helper-executing
+    // entries are stripped while a restrictive inherited list keeps its
+    // deny-by-default force over config-file policy.
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https:ssh');
+  });
+
+  it('normalizes an inherited GIT_ALLOW_PROTOCOL instead of deleting it', () => {
+    expect(
+      gitEnv({ GIT_ALLOW_PROTOCOL: 'https:ssh' })['GIT_ALLOW_PROTOCOL'],
+    ).toBe('https:ssh');
+    // A helper-only list filters to empty, which stays SET: an empty list
+    // is deny-all, while undefined would hand the decision to config.
+    expect(gitEnv({ GIT_ALLOW_PROTOCOL: 'ext:fd' })['GIT_ALLOW_PROTOCOL']).toBe(
+      '',
+    );
+    expect(gitEnv({})['GIT_ALLOW_PROTOCOL']).toBeUndefined();
   });
 
   it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
@@ -738,9 +756,9 @@ describe('gitPush', () => {
     git(dir, 'tag', 'v1.0');
     git(dir, 'checkout', '-q', 'v1.0');
 
-    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
-      /detached HEAD/,
-    );
+    await expect(
+      gitPush(dir, { setUpstream: true }, hermeticEnv()),
+    ).rejects.toThrow(/detached HEAD/);
   });
 
   it('preserves an existing upstream instead of rewriting it', async () => {
@@ -759,7 +777,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     // Tracking must still point at upstream, not origin.
     const tracking = git(
@@ -783,7 +801,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -806,7 +824,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
     const remoteLog = git(remote, 'log', '--oneline', '-1');
     expect(remoteLog).toContain('amended');
@@ -825,7 +843,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -852,7 +870,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const tracking = git(
       dir,
@@ -2032,5 +2050,142 @@ describe('getDefaultBranch (R10 #3)', () => {
   it('returns null when origin/HEAD is not set', async () => {
     const dir = makeRepo();
     expect(await getDefaultBranch(dir)).toBeNull();
+  });
+});
+
+describe('streamGitRecords', () => {
+  it('hands over each record as it arrives, and stops when told to', async () => {
+    const dir = makeRepo();
+    for (const name of ['b.txt', 'c.txt', 'd.txt']) {
+      fs.writeFileSync(path.join(dir, name), 'x\n');
+    }
+    git(dir, 'add', '.');
+    const seen: string[] = [];
+    const stopped = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      seen.push(r.toString('utf8'));
+      return r.toString('utf8') === 'b.txt';
+    });
+    // Stopped on the second record, and nothing after it reached the reader.
+    expect([stopped, seen]).toEqual([true, ['a.txt', 'b.txt']]);
+
+    const all: string[] = [];
+    const reachedEnd = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      all.push(r.toString('utf8'));
+      return false;
+    });
+    expect([reachedEnd, all]).toEqual([
+      false,
+      ['a.txt', 'b.txt', 'c.txt', 'd.txt'],
+    ]);
+  });
+
+  it('keeps a path the bytes it is', async () => {
+    const dir = makeRepo();
+    const blob = git(dir, 'rev-parse', 'HEAD:a.txt').trim();
+    // git writes paths as bytes, and `-z` does not quote them. Decoding the
+    // stream before splitting it would replace this byte and hand the
+    // reader a path that names some other file.
+    const odd = Buffer.concat([
+      Buffer.from('sub'),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: dir,
+      input: Buffer.concat([
+        Buffer.from(`100644 ${blob} 0\t`),
+        odd,
+        Buffer.from('\n'),
+      ]),
+    });
+    const records: Buffer[] = [];
+    await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      records.push(Buffer.from(r));
+      return false;
+    });
+    expect(records.some((r) => r.equals(odd))).toBe(true);
+  });
+
+  it('counts the last record, which no separator follows', async () => {
+    const dir = makeRepo();
+    const records: string[] = [];
+    await streamGitRecords(dir, ['rev-parse', 'HEAD'], (r) => {
+      records.push(r.toString('utf8').trim());
+      return false;
+    });
+    expect(records).toEqual([git(dir, 'rev-parse', 'HEAD').trim()]);
+  });
+
+  it('rejects when the reader throws, on any record, the last one included', async () => {
+    const dir = makeRepo();
+    // The last record is only seen once git has closed; a throw there has
+    // to become this promise's rejection, not an uncaught one from inside
+    // an event listener.
+    await expect(
+      streamGitRecords(dir, ['rev-parse', 'HEAD'], () => {
+        throw new Error('reader broke');
+      }),
+    ).rejects.toThrow('reader broke');
+    await expect(
+      streamGitRecords(dir, ['ls-files', '-z'], () => {
+        throw new Error('reader broke early');
+      }),
+    ).rejects.toThrow('reader broke early');
+  });
+
+  it('rejects when git fails, rather than answering "nothing found"', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-norepo-'));
+    tmpRoots.push(outside);
+    await expect(
+      streamGitRecords(
+        outside,
+        ['ls-files', '-z'],
+        () => false,
+        // Without a repository of its own, git would otherwise walk up to
+        // whatever repository holds the temporary directory.
+        { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(outside) },
+      ),
+    ).rejects.toThrow(/not a git repository/i);
+  });
+
+  it('names the subcommand when git fails without a word', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'changed\n');
+    // `diff --quiet` exits 1 on a change and says nothing, and the `-c`
+    // pair in front is how every call here begins.
+    await expect(
+      streamGitRecords(
+        dir,
+        ['-c', 'core.fsmonitor=false', 'diff', '--quiet'],
+        () => false,
+      ),
+    ).rejects.toThrow('git diff exited with 1');
+  });
+
+  // A shell-script stand-in for git on PATH; POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'says which signal stopped git when nothing else is said',
+    async () => {
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-fakegit-'));
+      tmpRoots.push(bin);
+      fs.writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nkill -TERM $$\n');
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      await expect(
+        streamGitRecords(bin, ['ls-files', '-z'], () => false, {
+          ...process.env,
+          PATH: `${bin}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        }),
+      ).rejects.toThrow('git ls-files exited with SIGTERM');
+    },
+  );
+
+  it('gives up on git that never finishes', async () => {
+    const dir = makeRepo();
+    // `cat-file --batch` waits on its input, which nothing ever sends.
+    await expect(
+      streamGitRecords(dir, ['cat-file', '--batch'], () => false, undefined, {
+        timeoutMs: 300,
+      }),
+    ).rejects.toThrow(/timed out/);
   });
 });

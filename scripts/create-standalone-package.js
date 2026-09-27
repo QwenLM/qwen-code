@@ -73,12 +73,16 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'execution-worker.js',
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
   // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
@@ -86,6 +90,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
   'codeModeHost.js',
+  // bwrap sandbox relay + confined file worker; esbuild emits them as
+  // standalone entries that sandboxAsset() resolves from the bundle dir at
+  // execution time (packages/core/src/sandbox/bwrap-execution.ts).
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled',
@@ -179,6 +188,11 @@ async function main() {
     copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
+    // getPty() returns null under Bun without touching node-pty, so only the
+    // node runtime needs the PTY packages.
+    if (args.runtime === 'node') {
+      copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
+    }
     if (args.runtime === 'bun') {
       copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
     }
@@ -318,8 +332,12 @@ Options:
                           renderer (needs bun:ffi) works standalone.
   --node-archive PATH     Downloaded Node.js runtime archive.
   --native-modules-dir DIR
-                          Staged native node_modules directory. Missing
-                          clipboard packages are fatal when this is supplied.
+                          Staged native node_modules directory holding
+                          @teddyzhu/clipboard* packages and, for --runtime
+                          node, @lydell/node-pty* packages. Missing clipboard
+                          packages are fatal when this is supplied; missing
+                          node-pty packages warn unless
+                          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1.
   --opentui-modules-dir DIR
                           Staged node_modules directory holding @opentui
                           platform packages. Used with --runtime bun; missing
@@ -520,6 +538,82 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
   assertNoSymlinks(
     modulesDest,
     'Bundled clipboard addon still contains symlinks.',
+  );
+}
+
+// Bundle @lydell/node-pty (the wrapper plus only this target's platform
+// prebuild package) into lib/node_modules so the web terminal can spawn a PTY
+// in standalone installs. getPty() resolves the wrapper via a runtime
+// import('@lydell/node-pty') — esbuild.config.js keeps every node-pty
+// specifier external — and the wrapper in turn requires
+// `@lydell/node-pty-<platform>-<arch>` from node_modules. Without this step
+// the archive declares the packages in optionalDependencies but ships none of
+// them, so every web terminal creation fails with "PTY not available"
+// (#11872). Missing packages warn-and-degrade locally (like the audio-capture
+// step) rather than failing the build, so a developer archive still builds for
+// a target whose prebuild the host install does not have: npm skips
+// optionalDependencies whose os/cpu do not match the installing machine, and a
+// staged --native-modules-dir can carry the clipboard packages without this
+// target's node-pty prebuild. An unmapped target is not that case —
+// copyNativeAddon reads the same TARGET_PREBUILD_DIR and its unconditional
+// path.join() throws on the undefined dir name before this step is reached.
+// Release builds cannot degrade silently: release.yml exports
+// QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 for the archive build, turning a
+// missing prebuild into a hard failure now that every shipped target has a
+// pinned package.
+function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
+  const packageNames = ['@lydell/node-pty', nativePackage];
+  const modulesSrc = path.resolve(
+    nativeModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const hasRequiredFiles =
+    packageSources.every((packageSrc) =>
+      fs.existsSync(path.join(packageSrc, 'package.json')),
+    ) &&
+    hasNativePrebuild(
+      path.join(packageSources[1], 'prebuilds', prebuildDirName),
+    );
+
+  if (!hasRequiredFiles) {
+    const message = `node-pty packages for ${target} are missing from ${modulesSrc}`;
+    if (process.env.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD === '1') {
+      fail(`Required ${message}`);
+    }
+    console.warn(
+      `[standalone] ${message}; bundling without PTY support ` +
+        '(web terminal will report "PTY not available").',
+    );
+    return;
+  }
+
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+    // The win32-x64 prebuild package ships .pdb debug symbols beside its .node
+    // addons: 10,780,672 B, 86% of its 12,485,696 B prebuild payload and
+    // ~2.05 MiB of the compressed win-x64 archive. Nothing reads them at
+    // runtime (a PDB is only opened by a debugger or crash-dump symbolizer),
+    // so they are dropped at packaging time.
+    filter: (src) => !src.endsWith('.pdb'),
+  };
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      copyOpts,
+    );
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled node-pty addon still contains symlinks.',
   );
 }
 
@@ -1052,6 +1146,11 @@ function fail(message) {
 
 export {
   TARGET_CLIPBOARD_PACKAGE,
+  // Exported so a test can hold the target map and the manifest's pins
+  // together: the release build now fails on a missing prebuild, so a target
+  // mapped to an unpinned package name would abort the whole archive step
+  // instead of degrading one archive.
+  TARGET_PREBUILD_DIR,
   TARGETS,
   standaloneArchiveName,
   writeSha256Sums,

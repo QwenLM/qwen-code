@@ -20,6 +20,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { summarizeReplayEvent } from './replay-summary.js';
 
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
@@ -495,14 +496,21 @@ export class EventBus {
     return events;
   }
 
+  private eventDetailMode: LiveReplayMode = 'full';
+
+  setEventDetailMode(mode: LiveReplayMode): void {
+    this.eventDetailMode = mode;
+  }
+
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
-   * (with `id` + `v` assigned) on success, or `undefined` when the
-   * bus is closed.
+   * (with `id` + `v` assigned) on success, or `undefined` when the bus
+   * is closed, the event is unserializable, or summary mode filters it.
+   * Filtering is a normal no-op; rejected events do not consume an ID.
    *
-   * **Never throws** (never-throws contract). Closing the bus mid-publish
-   * is the only abnormal path and is handled as a return-undefined
-   * no-op; subscriber-enqueue failures are caught internally and
+   * **Never throws** (never-throws contract). Closed-bus and unserializable
+   * events are handled as return-undefined no-ops;
+   * subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
    * this — the historical `try { publish(...) } catch {}` blocks in
    * `httpAcpBridge.ts` are defense-in-depth, not load-bearing, and
@@ -523,7 +531,7 @@ export class EventBus {
     // to anyway.
     if (this.closed) return undefined;
     const existingMeta = input._meta;
-    const event: BridgeEvent = {
+    let event: BridgeEvent = {
       // Read WITHOUT incrementing: a rejected event must not burn an id —
       // other subscribers would see a sequence gap (3 → 5) that resume
       // logic misreads as ring eviction. `nextId` advances only after the
@@ -536,6 +544,11 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    if (this.eventDetailMode === 'summary') {
+      const projected = summarizeReplayEvent(event);
+      if (!projected) return undefined;
+      event = projected;
+    }
     // Eager sizing doubles as the serializability gate (DAEMON-011): an
     // event JSON.stringify cannot represent would bypass every byte cap
     // at weight 0 and then fail at SSE send time anyway. Reject it here —

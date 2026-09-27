@@ -167,9 +167,12 @@ export function normalize(model: string): string {
   // Special handling for model names that include date/version as part of the model identifier
   // - Qwen models: qwen-plus-latest, qwen-flash-latest, qwen-vl-max-latest
   // - Kimi models: kimi-k2-0905, kimi-k2-0711, etc. (keep date for version distinction)
+  // - DeepSeek V4: the trailing -v4 IS the generation the limit tables key
+  //   on; stripping it drops the bare alias onto the generic ^deepseek row
   if (
     !s.match(/^qwen-(?:plus|flash|vl-max)-latest$/) &&
-    !s.match(/^kimi-k2-\d{4}$/)
+    !s.match(/^kimi-k2-\d{4}$/) &&
+    !s.match(/^deepseek-v4/)
   ) {
     // Regex breakdown:
     // -(?:...)$ - Non-capturing group for suffixes at the end of the string
@@ -243,7 +246,10 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
-  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
+  // The official DeepSeek API serves V4 flash as `deepseek-flash` (the
+  // `deepseek-v4.1-flash` spelling is DashScope's); both V4 names carry the
+  // 1M window, so flash must not fall through to the 128K family rule.
+  [/^deepseek-(?:v4|flash)/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
@@ -301,7 +307,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
-  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
+  [/^deepseek-(?:v4|flash)/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],

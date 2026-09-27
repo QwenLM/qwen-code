@@ -9,7 +9,9 @@ import {
   useCallback,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
+  useState,
 } from 'react';
 import {
   MessageList,
@@ -22,6 +24,7 @@ import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
@@ -31,6 +34,45 @@ interface ReadingAnchor {
   callId?: string;
 }
 
+export interface TurnFollowRange {
+  start: number;
+  end: number;
+  current: number;
+}
+
+// Rows whose blocks carry no turn mapping (assistant output, tool cards)
+// inherit the turn of the previous mapped row; rows above the first mapped row
+// belong to the turn before it. This mirrors how the in-list timeline
+// propagates a turn id across its rows.
+export function followRangeFromRows(
+  rows: readonly { top: number; bottom: number; ordinal?: number }[],
+  viewportTop: number,
+  viewportBottom: number,
+): TurnFollowRange | undefined {
+  const firstMapped = rows.find((row) => row.ordinal !== undefined)?.ordinal;
+  if (firstMapped === undefined) return undefined;
+  // The reading position is anchored a third of the way down the viewport so
+  // the highlight reaches the first and last turns at the scroll extremes
+  // instead of stalling on whichever turn sits in the middle.
+  const line = viewportTop + (viewportBottom - viewportTop) / 3;
+  let lastMapped: number | undefined;
+  let start: number | undefined;
+  let end: number | undefined;
+  let firstVisible: number | undefined;
+  let current: number | undefined;
+  for (const row of rows) {
+    if (row.ordinal !== undefined) lastMapped = row.ordinal;
+    const effective = row.ordinal ?? lastMapped ?? Math.max(0, firstMapped - 1);
+    if (row.bottom < viewportTop || row.top > viewportBottom) continue;
+    start = start === undefined ? effective : Math.min(start, effective);
+    end = end === undefined ? effective : Math.max(end, effective);
+    firstVisible ??= effective;
+    if (row.top <= line) current = effective;
+  }
+  if (start === undefined || end === undefined) return undefined;
+  return { start, end, current: current ?? firstVisible! };
+}
+
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
   MessageListProps
@@ -38,6 +80,15 @@ export const TranscriptViewport = forwardRef<
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
+  const openTurnCalls = useOpenTurnCalls();
+  const openViewportTurnCalls = useCallback(
+    (turnId: string) => {
+      const recordId = viewport.blocks?.find((block) => block.id === turnId)
+        ?.sourceRecordIds?.[0];
+      openTurnCalls?.(turnId, recordId);
+    },
+    [openTurnCalls, viewport.blocks],
+  );
   const {
     historical,
     loading,
@@ -46,6 +97,8 @@ export const TranscriptViewport = forwardRef<
     viewKey,
     pin,
     toolSources,
+    selectSearchHit,
+    continueLive,
   } = viewport;
   const globalNavigation =
     !props.hideSessionTimeline &&
@@ -133,17 +186,110 @@ export const TranscriptViewport = forwardRef<
     // Virtual rows may not exist when the scroll event starts the request.
     anchor.current = captureRef.current() ?? anchor.current;
   };
+
+  const blockOrdinal = useMemo(() => {
+    if (!globalNavigation) return undefined;
+    const navigation = viewport.navigation;
+    const map = new Map<string, number>();
+    for (const page of navigation.indexPages.values())
+      for (const entry of page.turns) {
+        const blockId = navigation.locations.get(entry.turnId)?.blockId;
+        if (blockId !== undefined) map.set(blockId, entry.ordinal);
+      }
+    navigation.provisionalTurns.forEach((turn, index) => {
+      if (turn.blockId) map.set(turn.blockId, navigation.totalTurns + index);
+    });
+    return map;
+  }, [globalNavigation, viewport.navigation]);
+  const [follow, setFollow] = useState<TurnFollowRange | undefined>(undefined);
+  const followFrame = useRef<number | undefined>(undefined);
+  const updateFollow = useCallback(() => {
+    const scroll = scroller();
+    if (!scroll || !blockOrdinal || !navigationVisible) {
+      setFollow(undefined);
+      return;
+    }
+    const rect = scroll.getBoundingClientRect();
+    const next = followRangeFromRows(
+      rows().map((row) => {
+        let ordinal: number | undefined;
+        for (const id of row.dataset.sourceBlockIds?.split(',') ?? []) {
+          const mapped = blockOrdinal.get(id);
+          if (
+            mapped !== undefined &&
+            (ordinal === undefined || mapped < ordinal)
+          )
+            ordinal = mapped;
+        }
+        const bounds = row.getBoundingClientRect();
+        return { top: bounds.top, bottom: bounds.bottom, ordinal };
+      }),
+      rect.top,
+      rect.bottom,
+    );
+    setFollow((previous) =>
+      previous &&
+      next &&
+      previous.start === next.start &&
+      previous.end === next.end &&
+      previous.current === next.current
+        ? previous
+        : next,
+    );
+  }, [scroller, rows, blockOrdinal, navigationVisible]);
+  const scheduleFollow = useCallback(() => {
+    if (followFrame.current !== undefined) return;
+    followFrame.current = requestAnimationFrame(() => {
+      followFrame.current = undefined;
+      if (!restoring.current) updateFollow();
+    });
+  }, [updateFollow]);
+  useLayoutEffect(() => {
+    scheduleFollow();
+  }, [scheduleFollow, messages, blockOrdinal]);
+  useLayoutEffect(() => {
+    const scroll = scroller();
+    if (!scroll || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => scheduleFollow());
+    observer.observe(scroll);
+    return () => observer.disconnect();
+  }, [scheduleFollow, scroller, viewKey]);
+  const updateFollowRef = useRef(updateFollow);
+  updateFollowRef.current = updateFollow;
+  useLayoutEffect(
+    () => () => {
+      if (followFrame.current !== undefined)
+        cancelAnimationFrame(followFrame.current);
+      followFrame.current = undefined;
+    },
+    [viewKey],
+  );
   useImperativeHandle(
     ref,
     () => ({
-      scrollToMessage: (id, callId) =>
-        list.current?.scrollToMessage(id, callId) ?? false,
+      scrollToSearchHit: (hit, isCurrent) => selectSearchHit(hit, isCurrent),
+      scrollToMessage: (id, callId) => {
+        if (list.current?.scrollToMessage(id, callId)) return true;
+        if (!historical && !loading) return false;
+        const blockId = props.messages.find((message) => message.id === id)
+          ?.sourceBlockIds?.[0];
+        if (!blockId) return false;
+        continueLive(blockId);
+        return true;
+      },
       scrollToBottom: (behavior) => {
         if (historical || loading) returnToLive();
         if (!historical) list.current?.scrollToBottom(behavior);
       },
     }),
-    [historical, loading, returnToLive],
+    [
+      historical,
+      loading,
+      returnToLive,
+      selectSearchHit,
+      continueLive,
+      props.messages,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -215,6 +361,7 @@ export const TranscriptViewport = forwardRef<
       else {
         anchor.current = undefined;
         restoring.current = false;
+        updateFollowRef.current();
       }
     };
     restore();
@@ -306,11 +453,14 @@ export const TranscriptViewport = forwardRef<
       {globalNavigation && (
         <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
+            action={props.timelineAction}
             state={viewport.navigation}
             store={viewport.store}
+            follow={navigationVisible ? follow : undefined}
             onSelect={(ordinal) => {
               handleScrollIntent();
               anchor.current = undefined;
+              setFollow(undefined);
               void viewport.selectOrdinal(ordinal);
             }}
           />
@@ -342,6 +492,7 @@ export const TranscriptViewport = forwardRef<
           const current = capture();
           if (loading) anchor.current = current;
           loadAtEdge();
+          scheduleFollow();
         }}
       >
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -367,50 +518,60 @@ export const TranscriptViewport = forwardRef<
               )}
             </div>
           )}
-          <MessageList
-            {...props}
-            key={viewport.viewKey}
-            ref={list}
-            messages={viewport.messages}
-            hideSessionTimeline={
-              historical || globalNavigation || props.hideSessionTimeline
-            }
-            {...(viewport.historical
-              ? {
-                  frozenViewport: true,
-                  hasOlderHistory: false,
-                  onLoadOlderHistory: undefined,
-                  historyCapacityReached: false,
-                  historyPaginationError: false,
-                  loadingOlderHistory: false,
-                  onCanScrollToBottomChange: undefined,
-                  firstTurnMetrics: undefined,
-                  sessionKey: viewport.viewKey,
-                  pendingApproval: null,
-                  loadingTranscript: false,
-                  catchingUp: false,
-                  isResponding: false,
-                  transcriptActivity: undefined,
-                  onReloadTranscript: undefined,
-                  transcriptReloadPaused: true,
-                  onEditUserMessage: undefined,
-                  onSubmitUserMessageEdit: undefined,
-                  onShowContextDetail: undefined,
-                  onBranchSession: undefined,
-                  onRetryClick: undefined,
-                  onRetryFailedPrompt: undefined,
-                  showRetryHint: false,
-                  failedPromptMessageId: undefined,
-                  tailContent: undefined,
-                  welcomeHeader: undefined,
-                  activeTurnStartedAt: undefined,
-                  turnFileChanges: undefined,
-                  turnArtifacts: undefined,
-                  turnScheduledTasks: undefined,
-                  generateContent: undefined,
-                }
-              : {})}
-          />
+          <TurnCallsProvider
+            onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
+          >
+            <MessageList
+              {...props}
+              key={viewport.viewKey}
+              ref={list}
+              messages={viewport.messages}
+              timelineAction={
+                globalNavigation ? undefined : props.timelineAction
+              }
+              hideSessionTimeline={
+                historical || globalNavigation || props.hideSessionTimeline
+              }
+              {...(viewport.historical
+                ? {
+                    frozenViewport: true,
+                    hasOlderHistory: false,
+                    onLoadOlderHistory: undefined,
+                    historyCapacityReached: false,
+                    historyPaginationError: false,
+                    loadingOlderHistory: false,
+                    onCanScrollToBottomChange: undefined,
+                    firstTurnMetrics: undefined,
+                    sessionKey: viewport.viewKey,
+                    pendingApproval: null,
+                    loadingTranscript: false,
+                    catchingUp: false,
+                    isResponding: false,
+                    transcriptActivity: undefined,
+                    onReloadTranscript: undefined,
+                    transcriptReloadPaused: true,
+                    onEditUserMessage: undefined,
+                    onSubmitUserMessageEdit: undefined,
+                    onShowContextDetail: undefined,
+                    onBranchSession: undefined,
+                    onRetryClick: undefined,
+                    onRetryFailedPrompt: undefined,
+                    showRetryHint: false,
+                    failedPromptMessageId: undefined,
+                    tailContent: undefined,
+                    welcomeHeader: undefined,
+                    activeTurnStartedAt: undefined,
+                    turnFileChanges: undefined,
+                    sourceEntries: undefined,
+                    sourceSessionId: undefined,
+                    onSourceOpen: undefined,
+                    turnArtifacts: undefined,
+                    turnScheduledTasks: undefined,
+                    generateContent: undefined,
+                  }
+                : {})}
+            />
+          </TurnCallsProvider>
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

@@ -56,19 +56,6 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
-// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value, while
-// delegating every other constant (timeouts, sentinel, resolveRequestTimeout)
-// to the real module so the mock cannot drift from the implementation.
-vi.mock('../constants.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../constants.js')>();
-  return {
-    ...actual,
-    get DASHSCOPE_PROXY_BASE_URL() {
-      return process.env['DASHSCOPE_PROXY_BASE_URL'];
-    },
-  };
-});
-
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -619,6 +606,36 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(headers['X-DashScope-UserAgent']).toBe(
         `QwenCode/unknown (${process.platform}; ${process.arch})`,
       );
+    });
+
+    it('should add the OssResourceResolve header when omni is enabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers['X-DashScope-OssResourceResolve']).toBe('enable');
+    });
+
+    it('should omit the OssResourceResolve header when omni is disabled', () => {
+      const omniCliConfig = {
+        ...mockCliConfig,
+        isOmniEnabled: vi.fn().mockReturnValue(false),
+      } as unknown as Config;
+      const omniProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        omniCliConfig,
+      );
+
+      const headers = omniProvider.buildHeaders();
+
+      expect(headers).not.toHaveProperty('X-DashScope-OssResourceResolve');
     });
   });
 
