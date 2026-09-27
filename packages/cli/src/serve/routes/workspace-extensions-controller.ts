@@ -422,10 +422,24 @@ export function createExtensionsController(
   let extensionsStatusCache:
     | {
         locale: string;
+        trusted: boolean;
         expiresAt: number;
         value: ServeWorkspaceExtensionsStatus;
       }
     | undefined;
+
+  let extensionsStatusInFlight:
+    | {
+        locale: string;
+        trusted: boolean;
+        promise: Promise<ServeWorkspaceExtensionsStatus>;
+      }
+    | undefined;
+
+  const invalidateExtensionsStatus = (): void => {
+    extensionsStatusCache = undefined;
+    extensionsStatusInFlight = undefined;
+  };
 
   const refreshExtensionsForAllSessions = async (): Promise<{
     refreshed: number;
@@ -436,7 +450,7 @@ export function createExtensionsController(
     const refresh = commitQueue.runUntilReleased(
       async (release) => {
         releaseCommitLane = release;
-        extensionsStatusCache = undefined;
+        invalidateExtensionsStatus();
         return await workspace.refreshExtensionsForAllSessions();
       },
       { signal: queueAbort.signal },
@@ -677,7 +691,7 @@ export function createExtensionsController(
         );
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
-        extensionsStatusCache = undefined;
+        invalidateExtensionsStatus();
         if (options.skipRefresh || event.updated === false) {
           reconciliationReservation?.release();
           reconciliationReservation = undefined;
@@ -904,7 +918,7 @@ export function createExtensionsController(
             ? (err as { code: string }).code
             : undefined;
         if (committedGeneration !== undefined) {
-          extensionsStatusCache = undefined;
+          invalidateExtensionsStatus();
           const error =
             `Commit succeeded but post-commit work failed: ${message}`.slice(
               0,
@@ -1014,104 +1028,136 @@ export function createExtensionsController(
     })();
   };
 
+  const loadLocalExtensionsStatus = async (
+    trusted: boolean,
+  ): Promise<ServeWorkspaceExtensionsStatus> => {
+    const extensionManager = createExtensionManager(boundWorkspace, trusted);
+    await extensionManager.refreshCache();
+    const entries: ServeExtensionEntry[] = extensionManager
+      .getLoadedExtensions()
+      .map((ext): ServeExtensionEntry => {
+        const capabilities: ServeExtensionCapabilities = {
+          mcpServerCount: ext.mcpServers
+            ? Object.keys(ext.mcpServers).length
+            : 0,
+          skillCount: ext.skills?.length ?? 0,
+          agentCount: ext.agents?.length ?? 0,
+          hookCount: ext.hooks
+            ? Object.values(ext.hooks).reduce(
+                (sum, defs) => sum + (defs?.length ?? 0),
+                0,
+              )
+            : 0,
+          commandCount: ext.commands?.length ?? 0,
+          contextFileCount: ext.contextFiles.length,
+          channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
+          hasSettings: (ext.settings?.length ?? 0) > 0,
+        };
+        return {
+          kind: 'extension',
+          id: ext.id,
+          name: ext.name,
+          ...(ext.displayName ? { displayName: ext.displayName } : {}),
+          ...(ext.config.description
+            ? { description: ext.config.description }
+            : {}),
+          version: ext.version,
+          isActive: ext.isActive,
+          path: ext.path,
+          ...(ext.installMetadata?.source &&
+          ext.installMetadata.type !== 'snapshot'
+            ? {
+                source: redactExtensionDisplaySource(
+                  ext.installMetadata.source,
+                ),
+              }
+            : {}),
+          ...(ext.installMetadata?.type
+            ? { installType: ext.installMetadata.type }
+            : {}),
+          ...(ext.installMetadata?.originSource
+            ? { originSource: ext.installMetadata.originSource }
+            : {}),
+          ...(ext.installMetadata?.ref ? { ref: ext.installMetadata.ref } : {}),
+          ...(ext.installMetadata?.autoUpdate !== undefined
+            ? { autoUpdate: ext.installMetadata.autoUpdate }
+            : {}),
+          ...(ext.installMetadata?.type === 'snapshot'
+            ? { credentialPersistence: 'one_time' as const }
+            : ext.installMetadata?.credentialPersistence === 'stored'
+              ? { credentialPersistence: 'stored' as const }
+              : {}),
+          updateState:
+            ext.installMetadata?.type === 'snapshot'
+              ? 'not updatable'
+              : ext.installMetadata
+                ? 'unknown'
+                : 'not updatable',
+          capabilities,
+          details: {
+            mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+            commands: ext.commands ?? [],
+            skills: ext.skills?.map((skill) => skill.name) ?? [],
+            agents: ext.agents?.map((agent) => agent.name) ?? [],
+            contextFiles: ext.contextFiles,
+            settings:
+              ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+          },
+        };
+      });
+    const status = {
+      v: STATUS_SCHEMA_VERSION,
+      workspaceCwd: boundWorkspace,
+      initialized: true,
+      extensions: entries,
+    };
+    return status;
+  };
+
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const locale = resolveExtensionLocale(boundWorkspace);
-      const now = Date.now();
+      const trusted =
+        deps.isWorkspaceTrusted?.() ??
+        getWorkspaceTrustStatus(
+          loadSettings(boundWorkspace).merged,
+          boundWorkspace,
+        ).effective.state === 'trusted';
+      const locale = resolveExtensionLocale(boundWorkspace, trusted);
       if (
         extensionsStatusCache?.locale === locale &&
-        extensionsStatusCache.expiresAt > now
+        extensionsStatusCache.trusted === trusted &&
+        extensionsStatusCache.expiresAt > Date.now()
       ) {
         return extensionsStatusCache.value;
       }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
-              : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source &&
-            ext.installMetadata.type !== 'snapshot'
-              ? {
-                  source: redactExtensionDisplaySource(
-                    ext.installMetadata.source,
-                  ),
-                }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            ...(ext.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : ext.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
-            updateState:
-              ext.installMetadata?.type === 'snapshot'
-                ? 'not updatable'
-                : ext.installMetadata
-                  ? 'unknown'
-                  : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
-      extensionsStatusCache = {
+      if (
+        extensionsStatusInFlight?.locale === locale &&
+        extensionsStatusInFlight.trusted === trusted
+      ) {
+        return extensionsStatusInFlight.promise;
+      }
+      const load = {
         locale,
-        expiresAt: Date.now() + 2_000,
-        value: status,
+        trusted,
+        promise: loadLocalExtensionsStatus(trusted),
       };
-      return status;
+      extensionsStatusInFlight = load;
+      try {
+        const value = await load.promise;
+        if (extensionsStatusInFlight === load) {
+          extensionsStatusCache = {
+            locale,
+            trusted,
+            expiresAt: Date.now() + 2_000,
+            value,
+          };
+        }
+        return value;
+      } finally {
+        if (extensionsStatusInFlight === load) {
+          extensionsStatusInFlight = undefined;
+        }
+      }
     };
 
   return {

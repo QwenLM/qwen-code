@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  applySessionStartupConfig,
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+  type SessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { randomUUID } from 'node:crypto';
 import {
   CdWhilePromptActiveError,
+  RequestedSessionIdRejectedError,
   SessionArchivingError,
   SessionNotFoundError,
   StandaloneSessionSpawnError,
@@ -162,6 +169,7 @@ export class StandaloneSessionServiceError extends Error {
 }
 
 export interface CreateStandaloneSessionRequest {
+  startupConfig?: SessionStartupConfig;
   sessionId: string;
   modelServiceId?: string;
   approvalMode?: ApprovalMode;
@@ -2579,6 +2587,11 @@ export class StandaloneSessionService {
     >,
     promptId: string = randomUUID(),
   ): Promise<CreatedStandaloneSessionInternal> {
+    const startupConfig = parseSessionStartupConfig(
+      request.startupConfig,
+      request,
+    );
+    request = { ...request, ...(startupConfig ? { startupConfig } : {}) };
     const { sessionId } = parseRequiredSessionId(request.sessionId);
     let entry: CreatingEntry | undefined;
     const attempt: CreationAttempt = {
@@ -2828,18 +2841,28 @@ export class StandaloneSessionService {
       if (attempt.diagnostic.dispatchState !== 'not_dispatched')
         attempt.diagnostic.phase = 'spawn_dispatched';
       if (error instanceof StandaloneSessionSpawnError && !error.dispatched) {
-        try {
-          await this.assertPersistedSessionAbsent(runtime, sessionId);
-        } catch {
-          this.beginTerminalQuarantine(runtime);
+        // A paired Bridge refuses an ID a direct creator registered after
+        // shared admission. Nothing was dispatched, so nothing is rolled back,
+        // and the live owner's transcript on disk is expected.
+        const conflict =
+          error.cause instanceof RequestedSessionIdRejectedError &&
+          error.cause.errorKind === 'session_id_conflict';
+        if (!conflict) {
+          try {
+            await this.assertPersistedSessionAbsent(runtime, sessionId);
+          } catch {
+            this.beginTerminalQuarantine(runtime);
+          }
         }
-        const outcome = serviceError(
-          'standalone_creation_rolled_back',
-          sessionId,
-          true,
-          error,
-        );
-        attempt.diagnostic.cleanupOutcome = 'rolled_back';
+        const outcome = conflict
+          ? serviceError('standalone_session_conflict', sessionId, false, error)
+          : serviceError(
+              'standalone_creation_rolled_back',
+              sessionId,
+              true,
+              error,
+            );
+        if (!conflict) attempt.diagnostic.cleanupOutcome = 'rolled_back';
         if (error.cause instanceof AcpChildCapacityExceededError) {
           throw new StandaloneSessionServiceError(
             outcome.code,
@@ -2911,26 +2934,40 @@ export class StandaloneSessionService {
       attempt.diagnostic.phase = 'model_selection';
       attempt.cause = serviceError('model_selection_failed', sessionId, true);
       attempt.diagnostic.cleanupOutcome = 'unknown';
-      await this.cleanRollbackBeforePersistence(runtime, sessionId);
+      await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
       attempt.diagnostic.cleanupOutcome = 'rolled_back';
-      try {
-        await this.options.workspace.discardEmptyConversationDirectory(
-          sessionId,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      this.directoryStates.delete(sessionId);
       throw serviceError('model_selection_failed', sessionId, true);
     }
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;
+    const startupConfig = request.startupConfig;
+    let startupPreparationFailed = false;
     attempt.diagnostic.phase = 'binding';
     try {
-      await this.bindAndRelease(runtime, sessionId, prepared.identity);
+      await this.bindAndRelease(
+        runtime,
+        sessionId,
+        prepared.identity,
+        startupConfig
+          ? async () => {
+              const startupConfigApplied = await applySessionStartupConfig(
+                runtime.bridge,
+                sessionId,
+                startupConfig,
+              ).catch((error: unknown) => {
+                startupPreparationFailed = isSessionStartupConfigError(error);
+                throw error;
+              });
+              this.assertRuntimeCurrentOrQuarantine(runtime);
+              session = {
+                ...session,
+                modelApplied: true,
+                startupConfigApplied,
+              };
+            }
+          : undefined,
+      );
       if (prompt !== undefined) {
         attempt.diagnostic.phase = 'initial_prompt';
         initialPrompt = await this.admitInitialPrompt(
@@ -2944,6 +2981,12 @@ export class StandaloneSessionService {
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
       attempt.cause = error;
+      if (startupPreparationFailed) {
+        attempt.diagnostic.cleanupOutcome = 'unknown';
+        await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
+        attempt.diagnostic.cleanupOutcome = 'rolled_back';
+        throw error;
+      }
       attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
       attempt.diagnostic.cleanupOutcome = 'closed';
@@ -2976,6 +3019,7 @@ export class StandaloneSessionService {
     runtime: WorkspaceRuntime,
     sessionId: string,
     pinned: ConversationDirectoryIdentity,
+    beforeRelease?: () => Promise<void>,
   ): Promise<void> {
     const expectation = toBridgeExpectation(sessionId, pinned);
     const changed = await runtime.bridge.changeSessionCwd(sessionId, {
@@ -3022,6 +3066,10 @@ export class StandaloneSessionService {
       pinned,
       agentBound: { eventEpoch, released: false },
     });
+    if (beforeRelease) {
+      await beforeRelease();
+      this.assertRuntimeCurrentOrQuarantine(runtime);
+    }
     try {
       this.assertRuntimeCurrentOrQuarantine(runtime);
       await runtime.bridge.releaseManagedConversationBinding(
@@ -3345,6 +3393,21 @@ export class StandaloneSessionService {
       if (error instanceof TerminalQuarantineSignal) throw error;
       this.beginTerminalQuarantine(runtime);
     }
+  }
+
+  private async rollbackSessionAndDiscardDirectory(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<void> {
+    await this.cleanRollbackBeforePersistence(runtime, sessionId);
+    try {
+      await this.options.workspace.discardEmptyConversationDirectory(sessionId);
+    } catch (error) {
+      debugLogger.warn(
+        `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.directoryStates.delete(sessionId);
   }
 
   private async closeOwnedSessionOrQuarantine(

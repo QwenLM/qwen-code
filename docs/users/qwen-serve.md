@@ -80,7 +80,7 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** and the primary listener is trusted, so any local process that can reach the port can use the full operator API, including executing code as the daemon user. Route-specific workspace trust, session ownership, `X-Qwen-Client-Id`, permission, feature, validation, and resource checks still apply. The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
-For an API-only daemon, disable the Web Shell. The session, prompt, workspace, permission and SSE routes are unchanged; the surfaces bound to the Web Shell go with it — Local Control enablement fails closed on every platform, and on macOS the `/live/*` routes and the `/live/host` WebSocket are not registered:
+For an API-only daemon, disable the Web Shell. The session, prompt, workspace, permission and SSE routes are unchanged; the surfaces bound to the Web Shell go with it — Local Control enablement fails closed on every platform, and the `/live/*` routes (plus, on macOS with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, the `/live/host` WebSocket) are not registered:
 
 ```bash
 qwen serve --no-web
@@ -182,7 +182,7 @@ The daemon reads each channel's settings (tokens, `proxy`, per-channel `model`) 
 
 Each selected channel's `cwd` must resolve to a registered workspace, and channels are grouped by that owning workspace: a single-workspace daemon runs one worker (unchanged from before); a multi-workspace daemon (`--workspace` repeated) runs one worker per workspace that owns a selected channel, each bound to that workspace's cwd, `QWEN_DAEMON_WORKSPACE`, and env overlay. To host a channel in a non-primary workspace, define it in that workspace's own `.qwen/settings.json` (no `cwd` needed) or set an explicit `cwd` equal to the workspace path. A channel defined only in user/system scope with no `cwd` is ambiguous across multiple workspaces: an explicit `--channel` selection fails startup, while automatic restore logs the ownership error and skips that selection before workers start. `--channel all` stays primary-only (it hosts the primary workspace's channels) and cannot be combined with named channels.
 
-Replacing a selection preflights configuration, ownership, and trust before stopping anything. It keeps workspace workers whose ordered selection is unchanged. If a changed worker cannot start, the daemon stops new workers and restores the old selection. If the daemon cannot confirm that an old child exited even after SIGKILL, it keeps the PID lease and refuses to create a duplicate worker. A worker is still considered ready when at least one requested adapter connects; PUT then returns `partial: true`, and `/daemon/status` reports `channel_worker_partial_connect` for the missing adapters.
+Replacing a selection preflights configuration, ownership, and trust before stopping anything. It keeps workspace workers whose ordered selection is unchanged. If a changed worker cannot start, the daemon stops new workers and restores the old selection. If the daemon cannot confirm that an old child exited even after SIGKILL, it keeps the PID lease and refuses to create a duplicate worker. A worker is still considered ready when at least one requested adapter connects; PUT then returns `partial: true`, and `/daemon/status` reports `channel_worker_partial_connect` for the missing adapters. A `serve.channels` name the daemon could not bring up — a configured selection whose worker failed to start, a name boot could not attribute, or one a late registration's restore left down — is reported as `channel_restore_failed` on `/daemon/status`, and shows as `error` with its `lastError` in that workspace's channel list when that workspace's own settings define it. Other ways a name can stay unhosted are in the daemon log only.
 
 When an adapter rejects `connect()`, current worker snapshots may include `startupFailures` entries with the channel, `phase: "connect"`, an optional adapter code, and a credential-redacted message. `qwen channel set`, `qwen channel reload`, and remote `qwen channel status --daemon-url …` print these reasons. If every adapter fails during a dynamic set or reload, the command receives `502 channel_worker_start_failed`; the response reasons describe that attempt and its `state` describes the result after rollback. The failed attempt is not retained by later status requests. At most 64 reasons are retained per worker startup, and adapter codes should be treated as diagnostic rather than stable categories. Initial `qwen serve --channel …` startup still exits when no adapter connects.
 
@@ -508,6 +508,10 @@ branding still applies inside the Web Shell. Embedded library consumers do not
 register the worker. To remove the installation, use your browser or operating
 system's app management; to remove its service worker and stored site data,
 use the browser's site settings.
+
+## Qwen Live (experimental)
+
+Qwen Live runs through the Web Shell on every platform: the browser tab is the microphone and speaker (WS `/live/web`), so open the Web Shell over `https` or `localhost` for microphone access. The native macOS `Qwen Live Host` app is off by default; to try it, start a macOS daemon with `QWEN_SERVE_LIVE_NATIVE_HOST=1`, which restores the `/live/host` WebSocket, the `realtime_voice` capability and the Host download when Live is turned on. Without it, a `Qwen Live Host.app` that is already installed stays unable to connect (the daemon does not register `/live/host`); quit it and use the Web Shell.
 
 ## CLI flags
 

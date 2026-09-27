@@ -20,7 +20,7 @@ const PACKAGE_NAME = '@qwen-code/qwen-code';
 const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
-interface ManagedNpmUpdate {
+export interface ManagedNpmUpdate {
   stagingDir: string;
   versionDir: string;
   launcherRoot: string;
@@ -115,17 +115,30 @@ function cleanupOrphanedManagedNpmUpdateArtifacts(
 function resolveNpmGlobalConfigPath(): string {
   const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
   if (configured) return path.resolve(configured);
-  const output = execFileSync(
-    process.execPath,
-    [
-      getNpmCliPath(process.execPath, process.platform),
-      'config',
-      'get',
-      'globalconfig',
-      '--global',
-    ],
-    { encoding: 'utf8', timeout: 10_000 },
-  ).trim();
+  const npmCliPath = getNpmCliPath(process.execPath, process.platform);
+  const runNpm = (args: string[]) =>
+    execFileSync(process.execPath, [npmCliPath, ...args], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  let output: string;
+  try {
+    output = runNpm(['config', 'get', 'globalconfig', '--global']);
+  } catch {
+    // npm refuses to print a value that looks like a secret, such as a prefix
+    // path containing a UUID, and redacts it from other commands' output. Its
+    // child processes still receive the resolved configuration.
+    output =
+      runNpm([
+        'exec',
+        '--offline',
+        '-c',
+        `"${process.execPath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
+      ])
+        .split(/\r?\n/)
+        .at(-1) ?? '';
+  }
   if (!output || output === 'null' || output === 'undefined') {
     throw new Error('Unable to resolve the global npm configuration');
   }
@@ -176,6 +189,36 @@ async function smokeTest(prefix: string): Promise<void> {
     [path.join(packageDir(prefix), 'cli-entry.js'), '--help'],
     { encoding: 'utf8', env, timeout: 10_000 },
   );
+}
+
+// pnpm pack preserves the exec bit only for `bin` entries, so the published
+// tarball ships every `vendor/ripgrep/*/rg` as 0644 (#12668). The published
+// manifest intentionally carries no postinstall to restore it (#6164 removed
+// that surface), so heal the install here instead. Best-effort like the
+// source-tree postinstall: a failure must not block the update — the runtime
+// ripgrep probe still falls back to a system rg or the JS grep tool. It is
+// metadata-only (chmod, never copies or replaces a binary), so it is also safe
+// on a version directory a live older session may still be importing.
+async function restoreVendoredRipgrepExecBits(prefix: string): Promise<void> {
+  const ripgrepDir = path.join(packageDir(prefix), 'vendor', 'ripgrep');
+  let names: string[];
+  try {
+    names = await fsPromises.readdir(ripgrepDir);
+  } catch {
+    return; // This package ships no vendored ripgrep; nothing to heal.
+  }
+  for (const name of names) {
+    try {
+      await fsPromises.chmod(path.join(ripgrepDir, name, 'rg'), 0o755);
+    } catch {
+      // Expected wherever `name` is not a platform directory holding a unix rg
+      // (the tree also carries COPYING, and x64-win32 ships rg.exe), and no
+      // other failure may block the update either — the runtime probe handles
+      // a still-broken binary. Deliberately not logged: this runs in the update
+      // worker, which returns before route dispatch and so never binds a
+      // debug-log session, leaving a warn here nowhere to go.
+    }
+  }
 }
 
 async function readActiveVersion(
@@ -253,6 +296,27 @@ export async function installManagedNpmUpdate(
     path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
   spawnFn: typeof spawn = spawn,
 ): Promise<void> {
+  const update = await stageManagedNpmUpdate(
+    version,
+    bootstrapPath,
+    updateRoot,
+    spawnFn,
+  );
+  try {
+    await activateManagedNpmUpdate(update, version, bootstrapPath);
+  } catch (error) {
+    await cleanupManagedNpmUpdate(update);
+    throw error;
+  }
+}
+
+export async function stageManagedNpmUpdate(
+  version: string,
+  bootstrapPath = process.env['QWEN_CODE_CLI'],
+  updateRoot = process.env['QWEN_CODE_MANAGED_NPM_ROOT'] ??
+    path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
+  spawnFn: typeof spawn = spawn,
+): Promise<ManagedNpmUpdate> {
   const update = prepareManagedNpmUpdate(version, bootstrapPath, updateRoot);
   const env = { ...process.env };
   for (const key of ['NPM_CONFIG_USERCONFIG', 'npm_config_userconfig']) {
@@ -281,7 +345,8 @@ export async function installManagedNpmUpdate(
         else reject(new Error(`npm install exited with code ${code}`));
       });
     });
-    await activateManagedNpmUpdate(update, version, bootstrapPath);
+    await validateInstallation(update.stagingDir, version);
+    return update;
   } catch (error) {
     await cleanupManagedNpmUpdate(update);
     throw error;
@@ -306,6 +371,7 @@ export async function activateManagedNpmUpdate(
 
   await validateInstallation(update.stagingDir, version);
   await smokeTest(update.stagingDir);
+  await restoreVendoredRipgrepExecBits(update.stagingDir);
 
   const activeFile = path.join(update.launcherRoot, 'active.json');
   const release = await lockfile.lock(activeFile, {
@@ -334,10 +400,16 @@ export async function activateManagedNpmUpdate(
     });
     if (activeVersion && semver.gt(activeVersion, version)) {
       try {
-        await validateInstallation(
-          path.join(update.launcherRoot, 'versions', activeVersion),
+        const activeDir = path.join(
+          update.launcherRoot,
+          'versions',
           activeVersion,
         );
+        await validateInstallation(activeDir, activeVersion);
+        // Heal the payload that stays active, not only the staged one: the
+        // existing pointer keeps this version in use, and it may have been
+        // activated by a build without the heal.
+        await restoreVendoredRipgrepExecBits(activeDir);
         await cleanupManagedNpmUpdate(update);
         return;
       } catch {
@@ -350,6 +422,9 @@ export async function activateManagedNpmUpdate(
     } catch (error) {
       if (!fs.existsSync(update.versionDir)) throw error;
       await validateInstallation(update.versionDir, version);
+      // The healed staging tree is discarded here, so heal the payload that
+      // survives the collision instead.
+      await restoreVendoredRipgrepExecBits(update.versionDir);
       await cleanupManagedNpmUpdate(update);
     }
 

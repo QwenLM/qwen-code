@@ -45,13 +45,15 @@ describe('built-in channel registry', () => {
     expect(
       catalog
         .find((entry) => entry.type === 'dws')
-        ?.fields.find((field) => field.key === 'dmPolicy'),
+        ?.fields.find((field) => field.key === 'privatePolicy'),
     ).toMatchObject({
       kind: 'enum',
-      default: 'open',
+      default: 'pairing',
       options: [
-        { value: 'open', label: 'Open' },
         { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
       ],
     });
 
@@ -133,7 +135,9 @@ describe('built-in channel registry', () => {
     });
     expect(entry?.fields.map((field) => field.key)).toEqual([
       'settings',
-      'senderPolicy',
+      'messageRoutes',
+      'defaultMessageRoute',
+      'privatePolicy',
       'allowedUsers',
       'groupPolicy',
       'operators',
@@ -142,7 +146,7 @@ describe('built-in channel registry', () => {
       'instructions',
     ]);
     expect(
-      entry?.fields.find((field) => field.key === 'senderPolicy'),
+      entry?.fields.find((field) => field.key === 'privatePolicy'),
     ).toMatchObject({ default: 'pairing' });
     // The shared descriptor is injected into every manageable channel, and
     // dingtalk substitutes its own default block instead of composing with it

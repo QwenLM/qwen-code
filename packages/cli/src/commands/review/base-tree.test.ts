@@ -57,6 +57,15 @@ import {
 } from '../../services/review-worktree-lease.js';
 import type { BuildTestReport } from './build-test.js';
 
+// Every test here drives real git through spawnSync/execFileSync, so the
+// worker's event loop does not turn for the whole file (~2 min on a hosted
+// runner). vitest's worker->main `onTaskUpdate` RPC times out after 60s and
+// the run exits 1 with every test green. Yielding between tests bounds each
+// stall to one test. The timer is captured at load so fake timers cannot
+// intercept it (same fix as scripts/tests/test-setup.ts).
+const realSetImmediate = setImmediate;
+beforeEach(() => new Promise<void>((resolve) => realSetImmediate(resolve)));
+
 // Set from exactly the cases that need it: `rmSync` fails for the paths the
 // predicate names — a stale build lock that will not delete. Mode bits cannot
 // stage that here, because this suite runs as root in the CI image.
@@ -116,6 +125,13 @@ const failedBuild = {
 // one does. The build-mechanics cases below stay ungated: they are this
 // file's coverage for the lane the fence never speaks on.
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
+// A fixture holding a raw 0xff name byte only exists where the filesystem
+// stores name bytes verbatim: NTFS is UTF-16 and cannot hold it, and APFS
+// rejects invalid UTF-8 with EILSEQ. Linux is the only lane this fixture is
+// verified on, so the gate is linux-only — the sibling `lib/worktree.test.ts`
+// gates its own `itWhereRawByteNamesExist` the same way.
+const itWhereByteExactNamesExist = it.skipIf(process.platform !== 'linux');
 
 describe('runBaseTree', () => {
   let repo: string;
@@ -988,7 +1004,7 @@ describe('runBaseTree', () => {
     },
   );
 
-  itWhereContainmentExists(
+  itWhereByteExactNamesExist(
     'records a filename holding a non-UTF-8 byte instead of dying on it (R1-26)',
     () => {
       // `ls-files -z` exists to preserve a byte-exact filename, and decoding
@@ -4086,4 +4102,20 @@ describe('runBaseTree', () => {
       rmSync(foreign, { recursive: true, force: true });
     }
   });
+});
+
+// Pins the yield at the top of this file: without it the loop never reaches
+// the check phase between these two tests, so the flag never flips. Armed
+// with the same captured setImmediate the yield uses — immediates run FIFO,
+// so the armed one fires before the yield's own.
+let yieldObserved = false;
+
+it('arms a flag from a real macrotask callback', () => {
+  realSetImmediate(() => {
+    yieldObserved = true;
+  });
+});
+
+it('observes the event loop turned between tests', () => {
+  expect(yieldObserved).toBe(true);
 });

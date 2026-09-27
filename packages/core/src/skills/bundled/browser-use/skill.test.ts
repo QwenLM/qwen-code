@@ -40,9 +40,10 @@ describe('bundled browser-use skill', () => {
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(skill).not.toContain('@qwen-code/node-repl-mcp@latest');
-    expect(skill).toContain('node_repl_add_node_module_dir');
-    expect(skill).toContain('<skill-base>/runtime/node_modules');
-    expect(skill).toContain('node_modules/playwright-core/package.json');
+    // The SDK loads its own bundled dependencies, so setup must not send the
+    // model through a module-directory registration first.
+    expect(skill).not.toContain('node_repl_add_node_module_dir');
+    expect(skill).not.toContain('node_modules');
     expect(skill).toContain("import('/absolute/skill/base/runtime/index.js')");
     expect(skill).not.toContain('<extension-root>');
     expect(skill).not.toContain('qwen extensions install');

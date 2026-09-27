@@ -64,12 +64,13 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   fields: [
     ...DINGTALK.fields,
     {
-      key: 'senderPolicy',
-      label: 'Sender Policy',
+      key: 'privatePolicy',
+      label: 'Private Policy',
       kind: 'enum',
       required: true,
       default: 'allowlist',
       options: [
+        { value: 'disabled', label: 'Disabled' },
         { value: 'pairing', label: 'Pairing' },
         { value: 'allowlist', label: 'Allowlist' },
         { value: 'open', label: 'Open' },
@@ -186,7 +187,7 @@ const INSTANCE: DaemonChannelInstanceSnapshot = {
   config: {
     type: 'dingtalk',
     clientId: 'stored-id',
-    senderPolicy: 'open',
+    privatePolicy: 'open',
   },
   secrets: {
     clientSecret: { present: true, source: 'environment' },
@@ -199,7 +200,7 @@ const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
   ...INSTANCE,
   config: {
     ...INSTANCE.config,
-    senderPolicy: 'pairing',
+    privatePolicy: 'pairing',
     allowedUsers: ['configured-user'],
   },
 };
@@ -394,45 +395,32 @@ describe('ChannelEditorDialog', () => {
     expect(fieldByLabel('输出模式')?.textContent).toBe('按轮（默认）');
   });
 
-  it('edits DWS direct access separately from sender and group authorization', async () => {
+  it('edits private access with four policies while preserving deprecated keys', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK_WITH_ACCESS,
+      fields: DINGTALK_WITH_ACCESS.fields.filter((field) =>
+        ['privatePolicy', 'groupPolicy', 'allowedUsers'].includes(field.key),
+      ),
       type: 'dws',
       displayName: 'DingTalk Workspace',
-      manageable: true,
-      fields: [
-        ...DINGTALK_WITH_ACCESS.fields.filter((field) =>
-          ['senderPolicy', 'groupPolicy', 'allowedUsers'].includes(field.key),
-        ),
-        {
-          key: 'dmPolicy',
-          label: 'DM descriptor fallback',
-          kind: 'enum',
-          required: true,
-          default: 'open',
-          options: [
-            { value: 'open', label: 'Open' },
-            { value: 'disabled', label: 'Disabled' },
-          ],
-        },
-      ],
     };
     const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
       name: 'dws-bot',
-      config: { type: 'dws', senderPolicy: 'pairing', groupPolicy: 'open' },
-      secrets: {},
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
+      config: {
+        type: 'dws',
+        senderPolicy: 'open',
+        dmPolicy: 'disabled',
+        groupPolicy: 'open',
+      },
     };
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor, instance, onSave });
-    expect(sectionHeadingOf(fieldByLabel('Direct message access'))).toBe(
-      'Access control',
+    expect(fieldByLabel('Direct message policy')?.textContent).toContain(
+      'Disabled',
     );
-    expect(fieldByLabel('Direct message access')?.textContent).toContain(
-      'Open',
-    );
-    expect(fieldByLabel('Sender policy')).not.toBeNull();
-    await selectOption('Direct message access', 'Disabled');
+    expect(fieldByLabel('Direct message access')).toBeNull();
+    await selectOption('Direct message policy', 'Pairing');
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
     );
@@ -441,19 +429,13 @@ describe('ChannelEditorDialog', () => {
       'dws-bot',
       expect.objectContaining({
         config: expect.objectContaining({
+          senderPolicy: 'open',
           dmPolicy: 'disabled',
+          privatePolicy: 'pairing',
           groupPolicy: 'open',
-          senderPolicy: 'pairing',
         }),
       }),
     );
-    await renderDialog({
-      descriptor,
-      instance: { ...instance, config: onSave.mock.calls[0]![1].config },
-      language: 'zh-CN',
-    });
-    expect(fieldByLabel('私聊访问')?.textContent).toContain('禁用');
-    expect(fieldByLabel('发送者策略')).not.toBeNull();
   });
 
   it('defaults to the primary workspace and allows a registered workspace', async () => {
@@ -799,7 +781,7 @@ describe('ChannelEditorDialog', () => {
         type: 'dingtalk',
         clientId: 'ding-client-id',
         sessionScope: 'user',
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
       },
       secrets: {
         clientSecret: {
@@ -899,7 +881,7 @@ describe('ChannelEditorDialog', () => {
     const allowedUsers = inputByLabel('Allowed user IDs');
     expect(allowedUsers).not.toBeNull();
     await selectOption('Direct message policy', 'Pairing');
-    expect(inputByLabel('Allowed user IDs')).toBeNull();
+    expect(inputByLabel('Allowed user IDs')).not.toBeNull();
     await selectOption('Direct message policy', 'Allowlist');
     await act(async () => {
       setInputValue(inputByLabel('Allowed user IDs')!, 'staff-a, staff-b');
@@ -937,7 +919,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'dingtalk',
         clientId: 'ding-client-id',
-        senderPolicy: 'allowlist',
+        privatePolicy: 'allowlist',
         allowedUsers: ['staff-a', 'staff-b'],
         groupPolicy: 'allowlist',
         sessionScope: 'chat_thread',
@@ -975,7 +957,7 @@ describe('ChannelEditorDialog', () => {
     );
     await selectOption('Group policy', 'Open');
     expect(fieldByLabel('Who can talk in groups')?.textContent).toContain(
-      'Same as direct messages',
+      'Any group member',
     );
     expect(inputByLabel('Allowed group member IDs')).toBeNull();
 
@@ -1097,7 +1079,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'github',
         useLocalGh: true,
-        senderPolicy: 'pairing',
+        privatePolicy: 'pairing',
       },
       secrets: { token: { operation: 'clear' } },
     });
@@ -1106,7 +1088,7 @@ describe('ChannelEditorDialog', () => {
   it('does not show the allowlist alert when no users are configured', async () => {
     const pairingNoAllowlist: DaemonChannelInstanceSnapshot = {
       ...INSTANCE,
-      config: { ...INSTANCE.config, senderPolicy: 'pairing' },
+      config: { ...INSTANCE.config, privatePolicy: 'pairing' },
     };
     await renderDialog({ instance: pairingNoAllowlist });
 
@@ -1137,7 +1119,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'dingtalk',
         clientId: 'stored-id',
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         sessionScope: 'user',
         interactiveCards: { enabled: true, statusCard: { enabled: true } },
       },
@@ -1174,7 +1156,7 @@ describe('ChannelEditorDialog', () => {
       ...INSTANCE,
       config: {
         ...INSTANCE.config,
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         groupPolicy: 'open',
       },
     };
@@ -1206,7 +1188,7 @@ describe('ChannelEditorDialog', () => {
       ...INSTANCE,
       config: {
         ...INSTANCE.config,
-        senderPolicy: 'open',
+        privatePolicy: 'open',
         groupPolicy: 'pairing',
       },
     };
