@@ -103,6 +103,7 @@ describe('GitLogDialog', () => {
     expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined, undefined, {
       all: false,
       search: undefined,
+      sessionId: undefined,
     });
     expect(document.body.textContent).toContain('first change');
     expect(document.body.textContent).toContain('Ada');
@@ -171,7 +172,7 @@ describe('GitLogDialog', () => {
       1,
       undefined,
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: undefined },
     );
     expect(document.body.textContent).toContain('newest');
     expect(document.body.textContent).toContain('older');
@@ -207,7 +208,7 @@ describe('GitLogDialog', () => {
       1,
       undefined,
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: undefined },
     );
     expect(workspaceGitLog).toHaveBeenNthCalledWith(
       3,
@@ -215,7 +216,7 @@ describe('GitLogDialog', () => {
       3,
       undefined,
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: undefined },
     );
     expect(document.body.textContent?.match(/duplicate/g)).toHaveLength(1);
     expect(document.body.textContent).toContain('older');
@@ -263,7 +264,11 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(e.sha, undefined);
+    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(
+      e.sha,
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent).toContain('the full body');
     expect(document.body.textContent).toContain('src/x.ts');
   });
@@ -363,7 +368,11 @@ describe('GitLogDialog', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <GitLogContent workspaceCwd="/repo" gitCwd="/worktrees/wt" />
+          <GitLogContent
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            gitSessionId="session-worktree"
+          />
         </I18nProvider>,
       );
     });
@@ -374,7 +383,7 @@ describe('GitLogDialog', () => {
       0,
       '/worktrees/wt',
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: 'session-worktree' },
     );
 
     const loadMore = Array.from(document.body.querySelectorAll('button')).find(
@@ -392,7 +401,7 @@ describe('GitLogDialog', () => {
       1,
       '/worktrees/wt',
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: 'session-worktree' },
     );
 
     const row = document.body.querySelector(
@@ -407,6 +416,7 @@ describe('GitLogDialog', () => {
     expect(workspaceGitCommitDetail).toHaveBeenCalledWith(
       e.sha,
       '/worktrees/wt',
+      'session-worktree',
     );
   });
 
@@ -433,7 +443,7 @@ describe('GitLogDialog', () => {
       0,
       undefined,
       undefined,
-      { all: true, search: undefined },
+      { all: true, search: undefined, sessionId: undefined },
     );
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
     expect(document.body.textContent).toContain('other branch');
@@ -469,7 +479,7 @@ describe('GitLogDialog', () => {
       0,
       undefined,
       undefined,
-      { all: false, search: 'typo' },
+      { all: false, search: 'typo', sessionId: undefined },
     );
     expect(document.body.textContent).toContain('fix: typo');
     expect(

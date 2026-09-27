@@ -108,7 +108,8 @@ REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不�
 直接创建方保留各自的错误词汇。`LocalManagedRuntimeProvider` 把已存活 ID 的拒绝
 映射为不可重试的 `managed_runtime_identity_conflict`。standalone 服务把未派发的
 已存活 ID 拒绝映射为 `standalone_session_conflict`，而不是
-`standalone_creation_rolled_back`。
+`standalone_creation_rolled_back`。此时它不检查该 ID 是否有已持久化的内容，因为存活
+owner 自己的 transcript 本就应当存在；发现它不能导致 runtime 被隔离。
 
 ## 文件与消费者
 
@@ -145,3 +146,4 @@ REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不�
 - 选择器在冷恢复前读取整个 transcript，与恢复本身相同，成本随 transcript 增长。
 - 选择器尚未接线。B2d 必须用 runtime 的会话 base 目录构造它，并决定新会话的选择。
   #12737 中关于选择器输入、下发失败、隔离恢复和 Hosted 边界的问题不由本切片决定。
+  B2d 的设计见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。

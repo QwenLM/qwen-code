@@ -534,6 +534,104 @@ describe('fetchWithPolicy retry abort handling', () => {
   });
 });
 
+describe('fetchWithPolicy multi-address (AggregateError) classification', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const opts = { timeoutMs: 5000, maxBytes: 1000, maxRedirects: 3 };
+
+  // Mirrors Node's NodeAggregateError (lib/internal/errors.js): an exhausted
+  // dual-stack connect rejects with `TypeError: fetch failed` whose cause is
+  // an AggregateError carrying every per-address attempt, and whose top-level
+  // `code` is only the FIRST attempted address's code — so reading that one
+  // code makes the classification attempt-order dependent (issue #12720).
+  function makeDualStackFetchError(codes: string[]): TypeError {
+    const attempts = codes.map((code) =>
+      Object.assign(new Error(`connect ${code} 203.0.113.1:443`), { code }),
+    );
+    const aggregate = new AggregateError(
+      attempts,
+      'connect failed',
+    ) as AggregateError & { code?: string };
+    aggregate.code = codes[0];
+    return new TypeError('fetch failed', { cause: aggregate });
+  }
+
+  async function classifyFetchFailure(thrown: Error): Promise<boolean> {
+    globalThis.fetch = vi.fn(async () => {
+      throw thrown;
+    }) as typeof fetch;
+    const error = await fetchWithPolicy('https://example.com/x', opts).then(
+      () => {
+        throw new Error('expected fetchWithPolicy to reject');
+      },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FetchError);
+    return isConnectionLevelError(error);
+  }
+
+  // ENETUNREACH is the issue's scenario; ECONNREFUSED is the same defect with
+  // a code already whitelisted before #12705 (maskable on main today).
+  it.each(['ENETUNREACH', 'ECONNREFUSED'])(
+    'classifies a whitelisted %s attempt as connection-level in either attempt order',
+    async (code) => {
+      await expect(
+        classifyFetchFailure(makeDualStackFetchError(['ETIMEDOUT', code])),
+      ).resolves.toBe(true);
+      await expect(
+        classifyFetchFailure(makeDualStackFetchError([code, 'ETIMEDOUT'])),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it('unwraps per-attempt TypeError wrappers (undici retry shape)', async () => {
+    // The same shape as errors.test.ts's AggregateError case: members carry
+    // their code one `.cause` deeper, so the aggregate's own top-level code
+    // is undefined and even first-match classification found nothing.
+    const wrapAttempt = (code: string) =>
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error(`connect ${code}`), { code }),
+      });
+    const aggregate = new AggregateError([
+      wrapAttempt('ETIMEDOUT'),
+      wrapAttempt('ENETUNREACH'),
+    ]);
+    await expect(
+      classifyFetchFailure(new TypeError('fetch failed', { cause: aggregate })),
+    ).resolves.toBe(true);
+  });
+
+  it('stays non-connection-level when no attempt is whitelisted', async () => {
+    // ETIMEDOUT remains deliberately excluded at the per-attempt level.
+    await expect(
+      classifyFetchFailure(makeDualStackFetchError(['ETIMEDOUT', 'ETIMEDOUT'])),
+    ).resolves.toBe(false);
+    await expect(
+      classifyFetchFailure(makeDualStackFetchError(['ETIMEDOUT', 'ENOTFOUND'])),
+    ).resolves.toBe(false);
+  });
+
+  it('keeps the single-error path unchanged', async () => {
+    const refused = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED'), {
+        code: 'ECONNREFUSED',
+      }),
+    });
+    await expect(classifyFetchFailure(refused)).resolves.toBe(true);
+
+    const timedOut = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ETIMEDOUT'), {
+        code: 'ETIMEDOUT',
+      }),
+    });
+    await expect(classifyFetchFailure(timedOut)).resolves.toBe(false);
+  });
+});
+
 describe('isPrivateHost', () => {
   it.each([
     // Private/internal — never https-upgraded

@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewW
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -548,6 +549,17 @@ class ManagedAgentMySqlIT {
             jdbc.update("DELETE FROM managed_workspace_registry"
                     + " WHERE tenant_id = ?", tenant);
         }
+    }
+
+    @Test
+    @Order(7)
+    void runtimeBrokerRepositoriesKeepTheirContractOnFlywaySchema()
+            throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcRepositoryContract.verify(dataSource,
+                "flyway-" + UUID.randomUUID());
     }
 
     private static Process startWorkspaceProcess(String action,
