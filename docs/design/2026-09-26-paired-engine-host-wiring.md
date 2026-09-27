@@ -5,16 +5,16 @@
 ## Status
 
 Design for slice B2d of #12737, the Stage B host integration for #12380, based
-on upstream `939b4db6bc`. Proposed, not implemented. It records in this
+on upstream `663d98eac5`. Proposed, not implemented. It records in this
 repository the selection and scope rules decided in #12737
 ([Q1/Q4](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846602143)),
 so that B2d is reviewed against this document instead of the
 [external engine-selection design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-session-execution-engine.md).
 It follows [paired engine owner selection](./2026-09-26-paired-engine-owner-selection.md)
-(B2a). The implementation lands after workspace contracts (B2b) and per-engine
-operations (B2c), which apply the
-[Q2/Q3 decisions](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487)
-and which #12737 requires before ordinary hosts are paired.
+(B2a). The slices that #12737 requires before ordinary hosts are paired have
+merged: workspace contracts (B2b, #12776 and #12807) and per-engine operations
+(B2c, #12795), which apply the
+[Q2/Q3 decisions](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487).
 
 ## Problem and current behavior
 
@@ -87,7 +87,9 @@ Managed branching, which stays rejected. No daemon route or REST shape changes.
 `ServeOptions.experimentalPairedEngines`. Without it, every site keeps its
 current single-factory construction. With it, each site passes
 `executionEngines` instead of `channelFactory`, built from that runtime's own
-inputs; every other Bridge option is unchanged.
+inputs; every other Bridge option is unchanged. Paired Bridges keep the
+defaults of B2b and B2c, including the five-minute quarantine drain deadline;
+B2d adds no operator setting for them.
 
 | Site                    | Constructor                                             | Legacy factory                                 | Owner reads use                       |
 | ----------------------- | ------------------------------------------------------- | ---------------------------------------------- | ------------------------------------- |
@@ -186,7 +188,12 @@ To be paired, a Managed engine supplies, per workspace runtime:
   that restores or forks a transcript refuses its sessions, either because its
   transcripts carry the Managed Session header those entries already refuse, or
   because the refusal is extended to its owner record. Otherwise switching the
-  opt-in off would let a Managed session run on Legacy.
+  opt-in off would let a Managed session run on Legacy;
+- workspace control: permission rules and Skills changes need the Legacy
+  workspace-control channel (B2b), so with only Managed live they cannot be
+  applied. The engine slice decides whether the host starts workspace control
+  for those routes; in B2d no Managed channel starts, so the case does not
+  arise.
 
 B2d registers no engine. The paired `managed` factory then rejects with an
 unavailable error. The selector never returns `managed` without a registered
@@ -308,6 +315,5 @@ classification is B2a's.
   is harmless while no ordinary host creates Managed sessions; the Managed
   engine seam makes closing it a precondition of the engine slice, which also
   settles how `session_execution_engine` relates to the Managed Session header.
-- B2b and B2c merge first; the implementation PR waits for them.
 - How the engine shares its evaluated inputs with its host for revalidation is
   decided together with the engine.

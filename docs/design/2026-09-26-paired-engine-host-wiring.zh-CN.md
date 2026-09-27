@@ -4,15 +4,15 @@
 
 ## 状态
 
-#12737 的 B2d 切片设计，属于 #12380 的 Stage B 宿主接入，基于上游 `939b4db6bc`。
+#12737 的 B2d 切片设计，属于 #12380 的 Stage B 宿主接入，基于上游 `663d98eac5`。
 本文为提案，尚未实现。它把 #12737 中已决定的选择与范围规则
 （[Q1/Q4](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846602143)）
 记录到本仓库，使 B2d 以本文而不是
 [外部引擎选择设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-session-execution-engine.md)
 为评审依据。本文承接[双引擎 owner 选择](./2026-09-26-paired-engine-owner-selection.zh-CN.md)
-（B2a）。实现在工作区契约（B2b）与按引擎的运维行为（B2c）之后落地；这两个切片
-落实 [Q2/Q3 决定](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487)，
-也是 #12737 要求在普通宿主配对之前完成的前置条件。
+（B2a）。#12737 要求在普通宿主配对之前完成的切片均已合入：工作区契约（B2b，#12776
+与 #12807）和按引擎的运维行为（B2c，#12795），它们落实了
+[Q2/Q3 决定](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487)。
 
 ## 问题与当前行为
 
@@ -69,7 +69,8 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 `qwen serve --experimental-paired-engines` 设置
 `ServeOptions.experimentalPairedEngines`。不设置时，每个构造点保持现有的单 factory
 构造。设置后，每个构造点改为传入由该 runtime 自身输入构造的 `executionEngines`，
-而不是 `channelFactory`；Bridge 的其他选项全部不变。
+而不是 `channelFactory`；Bridge 的其他选项全部不变。双引擎 Bridge 沿用 B2b 与 B2c
+的默认值，包括 5 分钟的隔离排空期限；B2d 不为它们新增运维配置项。
 
 | 构造点                 | 构造方                                          | Legacy factory                     | owner 读取位置                |
 | ---------------------- | ----------------------------------------------- | ---------------------------------- | ----------------------------- |
@@ -151,7 +152,10 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 - Legacy 拒绝：在创建任何会话之前，确保每个未配对的、会恢复或 fork transcript 的
   Legacy 入口都拒绝它的会话——要么它的 transcript 带有这些入口已经拒绝的 Managed
   Session header，要么把拒绝扩展到它的 owner 记录。否则关闭开关会让 Managed 会话在
-  Legacy 上运行。
+  Legacy 上运行；
+- 工作区控制：权限规则与 Skills 变更需要 Legacy 工作区控制通道（B2b），因此只有
+  Managed 存活时无法应用。由引擎切片决定宿主是否为这些路由启动工作区控制；B2d 中
+  不会启动 Managed 通道，所以不会出现这种情况。
 
 B2d 不注册任何引擎。此时双引擎的 `managed` factory 以“不可用”错误拒绝。没有注册引擎
 时选择器永远不会返回 `managed`，因此不会走到这个 factory；它存在只是因为双引擎 Bridge
@@ -251,5 +255,4 @@ runtime 的作用域，其错误分类沿用 B2a。
 - 目前未配对的 Legacy 宿主不识别 Managed owner 记录。在没有普通宿主创建 Managed 会话
   时这没有影响；Managed 引擎接口把补上这一点列为引擎切片的前置条件，该切片也会确定
   `session_execution_engine` 与 Managed Session header 的关系。
-- B2b 与 B2c 先合入；实现 PR 等待它们。
 - 引擎如何把评估所用的输入交给其宿主做重新核验，与引擎一起决定。
