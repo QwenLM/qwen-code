@@ -209,6 +209,7 @@ describe('getInitialChatHistory', () => {
   let mockToolRegistry: {
     warmAll: Mock;
     getDeferredToolSummary: Mock;
+    getFunctionDeclarations: Mock;
     isDeferredToolRevealed: Mock;
     getMcpServerInstructions: Mock;
     getTool: Mock;
@@ -220,6 +221,7 @@ describe('getInitialChatHistory', () => {
     mockToolRegistry = {
       warmAll: vi.fn().mockResolvedValue(undefined),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      getFunctionDeclarations: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
       getTool: vi
@@ -444,6 +446,18 @@ describe('getInitialChatHistory', () => {
       expect(text).toContain('test-skill');
       expect(snapshotEntries).toHaveLength(1);
       expect(snapshotEntries[0].name).toBe('test-skill');
+    });
+
+    it('keeps the listing for a deferred-but-registered Skill tool', async () => {
+      // A Skill tool demoted behind tool_search never appears in
+      // getFunctionDeclarations() but is still counted by getAllToolNames();
+      // the listing must survive that demotion. Pins the gate against a
+      // refactor to declarations-based detection.
+      expect(mockToolRegistry.getFunctionDeclarations()).toEqual([]);
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain('<available_skills>');
     });
 
     it('keeps the no-skills fallback when the Skill tool is registered but no skills exist', async () => {
