@@ -292,9 +292,21 @@ The reserved Hosted Harness profile cannot yet connect to the Broker at
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. The local-process adapter can recover the same
-worker after a Java restart on the same host; multi-host scheduling and the
-Kubernetes adapter's real-cluster fault matrix remain production gates. This
+credentials with AES-256-GCM. By default, local worker ownership is ephemeral
+and a restarted Broker cannot adopt it. On Linux, set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true` to enable persistent
+launch registration and adoption of the same live worker. The state directory
+must be persistent local storage, owned by the Broker user with mode `0700`,
+without symlinks, outside every configured Workspace root. Workers and tools
+must be trusted; same-UID hostile tools and multi-host or remote storage are
+unsupported. Keep the host machine ID, SQL credential key, placement mapping,
+state directory and worker command stable across Broker restarts. Shutdown and
+late lease discard detach from registered workers instead of killing them.
+Missing or damaged records and worker death do not authorize replacement;
+worker death does not prove escaped writers stopped. No host reboot reclamation
+is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
+The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
