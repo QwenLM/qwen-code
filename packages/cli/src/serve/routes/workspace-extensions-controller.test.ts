@@ -64,6 +64,55 @@ describe('createExtensionsController', () => {
     expect(manager.networkPolicy).toBeUndefined();
   });
 
+  it('resolves telemetry proxy and consent from the workspace settings only', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-telemetry-'));
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', 'settings.json'),
+      JSON.stringify({ proxy: 'http://workspace-settings:8080' }),
+    );
+    // A workspace's own env file must never be written into the daemon's
+    // shared process.env, and the daemon's ambient proxy env must never
+    // become this workspace's telemetry proxy.
+    await writeFile(
+      join(workspaceDir, '.qwen', '.env'),
+      'HTTPS_PROXY=http://workspace-env:8080\n',
+    );
+
+    const savedHttpsProxy = process.env['HTTPS_PROXY'];
+    delete process.env['HTTPS_PROXY'];
+    try {
+      const controller = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      const readProxy = (manager: unknown): string | undefined =>
+        (manager as { proxy?: string }).proxy;
+
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, true)),
+      ).toBe('http://workspace-settings:8080');
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
+
+      process.env['HTTPS_PROXY'] = 'http://daemon-ambient:8080';
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, true)),
+      ).toBe('http://workspace-settings:8080');
+
+      // The settings load is trust-gated, so an untrusted workspace's
+      // settings.proxy cannot reach the telemetry Config.
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, false)),
+      ).toBeUndefined();
+    } finally {
+      if (savedHttpsProxy === undefined) delete process.env['HTTPS_PROXY'];
+      else process.env['HTTPS_PROXY'] = savedHttpsProxy;
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it('releases the commit lane when a manual refresh times out', async () => {
     vi.useFakeTimers();
     let refreshCalls = 0;

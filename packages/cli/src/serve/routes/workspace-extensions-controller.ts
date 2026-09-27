@@ -14,7 +14,7 @@ import {
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   detectSystemLanguage,
@@ -60,19 +60,10 @@ const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
-const resolveExtensionLocale = (
-  workspaceDir: string,
-  workspaceTrusted?: boolean,
-): string => {
-  const configuredLanguage = loadSettings(
-    workspaceDir,
-    workspaceTrusted === undefined
-      ? true
-      : {
-          skipWorkspaceSettings: !workspaceTrusted,
-          workspaceTrusted,
-        },
-  ).merged.general?.language as string | undefined;
+const resolveExtensionLocale = (mergedSettings: Settings): string => {
+  const configuredLanguage = mergedSettings.general?.language as
+    | string
+    | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -313,10 +304,26 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
-    const settings = loadSettings(workspaceDir).merged;
+    // One trust-gated load per call, shared by the locale, the trust fallback
+    // and the telemetry options below. `skipLoadEnvironment` keeps this
+    // workspace's own `.env` / `settings.env` out of the daemon's shared
+    // `process.env`: one daemon hosts every workspace, so writing there leaks
+    // one repo's values into every other workspace's resolution. The trust
+    // options are what `resolveExtensionLocale` used to resolve on its own,
+    // so both now read one consistent view of the same workspace file.
+    const settings = loadSettings(
+      workspaceDir,
+      workspaceTrusted === undefined
+        ? { skipLoadEnvironment: true }
+        : {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: !workspaceTrusted,
+            workspaceTrusted,
+          },
+    ).merged;
     return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
+      locale: resolveExtensionLocale(settings),
       isWorkspaceTrusted:
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
@@ -324,12 +331,13 @@ export function createExtensionsController(
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
       ),
-      proxy:
-        settings.proxy ||
-        process.env['HTTPS_PROXY'] ||
-        process.env['https_proxy'] ||
-        process.env['HTTP_PROXY'] ||
-        process.env['http_proxy'],
+      // Only this workspace's own resolved settings may pick the telemetry
+      // proxy. The daemon's ambient proxy env is process-global and shared by
+      // every workspace it hosts, so falling back to it here would route this
+      // workspace's RUM uploads through a proxy it never configured. A
+      // runtime-resolved env would have to be injected the way
+      // `resolveSetupGithubProxy(boundWorkspace, deps.env, ...)` does.
+      proxy: settings.proxy,
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??
@@ -1127,13 +1135,12 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
+      const mergedSettings = loadSettings(boundWorkspace).merged;
       const trusted =
         deps.isWorkspaceTrusted?.() ??
-        getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace).merged,
-          boundWorkspace,
-        ).effective.state === 'trusted';
-      const locale = resolveExtensionLocale(boundWorkspace, trusted);
+        getWorkspaceTrustStatus(mergedSettings, boundWorkspace).effective
+          .state === 'trusted';
+      const locale = resolveExtensionLocale(mergedSettings);
       if (
         extensionsStatusCache?.locale === locale &&
         extensionsStatusCache.trusted === trusted &&
