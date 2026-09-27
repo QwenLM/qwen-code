@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -75,7 +77,10 @@ public class WebShellAgentController {
 
     @PostMapping("/sessions/create")
     public ResponseEntity<WebShellAdmission> create(TenantContext tenant,
-            @Valid @RequestBody WebShellCreateRequest request) {
+            @Valid @RequestBody WebShellCreateRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         WorkspaceSelection selection = null;
         if (request.workspace() != null) {
             if (request.workspace().isNull()) {
@@ -105,7 +110,10 @@ public class WebShellAgentController {
 
     @PostMapping("/turns/submit")
     public ResponseEntity<WebShellAdmission> submit(TenantContext tenant,
-            @Valid @RequestBody WebShellSubmitRequest request) {
+            @Valid @RequestBody WebShellSubmitRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
@@ -116,7 +124,10 @@ public class WebShellAgentController {
 
     @PostMapping("/turns/cancel")
     public ResponseEntity<WebShellAdmission> cancel(TenantContext tenant,
-            @Valid @RequestBody WebShellCancelRequest request) {
+            @Valid @RequestBody WebShellCancelRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),

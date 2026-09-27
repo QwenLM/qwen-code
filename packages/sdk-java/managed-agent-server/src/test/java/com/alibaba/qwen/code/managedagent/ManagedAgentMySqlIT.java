@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
@@ -74,7 +75,8 @@ class ManagedAgentMySqlIT {
                 "message_projection")).isEqualTo(1);
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc));
+                }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
                 "mysql-upgrade", "actor", "legacy-key", "bound-digest",
                 "qwen-code", null, List.of(), null,
@@ -385,7 +387,8 @@ class ManagedAgentMySqlIT {
                 new JdbcTemplate(dataSource), new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(
-                        new JdbcTemplate(dataSource)));
+                        new JdbcTemplate(dataSource)),
+                new ManagedAgentProperties());
         Admission lower = store.insertSessionCommand("case-tenant",
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code",
                 null, List.of(), null);
@@ -413,7 +416,8 @@ class ManagedAgentMySqlIT {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc));
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
         String tenant = "mysql-workspace-" + UUID.randomUUID();
         try {
             for (String id : List.of("workspace-a", "workspace-b")) {
@@ -484,7 +488,7 @@ class ManagedAgentMySqlIT {
         ManagedWorkspaceRegistry registry = new ManagedWorkspaceRegistry(jdbc);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, registry);
+                }, registry, new ManagedAgentProperties());
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String tenant = "mysql-actor-" + UUID.randomUUID();

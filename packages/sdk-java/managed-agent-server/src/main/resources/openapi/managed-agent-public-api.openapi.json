@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.13.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial."
+    "version": "1.14.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 adds archived to the Session status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented."
   },
   "servers": [
     {
@@ -152,7 +152,7 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "createSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "description": "Planned W0 workspace selection is persisted with the original creation receipt. Check actor-scoped replay before resolving defaults. A durable binding is not proof of Runtime readiness; never ignore selection.",
         "parameters": [
           {
@@ -202,7 +202,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listSessions",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "parameters": [
           {
             "$ref": "#/components/parameters/Cursor"
@@ -246,7 +246,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Session state.",
@@ -440,6 +440,9 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -550,6 +553,9 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -633,7 +639,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellListSessions",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "requestBody": {
           "required": true,
           "content": {
@@ -654,6 +660,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -662,7 +671,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellGetSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "requestBody": {
           "required": true,
           "content": {
@@ -683,6 +692,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -715,6 +727,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }
@@ -746,6 +764,12 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "409": {
             "$ref": "#/components/responses/CursorExpired"
           }
@@ -756,7 +780,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
         "description": "W0 maps workspaceId/cwdRelative to the public selection without using environmentId or absolute cwd. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
         "requestBody": {
           "required": true,
@@ -830,6 +854,12 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
           }
@@ -866,6 +896,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
@@ -2041,6 +2077,7 @@
             "type": "string",
             "enum": [
               "active",
+              "archived",
               "closing",
               "closed",
               "failed",
@@ -3218,7 +3255,7 @@
         "properties": {
           "error": {
             "type": "object",
-            "required": ["code", "message"],
+            "required": ["code", "message", "request_id"],
             "properties": {
               "code": {
                 "type": "string"
@@ -3227,7 +3264,8 @@
                 "type": "string"
               },
               "request_id": {
-                "type": ["string", "null"]
+                "type": "string",
+                "maxLength": 128
               },
               "replay_floor_sequence": {
                 "type": ["integer", "null"],

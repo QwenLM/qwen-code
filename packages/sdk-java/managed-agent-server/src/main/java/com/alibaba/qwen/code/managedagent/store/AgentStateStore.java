@@ -84,6 +84,8 @@ public interface AgentStateStore {
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
+    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+
     List<MaterializationTarget> findMaterializationTargets(int limit);
 
     MaterializationResult materializeNextBatch(String tenantId,

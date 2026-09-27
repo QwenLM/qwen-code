@@ -36,12 +36,6 @@ export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
 
-// The server still accepts only "text" blocks, not the contract's "input_text"
-// (contract-known-gaps.txt in packages/sdk-java/managed-agent-server).
-type JavaAgentInput<T> = Omit<T, 'input'> & {
-  input: Array<{ type: 'text'; text: string }>;
-};
-
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
   getHeaders?: () => HeadersInit | Promise<HeadersInit>;
@@ -100,14 +94,14 @@ export class JavaManagedAgentClient {
   }
 
   createSession(
-    request: JavaAgentInput<Schemas['WebShellCreateRequest']>,
+    request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
   }
 
   submitTurn(
-    request: JavaAgentInput<Schemas['WebShellSubmitRequest']>,
+    request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/submit', request, signal);

@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
@@ -34,17 +35,26 @@ import org.springframework.web.bind.annotation.RestController;
 public class PublicAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
+    private final String agentRevision;
 
     public PublicAgentController(ManagedAgentService service,
-            ManagedEventStreamService streams) {
+            ManagedEventStreamService streams,
+            ManagedAgentProperties properties) {
         this.service = service;
         this.streams = streams;
+        this.agentRevision = properties.getAgentRevision();
     }
 
     @PostMapping
     public ResponseEntity<PublicSession> create(TenantContext tenant,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody CreateSessionRequest request) {
+        if (request.agentRevision() != null
+                && !request.agentRevision().equals(agentRevision)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "Only the current agent revision can be selected.");
+        }
         WorkspaceSelection selection = null;
         if (request.workspace() != null) {
             if (request.workspace().isNull()) {

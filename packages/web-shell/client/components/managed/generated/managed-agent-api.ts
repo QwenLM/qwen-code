@@ -289,7 +289,7 @@ export interface components {
             error: {
                 code: string;
                 message: string;
-                request_id?: string | null;
+                request_id: string;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -376,6 +376,7 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSessionPage"];
                 };
             };
+            400: components["responses"]["BadRequest"];
         };
     };
     webShellGetSession: {
@@ -400,6 +401,7 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSession"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -425,6 +427,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellTranscript"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
     webShellStreamEvents: {
@@ -449,6 +453,8 @@ export interface operations {
                     "text/event-stream": string;
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
         };
     };
@@ -504,6 +510,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -530,6 +538,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };

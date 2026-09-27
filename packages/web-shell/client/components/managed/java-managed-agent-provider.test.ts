@@ -124,7 +124,7 @@ describe('createJavaManagedAgentProvider', () => {
         idempotencyKey: 'key-1',
         agentId: 'qwen-code',
         environmentId: 'python',
-        input: [{ type: 'text', text: 'hello' }],
+        input: [{ type: 'input_text', text: 'hello' }],
       }),
     );
   });

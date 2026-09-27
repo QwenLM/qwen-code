@@ -30,6 +30,9 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 Stage D still has to close. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
+`1`) when they are created. Every response carries `X-Request-Id`, which error
+envelopes repeat as `request_id` and the logs print.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
 [简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md)
 

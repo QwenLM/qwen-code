@@ -58,7 +58,7 @@ class ManagedEventStreamServiceTest {
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
-                null, "ACTIVE", null, null, 0, 2, 1, 1, null, 1,
+                null, null, "ACTIVE", null, null, 0, 2, 1, 1, null, 1,
                 new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1));
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();

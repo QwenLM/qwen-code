@@ -279,8 +279,8 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await expect(composer).toBeEnabled();
   await expect(page).toHaveURL(new RegExp(`managedSession=${SESSION_ID}`));
   expect(fixture.prompts.map((request) => request.prompt)).toEqual([
-    [{ type: 'text', text: 'Turn to cancel' }],
-    [{ type: 'text', text: 'Continue after cancellation' }],
+    [{ type: 'input_text', text: 'Turn to cancel' }],
+    [{ type: 'input_text', text: 'Continue after cancellation' }],
   ]);
   expect(new Set(fixture.prompts.map((request) => request.key)).size).toBe(2);
   expect(fixture.daemon.promptRequests()).toHaveLength(0);

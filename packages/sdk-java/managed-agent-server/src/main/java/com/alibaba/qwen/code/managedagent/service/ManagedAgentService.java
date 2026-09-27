@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
@@ -25,6 +26,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
@@ -42,6 +44,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -58,6 +61,12 @@ public class ManagedAgentService {
     private static final String DELETE = "DELETE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
+    // Snapshot reset and resync arrive with event replay (Stage D3).
+    private static final SessionCapabilities CAPABILITIES =
+            new SessionCapabilities(true, false, false, false);
+    // "text" is the spelling that clients used before the contract.
+    private static final Set<String> INPUT_TYPES = Set.of("input_text",
+            "text");
     private final AgentStateStore store;
     private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
@@ -427,10 +436,14 @@ public class ManagedAgentService {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
         return new PublicSession(session.sessionId(), "agent.session",
-                session.agentId(), session.status().toLowerCase(),
+                session.agentId(), session.agentRevision(),
+                session.status().toLowerCase(),
                 session.createdAt() / 1000, session.updatedAt() / 1000,
                 metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), publicWorkspace(session));
+                session.lastSequence(), 0,
+                store.findSnapshotCoveredSequence(session.tenantId(),
+                        session.sessionId()),
+                CAPABILITIES, publicWorkspace(session));
     }
 
     private WebShellSession webShellSession(SessionRecord session) {
@@ -485,7 +498,8 @@ public class ManagedAgentService {
 
     private static PublicTurn publicTurn(TurnRecord turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
-                turn.sessionId(), turn.status().toLowerCase(),
+                turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
+                turn.status().toLowerCase(),
                 turn.createdAt() / 1000,
                 turn.completedAt() == null ? null
                         : turn.completedAt() / 1000,
@@ -697,7 +711,7 @@ public class ManagedAgentService {
         }
         List<Map<String, Object>> result = new ArrayList<>();
         for (InputBlock block : blocks) {
-            if (block == null || !"text".equals(block.type())
+            if (block == null || !INPUT_TYPES.contains(block.type())
                     || block.text() == null || block.text().isEmpty()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "unsupported_input",
