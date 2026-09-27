@@ -18,7 +18,7 @@ export function projectJavaAgentEvent(
     at: toTimestamp(event.createdAt),
     type,
     sessionId: event.sessionId,
-    turnId: event.turnId,
+    turnId: event.turnId ?? '',
     data: normalizeData(type, event.data),
   };
 }

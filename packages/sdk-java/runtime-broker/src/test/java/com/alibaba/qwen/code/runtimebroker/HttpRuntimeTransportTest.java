@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -13,11 +14,15 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -36,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 
 class HttpRuntimeTransportTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -262,6 +268,57 @@ class HttpRuntimeTransportTest {
         assertNull(captured.get());
         assertThrows(IllegalArgumentException.class,
                 () -> new RuntimeSession("harness", "s\ud800", "bootstrap", scope));
+    }
+
+    @Test
+    void validatesEveryActivationReceiptFieldAndRefusesOlderWorkers() throws Exception {
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
+        RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
+        RuntimeBindingRecord runtime = ready(request, seed, contextLease(seed));
+        RuntimeSessionRecord session = on(runtime, session("session", request));
+        var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", "workspace", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        for (boolean active : new boolean[] {true, false}) {
+            Map<String, Object> receipt = new LinkedHashMap<>();
+            receipt.put("protocolVersion", 1);
+            receipt.put("operation", active ? "activate" : "release");
+            receipt.put("sessionId", "session");
+            receipt.put("contextDigest", binding.getContextDigest());
+            receipt.put("contextConfigRef", binding.getContextConfigRef());
+            receipt.put("profile", WorkspaceExecutionProfile.PROFILE);
+            receipt.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+            receipt.put("runtimeIncarnation", seed.getGatewayIncarnation());
+            receipt.put("epoch", seed.getEpoch());
+            receipt.put("active", active);
+            reply.set(json(200, JsonCodec.encode(receipt)));
+            transport.activateWorkspace(runtime, session, binding, active).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals("/internal/managed-runtime/v3/activation", capturedPath.get());
+            assertEquals(active ? "activate" : "release", JSON.readTree(captured.get()).get("operation").asText());
+            for (String field : receipt.keySet()) {
+                Map<String, Object> invalid = new LinkedHashMap<>(receipt);
+                invalid.put(field, "foreign");
+                reply.set(json(200, JsonCodec.encode(invalid)));
+                assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, active)
+                        .toCompletableFuture().get(2, TimeUnit.SECONDS), field);
+            }
+            receipt.put("extra", true);
+            reply.set(json(200, JsonCodec.encode(receipt)));
+            assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, active)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        reply.set(json(404, "{}".getBytes(StandardCharsets.UTF_8)));
+        assertThrows(ExecutionException.class, () -> transport.activateWorkspace(runtime, session, binding, true)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        for (RuntimeSessionRecord foreign : List.of(
+                new RuntimeSessionRecord(session.getSession(), "foreign", runtime.getGeneration(),
+                        RuntimeSessionRecord.State.READY, 0, Instant.now()),
+                new RuntimeSessionRecord(session.getSession(), runtime.getBindingId(), runtime.getGeneration() + 1,
+                        RuntimeSessionRecord.State.READY, 0, Instant.now()))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> transport.activateWorkspace(runtime, foreign, binding, true));
+        }
     }
 
     /** A READY durable binding whose Runtime holds this lease. */
@@ -559,6 +616,143 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void usesExplicitToolV3RoutesAndRejectsAV2Answer() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        reference.put("toolName", "run_shell_command");
+        reference.put("input", Map.of("command", "printf hello"));
+        Map<String, Object> capture = new LinkedHashMap<>();
+        capture.put("tenantId", "tenant-a");
+        capture.put("sessionId", "managed-session-a");
+        capture.put("turnId", "prompt-01");
+        capture.put("executionCallId", "execution-a");
+        capture.put("bindingGeneration", "1");
+        capture.put("capturePolicy", "complete_required");
+        Map<String, Object> capturedResult = new LinkedHashMap<>();
+        capturedResult.put("captureStatus", "unavailable");
+        capturedResult.put("captureReason", "storage_failed");
+        capturedResult.put("manifest", null);
+        capturedResult.put("previewTruncated", false);
+        capturedResult.put("deliveryStatus", "blocked");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of("hello"));
+        envelope.put("capture", capturedResult);
+        Map<String, Object> settled = Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "state", "settled",
+                "result", envelope);
+        reply.set(json(200, JSON.writeValueAsBytes(settled)));
+
+        assertEquals("settled", transport.executeV3(lease, session, reference,
+                capture).toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_EXECUTE_PATH, capturedPath.get());
+        assertEquals("managed-tool-result/1", JSON.readTree(captured.get())
+                .required("toolResult").asText());
+        assertEquals("managed-session-a", JSON.readTree(captured.get())
+                .required("capture").required("sessionId").asText());
+
+        assertEquals("settled", transport.statusV3(lease, session, reference, 0)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_STATUS_PATH, capturedPath.get());
+        assertEquals("settled", transport.cancelV3(lease, session, reference)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_CANCEL_PATH, capturedPath.get());
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", "execution-a");
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "blocked");
+        receipt.put("historyRevision", null);
+        assertEquals("settled", transport.acknowledgeV3(lease, session,
+                reference, receipt).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_ACKNOWLEDGE_PATH,
+                capturedPath.get());
+        assertEquals("blocked", JSON.readTree(captured.get())
+                .required("receipt").required("deliveryStatus").asText());
+
+        reply.set(json(200, JsonCodec.encode(Map.of(
+                "protocolVersion", 2,
+                "state", "unknown"))));
+        assertThrows(ExecutionException.class, () -> transport.statusV3(
+                lease, session, reference, 0).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void exchangesToolV3WithTheRealTypeScriptHandler() throws Exception {
+        Path repository = Path.of("").toAbsolutePath()
+                .resolve("../../..").normalize();
+        Path handler = repository.resolve("packages/cli/dist/src/serve/managed-runtime-tool-v3-routes.js");
+        Assumptions.assumeTrue(Files.isRegularFile(handler),
+                "Build the TypeScript workspace before the interop test.");
+        Path serverScript = Path.of("src/test/resources/tool-v3-interop-server.mjs")
+                .toAbsolutePath();
+        Process worker = new ProcessBuilder("node", serverScript.toString())
+                .directory(repository.toFile())
+                .start();
+        try {
+            BufferedReader output = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            String ready = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return output.readLine();
+                } catch (IOException error) {
+                    throw new CompletionException(error);
+                }
+            }).get(20, TimeUnit.SECONDS);
+            assertTrue(ready != null && ready.startsWith("READY:"), ready);
+            int port = Integer.parseInt(ready.substring("READY:".length()));
+            RuntimeLease lease = toolLease(port);
+            Map<String, Object> reference = toolReference();
+            reference.put("toolName", "run_shell_command");
+            reference.put("input", Map.of("command", "printf hello"));
+            reference.put("argsDigest",
+                    "424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8");
+            Map<String, Object> capture = Map.of(
+                    "tenantId", "tenant-a",
+                    "sessionId", "managed-session-a",
+                    "turnId", "turn-1",
+                    "executionCallId", "execution-a",
+                    "bindingGeneration", "1",
+                    "capturePolicy", "complete_required");
+            Map<String, Object> answer = transport.executeV3(
+                    lease, toolSession(), reference, capture)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals("settled", answer.get("state"));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = (Map<String, Object>) answer.get("result");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> raw = (Map<String, Object>) result.get("capture");
+            assertEquals("complete", raw.get("captureStatus"));
+            assertEquals("committed", raw.get("deliveryStatus"));
+            assertEquals("settled", transport.statusV3(lease, toolSession(),
+                    reference, 0).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS).get("state"));
+            Map<String, Object> receipt = new LinkedHashMap<>();
+            receipt.put("executionCallId", "execution-a");
+            receipt.put("manifest", raw.get("manifest"));
+            receipt.put("deliveryStatus", "committed");
+            receipt.put("historyRevision", 7);
+            assertEquals("settled", transport.acknowledgeV3(lease,
+                    toolSession(), reference, receipt)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS)
+                    .get("state"));
+            receipt.put("historyRevision", 8);
+            assertThrows(ExecutionException.class, () -> transport.acknowledgeV3(
+                    lease, toolSession(), reference, receipt)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS));
+        } finally {
+            worker.destroy();
+            if (!worker.waitFor(5, TimeUnit.SECONDS)) {
+                worker.destroyForcibly();
+            }
+        }
+    }
+
+    @Test
     void preservesNullValuesInToolInput() throws Exception {
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("optional", null);
@@ -782,8 +976,30 @@ class HttpRuntimeTransportTest {
                 json(200, JSON.writeValueAsBytes(fractionalProtocol)));
         replies.put("rounded version",
                 json(200, JSON.writeValueAsBytes(roundedProtocol)));
+        replies.put("rounded-up version", json(200,
+                successBodyWith("protocolVersion", "2.0000000000000001")));
+        replies.put("exponent rounded-up version", json(200,
+                successBodyWith("protocolVersion", "0.20000000000000001E+1")));
+        replies.put("long-mantissa version", json(200,
+                successBodyWith("protocolVersion", "0.020000000000000000000E1")));
+        replies.put("suffixed version", json(200,
+                successBodyWith("protocolVersion", "2.0000000000000001D")));
+        replies.put("wrapped version", json(200,
+                successBodyWith("protocolVersion", "258B")));
         replies.put("epoch",
                 json(200, JSON.writeValueAsBytes(fractionalEpoch)));
+        replies.put("rounded-up epoch", json(200,
+                successBodyWith("epoch", "4.0000000000000001")));
+        replies.put("exponent rounded-up epoch", json(200,
+                successBodyWith("epoch", "40000000000000001E-16")));
+        replies.put("overflowing epoch", json(200,
+                successBodyWith("epoch", "1e400")));
+        replies.put("suffixed epoch", json(200,
+                successBodyWith("epoch", "4.0000001F")));
+        replies.put("wrapped epoch", json(200,
+                successBodyWith("epoch", "65540S")));
+        replies.put("unsupported epoch", json(200,
+                successBodyWith("epoch", "Set[4]")));
         for (Map.Entry<String, Reply> planned : replies.entrySet()) {
             reply.set(planned.getValue());
 
@@ -794,6 +1010,56 @@ class HttpRuntimeTransportTest {
                     failure.getCode(), planned.getKey());
             assertFalse(failure.isRetryable(), planned.getKey());
         }
+    }
+
+    @Test
+    void acceptsIntegralSpellingsOfTheAttestationNumbers() throws Exception {
+        long epoch = successBody().required("epoch").longValue();
+        String[][] spellings = {
+            {"protocolVersion", "2.0"},
+            {"protocolVersion", "2E+0"},
+            {"epoch", "4.0"},
+            {"epoch", "4.00000000000000000000"},
+        };
+        for (String[] spelling : spellings) {
+            reply.set(json(200, successBodyWith(spelling[0], spelling[1])));
+
+            RuntimeAttestation proof = attest().toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+
+            assertEquals(epoch, proof.getEpoch(), spelling[1]);
+        }
+    }
+
+    @Test
+    void acceptsAnEpochBeyondTheIntRange() throws Exception {
+        long epoch = 4_294_967_296L;
+        JsonNode identity = suite.required("identity");
+        RuntimeProvisionSeed seed = new RuntimeProvisionSeed(
+                identity.required("provisionRequestId").textValue(),
+                identity.required("runtimeInstanceId").textValue(),
+                identity.required("runtimeIncarnation").textValue(),
+                identity.required("leaseId").textValue(), epoch,
+                identity.required("token").textValue());
+        reply.set(json(200, successBodyWith("epoch", Long.toString(epoch))));
+
+        RuntimeAttestation proof = transport.attest(
+                lease(server.getAddress().getPort(), epoch),
+                new RuntimeProvisionRequest(scope(), "session-1"), seed)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        assertEquals(epoch, proof.getEpoch());
+    }
+
+    @Test
+    void keepsTheParseFailureAsTheCauseOfAnInvalidAttestation()
+            throws IOException {
+        reply.set(json(200, successBodyWith("epoch", "Set[4]")));
+
+        RuntimeBrokerException failure = awaitFailure();
+
+        assertEquals("managed_runtime_attestation_invalid", failure.getCode());
+        assertInstanceOf(IllegalArgumentException.class, failure.getCause());
     }
 
     @Test
@@ -1342,13 +1608,17 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeLease lease(int port) {
+        return lease(port, suite.required("identity").required("epoch")
+                .longValue());
+    }
+
+    private RuntimeLease lease(int port, long epoch) {
         JsonNode identity = suite.required("identity");
         return new RuntimeLease(
                 identity.required("runtimeInstanceId").textValue(),
                 URI.create("http://127.0.0.1:" + port + "/"),
                 identity.required("token").textValue(),
-                identity.required("leaseId").textValue(),
-                identity.required("epoch").longValue());
+                identity.required("leaseId").textValue(), epoch);
     }
 
     private RuntimeBrokerException awaitFailure() {
@@ -1376,6 +1646,16 @@ class HttpRuntimeTransportTest {
     private ObjectNode successBody() {
         return (ObjectNode) find("success").required("expected")
                 .required("body").deepCopy();
+    }
+
+    private byte[] successBodyWith(String field, String number)
+            throws IOException {
+        ObjectNode body = successBody();
+        body.required(field);
+        // Jackson would normalize the spelling, so splice the literal in.
+        body.put(field, "@");
+        return JSON.writeValueAsString(body).replace("\"@\"", number)
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private JsonNode find(String id) {

@@ -22,6 +22,28 @@ import {
 
 const { isEphemeralSlug } = __test__;
 
+const cleanupLogger = vi.hoisted(() => ({
+  isEnabled: () => true,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+// Intercept only the sweep's own tag; every other module in this file's import
+// graph (gitWorktreeService, storage, telemetry) keeps the real logger.
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) =>
+      tag === 'WORKTREE_CLEANUP'
+        ? cleanupLogger
+        : actual.createDebugLogger(tag),
+  };
+});
+
 describe('isEphemeralSlug', () => {
   it('matches the agent-<7hex> pattern', () => {
     expect(isEphemeralSlug('agent-aabbccd')).toBe(true);
@@ -121,6 +143,55 @@ describe('cleanupStaleAgentWorktrees', () => {
     await expect(
       fs.access(path.join(wtPath, 'secret.env')),
     ).resolves.toBeUndefined();
+  });
+
+  it('preserves a user-named `agent-<7hex>` worktree holding only untracked files (#12735)', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    // Pin the untracked mode against ambient config. `normal` is git's
+    // default, so without this a later refactor that drops the explicit
+    // `--untracked-files=normal` from the probe would keep every test green
+    // while a user's `status.showUntrackedFiles=no` (in `~/.gitconfig`, or in
+    // the repo's `.git/config`, which every linked worktree shares) hides the
+    // sentinel and #12735 returns silently.
+    execFileSync('git', ['config', 'status.showUntrackedFiles', 'no'], {
+      cwd: repoRoot,
+    });
+    await fs.writeFile(path.join(wtPath, 'sentinel.txt'), 'user work\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'sentinel.txt')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('logs a debug breadcrumb naming the entry it deliberately kept', async () => {
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, 'sentinel.txt'), 'user work\n');
+    await agePastCutoff(wtPath);
+    cleanupLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    // The caller logs "nothing to remove" when the sweep returns 0, so a
+    // preserved entry that leaves no line of its own cannot be told apart
+    // from one the sweep never saw.
+    expect(cleanupLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('keeping agent-aabbccd'),
+    );
+  });
+
+  it('still sweeps a clean, commit-free ephemeral worktree past the cutoff', async () => {
+    const wtPath = await createAgentWorktree('agent-1234567');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
   });
 
   it('still reaps a stale worktree holding only disposable build output', async () => {

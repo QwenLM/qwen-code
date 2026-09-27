@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -38,6 +39,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String EXECUTE_PATH = "/internal/managed-runtime/v2/execute";
     static final String STATUS_PATH = "/internal/managed-runtime/v2/status";
     static final String CANCEL_PATH = "/internal/managed-runtime/v2/cancel";
+    static final String V3_EXECUTE_PATH = "/internal/managed-runtime/v3/execute";
+    static final String V3_STATUS_PATH = "/internal/managed-runtime/v3/status";
+    static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
+    static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
@@ -56,6 +61,20 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private static final Set<String> RESULT_FIELDS = Set.of(
             "executionStatus", "responseParts", "error");
     private static final Set<String> ERROR_FIELDS = Set.of("message", "type");
+    private static final Set<String> V3_RESPONSE_FIELDS = Set.of(
+            "protocolVersion", "toolResult", "state", "result", "lastSequence");
+    private static final Set<String> V3_RESULT_FIELDS = Set.of(
+            "executionStatus", "responseParts", "error", "capture");
+    private static final Set<String> V3_CAPTURE_FIELDS = Set.of(
+            "captureStatus", "captureReason", "manifest", "previewTruncated",
+            "deliveryStatus");
+    private static final Set<String> V3_CAPTURE_REQUEST_FIELDS = Set.of(
+            "tenantId", "sessionId", "turnId", "executionCallId",
+            "bindingGeneration", "capturePolicy");
+    private static final Set<String> V3_MANIFEST_REF_FIELDS = Set.of(
+            "resourceId", "kind", "schemaVersion", "byteLength", "digest");
+    private static final Set<String> V3_RECEIPT_FIELDS = Set.of(
+            "executionCallId", "manifest", "deliveryStatus", "historyRevision");
 
     private final HttpClient client;
     private final Duration requestTimeout;
@@ -196,6 +215,42 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 });
     }
 
+    /** Activates or closes the installed fixed-profile Session gate. */
+    public CompletionStage<Void> activateWorkspace(RuntimeBindingRecord runtime,
+            RuntimeSessionRecord sessionRecord, ContextBinding binding, boolean active) {
+        RuntimeSession session = sessionRecord.getSession();
+        RuntimeProvisionSeed seed = runtime.getProvisionSeed();
+        RuntimeProvisionRequest request = runtime.getRequest();
+        if (seed == null || runtime.getLease() == null
+                || !runtime.getBindingId().equals(sessionRecord.getBindingId())
+                || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
+                || !request.isManagedContext()
+                || !request.getScope().equals(session.getScope())
+                || !session.getHarnessSessionId().equals(request.getIsolationKey())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
+                        session.getScope().getCapabilityDigest())
+                || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
+                        binding.getContextConfigRef())) {
+            throw new IllegalArgumentException("Workspace activation identity is invalid");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("operation", active ? "activate" : "release");
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("contextDigest", binding.getContextDigest());
+        body.put("contextConfigRef", binding.getContextConfigRef());
+        body.put("profile", WorkspaceExecutionProfile.PROFILE);
+        Map<String, Object> expected = new LinkedHashMap<>(body);
+        expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+        expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
+        expected.put("epoch", seed.getEpoch());
+        expected.put("active", active);
+        return post(runtime.getLease(), "/internal/managed-runtime/v3/activation",
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(
+                        ManagedContextProtocol.parse(bytes), expected));
+    }
+
     /**
      * Runs one tool call to settlement. The reference carries the identity
      * four plus {@code toolName} and {@code input}; nothing else may ride
@@ -268,6 +323,221 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return post(lease, CANCEL_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                 .thenApply(bytes -> projectClosedStatus(
                         parseToolResponse(bytes, "cancel"), "cancel"));
+    }
+
+    /** Explicit local Tool v3 call; production Broker selection remains v2. */
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> capture) {
+        requireV3Context(lease, session);
+        requireClosed(capture, V3_CAPTURE_REQUEST_FIELDS, "capture");
+        if (!"complete_required".equals(capture.get("capturePolicy"))) {
+            throw new IllegalArgumentException("capture policy is invalid");
+        }
+        for (String key : List.of("tenantId", "sessionId", "turnId",
+                "executionCallId", "bindingGeneration")) {
+            if (!(capture.get(key) instanceof String text) || text.isEmpty()) {
+                throw new IllegalArgumentException("capture " + key + " is invalid");
+            }
+        }
+        Map<String, Object> body = v3Body(reference);
+        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("input", referenceInput(reference));
+        body.put("capture", capture);
+        return post(lease, V3_EXECUTE_PATH,
+                encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "execute"));
+    }
+
+    /** Read-only Tool v3 lookup by the original invocation reference. */
+    public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        requireV3Context(lease, session);
+        if (afterSequence < 0) {
+            throw new IllegalArgumentException("afterSequence must be non-negative");
+        }
+        Map<String, Object> body = v3Body(reference);
+        body.put("afterSequence", afterSequence);
+        return post(lease, V3_STATUS_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "status"));
+    }
+
+    /** Requests cancellation without assuming the physical call was undone. */
+    public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        requireV3Context(lease, session);
+        return post(lease, V3_CANCEL_PATH,
+                encodeToolRequest(v3Body(reference), BODY_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "cancel"));
+    }
+
+    /** Replays the exact Session receipt; a changed ACK is a conflict. */
+    public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        requireV3Context(lease, session);
+        requireClosed(receipt, V3_RECEIPT_FIELDS, "receipt");
+        if (!(receipt.get("executionCallId") instanceof String callId)
+                || callId.isEmpty()) {
+            throw new IllegalArgumentException("receipt executionCallId is invalid");
+        }
+        Object delivery = receipt.get("deliveryStatus");
+        Object revision = receipt.get("historyRevision");
+        if (!(delivery instanceof String status)
+                || !("committed".equals(status) || "blocked".equals(status))
+                || ("committed".equals(status)
+                    ? !(revision instanceof Number number)
+                            || new BigDecimal(number.toString()).compareTo(BigDecimal.ONE) < 0
+                            || new BigDecimal(number.toString()).stripTrailingZeros().scale() > 0
+                    : revision != null)) {
+            throw new IllegalArgumentException("receipt decision is invalid");
+        }
+        Map<String, Object> body = v3Body(reference);
+        body.put("receipt", receipt);
+        return post(lease, V3_ACKNOWLEDGE_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "acknowledge"));
+    }
+
+    private static void requireV3Context(RuntimeLease lease,
+            RuntimeSession session) {
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+    }
+
+    private static Map<String, Object> v3Body(Map<String, Object> reference) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("reference", referenceIdentity(reference));
+        return body;
+    }
+
+    private static void requireClosed(Map<String, Object> value,
+            Set<String> fields, String name) {
+        if (value == null || !value.keySet().equals(fields)) {
+            throw new IllegalArgumentException(name + " fields are invalid");
+        }
+    }
+
+    private static Map<String, Object> parseV3Response(byte[] bytes,
+            String operation) {
+        Map<String, Object> fields;
+        try {
+            fields = BrokerValues.immutableMap(JSON.parseObject(
+                    new String(bytes, StandardCharsets.UTF_8),
+                    JSONReader.Feature.DisableReferenceDetect,
+                    JSONReader.Feature.UseBigDecimalForDoubles,
+                    JSONReader.Feature.UseBigDecimalForFloats));
+        } catch (RuntimeException exception) {
+            throw protocol("Managed Runtime " + operation + " response is invalid.");
+        }
+        Object rawState = fields.get("state");
+        if (!V3_RESPONSE_FIELDS.containsAll(fields.keySet())
+                || !Integer.valueOf(3).equals(fields.get("protocolVersion"))
+                || !"managed-tool-result/1".equals(fields.get("toolResult"))
+                || !(rawState instanceof String state)
+                || !TOOL_STATES.contains(state)) {
+            throw protocol("Managed Runtime " + operation + " response is invalid.");
+        }
+        if ("acknowledge".equals(operation)
+                && !("settled".equals(state) || "unknown".equals(state))) {
+            throw protocol("Managed Runtime " + operation + " response is invalid.");
+        }
+        Object result = fields.get("result");
+        if ("settled".equals(state)) {
+            if (!(result instanceof Map<?, ?> envelope)
+                    || !V3_RESULT_FIELDS.containsAll(envelope.keySet())
+                    || !envelope.containsKey("capture")
+                    || !(envelope.get("executionStatus") instanceof String outcome)
+                    || !EXECUTION_STATUSES.contains(outcome)
+                    || !(envelope.get("responseParts") instanceof List)) {
+                throw protocol("Managed Runtime " + operation + " result is invalid.");
+            }
+            if (envelope.containsKey("error")) {
+                Object error = envelope.get("error");
+                if (!(error instanceof Map<?, ?> details)
+                        || !ERROR_FIELDS.containsAll(details.keySet())
+                        || !(details.get("message") instanceof String message)
+                        || message.isEmpty()
+                        || details.containsKey("type")
+                            && (!(details.get("type") instanceof String type)
+                                || type.isEmpty())) {
+                    throw protocol("Managed Runtime " + operation
+                            + " result is invalid.");
+                }
+            }
+            Object capture = envelope.get("capture");
+            if (!"not_started".equals(envelope.get("executionStatus"))) {
+                if (!(capture instanceof Map<?, ?> data)
+                        || !data.keySet().equals(V3_CAPTURE_FIELDS)
+                        || !(data.get("captureStatus") instanceof String captureStatus)
+                        || !Set.of("complete", "partial", "unavailable")
+                                .contains(captureStatus)
+                        || !(data.get("previewTruncated") instanceof Boolean)
+                        || !(data.get("deliveryStatus") instanceof String deliveryStatus)
+                        || !Set.of("pending", "committed", "blocked")
+                                .contains(deliveryStatus)
+                        || "complete".equals(captureStatus)
+                            != (data.get("captureReason") == null)
+                        || data.get("captureReason") != null
+                            && (!(data.get("captureReason") instanceof String reason)
+                                || !Set.of("quota_exhausted", "size_limit",
+                                        "producer_lost", "storage_failed",
+                                        "cancelled").contains(reason))
+                        || data.get("manifest") == null
+                            && !"unavailable".equals(captureStatus)
+                        || data.get("manifest") != null
+                            && !validV3ManifestRef(data.get("manifest"))) {
+                    throw protocol("Managed Runtime " + operation
+                            + " capture is invalid.");
+                }
+            } else if (capture != null) {
+                throw protocol("Managed Runtime " + operation
+                        + " capture is invalid.");
+            }
+        } else if (fields.containsKey("result")) {
+            throw protocol("Managed Runtime " + operation + " response is invalid.");
+        }
+        if (fields.containsKey("lastSequence")) {
+            Object cursor = fields.get("lastSequence");
+            if (!"status".equals(operation)
+                    || !(cursor instanceof Number number)
+                    || new BigDecimal(number.toString()).signum() < 0
+                    || new BigDecimal(number.toString()).stripTrailingZeros()
+                            .scale() > 0) {
+                throw protocol("Managed Runtime " + operation
+                        + " sequence is invalid.");
+            }
+        }
+        return fields;
+    }
+
+    private static boolean validV3ManifestRef(Object value) {
+        if (!(value instanceof Map<?, ?> ref)
+                || !ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
+                || !(ref.get("resourceId") instanceof String resourceId)
+                || resourceId.isEmpty()
+                || !"managed-tool-result-manifest".equals(ref.get("kind"))
+                || !Integer.valueOf(1).equals(ref.get("schemaVersion"))
+                || !(ref.get("byteLength") instanceof Number length)
+                || new BigDecimal(length.toString()).signum() <= 0
+                || new BigDecimal(length.toString()).compareTo(
+                        BigDecimal.valueOf(64 * 1024)) > 0
+                || new BigDecimal(length.toString()).stripTrailingZeros()
+                        .scale() > 0
+                || !(ref.get("digest") instanceof String digest)
+                || !digest.matches("[0-9a-f]{64}")) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -630,8 +900,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         try {
             fields = JsonCodec.parseObject(bytes,
                     "Managed Runtime attestation");
-        } catch (RuntimeBrokerException exception) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        } catch (RuntimeBrokerException | IllegalArgumentException exception) {
+            throw protocol("Managed Runtime attestation response is invalid.",
+                    exception);
         }
         if (!fields.keySet().equals(RESPONSE_FIELDS)) {
             throw protocol("Managed Runtime attestation response is invalid.");
@@ -697,10 +968,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        Object raw = response.get("protocolVersion");
-        if (!(raw instanceof Number number)
-                || new BigDecimal(number.toString())
-                        .compareTo(BigDecimal.valueOf(2)) != 0) {
+        BigDecimal version = exactNumber(response.get("protocolVersion"));
+        if (version == null
+                || version.compareTo(BigDecimal.valueOf(2)) != 0) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -708,15 +978,31 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        Object value = response.get(field);
-        if (!(value instanceof Number number)) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        BigDecimal value = exactNumber(response.get(field));
+        if (value != null) {
+            try {
+                long parsed = value.longValueExact();
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (ArithmeticException exception) {
+                // A fraction or a value beyond a long is not an epoch.
+            }
         }
-        long parsed = number.longValue();
-        if (number.doubleValue() != parsed || parsed <= 0) {
-            throw protocol("Managed Runtime attestation response is invalid.");
+        throw protocol("Managed Runtime attestation response is invalid.");
+    }
+
+    private static BigDecimal exactNumber(Object value) {
+        // A parsed Double or Float may be rounded and a Short or Byte wrapped,
+        // as with 40000000000000001E-16 or 65540S, so an integer written with
+        // a non-zero exponent (40e-1) fails closed. Exact-decimal parsing would
+        // keep it, but fastjson2 2.0.60 then reads 0.020000000000000000000E1
+        // as 2.
+        if (value instanceof Integer || value instanceof Long
+                || value instanceof BigInteger || value instanceof BigDecimal) {
+            return new BigDecimal(value.toString());
         }
-        return parsed;
+        return null;
     }
 
     private static boolean jsonContentType(String value) {
@@ -772,8 +1058,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static RuntimeBrokerException protocol(String message) {
-        return error(400, "managed_runtime_attestation_invalid", message,
-                false);
+        return protocol(message, null);
+    }
+
+    private static RuntimeBrokerException protocol(String message,
+            Throwable cause) {
+        return new RuntimeBrokerException(400,
+                "managed_runtime_attestation_invalid", message, false, cause);
     }
 
     private static RuntimeBrokerException conflict(String message) {

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
@@ -28,7 +29,8 @@ public final class WorkspaceCreationProcessFixtureMain {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc));
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String tenant = required("W0_TENANT");
@@ -37,7 +39,7 @@ public final class WorkspaceCreationProcessFixtureMain {
             case "create-and-exit" -> {
                 Admission first = transactions.execute(status ->
                         store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                                "workspace-create", digest, "qwen-code",
+                                "workspace-create", digest, "qwen-code", null,
                                 null, List.of(), null, null));
                 require(first != null && !first.replayed(),
                         "creation did not commit a new command");

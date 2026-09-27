@@ -42,7 +42,7 @@ mvn checkstyle:check
 
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
 Broker tables. The JDBC implementations use `javax.sql.DataSource` for
-database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
 (`AesGcmSecretProtector` is included): the provision seed of a durable binding
@@ -80,7 +80,10 @@ bundled worker, with a fault-injecting HTTP proxy between them and a
 file-backed H2 database behind a relay that can be cut. They drop, reset,
 delay or hold Runtime answers, kill workers and Broker JVMs, freeze a Broker
 past its lease, and take the database away, then check that no tool call
-runs twice or settles without the Runtime's evidence; see
+runs twice or settles without the Runtime's evidence. The FG5 gates do the
+same around W0c context installation on managed-context/1: no tool runs
+before the context is installed and activated, and none runs outside the
+Session's directory; see
 [Runtime Broker Fault Gates](../../../docs/design/2026-09-26-runtime-broker-fault-gates.md).
 They need the bundle, Node.js and POSIX signals, and fail when any is
 missing. The default `mvn test` excludes them. From the repository root, run
