@@ -34,10 +34,10 @@ const ECHO_HELLO = invoke('run_shell_command', param('command', 'echo hello'));
 // Fenced invokes shared by the extract and recover cases.
 const FENCED_RM = '```xml\n' + RM_TMP + '\n```';
 const FENCED_ECHO_HELLO = '```xml\n' + ECHO_HELLO + '\n```';
-const SHORTER_FENCE_INSIDE = '````markdown\n```xml\n' + RM_TMP + '\n```\n````';
-const INFO_STRING_CLOSE = '````markdown\n```xml\n' + RM_TMP + '\n```xml\n````';
+const SHORTER_FENCE_INSIDE = '````markdown\n```\n' + RM_TMP + '\n````';
+const INFO_STRING_CLOSE = '```markdown\n```xml\n' + RM_TMP + '\n```';
 const TRAILING_TEXT_CLOSE =
-  '~~~markdown\n' + ECHO_HI + '\n~~~ end of examples\n~~~';
+  '~~~markdown\n~~~ end of examples\n' + ECHO_HI + '\n~~~';
 
 const expectExtract = (text: string, calls: unknown[]) =>
   expect(extractXmlToolCalls(text)).toEqual(calls);
@@ -161,6 +161,7 @@ describe('extractXmlToolCalls', () => {
     expect(result).toHaveLength(1);
     const args = result[0]!.args;
     expect(args['safe']).toBe('yes');
+    expect(args['__proto__']).toEqual({ polluted: true });
     expect(Object.getPrototypeOf(args)).toBeNull();
     expect((args as Record<string, unknown>)['polluted']).toBeUndefined();
   });
@@ -169,7 +170,7 @@ describe('extractXmlToolCalls', () => {
     ['skips invoke blocks inside fenced code blocks', FENCED_RM],
     [
       'skips invokes inside a ~~~ fence that contains ``` lines',
-      '~~~markdown\nHere is an example:\n```xml\n' + ECHO_HELLO + '\n```\n~~~',
+      '~~~markdown\n```\n' + ECHO_HELLO + '\n~~~',
     ],
     [
       'treats a shorter same-delimiter fence as content, not a close (CommonMark 4.5)',
@@ -270,7 +271,7 @@ describe('tryRecoverXmlToolCalls', () => {
     ],
     [
       'does not recover an invoke inside a ~~~ fence containing ``` lines',
-      '~~~markdown\nExample:\n```xml\n' + ECHO_HI + '\n```\n~~~',
+      '~~~markdown\n```\n' + ECHO_HI + '\n~~~',
     ],
     [
       'does not recover an invoke nested in a longer same-delimiter fence',

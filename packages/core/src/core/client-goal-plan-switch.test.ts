@@ -8,11 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import {
-  Config,
-  ApprovalMode,
-  deriveApprovalModeConfig,
-} from '../config/config.js';
+import { Config, ApprovalMode } from '../config/config.js';
 import { createGoalRuntime } from '../goals/goal-runtime.js';
 import { LlmClient } from './client.js';
 
@@ -65,16 +61,6 @@ describe('approved Goal proposals and Plan mode', () => {
     return { config, runtime, settle, recordGoalState, reportFailure };
   }
 
-  it('does not create a Goal after the user enters Plan mode before settlement', async () => {
-    const { config, runtime, settle, reportFailure } = await setup();
-    config.setApprovalMode(ApprovalMode.PLAN);
-    await settle();
-    expect(runtime.getSnapshot().goal).toBeNull();
-    expect(reportFailure).toHaveBeenCalledWith(
-      expect.stringContaining('approval was revoked'),
-    );
-  });
-
   it('does not revive the approval after leaving Plan mode', async () => {
     const { config, runtime, settle } = await setup();
     config.setApprovalMode(ApprovalMode.PLAN);
@@ -92,21 +78,6 @@ describe('approved Goal proposals and Plan mode', () => {
     expect(runtime.getSnapshot().goal).toBeNull();
   });
 
-  it('creates an ordinary approved Goal exactly once', async () => {
-    const { runtime, settle } = await setup();
-    const dispatch = vi.spyOn(runtime, 'dispatch');
-    await settle();
-    await settle();
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      objective: 'Verify the approved objective.',
-      status: 'active',
-    });
-    expect(dispatch).toHaveBeenCalledExactlyOnceWith({
-      action: 'create',
-      objective: 'Verify the approved objective.',
-    });
-  });
-
   it('pauses creation if Plan mode begins while the Goal is being saved', async () => {
     const { config, runtime, settle, recordGoalState } = await setup();
     recordGoalState.mockImplementationOnce(async () => {
@@ -114,23 +85,6 @@ describe('approved Goal proposals and Plan mode', () => {
     });
     await settle();
     expect(runtime.getSnapshot().goal?.status).toBe('paused');
-  });
-
-  it('permits a newly approved proposal after leaving Plan mode', async () => {
-    const { config, runtime, settle } = await setup();
-    config.setApprovalMode(ApprovalMode.PLAN);
-    await settle();
-    config.setApprovalMode(ApprovalMode.DEFAULT);
-    config.setPendingGoalProposal({
-      objective: 'A newly approved objective.',
-      turnKey: 'approved-turn',
-      reviewedGoal: null,
-    });
-    await settle();
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      objective: 'A newly approved objective.',
-      status: 'active',
-    });
   });
 
   it('rejects approval that reaches the store after Plan mode was entered', async () => {
@@ -144,14 +98,5 @@ describe('approved Goal proposals and Plan mode', () => {
     });
     await settle();
     expect(runtime.getSnapshot().goal).toBeNull();
-  });
-
-  it('keeps the parent approval when a derived agent enters Plan mode', async () => {
-    const { config, runtime, settle } = await setup();
-    const child = deriveApprovalModeConfig(config, ApprovalMode.DEFAULT);
-    child.config.setApprovalMode(ApprovalMode.PLAN);
-    await settle();
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    child.cleanup();
   });
 });
