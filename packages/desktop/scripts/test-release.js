@@ -1451,6 +1451,56 @@ function testUpdateManifest(directory) {
       ],
       { encoding: 'utf8' },
     );
+
+  // Tolerated-and-present, which is the normal case on the only production
+  // caller: sync-desktop-to-oss.yml passes --allow-missing-platform
+  // linux-aarch64 on every SOURCE=release re-mirror, and from this release
+  // onward that artifact is in the downloaded assets. Without this run the
+  // `matches.length === 0 &&` conjunct is unpinned -- dropping it turns the
+  // escape hatch into a blanket opt-out that omits the arm64 leg from the
+  // mirror feed (the first updater endpoint) while the asset sits in the same
+  // bucket, exits 0, and prints a warning that is false. That is #12806 again.
+  const toleratedButPresent = runManifest(
+    '--allow-missing-platform',
+    'linux-aarch64',
+  );
+  assert.equal(toleratedButPresent.status, 0, toleratedButPresent.stderr);
+  assert.deepEqual(
+    Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+    [
+      'darwin-aarch64',
+      'darwin-x86_64',
+      'linux-aarch64',
+      'linux-x86_64',
+      'windows-x86_64',
+    ],
+    'a tolerated platform whose artifact did upload must still be published',
+  );
+  assert.doesNotMatch(
+    toleratedButPresent.stdout,
+    /::warning::/,
+    'a tolerated platform that did upload must not be reported missing',
+  );
+
+  // Accumulation belongs to --allow-missing-platform alone. A duplicated
+  // single-valued flag has to override: comma-joining it would put
+  // `"version": "0.1.0,0.1.0"` in the signed feed, which the updater client
+  // cannot parse as semver, and for --output it would write a file named
+  // `<f>,<f>` so no feed exists at all -- both with the step exiting 0.
+  const duplicatedVersion = runManifest('--version', '0.1.0');
+  assert.equal(duplicatedVersion.status, 0, duplicatedVersion.stderr);
+  assert.equal(
+    JSON.parse(fs.readFileSync(output, 'utf8')).version,
+    '0.1.0',
+    'a repeated --version must override, not comma-join into the feed',
+  );
+  const duplicatedOutput = runManifest('--output', output);
+  assert.equal(
+    duplicatedOutput.status,
+    0,
+    `a repeated --output must override, not write a comma-joined filename: ${duplicatedOutput.stderr}`,
+  );
+
   fs.rmSync(path.join(assets, artifacts[4]));
   fs.rmSync(path.join(assets, `${artifacts[4]}.sig`));
   const missingLeg = runManifest();
@@ -1504,6 +1554,28 @@ function testUpdateManifest(directory) {
       ['darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
     );
   }
+
+  // darwin-aarch64 is tolerated but linux-aarch64 is not, so this run throws
+  // and writes no feed. It must not also publish an annotation claiming an
+  // incomplete feed went out: GitHub parses workflow commands from stdout, so
+  // a warning emitted at selection time turns a red run into a claim that
+  // sends oncall looking for a truncated desktop-latest.json that never
+  // existed, while the real cause is the other leg named in stderr.
+  const refusedAfterTolerating = runManifest(
+    '--allow-missing-platform',
+    'darwin-aarch64',
+  );
+  assert.notEqual(refusedAfterTolerating.status, 0);
+  assert.match(
+    refusedAfterTolerating.stderr,
+    /Expected one updater artifact for linux-aarch64, found 0/,
+  );
+  assert.doesNotMatch(
+    refusedAfterTolerating.stdout,
+    /::warning::/,
+    'a run that refused to publish must not also report a tolerated platform',
+  );
+
   for (const artifact of [artifacts[0], artifacts[4]]) {
     fs.writeFileSync(path.join(assets, artifact), artifact);
     fs.writeFileSync(

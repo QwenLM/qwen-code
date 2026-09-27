@@ -15,6 +15,10 @@ const allowMissingPlatforms = new Set(
     .map((platform) => platform.trim())
     .filter(Boolean),
 );
+// Tolerated platforms are collected here and reported only once the feed has
+// actually been written, so a run that throws on some other leg publishes no
+// annotation claiming an incomplete feed went out.
+const droppedPlatforms = [];
 const platforms = {};
 const platformArtifacts = [
   [
@@ -67,17 +71,26 @@ const manifest = {
 };
 fs.writeFileSync(options.output, `${JSON.stringify(manifest, null, 2)}\n`);
 
+// Only now is "publishing the feed without it" true: every leg that was not
+// tolerated has been selected and signed, and the feed is on disk. Emitting
+// this inside selectArtifact instead would put the annotation on runs that
+// later throw and write nothing, sending oncall hunting for a truncated feed
+// that never existed.
+for (const platform of droppedPlatforms) {
+  // stdout, not stderr: GitHub parses workflow commands from stdout only,
+  // and stderr has to stay reserved for the thrown error the tests match on.
+  // Without this a tolerant run is byte-identical in the log to a complete
+  // one, and the dropped key is only discoverable by diffing the published
+  // feed against the previous mirror.
+  console.log(
+    `::warning::no updater artifact for ${platform}; publishing the feed without it (--allow-missing-platform)`,
+  );
+}
+
 function selectArtifact(assets, pattern, platform) {
   const matches = assets.filter((asset) => pattern.test(asset));
   if (matches.length === 0 && allowMissingPlatforms.has(platform)) {
-    // stdout, not stderr: GitHub parses workflow commands from stdout only,
-    // and stderr has to stay reserved for the thrown error the tests match on.
-    // Without this a tolerant run is byte-identical in the log to a complete
-    // one, and the dropped key is only discoverable by diffing the published
-    // feed against the previous mirror.
-    console.log(
-      `::warning::no updater artifact for ${platform}; publishing the feed without it (--allow-missing-platform)`,
-    );
+    droppedPlatforms.push(platform);
     return null;
   }
   if (matches.length !== 1) {
@@ -95,16 +108,25 @@ function releaseBaseUrl(options) {
 }
 
 function parseArguments(args) {
+  // Only this option is genuinely multi-valued. Accumulating repeats for every
+  // option would comma-join a duplicated single-valued flag straight into the
+  // published, signed feed -- `--version a --version a` writes a version no
+  // updater client can parse, and `--output f --output f` writes a file named
+  // `f,f` so no feed exists at all, both at exit status 0.
+  const multiValueOptions = new Set(['allow-missing-platform']);
   const values = {};
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index]?.replace(/^--/, '');
     const value = args[index + 1];
     if (!name || value === undefined) throw new Error('Invalid arguments.');
-    // Accumulate repeats: a bash-array caller spells a multi-valued option as
-    // repeated flags, and plain assignment would keep only the last one — the
-    // dropped value then surfaces as a missing build leg during a release run.
+    // Accumulate repeats of the multi-valued option only: a bash-array caller
+    // spells it as repeated flags, and plain assignment would keep only the
+    // last one — the dropped value then surfaces as a missing build leg during
+    // a release run. Single-valued options keep the ordinary last-wins.
     values[name] =
-      values[name] === undefined ? value : `${values[name]},${value}`;
+      multiValueOptions.has(name) && values[name] !== undefined
+        ? `${values[name]},${value}`
+        : value;
   }
   for (const required of ['assets', 'repository', 'tag', 'version', 'output']) {
     if (!values[required]) throw new Error(`Missing --${required}`);
