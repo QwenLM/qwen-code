@@ -249,6 +249,7 @@ export async function rebuildManagedAutoMemoryIndex(
   const content = buildManagedAutoMemoryIndex(docs, metadata);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }
@@ -279,6 +280,7 @@ export async function rebuildUserAutoMemoryIndex(): Promise<string> {
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }

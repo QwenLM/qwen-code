@@ -2091,6 +2091,14 @@ export class MemoryManager {
         const message = error instanceof Error ? error.message : String(error);
         debugLogger.warn('Failed to persist User Dream metadata:', error);
         this.update(record, { metadata: { metadataWriteError: message } });
+        await failUserAutoMemoryDream('failed', now).catch(
+          (metadataError: unknown) => {
+            debugLogger.warn(
+              'Failed to persist User Dream retry throttle:',
+              metadataError,
+            );
+          },
+        );
       }
     } catch (error) {
       const cancelled = abortSignal.aborted && record.status === 'cancelled';

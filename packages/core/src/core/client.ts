@@ -5421,10 +5421,7 @@ export class LlmClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
-      if (memoryDeliveryToCommit) {
-        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
-        memoryDeliveryToCommit = null;
-      }
+      settleMemoryDelivery();
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -5448,10 +5445,7 @@ export class LlmClient {
       }
       throw error;
     } finally {
-      if (memoryDeliveryToCommit) {
-        this.discardManagedAutoMemoryRecallDelivery(memoryDeliveryToCommit);
-        memoryDeliveryToCommit = null;
-      }
+      settleMemoryDelivery();
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }

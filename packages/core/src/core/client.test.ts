@@ -7213,14 +7213,19 @@ hello
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
 
-      await fromAsync(
-        client.sendMessageStream(
-          [{ text: 'first' }],
-          new AbortController().signal,
-          'prompt-tree-loop',
-        ),
-      );
+      let sawLoopDetected = false;
+      for await (const event of client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-tree-loop',
+      )) {
+        if (event.type === LlmEventType.LoopDetected) {
+          sawLoopDetected = true;
+          break;
+        }
+      }
 
+      expect(sawLoopDetected).toBe(true);
       expect(JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1])).toContain(
         'Router loop-revision',
       );

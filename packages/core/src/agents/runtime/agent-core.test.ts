@@ -13,6 +13,7 @@ import {
   AgentCore,
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
+  renderSubagentSystemPrompt,
   type ReasoningLoopResult,
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
@@ -89,6 +90,33 @@ vi.mock(
     observeToolResultBoundary: boundaryObserveMock,
   }),
 );
+
+describe('renderSubagentSystemPrompt', () => {
+  it('does not give structured memory routing instructions to subagents', () => {
+    const runtimeContext = {
+      getUserMemory: () => '',
+      getAutoMemoryPrompt: () =>
+        'Use search_memory only when routed by the complete tree.',
+      getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+    } as unknown as Config;
+    const prompt = renderSubagentSystemPrompt(
+      { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+      new ContextState(),
+      runtimeContext,
+    );
+
+    expect(prompt).not.toContain('Use search_memory only when');
+
+    vi.mocked(runtimeContext.getMemoryRecallMode).mockReturnValue('legacy');
+    expect(
+      renderSubagentSystemPrompt(
+        { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+        new ContextState(),
+        runtimeContext,
+      ),
+    ).toContain('Use search_memory only when');
+  });
+});
 
 describe('AgentCore.createChat manual plan-exit notice ownership', () => {
   it('enables notices only for interactive agent chats', async () => {

@@ -935,12 +935,13 @@ describe('MemoryManager', () => {
         new Error('metadata unavailable'),
       );
       const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+      });
 
       const result = await manager.scheduleUserDream({
         projectRoot,
-        config: makeMockConfig({
-          getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
-        }),
+        config,
         now,
       });
       await result.promise;
@@ -948,6 +949,16 @@ describe('MemoryManager', () => {
       expect(manager.getTask(result.taskId!)).toMatchObject({
         status: 'completed',
         metadata: { metadataWriteError: 'metadata unavailable' },
+      });
+      await expect(
+        manager.scheduleUserDream({
+          projectRoot,
+          config,
+          now: new Date('2026-08-27T00:30:00.000Z'),
+        }),
+      ).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'failure_backoff',
       });
     });
   });

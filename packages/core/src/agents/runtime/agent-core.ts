@@ -357,7 +357,10 @@ Important Rules:
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
-    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+    autoMemory:
+      runtimeContext.getMemoryRecallMode() === 'structured'
+        ? ''
+        : runtimeContext.getAutoMemoryPrompt(),
   });
 }
 
