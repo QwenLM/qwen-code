@@ -284,6 +284,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'serve', key: 'tokenQr' },
   { section: 'superfast', key: 'enabled' },
   { section: 'superfast', key: 'endpoint' },
+  { section: 'superfast', key: 'apiKeyEnv' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

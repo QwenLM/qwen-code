@@ -111,13 +111,22 @@ export interface DecisionGateSettings {
   model: string;
   /** Hard timeout for a single decision call, in milliseconds. */
   timeoutMs: number;
+  /**
+   * Name of an environment variable holding a bearer token for the decision
+   * endpoint (e.g. `VON_API_KEY`). The value is read at call time and is never
+   * stored in settings or logged. When unset, no Authorization header is sent.
+   */
+  apiKeyEnv?: string;
 }
 
 export const DEFAULT_GATE_SETTINGS: DecisionGateSettings = {
   enabled: false,
   endpoint: 'http://localhost:8000/v1/systemone',
   model: 'von-1.2.0',
-  timeoutMs: 150,
+  // A warm single forward pass is tens to low-hundreds of ms; the first call
+  // additionally loads the encoder. 150 ms sat inside that range and left a
+  // correctly installed gate silently inert, so the default is set above it.
+  timeoutMs: 1000,
 };
 
 /** Partial settings as read from `settings.json` (all fields optional). */
@@ -126,6 +135,7 @@ export interface SuperfastSettingsInput {
   endpoint?: string;
   model?: string;
   timeoutMs?: number;
+  apiKeyEnv?: string;
 }
 
 /** Merge a partial settings object over the defaults into a full config. */
@@ -142,20 +152,29 @@ export function resolveGateSettings(
     endpoint: input?.endpoint || DEFAULT_GATE_SETTINGS.endpoint,
     model: input?.model || DEFAULT_GATE_SETTINGS.model,
     timeoutMs,
+    apiKeyEnv: input?.apiKeyEnv || undefined,
   };
 }
 
+/** Outcome of a raw System One request, for callers that need the status. */
+interface RawDecisionResult {
+  /** HTTP status, or null when the request never completed (network/timeout). */
+  status: number | null;
+  /** Parsed answers on a valid 2xx, otherwise null. */
+  answers: Record<string, DecisionAnswer> | null;
+}
+
 /**
- * Issue one System One request. Returns the parsed answers on success, or
- * `null` on any failure (fail-open). Never throws except when the caller's
- * own `signal` is aborted, which propagates as an AbortError.
+ * Issue one System One request and report both the HTTP status and the parsed
+ * answers. Returns `{ status: null, answers: null }` on any network or timeout
+ * failure. Throws only when the caller's own `signal` is aborted.
  */
-export async function querySystemOne(
+async function requestSystemOne(
   state: string,
   questions: Record<string, QuestionSpec>,
   settings: DecisionGateSettings,
   signal?: AbortSignal,
-): Promise<Record<string, DecisionAnswer> | null> {
+): Promise<RawDecisionResult> {
   const startedAt = Date.now();
   try {
     const timeoutSignal = AbortSignal.timeout(settings.timeoutMs);
@@ -163,9 +182,19 @@ export async function querySystemOne(
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    // A bearer token, read from a named env var at call time so the secret never
+    // lives in settings.json and is never logged. Sent only when the var is set.
+    if (settings.apiKeyEnv) {
+      const token = process.env[settings.apiKeyEnv];
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    }
+
     const init: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         model: settings.model,
         state,
@@ -193,7 +222,7 @@ export async function querySystemOne(
       debugLogger.debug(
         `Gate non-2xx status=${res.status} latencyMs=${Date.now() - startedAt}`,
       );
-      return null;
+      return { status: res.status, answers: null };
     }
 
     const json = (await res.json()) as SystemOneResponse;
@@ -201,10 +230,10 @@ export async function querySystemOne(
       debugLogger.debug(
         `Gate malformed response latencyMs=${Date.now() - startedAt}`,
       );
-      return null;
+      return { status: res.status, answers: null };
     }
 
-    return json.answers;
+    return { status: res.status, answers: json.answers };
   } catch (err) {
     // The caller's own abort must propagate; everything else fails open.
     if (signal?.aborted) throw err;
@@ -212,8 +241,22 @@ export async function querySystemOne(
       `Gate unavailable (fail-open) latencyMs=${Date.now() - startedAt} ` +
         `cause=${err instanceof Error ? err.name : String(err)}`,
     );
-    return null;
+    return { status: null, answers: null };
   }
+}
+
+/**
+ * Issue one System One request. Returns the parsed answers on success, or
+ * `null` on any failure (fail-open). Never throws except when the caller's
+ * own `signal` is aborted, which propagates as an AbortError.
+ */
+export async function querySystemOne(
+  state: string,
+  questions: Record<string, QuestionSpec>,
+  settings: DecisionGateSettings,
+  signal?: AbortSignal,
+): Promise<Record<string, DecisionAnswer> | null> {
+  return (await requestSystemOne(state, questions, settings, signal)).answers;
 }
 
 /** The routing recommendation derived from a turn's decision answers. */
@@ -350,17 +393,33 @@ function deriveRoute(answers: Record<string, DecisionAnswer>): TurnRoute {
   return 'unknown';
 }
 
+/** Result of the `/superfast status` health probe. */
+export type ProbeResult =
+  | 'healthy'
+  | 'auth_failed'
+  | 'unreachable'
+  | 'unhealthy';
+
 /**
- * Lightweight health probe used by `/superfast status`. Returns true only if
- * the endpoint answers a trivial noul question within the timeout.
+ * Health probe used by `/superfast status`. It uses a larger timeout than the
+ * per-turn budget so a cold backend that is still loading its model is not
+ * misreported as down, and it distinguishes an authentication failure (the
+ * server is up but rejected our credentials) from a genuinely unreachable one.
  */
 export async function probeBackend(
   settings: DecisionGateSettings,
-): Promise<boolean> {
-  const answers = await querySystemOne(
+): Promise<ProbeResult> {
+  const probeSettings: DecisionGateSettings = {
+    ...settings,
+    timeoutMs: Math.max(settings.timeoutMs, 2000),
+  };
+  const result = await requestSystemOne(
     'health check',
     { ok: { type: 'noul', instructions: 'Is the service healthy?' } },
-    settings,
+    probeSettings,
   );
-  return answers !== null && typeof answers['ok']?.noul === 'number';
+  if (result.status === null) return 'unreachable';
+  if (result.status === 401 || result.status === 403) return 'auth_failed';
+  if (typeof result.answers?.['ok']?.noul === 'number') return 'healthy';
+  return 'unhealthy';
 }

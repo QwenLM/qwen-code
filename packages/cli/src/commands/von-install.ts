@@ -9,6 +9,7 @@ import type { CommandModule } from 'yargs';
 interface VonInstallArgs {
   check?: boolean;
   port?: number;
+  yes?: boolean;
 }
 
 /**
@@ -16,14 +17,12 @@ interface VonInstallArgs {
  * `/superfast`.
  *
  * This mirrors the established Qwen Code convention that a feature needing an
- * external backend first installs that backend through a dedicated command
- * (like `qwen sandbox` inspects/proves its backend). The fork itself never
- * bundles the model: the Decision Gate talks to a local HTTP endpoint, and
- * this command provisions that endpoint's server out-of-band.
+ * external backend first installs that backend through a dedicated command.
+ * The fork itself never bundles the model: the Decision Gate talks to a local
+ * HTTP endpoint, and this command provisions that endpoint's server out of band.
  *
- * Von is chosen because it is Apache-2.0, small (~1.5 GB), and runs on CPU,
- * CUDA, ROCm, Apple Metal, or Intel iGPU — so the option is accessible on
- * essentially any machine, including laptops with no discrete GPU.
+ * Because the install pulls large third-party packages, it shows what will be
+ * downloaded and asks for confirmation before starting (skip with `--yes`).
  */
 export const vonInstallCommand: CommandModule = {
   command: 'von-install',
@@ -40,6 +39,12 @@ export const vonInstallCommand: CommandModule = {
         type: 'number',
         describe: 'Port the server will use (informational; default 8000)',
       })
+      .option('yes', {
+        alias: 'y',
+        type: 'boolean',
+        default: false,
+        describe: 'Skip the confirmation prompt and install immediately',
+      })
       .strict(),
   handler: async (argv) => {
     const args = argv as unknown as VonInstallArgs;
@@ -48,20 +53,28 @@ export const vonInstallCommand: CommandModule = {
       '../utils/stdioHelpers.js'
     );
 
-    // Detect a Python package manager. `uv` is preferred (fast, isolated);
-    // `pip` is the universal fallback. We never assume a specific interpreter
-    // path — we probe what is on PATH so this works on any machine and OS.
-    const has = (cmd: string, versionArgs: string[]): boolean => {
+    // True when the binary is on PATH and answers its version probe cleanly.
+    const works = (cmd: string): boolean => {
       try {
-        const r = spawnSync(cmd, versionArgs, { stdio: 'ignore' });
+        const r = spawnSync(cmd, ['--version'], { stdio: 'ignore' });
         return !r.error && r.status === 0;
       } catch {
         return false;
       }
     };
 
-    const alreadyInstalled = has('von', ['--version']);
-    if (alreadyInstalled) {
+    // True when the binary is on PATH even if it failed to answer. A missing
+    // binary reports ENOENT; a present-but-broken one does not.
+    const present = (cmd: string): boolean => {
+      try {
+        const r = spawnSync(cmd, ['--version'], { stdio: 'ignore' });
+        return !r.error || (r.error as NodeJS.ErrnoException).code !== 'ENOENT';
+      } catch {
+        return false;
+      }
+    };
+
+    if (works('von')) {
       writeStdoutLine('Von is already installed.');
       writeStdoutLine('Start the decision server with:  von serve --port 8000');
       writeStdoutLine('Then enable the gate in Qwen Code with:  /superfast on');
@@ -78,19 +91,69 @@ export const vonInstallCommand: CommandModule = {
       return;
     }
 
-    const useUv = has('uv', ['--version']);
-    const installCmd = useUv ? 'uv' : 'pip';
-    const installArgs = useUv
+    const uvWorks = works('uv');
+    const pipWorks = works('pip');
+    if (!uvWorks && !pipWorks) {
+      if (present('uv') || present('pip')) {
+        writeStderrLine(
+          'A Python package manager was found on PATH but did not answer its ' +
+            'version probe. Repair it (or install `uv`), then re-run ' +
+            '`qwen von-install`.',
+        );
+      } else {
+        writeStderrLine(
+          'Neither `uv` nor `pip` was found on PATH. Install a Python 3.12+ ' +
+            'package manager, then re-run `qwen von-install`.',
+        );
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    const installCmd = uvWorks ? 'uv' : 'pip';
+    const installArgs = uvWorks
       ? ['tool', 'install', 'von-sdk']
       : ['install', 'von-sdk'];
 
-    if (!useUv && !has('pip', ['--version'])) {
-      writeStderrLine(
-        'Neither `uv` nor `pip` was found on PATH. Install a Python 3.12+ ' +
-          'package manager, then re-run `qwen von-install`.',
-      );
-      process.exitCode = 1;
-      return;
+    // Disclose the size and the third-party packages before touching the system.
+    writeStdoutLine(
+      'This installs the Von decision backend (von-sdk) and its Python ' +
+        'dependencies:',
+    );
+    writeStdoutLine(
+      '  torch, transformers, accelerate, fastapi, uvicorn, httpx, pydantic, ' +
+        'click.',
+    );
+    writeStdoutLine(
+      'The download is large: the torch wheel alone is about 555 MB (more with ' +
+        'a CUDA build),',
+    );
+    writeStdoutLine(
+      'and the first `von serve` also downloads model weights from Hugging Face.',
+    );
+
+    if (!args.yes) {
+      if (!process.stdin.isTTY) {
+        writeStderrLine(
+          'Not running in a terminal, so the install was not started. Re-run ' +
+            'with `--yes` to confirm.',
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const { createInterface } = await import('node:readline/promises');
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      const answer = (await rl.question('Proceed with the install? [y/N] '))
+        .trim()
+        .toLowerCase();
+      rl.close();
+      if (answer !== 'y' && answer !== 'yes') {
+        writeStdoutLine('Cancelled. Nothing was installed.');
+        return;
+      }
     }
 
     writeStdoutLine(

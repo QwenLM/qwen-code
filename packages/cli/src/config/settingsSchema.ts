@@ -3486,11 +3486,13 @@ const SETTINGS_SCHEMA = {
     description:
       'Optional System One decision gate. When enabled, a small local decision ' +
       'model (Von) classifies each turn in a single forward pass. This release ' +
-      'runs in shadow mode only: it records the routing recommendation but does ' +
-      'not change how the turn is handled, so it never skips work yet. Acting on ' +
-      'the recommendation is a later phase. Off by default; fails open to normal ' +
-      'behaviour whenever the model is unsure or unavailable. Run `von-install` ' +
-      'to set up the backend, then `/superfast on` to enable (restart required).',
+      'runs in shadow mode only: it writes the routing recommendation to the ' +
+      'debug log (run with --debug to capture it) but does not change how the ' +
+      'turn is handled, so it never skips work yet. Acting on the ' +
+      'recommendation is a later phase. Off by default; fails open to normal ' +
+      'behaviour whenever the model is unsure or unavailable. Run ' +
+      '`qwen von-install` to set up the backend, then `/superfast on` to ' +
+      'enable (restart required).',
     showInDialog: false,
     properties: {
       enabled: {
@@ -3507,7 +3509,7 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Decision Endpoint',
         category: 'Advanced',
-        requiresRestart: false,
+        requiresRestart: true,
         default: undefined as string | undefined,
         description:
           'Full URL of the Jev-compatible /v1/systemone endpoint (default ' +
@@ -3518,9 +3520,12 @@ const SETTINGS_SCHEMA = {
         type: 'string',
         label: 'Decision Model',
         category: 'Advanced',
-        requiresRestart: false,
+        requiresRestart: true,
         default: undefined as string | undefined,
-        description: 'Model id sent to the decision endpoint (e.g. von-1.2.0).',
+        description:
+          'Model id sent to the decision endpoint (e.g. von-1.2.0). Some ' +
+          'backends, including Von, ignore this and use their own configured ' +
+          'model.',
         showInDialog: false,
       },
       timeoutMs: {
@@ -3533,7 +3538,19 @@ const SETTINGS_SCHEMA = {
         maximum: 2147483647,
         description:
           'Hard timeout for a single decision call. On timeout the gate fails ' +
-          'open. Default 150ms. Must be an integer between 1 and 2147483647.',
+          'open. Default 1000ms. Must be an integer between 1 and 2147483647.',
+        showInDialog: false,
+      },
+      apiKeyEnv: {
+        type: 'string',
+        label: 'Decision API Key Env Var',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Name of an environment variable holding the bearer token for the ' +
+          'decision endpoint (e.g. VON_API_KEY). The value is read at call ' +
+          'time and is never stored in settings or logged.',
         showInDialog: false,
       },
     },
