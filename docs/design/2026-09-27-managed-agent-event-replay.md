@@ -58,7 +58,7 @@ correct `cursor_expired` or resync.
 
 ## 4. Decisions
 
-### 4.1 Contract v1.16
+### 4.1 Contract v1.17
 
 - The three operations above move to `implemented`.
 - `next_cursor` is the `after` value for the next page, the last returned

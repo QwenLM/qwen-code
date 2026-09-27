@@ -2294,6 +2294,7 @@ async function loadServeRuntimeModules() {
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
+    sessionExecutionEngineSelectorModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2308,6 +2309,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
+    import('./session-execution-engine-selector.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2338,6 +2340,8 @@ async function loadServeRuntimeModules() {
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
+    createPairedExecutionEngines:
+      sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
   };
 }
 
@@ -6193,7 +6197,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: channelFactory,
+                runtimeBaseDir: primarySessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
@@ -6794,7 +6805,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory: secondaryChannelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: secondaryChannelFactory,
+                runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
@@ -7501,7 +7519,18 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          channelFactory: wsChannelFactory,
+          // The Conversations runtime hosts only daemon-owned standalone
+          // conversations and the sessions they start, which stay on Legacy,
+          // so it keeps a single factory.
+          ...(opts.experimentalPairedEngines &&
+          provenance !== 'live-conversation'
+            ? {
+                executionEngines: runtime.createPairedExecutionEngines({
+                  legacy: wsChannelFactory,
+                  runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+                }),
+              }
+            : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),

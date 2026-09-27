@@ -50,7 +50,7 @@ resync。
 
 ## 4. 决策
 
-### 4.1 契约 v1.16
+### 4.1 契约 v1.17
 
 - 上述三个 operation 改为 `implemented`。
 - `next_cursor` 是下一页的 `after` 值，即本页最后一条事件的 sequence 的十进制

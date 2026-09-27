@@ -113,10 +113,11 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 
 ### 5.1 路由
 
-测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agents` 与
-`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。映射了 spec 中不存在或
-标为 `planned` 的路由会失败；`partial` 或 `implemented` 的路由没有映射也会失败。
-4.3 与 4.5 之后没有路由差异。
+测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agent` 与
+`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。第一个前缀覆盖 `/v1/agents` 以及
+[H0a 任务契约](2026-09-27-managed-agent-task-contract.zh-CN.md)命名的 `/v1/agent-*` 资源；
+D1 只读取 `/v1/agents`。映射了 spec 中不存在或标为 `planned` 的路由会失败；
+`partial` 或 `implemented` 的路由没有映射也会失败。4.3 与 4.5 之后没有路由差异。
 
 ### 5.2 Record
 
