@@ -26,7 +26,17 @@
 // carried this change; the classifier script and its tests were left in
 // place so that stays a revert.
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -691,8 +701,8 @@ describe('GitHub helper tests', () => {
     // The block carries pipefail itself (this file's `set -uo pipefail`
     // convention) instead of inheriting it from the workflow-level
     // defaults.run.shell: under a bare `bash -e` tee's 0 would mask node's
-    // failure and the retry would be dead code. The executed replay is in
-    // .github/scripts/ci-disk-pressure.test.mjs.
+    // failure and the retry would be dead code. The executed replays live
+    // in the 'helper-tests retry — executed replay' describe below.
     expect(run).toMatch(/^set -uo pipefail$/m);
     // The retry's exit status decides the step. The only soft-fails are
     // tee's log write (a failed write on the ENOSPC-prone pool must not
@@ -784,6 +794,118 @@ describe('GitHub helper tests', () => {
         where,
       ).not.toContain('env.HELPER_TESTS');
     }
+  });
+});
+
+describe('helper-tests retry — executed replay', () => {
+  // #12772 retries the battery once against pool contention. The shape
+  // assertions above cannot observe the two shell mechanics the retry
+  // stands on, so these replay the extracted run block against a stub
+  // `node` that counts invocations: pipefail must come from the block
+  // itself, and a failed tee write must never drive control flow. They
+  // live beside the pins rather than in .github/scripts, which is the
+  // CI-guardrail area outside this PR's footprint.
+  const helperRetryRun = String(
+    (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    )?.run ?? '',
+  ).replaceAll('${{ env.HELPER_TESTS }}', 'stub-battery');
+
+  function replay(shellArgs, stubBody, occupyLogPath) {
+    const root = mkdtempSync(join(tmpdir(), 'ci-helper-retry-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const node = join(bin, 'node');
+    writeFileSync(node, `#!/usr/bin/env bash\n${stubBody}\n`);
+    chmodSync(node, 0o755);
+    // A directory at the log path fails tee's write the way a full disk
+    // would — and, unlike a chmod 555, keeps failing under the root-run
+    // ECS lanes.
+    if (occupyLogPath) {
+      mkdirSync(join(root, 'helper-attempt1.log'));
+    }
+    try {
+      const result = spawnSync('bash', [...shellArgs, '-c', helperRetryRun], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: root,
+        },
+      });
+      expect(result.error).toBeUndefined();
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        runs: (result.stdout.match(/^STUB-NODE-RUN$/gm) ?? []).length,
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it('fails without ambient pipefail when the battery fails', () => {
+    // Replay under a bare `bash -e` — what the step gets if the
+    // workflow-level defaults.run.shell is ever dropped or narrowed. The
+    // block's own `set -o pipefail` is then the only thing carrying node's
+    // status through the tee pipe; without it tee's 0 masks the failure,
+    // the `||` arm never runs, and the lane goes green on a real break.
+    const result = replay(['-e'], 'echo STUB-NODE-RUN\nexit 1', false);
+    expect(
+      result.status,
+      `a failing battery must fail the step\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    ).not.toBe(0);
+    expect(result.runs, 'the retry must re-run the battery once').toBe(2);
+  });
+
+  it('never lets a failed attempt-1 log write drive the retry', () => {
+    // tee fails while the battery passes. An unguarded pipefail pipeline
+    // reads tee's failure as the battery's: a spurious serial re-run on a
+    // host that just reported a write failure, then — when the retry
+    // passes — an absorbed-flake ::warning:: naming NOTHING, polluting the
+    // #12772 recurrence count with a disk event. The step must stay green,
+    // run the battery exactly once, and emit no warning.
+    const result = replay(
+      ['-e', '-o', 'pipefail'],
+      'echo STUB-NODE-RUN\nexit 0',
+      true,
+    );
+    expect(
+      result.status,
+      `signal/status must stay green\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    ).toBe(0);
+    expect(result.runs).toBe(1);
+    expect(result.stdout).not.toMatch(/::warning::/);
+    // tee's own diagnostic stays on stderr, as the dump step's documents.
+    expect(result.stderr).toMatch(/tee:/);
+  });
+
+  it('says when the attempt-1 log yields no failure names', () => {
+    // A killed or harness-dead attempt 1 leaves a log without `^not ok`
+    // lines; the absorbed-flake warning must say the capture came up empty
+    // instead of asserting a suite flake with a blank list — the warning
+    // feeds a human-maintained recurrence count.
+    const result = replay(
+      ['-e', '-o', 'pipefail'],
+      [
+        'echo STUB-NODE-RUN',
+        'if [ -f "$RUNNER_TEMP/attempt1" ]; then exit 0; fi',
+        'touch "$RUNNER_TEMP/attempt1"',
+        'echo "harness crash"',
+        'exit 1',
+      ].join('\n'),
+      false,
+    );
+    expect(
+      result.status,
+      `an absorbed flake must stay green\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    ).toBe(0);
+    expect(result.runs).toBe(2);
+    expect(result.stdout).toMatch(
+      /::warning::.*no failing test lines captured in the attempt-1 log/,
+    );
   });
 });
 
