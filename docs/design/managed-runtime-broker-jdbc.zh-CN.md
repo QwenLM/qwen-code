@@ -26,7 +26,7 @@ Managed Runtime Broker 基础能力已经定义 Runtime Binding、Runtime Sessio
 
 ## 依赖边界
 
-JDBC Repository 使用 `javax.sql.DataSource` 访问数据库，并使用 fastjson2（2.0.60）作为 `reference_json`/`result_json` 列的 JSON 编解码。不透明 Tool 载荷会关闭 fastjson2 引用检测，使 `$ref` 与 `@type` 成员保持普通数据；有限 `BigDecimal` 不使用指数形式写出，避免读取时被收窄为 double 或溢出。它们不选择连接池、不要求 Spring、不通过框架管理数据库迁移，也不捆绑生产数据库驱动。测试配置默认提供 H2 来运行 Repository 契约，并为可选的 MySQL 集成测试提供 MySQL Connector/J。
+JDBC Repository 使用 `javax.sql.DataSource` 访问数据库，并使用 fastjson2（2.0.60）作为 `reference_json`/`result_json` 列的 JSON 编解码。不透明 Tool 载荷会关闭 fastjson2 引用检测，使 `$ref` 与 `@type` 成员保持普通数据；有限 `BigDecimal` 不使用指数形式写出，避免读取时被收窄为 double 或溢出。由于同一编解码器无法读回 scale 超过 2048 的十进制值，这类值会在持久化前被拒绝。Repository 不选择连接池、不要求 Spring、不通过框架管理数据库迁移，也不捆绑生产数据库驱动。测试配置默认提供 H2 来运行 Repository 契约，并为可选的 MySQL 集成测试提供 MySQL Connector/J。
 
 ## Schema
 
@@ -53,7 +53,7 @@ Schema 初始化会对四张 Broker 私有表执行幂等的 `CREATE TABLE IF NO
 
 ## 恢复边界
 
-持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账、传输健康检查和权威执行对账仍属于后续 Runtime 集成的职责。
+持久化的 Binding 或 Session 行只能证明 Broker 状态仍然存在，不能证明它引用的 Runtime 进程仍然存活。同样，`UNKNOWN` Tool Execution 记录的是不确定性，不能证明副作用是否已经发生。进程对账和传输健康检查仍属于后续 Runtime 集成的职责。按需执行对账会询问原 Runtime，只在其给出终态证据时经 `resolveUnknown` 结算；参见 `managed-runtime-broker-service-core.zh-CN.md` 的 UNKNOWN 对账一节。
 
 ## 安全与租户隔离
 
@@ -94,4 +94,4 @@ Repository 契约覆盖：
 
 ## 后续工作
 
-服务端装配、进程对账、权威 `UNKNOWN` 解决、Schema migration 部署和多进程端到端验证仍属于后续工作。
+服务端装配、进程对账、`UNKNOWN` 执行的接管扫描、Schema migration 部署和多进程端到端验证仍属于后续工作。

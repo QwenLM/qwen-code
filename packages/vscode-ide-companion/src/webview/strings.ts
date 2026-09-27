@@ -84,6 +84,8 @@ const EN = {
     'The message cannot be edited before the session is ready.',
   'composer.editExpired': 'The original message can no longer be edited.',
   'composer.editFailed': 'Failed to edit the message. Please try again.',
+  'composer.editSyncFailed':
+    'Could not confirm the rewind. Please send the message again.',
   'context.included': 'Included',
   'context.excluded': 'Excluded',
   'context.include': 'Include active file context',
@@ -167,6 +169,7 @@ const ZH: Record<ChromeStringKey, string> = {
   'composer.editUnavailable': '会话尚未就绪，暂时无法编辑该消息。',
   'composer.editExpired': '该消息已无法再编辑。',
   'composer.editFailed': '编辑消息失败，请重试。',
+  'composer.editSyncFailed': '未能确认回退，请重新发送该消息。',
   'context.included': '已包含',
   'context.excluded': '已排除',
   'context.include': '包含当前文件上下文',
