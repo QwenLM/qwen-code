@@ -8,6 +8,7 @@ import {
   projectJavaAgentItem,
   toTimestamp,
 } from './java-managed-agent-event-projector';
+import { managedRequestId } from './managed-session-storage';
 import type {
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
@@ -58,7 +59,7 @@ export function createJavaManagedAgentProvider(
             async createEmpty(request, command) {
               const result = await client.createSession(
                 {
-                  requestId: command.idempotencyKey,
+                  requestId: managedRequestId(),
                   idempotencyKey: command.idempotencyKey,
                   agentId: request.agentId,
                   input: [],
@@ -120,12 +121,12 @@ export function createJavaManagedAgentProvider(
     async createSession(request, command) {
       const result = await client.createSession(
         {
-          requestId: command.idempotencyKey,
+          requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
           environmentId: options.environmentId,
           title: titleFor(request.text),
-          input: [{ type: 'text', text: request.text }],
+          input: [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -138,10 +139,10 @@ export function createJavaManagedAgentProvider(
     async submitPrompt(sessionId, request, command) {
       const result = await client.submitTurn(
         {
-          requestId: command.idempotencyKey,
+          requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
-          input: [{ type: 'text', text: request.text }],
+          input: [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -154,7 +155,7 @@ export function createJavaManagedAgentProvider(
     async cancel(sessionId, turnId, command) {
       await client.cancelTurn(
         {
-          requestId: command.idempotencyKey,
+          requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
           turnId,
