@@ -57,7 +57,7 @@ an existing schema (`PublicCommandOperation`, `WebShellCommandOperation`,
 `SessionCapabilities` and `WebShellSession.capabilities`). The properties of
 the new schemas and the two new parameters need no marker of their own: only
 planned operations reach them. The generator drops all of it, and the Java
-contract test fails if the server maps any of the routes. The version becomes `1.15.0`: routes are added, and W0d (#12797) already took `1.14.0`.
+contract test fails if the server maps any of the routes. The version becomes `1.16.0`: routes are added, and W0d (#12797) and D2 (#12822) already took `1.14.0` and `1.15.0`.
 
 An enum value cannot carry the marker, and cancel reuses the command
 operation (section 4.4). The new `task_cancel` command type is therefore
@@ -325,7 +325,7 @@ cancel and event query requests are checked as well.
 - `npm run generate:managed-agent-api` in `packages/web-shell` leaves
   `client/components/managed/generated/managed-agent-api.ts` unchanged, and
   `managed-agent-api.test.ts` passes.
-- `ManagedAgentApiContractTest` (3 tests), `PlannedTaskContractTest` (5
+- `ManagedAgentApiContractTest` (5 tests), `PlannedTaskContractTest` (5
   tests, 103 validations: 50 public, 49 WebShell mirrors and 4 WebShell
   requests) and `ManagedSessionStoreContractFixtureTest` (3 tests) pass
   without new gap lines.
@@ -346,9 +346,9 @@ cancel and event query requests are checked as well.
 
 ## 7. Follow-up
 
-- **Version order.** W0d (#12797) landed first as `1.14.0`, so this change is
-  `1.15.0`. D2 (#12822) also moves the spec; whichever of the two lands later
-  takes the next minor version.
+- **Version order.** W0d (#12797) landed as `1.14.0` and D2 (#12822) as
+  `1.15.0` before this change, so it is `1.16.0`. Any spec change that lands
+  before it moves it to the next minor version again.
 - **H0b.** The shared record schema, including `monitor_run`, the three state
   lines and `OperationGrant`, is #12837. It adds `monitor_run` to the closed v1
   domain index, which answers issue question 1, and keeps the domain disabled
