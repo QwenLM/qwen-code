@@ -66,6 +66,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { stripAuxSelectorBaseUrlCredential } from '../../utils/aux-model-selector.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import { applyOpenTuiTheme } from './theme.js';
@@ -99,7 +100,7 @@ function advisorSelector(
   const selector = `${model.authType}:${model.id}`;
   return model.isRuntimeModel
     ? selector
-    : `${selector}\0${model.registryBaseUrl ?? ''}`;
+    : `${selector}\0${stripAuxSelectorBaseUrlCredential(model.registryBaseUrl ?? '')}`;
 }
 
 /**

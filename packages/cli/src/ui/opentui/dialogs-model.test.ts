@@ -23,6 +23,7 @@ vi.mock('@opentui/core', () => ({
 import {
   buildModelSelectionKey,
   computeModelDialogMaxItems,
+  encodeVisionModelSelector,
   formatContextWindow,
   formatModalities,
   formatModelOptionLabel,
@@ -92,6 +93,24 @@ describe('model selection keys', () => {
       authType: '',
       modelId: 'plain-id',
     });
+  });
+});
+
+describe('encodeVisionModelSelector', () => {
+  it('keeps a clean baseUrl suffix byte-identical', () => {
+    expect(
+      encodeVisionModelSelector(
+        buildModelSelectionKey('use-openai', 'gpt-x', 'https://a.example/v1'),
+      ),
+    ).toBe('use-openai:gpt-x\0https://a.example/v1');
+  });
+
+  it('strips userinfo credentials from the persisted baseUrl suffix', () => {
+    expect(
+      encodeVisionModelSelector(
+        'use-openai::gpt-x\0https://user:sk-secret@a.example/v1',
+      ),
+    ).toBe('use-openai:gpt-x\0https://a.example/v1');
   });
 });
 

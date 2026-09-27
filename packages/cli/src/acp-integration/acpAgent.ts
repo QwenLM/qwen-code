@@ -351,6 +351,10 @@ import {
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../utils/aux-model-selector.js';
+import {
   updateOutputLanguageFile,
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
@@ -2101,7 +2105,12 @@ function readCoreSettingValues(
   for (const key of QWEN_CORE_SETTING_KEYS) {
     const value = getNestedSettingValue(source, key);
     if (value !== undefined) {
-      values[key] = value;
+      // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix
+      // can embed userinfo credentials and must not reach the ACP client.
+      values[key] =
+        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     }
   }
   return values;
@@ -8319,7 +8328,11 @@ class QwenAgent implements Agent {
                 ...(baseUrl
                   ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
                   : {}),
-                ...(fastModelId ? { fastModelId } : {}),
+                // The persisted selector can carry a userinfo-bearing
+                // baseUrl suffix; publish the credential-stripped form.
+                ...(fastModelId
+                  ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+                  : {}),
               },
             }
           : {}),

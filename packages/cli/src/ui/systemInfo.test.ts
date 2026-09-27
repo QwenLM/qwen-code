@@ -276,6 +276,24 @@ describe('systemInfo', () => {
   });
 
   describe('getExtendedSystemInfo', () => {
+    it('should redact userinfo from the persisted fast model selector', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:fast\0https://user:sk-secret@fast.example/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:fast (https://fast.example/v1)',
+      );
+      expect(JSON.stringify(extendedInfo)).not.toContain('sk-secret');
+    });
+
     it('should include memory usage and base URL', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),

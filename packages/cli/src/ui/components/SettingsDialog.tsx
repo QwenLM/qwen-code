@@ -11,6 +11,10 @@ import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
+import {
+  formatAuxModelSelectorForDisplay,
+  isAuxModelSelectorSettingKey,
+} from '../../utils/aux-model-selector.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
@@ -1300,7 +1304,14 @@ export function SettingsDialog({
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                // Aux-model selectors persist as `authType:id\0baseUrl`; the
+                // suffix can embed userinfo credentials, so render the
+                // scrubbed display form rather than the raw string.
+                displayValue =
+                  typeof effectiveCurrentValue === 'string' &&
+                  isAuxModelSelectorSettingKey(item.value)
+                    ? formatAuxModelSelectorForDisplay(effectiveCurrentValue)
+                    : String(effectiveCurrentValue);
               } else {
                 displayValue = '';
               }
