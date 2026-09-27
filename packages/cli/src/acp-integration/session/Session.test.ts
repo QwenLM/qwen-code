@@ -11172,6 +11172,7 @@ describe('Session', () => {
           hookContext: '',
           inputAnnotations: expectedAnnotations,
         },
+        expect.stringContaining('test-session-id########'),
         'tag-prompt',
       );
       expect(textParts(firstSentMessage())).toEqual(['model-only prompt']);
@@ -11192,6 +11193,7 @@ describe('Session', () => {
           'hello',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
       },
@@ -11221,6 +11223,7 @@ describe('Session', () => {
           hookContext: '',
           inputAnnotations: [valid],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11245,6 +11248,7 @@ describe('Session', () => {
         'hello',
         undefined,
         undefined,
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -27770,6 +27774,7 @@ describe('Session', () => {
               },
             ],
           },
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
