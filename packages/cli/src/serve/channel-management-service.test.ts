@@ -631,6 +631,43 @@ describe('createChannelManagementService', () => {
     expect(store.remove).not.toHaveBeenCalled();
   });
 
+  it('rejects deletion when runtime still sees a channel the resolved scope never persisted', async () => {
+    // The manager resolves the merged system + user + workspace view, so a
+    // channel configured only at user scope runs in this workspace while the
+    // resolved scope snapshot shows neither its config nor a startup entry.
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
+      committedNames: ['proj'],
+    });
+
+    await expect(
+      service.remove('proj', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(manager.committedChannelNames()).toEqual(['proj']);
+    expect(manager.state().workers).toHaveLength(1);
+  });
+
+  it('reports not found when another workspace owns the only runtime trace and nothing is persisted here', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: [] }),
+      committedNames: ['bot'],
+    });
+    const state = manager.state();
+    const worker = state.workers[0]!;
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      workers: [{ ...worker, workspaceCwd: '/ws/other' }],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
   it('propagates missing-config worker stop failure without persisting deletion', async () => {
     const { service, store, manager } = setup({
       snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
@@ -658,7 +695,7 @@ describe('createChannelManagementService', () => {
     'rejects missing-config deletion with %s runtime ownership',
     async (ownership, reason) => {
       const { service, store, manager } = setup({
-        snapshot: settingsSnapshot({ channels: {} }),
+        snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
         committedNames: ['bot'],
       });
       const state = manager.state();

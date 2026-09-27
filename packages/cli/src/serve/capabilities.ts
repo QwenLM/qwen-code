@@ -374,6 +374,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   channel_control: { since: 'v1' },
   // Sanitized workspace Channel configuration, lifecycle, and pairing.
   channel_management: { since: 'v1' },
+  // `DELETE /workspaces/:workspace/channels/:name` converges a Channel whose
+  // configuration is missing from the workspace's resolved settings scope:
+  // with exactly one confirmed committed Worker owner in that workspace, it
+  // stops the owner and removes the persisted startup selection held in that
+  // scope instead of reporting `channel_instance_not_found`.
+  channel_delete_config_loss_convergence: { since: 'v1' },
   // Read-only workspace graph of recently observed channel contacts.
   workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
@@ -682,6 +688,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['channel_control', (toggles) => toggles.channelControlAvailable === true],
   [
     'channel_management',
+    (toggles) => toggles.channelManagementAvailable === true,
+  ],
+  [
+    'channel_delete_config_loss_convergence',
     (toggles) => toggles.channelManagementAvailable === true,
   ],
   [

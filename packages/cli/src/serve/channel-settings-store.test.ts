@@ -2536,6 +2536,48 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('preserves filtered channel entries when removing an absent channel startup name', async () => {
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: { type: 'telegram', token: '$TEST_TOKEN' },
+          legacy: 'telegram',
+        },
+        serve: { channels: ['bot', 'ghost'] },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const current = store.snapshot();
+
+    const next = await store.remove('ghost', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next.channels).toEqual(current.channels);
+    expect(next.startupNames).toEqual(['bot']);
+    const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(persisted.channels.legacy).toBe('telegram');
+    expect(persisted.serve.channels).toEqual(['bot']);
+  });
+
+  it('leaves the settings file byte-identical when deleting a channel that was never persisted', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "telegram", "token": "$BOT_TOKEN" } },
+  "serve": { "port": 4123 }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    const next = await store.remove('missing', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('preserves the all sentinel when removing a legacy all config beside other instances', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

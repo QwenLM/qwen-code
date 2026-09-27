@@ -456,6 +456,7 @@ describe('qwen serve — capabilities envelope', () => {
       'channel_delivery',
       'channel_control',
       'channel_management',
+      'channel_delete_config_loss_convergence',
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',

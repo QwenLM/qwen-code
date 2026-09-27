@@ -218,12 +218,15 @@ export function createChannelManagementService(
     return matches;
   };
 
+  const ownedWorkers = (name: string) =>
+    workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+
   const workspaceCommittedNames = (): string[] =>
     opts.manager
       .committedChannelNames()
-      .filter((name) =>
-        workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
-      );
+      .filter((name) => ownedWorkers(name).length > 0);
 
   const runtimeOwnerMismatch = (name: string, reason?: string) =>
     new ChannelManagementError(
@@ -233,10 +236,7 @@ export function createChannelManagementService(
 
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
-    const workers = workerFor(name).filter(
-      (worker) => worker.workspaceCwd === opts.workspaceCwd,
-    );
-    if (workers.length !== 1) {
+    if (ownedWorkers(name).length !== 1) {
       throw runtimeOwnerMismatch(name);
     }
   };
@@ -267,9 +267,7 @@ export function createChannelManagementService(
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
-    const workers = workerFor(name).filter(
-      (worker) => worker.workspaceCwd === opts.workspaceCwd,
-    );
+    const workers = ownedWorkers(name);
     if (workers.length !== 1) {
       return {
         state: 'error',
@@ -480,9 +478,29 @@ export function createChannelManagementService(
       const configured = Object.hasOwn(current.channels, name);
       if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (!configured) assertConvergeableRuntimeOwner(name);
+      if (!configured && current.startupNames.includes(name)) {
+        assertConvergeableRuntimeOwner(name);
+      } else if (
+        !configured &&
+        (opts.manager.committedChannelNames().includes(name) ||
+          workerFor(name).length > 0)
+      ) {
+        // The manager resolves the merged system + user + workspace view, so
+        // the runtime can still see a channel this scope never persisted —
+        // configured only at user scope, or selected in another workspace's
+        // file. Nothing persisted here can converge; stopping the worker
+        // would tear down a channel this route never listed and cannot
+        // delete, so report the scope-local truth instead.
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
       if (workspaceCommittedNames().includes(name)) {
-        assertOwnedRuntime(name);
+        // On the missing-config path the converge gate above already
+        // confirmed the single local owner; only the configured path needs
+        // this check.
+        if (configured) assertOwnedRuntime(name);
         await stopChannel(name);
       }
       const persisted = await opts.store.remove(name, request);
