@@ -1281,17 +1281,27 @@ jobs:
       # spawns real subprocess loops on the shared ECS pool, and a main push
       # has no flaky-rerun patrol — a single host hiccup failed the lane on a
       # CSS-only commit (#12772). A real break still fails both attempts.
-      # Attempt 1 tees to a log so the warning can name the failed suites;
-      # pipefail (defaults.run.shell: bash) is what keeps node's status
-      # through that pipe. The warning is gated on the retry's success, so
-      # only an absorbed flake is annotated — a double failure reddens the
-      # lane directly (the #11364 doctrine from e2e.yml).
+      # Attempt 1 tees to a log so the warning can name the failed suites.
+      # The block sets its own pipefail (this file's convention) rather than
+      # inheriting it from defaults.run.shell ~1200 lines up — under a bare
+      # `bash -e` tee's 0 would mask node's failure and silently retire the
+      # retry — and tee's write is `|| true`-guarded so a failed log write on
+      # this ENOSPC-prone pool can never pose as a battery failure: node's
+      # status alone decides. TAP is pinned on attempt 1 so the warning's
+      # `^not ok` grep still matches if a self-hosted runner's Node drifts
+      # past 22 (measured: Node 24 pipes spec, not tap). The warning is gated on
+      # the retry's success, so only an absorbed flake is annotated — a
+      # double failure reddens the lane directly (the #11364 doctrine from
+      # e2e.yml).
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
-            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
-              echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
+          set -uo pipefail
+          node --test --test-concurrency=1 --test-reporter=tap ${{ env.HELPER_TESTS }} 2>&1 | { tee "${RUNNER_TEMP}/helper-attempt1.log" || true; } || {
+            node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} && {
+              failures="$(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -)" || true
+              echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: ${failures:-no failing test lines captured in the attempt-1 log} — count this toward the #12772 helper-battery recurrence threshold"
+            }
           }
 
       # State-at-failure dump for the 19 substantive steps after install: the

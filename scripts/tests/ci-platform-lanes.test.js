@@ -682,23 +682,41 @@ describe('GitHub helper tests', () => {
       (candidate) => candidate.name === 'Run .github/scripts helper tests',
     );
     expect(step, 'helper-tests step missing').toBeDefined();
-    const invocations =
-      String(step.run).match(/node --test --test-concurrency=1/g) ?? [];
+    const run = String(step.run);
+    const invocations = run.match(/node --test --test-concurrency=1/g) ?? [];
     expect(invocations).toHaveLength(2);
-    expect(String(step.run)).toContain('||');
+    expect(run).toContain('||');
     // The retry re-runs the SAME battery, not a cheaper subset.
-    expect(String(step.run)).not.toContain('HELPER_TESTS_DEP_FREE');
-    // The retry's exit status decides the step: nothing swallows it.
-    expect(String(step.run)).not.toMatch(/\|\|\s*(true|:)/);
-    expect(String(step.run).trimEnd().endsWith('}')).toBe(true);
+    expect(run).not.toContain('HELPER_TESTS_DEP_FREE');
+    // The block carries pipefail itself (this file's `set -uo pipefail`
+    // convention) instead of inheriting it from the workflow-level
+    // defaults.run.shell: under a bare `bash -e` tee's 0 would mask node's
+    // failure and the retry would be dead code. The executed replay is in
+    // .github/scripts/ci-disk-pressure.test.mjs.
+    expect(run).toMatch(/^set -uo pipefail$/m);
+    // The retry's exit status decides the step. The only soft-fails are
+    // tee's log write (a failed write on the ENOSPC-prone pool must not
+    // pose as a battery failure) and the warning's grep capture (a missing
+    // attempt-1 log must not redden an absorbed flake) — and no soft-fail
+    // may follow the retry group itself.
+    expect(run.match(/\|\|\s*(true|:)\b/g) ?? []).toHaveLength(2);
+    expect(run).not.toMatch(/\}\s*\|\|\s*(true|:)/);
+    expect(run.trimEnd().endsWith('}')).toBe(true);
     expect(step['continue-on-error']).toBeUndefined();
     // The warning fires only when the retry absorbed the flake, and names
-    // the attempt-1 failures (the datum #12772 asked for).
-    expect(String(step.run)).toMatch(/&&\s+echo "::warning::/);
-    expect(String(step.run)).toMatch(
-      /tee "\$\{RUNNER_TEMP\}\/helper-attempt1\.log"/,
-    );
-    expect(String(step.run)).toMatch(/::warning::.*\$\(/);
+    // the attempt-1 failures (the datum #12772 asked for). TAP is pinned on
+    // attempt 1 so the `^not ok` grep still matches if a self-hosted
+    // runner's Node drifts past 22 (measured: Node 24 pipes spec), and
+    // an empty capture says so instead of asserting a blank suite flake.
+    expect(run).toContain('echo "::warning::');
+    const warningAt = run.indexOf('echo "::warning::');
+    const retryAt = run.lastIndexOf('node --test');
+    expect(retryAt).toBeGreaterThanOrEqual(0);
+    expect(run.slice(retryAt, warningAt)).toContain('&&');
+    expect(run).toContain('--test-concurrency=1 --test-reporter=tap');
+    expect(run).toContain('tee "${RUNNER_TEMP}/helper-attempt1.log"');
+    expect(run).toContain("grep -E '^not ok'");
+    expect(run).toContain('${failures:-');
   });
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {
