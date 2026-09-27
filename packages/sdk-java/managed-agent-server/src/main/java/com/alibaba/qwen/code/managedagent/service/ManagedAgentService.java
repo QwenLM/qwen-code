@@ -64,6 +64,8 @@ public class ManagedAgentService {
     // Snapshot reset and resync arrive with event replay (Stage D3).
     private static final SessionCapabilities CAPABILITIES =
             new SessionCapabilities(true, false, false, false);
+    // A context stays ready until cwd changes arrive (W2).
+    private static final String WORKSPACE_STATE = "ready";
     // "text" is the spelling that clients used before the contract.
     private static final Set<String> INPUT_TYPES = Set.of("input_text",
             "text");
@@ -470,13 +472,17 @@ public class ManagedAgentService {
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
         return session.workspace() == null ? null
                 : new WebShellWorkspace(session.workspace().getWorkspaceId(),
-                        session.workspace().getCwdRelative());
+                        session.workspace().getCwdRelative(),
+                        session.workspace().getContextRevision(),
+                        WORKSPACE_STATE);
     }
 
     private static PublicWorkspace publicWorkspace(SessionRecord session) {
         return session.workspace() == null ? null
                 : new PublicWorkspace(session.workspace().getWorkspaceId(),
-                        session.workspace().getCwdRelative());
+                        session.workspace().getCwdRelative(),
+                        session.workspace().getContextRevision(),
+                        WORKSPACE_STATE);
     }
 
     private static Map<String, Object> webShellEnvironment(

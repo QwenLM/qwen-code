@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.14.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented."
+    "version": "1.15.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented."
   },
   "servers": [
     {
@@ -940,14 +940,28 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listWorkspaces",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Only readable preregistered workspaces, ordered by stable workspace id. Opaque cursors are bound to tenant, actor and filters; ACLs are rechecked on each page. Return actor-specific creation hints, pre-Session capability discovery and the authorized explicit default even when it is outside this page. No physical paths are exposed and no Runtime is started.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Cursor"
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
           },
           {
-            "$ref": "#/components/parameters/ListLimit"
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
           }
         ],
         "responses": {
@@ -986,7 +1000,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getWorkspace",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Authorized durable resource view; no Runtime startup required.",
@@ -1106,14 +1120,14 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellQueryWorkspaces",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WebShellListRequest"
+                "$ref": "#/components/schemas/WebShellWorkspaceQueryRequest"
               }
             }
           }
@@ -1725,6 +1739,42 @@
           }
         }
       }
+    },
+    "/api/agent/web-shell/v1/workspaces/get": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellGetWorkspace",
+        "x-qwen-implementation-status": "partial",
+        "description": "Read one authorized Workspace by its logical ID; absent or unreadable Workspaces return 404. No Runtime is started.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceGetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authorized durable resource view; no Runtime startup required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellWorkspace"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1973,7 +2023,7 @@
           },
           "workspace": {
             "$ref": "#/components/schemas/WorkspaceSelection",
-            "x-qwen-implementation-status": "planned",
+            "x-qwen-implementation-status": "partial",
             "description": "W0. Only omission allows default resolution; null or an empty object is invalid. Resolve and persist an explicit authorized tenant default on first admission; no default means workspace_required. The caller request digest retains an omission marker; replay resolves the original receipt before defaults. A changed default must never rebind a retry. Unavailable W0 support rejects rather than ignores this field."
           }
         }
@@ -2177,7 +2227,7 @@
           },
           "workspace": {
             "$ref": "#/components/schemas/WorkspaceContext",
-            "x-qwen-implementation-status": "planned",
+            "x-qwen-implementation-status": "partial",
             "description": "Absent for unbound legacy records, whose execution stays blocked pending evidence-based migration. Ready means committed context, not an active Runtime gate."
           },
           "archived_at": {
@@ -2815,7 +2865,7 @@
           },
           "workspace": {
             "$ref": "#/components/schemas/WebShellWorkspaceSelection",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           }
         }
       },
@@ -3037,7 +3087,7 @@
           },
           "workspace": {
             "$ref": "#/components/schemas/WebShellWorkspaceContext",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           },
           "capabilities": {
             "type": "object",
@@ -3335,7 +3385,7 @@
         "maxLength": 1024,
         "description": "Logical directory relative to the authorized workspace root; dot denotes root. Use slash separators. Reject absolute paths, drive prefixes, backslashes, NUL and parent segments. Runtime must verify directory existence, realpath containment and symlink safety before activation; schema validation alone is insufficient. Preserve spaces and case, normalize repeated separators and dot segments, and never percent-decode JSON values.",
         "examples": [".", "services/api"],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WorkspaceSelection": {
         "type": "object",
@@ -3352,7 +3402,7 @@
             "default": "."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WorkspaceContext": {
         "type": "object",
@@ -3382,7 +3432,7 @@
             "enum": ["ready", "changing", "recovery_blocked"]
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicWorkspace": {
         "type": "object",
@@ -3410,14 +3460,14 @@
           "can_create_session": {
             "type": "boolean",
             "description": "Current actor permission hint only; creation rechecks ACL, state and Agent/config compatibility.",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           },
           "state": {
             "type": "string",
             "enum": ["active", "draining", "removed"]
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicWorkspaceList": {
         "type": "object",
@@ -3448,15 +3498,19 @@
           "capabilities": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["workspace_context"],
+            "required": ["workspace_context", "workspace_binding"],
             "properties": {
               "workspace_context": {
                 "type": "boolean",
                 "default": false,
                 "description": "True only after W0 creation, binding and private installation contracts are supported end to end."
+              },
+              "workspace_binding": {
+                "type": "boolean",
+                "description": "Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution."
               }
             },
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           },
           "default_workspace": {
             "oneOf": [
@@ -3483,10 +3537,10 @@
               }
             ],
             "description": "Explicit tenant default only when active and creatable by this actor; otherwise null. Included independently of the current page. A non-null default has can_create_session=true; creation revalidates it.",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "ChangeCwdRequest": {
         "type": "object",
@@ -3604,7 +3658,7 @@
             "default": "."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellWorkspaceContext": {
         "type": "object",
@@ -3629,7 +3683,7 @@
             "enum": ["ready", "changing", "recovery_blocked"]
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellWorkspace": {
         "type": "object",
@@ -3648,14 +3702,14 @@
           "canCreateSession": {
             "type": "boolean",
             "description": "Current actor permission hint only; creation rechecks ACL, state and Agent/config compatibility.",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           },
           "state": {
             "type": "string",
             "enum": ["active", "draining", "removed"]
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellWorkspacePage": {
         "type": "object",
@@ -3677,15 +3731,19 @@
           "capabilities": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["workspaceContext"],
+            "required": ["workspaceContext", "workspaceBinding"],
             "properties": {
               "workspaceContext": {
                 "type": "boolean",
                 "default": false,
                 "description": "Same end-to-end W0 readiness as public workspace_context; missing means unsupported."
+              },
+              "workspaceBinding": {
+                "type": "boolean",
+                "description": "Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution."
               }
             },
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           },
           "defaultWorkspace": {
             "oneOf": [
@@ -3712,10 +3770,10 @@
               }
             ],
             "description": "Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true.",
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "partial"
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellChangeCwdRequest": {
         "type": "object",
@@ -5084,6 +5142,36 @@
           }
         },
         "x-qwen-implementation-status": "planned"
+      },
+      "WebShellWorkspaceQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": ["string", "null"],
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      },
+      "WebShellWorkspaceGetRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId"],
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "x-qwen-implementation-status": "partial"
       }
     }
   }

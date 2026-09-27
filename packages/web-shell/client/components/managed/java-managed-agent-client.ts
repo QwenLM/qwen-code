@@ -19,6 +19,10 @@ export type JavaAgentSession = Omit<
   environment?: JavaAgentEnvironment | null;
 };
 
+export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
+
+export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
+
 export type JavaAgentSessionPage = Omit<
   Schemas['WebShellSessionPage'],
   'data'
@@ -84,6 +88,21 @@ export class JavaManagedAgentClient {
 
   getSession(sessionId: string, signal?: AbortSignal) {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
+  }
+
+  listWorkspaces(
+    request: Schemas['WebShellWorkspaceQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspacePage> {
+    return this.post('/workspaces/query', request, signal);
+  }
+
+  getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    return this.post<JavaAgentWorkspace>(
+      '/workspaces/get',
+      { workspaceId },
+      signal,
+    );
   }
 
   getTranscript(

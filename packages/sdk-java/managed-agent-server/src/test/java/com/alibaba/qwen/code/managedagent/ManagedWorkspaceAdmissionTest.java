@@ -66,6 +66,193 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedWorkspaceRegistry registry;
 
     @Test
+    void discoveryFiltersBeforePagingAndKeepsDefaultOutsidePage()
+            throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "a-hidden", "physical-a");
+        register(tenant, "b-visible", "physical-b");
+        register(tenant, "c-readonly", "physical-c");
+        register(tenant, "d-default", "physical-d");
+        grant(tenant, "a-hidden", "other", true);
+        grant(tenant, "b-visible", "actor-a", true);
+        grant(tenant, "c-readonly", "actor-a", false);
+        grant(tenant, "d-default", "actor-a", true);
+        jdbc.update("INSERT INTO managed_workspace_default"
+                + " (tenant_id, workspace_id) VALUES (?, ?)", tenant,
+                "d-default");
+        var response = mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id")
+                        .value("b-visible"))
+                .andExpect(jsonPath("$.data[0].object")
+                        .value("agent.workspace"))
+                .andExpect(jsonPath("$.data[0].state").value("active"))
+                .andExpect(jsonPath("$.default_workspace.id")
+                        .value("d-default"))
+                .andExpect(jsonPath("$.default_workspace.object")
+                        .value("agent.workspace"))
+                .andExpect(jsonPath("$.has_more").value(true))
+                .andExpect(jsonPath("$.capabilities.workspace_binding")
+                        .value(true))
+                .andExpect(jsonPath("$.capabilities.workspace_context")
+                        .value(false))
+                .andReturn();
+        assertThat(response.getResponse().getHeader("Cache-Control"))
+                .contains("no-store");
+        assertThat(response.getResponse().getContentAsString())
+                .doesNotContain("physical-b", "config-b-visible",
+                        "policy-b-visible");
+        String cursor = mapper.readTree(response.getResponse()
+                .getContentAsString()).get("next_cursor").asText();
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", "1").param("cursor", cursor))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id")
+                        .value("c-readonly"))
+                .andExpect(jsonPath("$.data[0].can_create_session")
+                        .value(false));
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "other"))
+                        .param("limit", "1").param("cursor", cursor))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", "2").param("cursor", cursor))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("invalid_workspace_cursor"));
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "limit", 2, "cursor", cursor))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("invalid_workspace_cursor"));
+        String longActor = "界".repeat(512);
+        grant(tenant, "b-visible", longActor, true);
+        grant(tenant, "d-default", longActor, true);
+        var longActorPage = mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .param("limit", "1"))
+                .andExpect(status().isOk()).andReturn();
+        String longActorCursor = mapper.readTree(longActorPage.getResponse()
+                .getContentAsString()).get("next_cursor").asText();
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .param("limit", "1")
+                        .param("cursor", longActorCursor))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id")
+                        .value("d-default"));
+        mvc.perform(get("/v1/agents/workspaces/a-hidden")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isNotFound());
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"limit\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].workspaceId")
+                        .value("b-visible"))
+                .andExpect(jsonPath("$.data[0].state").value("active"))
+                .andExpect(jsonPath("$.defaultWorkspace.workspaceId")
+                        .value("d-default"))
+                .andExpect(jsonPath("$.defaultWorkspace.state")
+                        .value("active"));
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workspaceId\":\"b-visible\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.workspaceId").value("b-visible"))
+                .andExpect(jsonPath("$.state").value("active"));
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor("another-tenant", "actor-a")))
+                .andExpect(status().isForbidden());
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                + " WHERE tenant_id = ? AND workspace_id = ?", tenant,
+                "b-visible");
+        mvc.perform(get("/v1/agents/workspaces/b-visible")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("b-visible"))
+                .andExpect(jsonPath("$.object").value("agent.workspace"))
+                .andExpect(jsonPath("$.state").value("draining"))
+                .andExpect(jsonPath("$.can_create_session").value(false));
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'REMOVED'"
+                + " WHERE tenant_id = ? AND workspace_id = ?", tenant,
+                "d-default");
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.default_workspace").value((Object) null));
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+                        + " WHERE tenant_id = ? AND workspace_id = ?",
+                tenant, "b-visible");
+        mvc.perform(get("/v1/agents/workspaces/b-visible")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isNotFound());
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].id")
+                        .value("c-readonly"))
+                .andExpect(jsonPath("$.data[1].id")
+                        .value("d-default"));
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].workspaceId")
+                        .value("c-readonly"))
+                .andExpect(jsonPath("$.data[1].workspaceId")
+                        .value("d-default"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 101})
+    void discoveryRejectsOutOfRangePageSizes(int limit) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", Integer.toString(limit)))
+                .andExpect(status().isBadRequest());
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("limit", limit))))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void publicCreationPinsSevenFieldBindingAndReplaysAfterRegistryChange()
             throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();

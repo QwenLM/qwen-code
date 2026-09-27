@@ -58,10 +58,13 @@ public final class ApiModels {
 
     public record PublicWorkspace(
             @JsonProperty("workspace_id") String workspaceId,
-            @JsonProperty("cwd_relative") String cwdRelative) {
+            @JsonProperty("cwd_relative") String cwdRelative,
+            @JsonProperty("context_revision") long contextRevision,
+            String state) {
     }
 
-    public record WebShellWorkspace(String workspaceId, String cwdRelative) {
+    public record WebShellWorkspace(String workspaceId, String cwdRelative,
+            long contextRevision, String state) {
     }
 
     public record SessionCapabilities(boolean items, boolean snapshots,

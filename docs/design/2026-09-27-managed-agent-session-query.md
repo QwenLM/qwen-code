@@ -25,6 +25,10 @@ get routes on both surfaces still had the following gaps:
   contract's status enum lacked.
 - Several operations did not declare error statuses that the server returns,
   so the contract test never validated those envelopes.
+- W0d ([#12797](https://github.com/QwenLM/qwen-code/pull/12797)) binds empty
+  Sessions to a Workspace. A bound Session's `workspace` lacked the required
+  `context_revision` and `state`, which W0d recorded as gaps on the create and
+  get routes.
 
 The issue's exit check for D2 is that these six routes move to `implemented`,
 that one Session reports the same identity, status and sequence on both
@@ -44,13 +48,13 @@ surfaces, and that cross-tenant reads return `404 session_not_found`.
 - Event versions, top-level Item and Part identity, real `has_more`, event
   limits up to 1000, a persisted replay floor, `cursor_expired` and resync.
   These are D3.
-- Durable archive and delete operations (lifecycle work) and the Session
-  workspace's `context_revision` and `state` (workspace-context work).
+- Durable archive and delete operations (lifecycle work) and context changes
+  (W2), which raise `context_revision` and report the other `state` values.
 - AgentDefinition. Only one agent revision exists until it lands.
 
 ## 4. Decisions
 
-### 4.1 Contract v1.14
+### 4.1 Contract v1.15
 
 - The Session and Turn status enums gain the values the server already
   returns. A Session reads `archived` after an archive, and `archiving` or
@@ -74,10 +78,8 @@ surfaces, and that cross-tenant reads return `404 session_not_found`.
   Items list, and `400` and `404` on the WebShell transcript, event stream,
   submit and cancel.
 - The six Session routes above move to `implemented`. `implemented` covers an
-  operation's surface that is not `planned`. The planned `workspace` field,
-  which W0b already returns for bound Sessions, does not match
-  `WorkspaceContext` yet; the `record … WorkspaceContext` gap lines keep
-  tracking it for the workspace-context work.
+  operation's surface that is not `planned`, so it includes the `partial`
+  `workspace` field, which section 4.4 completes.
 
 ### 4.2 `agent_revision`
 
@@ -117,7 +119,16 @@ digest ignored it; no client in this repository sends the field.
 - `input_item_id` is `item_<turnId>_input`, the id the input Item is
   materialized with.
 
-### 4.4 Request id
+### 4.4 Session workspace
+
+A bound Session's `workspace` now carries `context_revision` and `state` on
+both surfaces. `context_revision` is the revision stored with the binding
+since V7, which is `1` at creation. `state` is always `ready`: nothing can
+change a context before W2, which adds `changing` and `recovery_blocked`. The
+`WorkspaceContext` schemas stay `partial` until then. The WebShell client's
+local type, which left the two fields out, now uses the generated one.
+
+### 4.5 Request id
 
 A filter that runs before tenant resolution assigns every request an id. It
 uses the incoming `X-Request-Id` when that is visible ASCII of at most 128
@@ -131,17 +142,18 @@ assigned. The id is
 returned in `X-Request-Id` on every response, written to `error.request_id`,
 and placed in the log MDC, which the `logging.pattern.correlation` setting
 prints. The WebShell client now sends a fresh `requestId` with each create,
-submit and cancel instead of reusing the idempotency key, which the contract's `RequestId` header
-forbids.
+including the empty bound create, and with each submit and cancel, instead of
+reusing the idempotency key, which the contract's `RequestId` header forbids.
+A retry therefore keeps its idempotency key and gets a new `requestId`.
 
-### 4.5 Input type
+### 4.6 Input type
 
 The server accepts `input_text` and keeps accepting `text` from older clients.
 Both normalize to the same Harness input, so request digests and idempotent
 replays do not change. The WebShell client now sends `input_text`, which means
 a new client needs a server that includes this change.
 
-### 4.6 JSON errors on SSE routes
+### 4.7 JSON errors on SSE routes
 
 The new error probes showed that a client sending only
 `Accept: text/event-stream`, which is what the WebShell client does, hit an
@@ -164,7 +176,8 @@ did before the preset.
   error probes send invalid bodies on purpose.
 - The scenario reads a Session while its Turn is cancelling and while an
   archive waits for a retry, and checks `cancelling`, `input_item_id` and
-  `archiving`.
+  `archiving`. It reads a bound Session on both surfaces and checks
+  `context_revision` `1` and `state` `ready`.
 - Every response must carry `X-Request-Id`, an error's `request_id` must equal
   it, and a WebShell `requestId` must be echoed. A separate test sends a safe
   and an unsafe `X-Request-Id` and an unsafe body `requestId`.
@@ -175,13 +188,13 @@ did before the preset.
   capabilities, the replay floor and the snapshot watermark against the Items
   list, and checks that cross-tenant reads on both surfaces return
   `404 session_not_found`.
-- The gap file shrinks from 51 to 21 lines; what remains is D3, lifecycle and
-  workspace-context work.
+- The gap file shrinks from 57 lines (the 51 of D1 plus the 6 that W0d added)
+  to 17; what remains is D3 and lifecycle work.
 
 ## 6. Compatibility
 
-- Public Session and Turn responses and error envelopes gain fields; nothing
-  is removed.
+- Public Session and Turn responses, the Session workspace and error
+  envelopes gain fields; nothing is removed.
 - Status values the server already returned (`archived`, `archiving`,
   `deleting`, `cancelling`) are now part of the contract.
 - The server accepts both input spellings. The WebShell client sends
@@ -190,7 +203,8 @@ did before the preset.
   as the contract's schema requires.
 - The generated `@qwen-code/web-shell` types now require `request_id` in the
   error envelope, and the client's create and submit requests take
-  `input_text` blocks.
+  `input_text` blocks. The client's Session type requires `contextRevision`
+  and `state` in a Session workspace.
 - Flyway V13 adds a column with a default; no data is rewritten.
 
 ## 7. Validation
@@ -214,14 +228,17 @@ did before the preset.
   back through a service configured with another one. A `406` test covers
   unacceptable media types.
 - The WebShell typecheck, the managed component tests and the managed-progress
-  e2e spec pass against the regenerated types.
+  e2e spec pass against the regenerated types. The W0d browser spec passes
+  against `WorkspaceBrowserFixtureMain`, including a retry after a dropped
+  create response.
 
 ## 8. Follow-up
 
 - D3: the event-replay gaps that remain in the gap file.
 - Lifecycle work: durable archive and delete, and whether archiving becomes
   `closed` plus `archived_at`.
-- Workspace-context work: `context_revision` and `state` on the Session
-  workspace, and a read of a bound Session in the scenario.
+- W2: context changes raise `context_revision`, report `changing` and
+  `recovery_blocked`, and move the `WorkspaceContext` schemas out of
+  `partial`.
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md

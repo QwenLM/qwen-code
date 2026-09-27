@@ -29,10 +29,3 @@ response webShellTranscript: expected 200, got 400 invalid_limit
 record DeletedSession has no schema
 response archiveSession: expected 202, got 200
 response deleteSession: expected 202, got 200
-
-# Workspace context (W0d/W2, outside Stage D): the Session workspace lacks its
-# context revision and state.
-record PublicWorkspace -> WorkspaceContext: missing context_revision
-record PublicWorkspace -> WorkspaceContext: missing state
-record WebShellWorkspace -> WebShellWorkspaceContext: missing contextRevision
-record WebShellWorkspace -> WebShellWorkspaceContext: missing state
