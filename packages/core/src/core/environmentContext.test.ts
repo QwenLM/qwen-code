@@ -221,7 +221,14 @@ describe('getInitialChatHistory', () => {
     mockToolRegistry = {
       warmAll: vi.fn().mockResolvedValue(undefined),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
-      getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      // Default main-session shape: the Skill tool is eagerly registered, so it
+      // appears in the declared schemas as well as in `getAllToolNames()`.
+      // Production reads only `getAllToolNames()` for the skills gate; the
+      // declaration list exists so the deferred-but-registered case below can
+      // contrast against it.
+      getFunctionDeclarations: vi
+        .fn()
+        .mockReturnValue([{ name: ToolNames.SKILL }]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
       getTool: vi
@@ -231,9 +238,8 @@ describe('getInitialChatHistory', () => {
             ? {}
             : null,
         ),
-      // Default main-session shape: the Skill tool is registered. Deferred
-      // registrations are also counted by getAllToolNames, so this default
-      // covers both.
+      // `getAllToolNames()` unions factory registrations, so the Skill tool is
+      // listed here whether it is eager or demoted behind `tool_search`.
       getAllToolNames: vi.fn().mockReturnValue([ToolNames.SKILL]),
     };
     mockConfig = {
@@ -407,8 +413,21 @@ describe('getInitialChatHistory', () => {
 
     it('omits the skills listing when the Skill tool is not registered', async () => {
       // e.g. `--exclude-tools skill` or a coreTools allowlist without skill:
-      // the factory never reaches the registry at all.
-      mockToolRegistry.getAllToolNames.mockReturnValue([]);
+      // the Skill factory never reaches the registry, while its siblings stay
+      // registered. Stubbing a non-empty list is what keeps this from
+      // degenerating into an emptiness check — `--core-tools read_file`
+      // (#12835's repro) yields ['read_file'], not [].
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      // An excluded tool is absent from the declared schemas as well. Keeping
+      // the two in step here is what leaves the deferred case below as the
+      // only fixture where they disagree.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
 
       const [history, snapshotEntries] = await getInitialChatHistory(
         mockConfig as Config,
@@ -421,7 +440,16 @@ describe('getInitialChatHistory', () => {
     });
 
     it('omits even the no-skills fallback when the Skill tool is not registered', async () => {
-      mockToolRegistry.getAllToolNames.mockReturnValue([]);
+      // Siblings registered, Skill absent — same shape as above, so the
+      // `NO_SKILLS_OPENER` fallback is suppressed for the same reason.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -437,6 +465,8 @@ describe('getInitialChatHistory', () => {
     });
 
     it('includes the skills listing when the Skill tool is registered', async () => {
+      // Eagerly registered — the default fixture: the Skill tool is in the
+      // declared schemas *and* in `getAllToolNames()`.
       const [history, snapshotEntries] = await getInitialChatHistory(
         mockConfig as Config,
       );
@@ -449,11 +479,18 @@ describe('getInitialChatHistory', () => {
     });
 
     it('keeps the listing for a deferred-but-registered Skill tool', async () => {
-      // A Skill tool demoted behind tool_search never appears in
-      // getFunctionDeclarations() but is still counted by getAllToolNames();
-      // the listing must survive that demotion. Pins the gate against a
-      // refactor to declarations-based detection.
+      // A Skill tool demoted behind `tool_search` by an active `tools.eager`
+      // allowlist is still registered — `getAllToolNames()` unions factory
+      // registrations — but appears in neither `getFunctionDeclarations()` nor
+      // `getTool()`, which reads only loaded instances. The listing must
+      // survive that demotion, so this is the case a declarations-based gate
+      // wrongly drops. This is the only case in the suite that overrides the
+      // eager default declaration list.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([]);
+
+      expect(mockToolRegistry.getAllToolNames()).toEqual([ToolNames.SKILL]);
       expect(mockToolRegistry.getFunctionDeclarations()).toEqual([]);
+      expect(mockToolRegistry.getTool(ToolNames.SKILL)).toBeNull();
 
       const [history] = await getInitialChatHistory(mockConfig as Config);
 
@@ -554,6 +591,11 @@ describe('stripStartupContext', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getDeferredToolSummary: vi.fn().mockReturnValue([]),
+        // Eager shape, matching the suite default above, so this registry is
+        // not the one that witnesses the deferred-vs-eager distinction.
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([{ name: ToolNames.SKILL }]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(false),
         getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
         getTool: vi
