@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -29,7 +30,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -926,6 +929,179 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void eventsNameTheSnapshotItemsAndPartsTheyChange() {
+        String tenant = "tenant-identity-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "identity-create",
+                "sha256:" + "d".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        String sessionId = session.sessionId();
+        String owner = "identity-owner";
+        Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
+            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                    "identity-turn", "sha256:" + "e".repeat(64), sessionId,
+                    List.of(Map.of("type", "text", "text", "hi")),
+                    "sha256:" + "f".repeat(64));
+            assertThat(store.claimTurn(tenant, sessionId, admitted.turnId(),
+                    owner, Duration.ofMinutes(1))).isPresent();
+            return admitted;
+        });
+        store.recordAdmission(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", 0);
+        // The reasoning stream continues across the two batches.
+        store.recordHarnessEvents(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", List.of(
+                        harnessText(1, "item.output_text.delta", "a"),
+                        harnessText(2, "item.output_text.delta", "b"),
+                        harnessText(3, "item.reasoning.delta", "c")));
+        store.recordHarnessEvents(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", List.of(
+                        harnessText(4, "item.reasoning.delta", "d"),
+                        new HarnessEvent(5, "boot:identity-epoch:5",
+                                new ProjectedEvent("item.tool_call.updated",
+                                        Map.of("toolCallId", "tool-1"), false,
+                                        null, null, null)),
+                        harnessText(6, "item.output_text.delta", "e"),
+                        new HarnessEvent(7, "boot:identity-epoch:7",
+                                new ProjectedEvent("turn.completed", Map.of(),
+                                        true, "COMPLETED", null, null))));
+        store.materializeNextBatch(tenant, sessionId, 200);
+
+        List<EventRecord> events = assertEventsNameTheSnapshot(tenant,
+                sessionId);
+        List<EventRecord> deltas = events.stream()
+                .filter(event -> event.type().endsWith(".delta")).toList();
+        String output = "part_" + turn.turnId() + "_output_text_";
+        String reasoning = "part_" + turn.turnId() + "_reasoning_";
+        assertThat(deltas).extracting(EventRecord::contentPartId)
+                .containsExactly(output + deltas.get(0).sequence(),
+                        output + deltas.get(0).sequence(),
+                        reasoning + deltas.get(2).sequence(),
+                        reasoning + deltas.get(2).sequence(),
+                        output + deltas.get(4).sequence());
+        assertThat(events).filteredOn(event -> event.itemId() != null)
+                .extracting(EventRecord::type).containsExactly(
+                        "turn.accepted", "item.output_text.delta",
+                        "item.output_text.delta", "item.reasoning.delta",
+                        "item.reasoning.delta", "item.tool_call.updated",
+                        "item.output_text.delta");
+    }
+
+    @Test
+    void singleAppendsContinueTheTextPartBeforeThem() {
+        String tenant = "tenant-single-identity-" + UUID.randomUUID();
+        String sessionId = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "single-identity-create", "digest-create",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        for (String text : List.of("a", "b")) {
+            store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
+                    "item.output_text.delta", Map.of("text", text), false,
+                    "single:" + text);
+        }
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
+                "item.reasoning.delta", Map.of("text", "c"), false,
+                "single:c");
+        store.materializeNextBatch(tenant, sessionId, 100);
+
+        List<EventRecord> deltas = assertEventsNameTheSnapshot(tenant,
+                sessionId).stream()
+                .filter(event -> event.type().endsWith(".delta")).toList();
+        assertThat(deltas).extracting(EventRecord::contentPartId)
+                .containsExactly(
+                        "part_turn-single_output_text_"
+                                + deltas.get(0).sequence(),
+                        "part_turn-single_output_text_"
+                                + deltas.get(0).sequence(),
+                        "part_turn-single_reasoning_"
+                                + deltas.get(2).sequence());
+    }
+
+    @Test
+    void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
+        String tenant = "tenant-retract-identity-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "retract-identity-create",
+                "sha256:" + "7".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        String sessionId = session.sessionId();
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "retract-identity-turn", "sha256:" + "8".repeat(64),
+                sessionId, List.of(), "sha256:" + "9".repeat(64));
+        String owner = "retract-identity-owner";
+        assertThat(store.claimTurn(tenant, sessionId, turn.turnId(), owner,
+                Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, sessionId, turn.turnId(), owner,
+                "boot_old")).isTrue();
+        store.markSubmissionAttempted(tenant, sessionId, turn.turnId(),
+                owner);
+        store.recordAdmission(tenant, sessionId, turn.turnId(), owner,
+                "epoch_old", 1);
+        // The kept delta continues the Part of the one that is retracted.
+        store.recordHarnessEvents(tenant, sessionId, turn.turnId(), owner,
+                "epoch_old", List.of(
+                        new HarnessEvent(2, "boot_old:epoch_old:2",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "partial"), false,
+                                        null, null, null)),
+                        new HarnessEvent(3, "boot_kept:epoch_old:3",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "kept"), false, null,
+                                        null, null))));
+        List<EventRecord> before = store.findEvents(tenant, sessionId, 0, 20)
+                .stream().filter(event -> event.type().endsWith(".delta"))
+                .toList();
+        assertThat(before).extracting(EventRecord::contentPartId)
+                .containsOnly(before.get(0).contentPartId());
+
+        store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
+                owner, "boot_old", "epoch_old");
+        store.materializeNextBatch(tenant, sessionId, 100);
+
+        assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
+                .filteredOn(event -> event.type().endsWith(".delta"))
+                .extracting(EventRecord::itemId, EventRecord::contentPartId)
+                .containsExactly(tuple(null, null), tuple(
+                        "item_" + turn.turnId() + "_assistant",
+                        "part_" + turn.turnId() + "_output_text_"
+                                + before.get(1).sequence()));
+    }
+
+    // Every event that names an Item or a Part names one of the Snapshot.
+    private List<EventRecord> assertEventsNameTheSnapshot(String tenant,
+            String sessionId) {
+        List<ItemRecord> items = store.findSnapshot(tenant, sessionId)
+                .orElseThrow().items();
+        List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
+                100);
+        for (EventRecord event : events) {
+            assertThat(event.schemaVersion()).isEqualTo(1);
+            assertThat(event.projectionVersion()).isEqualTo(1);
+            if (event.itemId() == null) {
+                continue;
+            }
+            ItemRecord item = items.stream().filter(candidate ->
+                    candidate.itemId().equals(event.itemId()))
+                    .findFirst().orElseThrow();
+            if (event.contentPartId() != null) {
+                assertThat(item.content()).filteredOn(part ->
+                                part.partId().equals(event.contentPartId()))
+                        .singleElement().satisfies(part -> assertThat(
+                                event.sequence()).isBetween(
+                                        part.firstSequence(),
+                                        part.lastSequence()));
+            }
+        }
+        return events;
+    }
+
+    private static HarnessEvent harnessText(long sourceId, String type,
+            String text) {
+        return new HarnessEvent(sourceId, "boot:identity-epoch:" + sourceId,
+                new ProjectedEvent(type, Map.of("text", text), false, null,
+                        null, null));
+    }
+
+    @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
@@ -1170,6 +1346,7 @@ class ManagedAgentServerIntegrationTest {
                                 assertThat(item.content()).singleElement()
                                         .satisfies(part -> assertThat(
                                                 part.text()).isEqualTo("kept"))));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
     @Test
