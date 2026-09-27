@@ -1675,7 +1675,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Tasks of this Session in creation order, oldest first, merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart.",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1755,11 +1755,11 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Task events after the cursor, oldest first. 400 invalid_cursor rejects a cursor from another task; 409 cursor_expired means that the cursor is older than the retained events: read the task Artifacts, then continue from the task output_cursor.",
+            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task; 409 cursor_expired means that the cursor is older than the retained events: read the task Artifacts, then continue from the task output_cursor.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicTaskEventPage"
+                  "$ref": "#/components/schemas/PublicTaskEventList"
                 }
               }
             }
@@ -1802,7 +1802,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Cancel durably recorded for the task owner, with Idempotency-Key replay. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; 409 idempotency_conflict when the key was used with another request.",
+            "description": "Cancel durably recorded for the task owner. A retry with the same Idempotency-Key and request replays the original operation before any state or capability check, even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. A new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5568,7 +5568,7 @@
           "recovery_blocked"
         ],
         "x-qwen-implementation-status": "planned",
-        "description": "Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the outcome and waits for an operator; it is never reported as success and never re-run automatically."
+        "description": "Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
       },
       "TaskRuntimeState": {
         "type": "string",
@@ -5587,6 +5587,7 @@
         "additionalProperties": false,
         "required": [
           "id",
+          "object",
           "session_id",
           "kind",
           "state",
@@ -5599,6 +5600,9 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          },
+          "object": {
+            "const": "agent.task"
           },
           "session_id": {
             "type": "string",
@@ -5646,7 +5650,7 @@
               "minLength": 1,
               "maxLength": 128
             },
-            "description": "Artifacts that hold durable task output, at most 100; the Session artifact routes keep every Artifact readable."
+            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes."
           },
           "action_capabilities": {
             "type": "array",
@@ -5690,7 +5694,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["running", "waiting", "degraded"]
+                  "enum": ["running", "waiting", "degraded", "completed"]
                 }
               },
               "required": ["state"]
@@ -5713,6 +5717,27 @@
                 "required": ["started_at"]
               }
             }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "recovery_blocked"
+                }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "properties": {
+                "action_capabilities": {
+                  "not": {
+                    "contains": {
+                      "const": "send_input"
+                    }
+                  }
+                }
+              }
+            }
           }
         ],
         "description": "Read-only projection of one asynchronous task of a Session (SessionTaskView). It is rebuilt from the Session's durable domain records and is never their source of truth. It never carries a Runtime binding ID, generation, Runtime endpoint, Pod, absolute path, raw PID, SecretHandle or local sidecar; diagnostics are authorized Artifact references."
@@ -5720,8 +5745,11 @@
       "PublicTaskList": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "has_more"],
+        "required": ["object", "data", "has_more"],
         "properties": {
+          "object": {
+            "const": "list"
+          },
           "data": {
             "type": "array",
             "maxItems": 100,
@@ -5737,12 +5765,32 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "planned",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "has_more": {
+                  "const": true
+                }
+              },
+              "required": ["has_more"]
+            },
+            "then": {
+              "required": ["next_cursor"],
+              "properties": {
+                "next_cursor": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
       },
       "PublicTaskEvent": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["task_id", "session_id", "type", "created_at"],
+        "required": ["task_id", "session_id", "type", "created_at", "cursor"],
         "properties": {
           "task_id": {
             "type": "string",
@@ -5754,7 +5802,13 @@
             "format": "uuid"
           },
           "type": {
-            "enum": ["state_changed", "output", "artifact"]
+            "$ref": "#/components/schemas/TaskEventType"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Task event cursor positioned after this event. A consumer that stores it with each applied event resumes without applying an event twice."
           },
           "created_at": {
             "type": "integer",
@@ -5768,6 +5822,7 @@
           },
           "text": {
             "type": "string",
+            "minLength": 1,
             "maxLength": 16384
           },
           "truncated": {
@@ -5866,30 +5921,6 @@
         ],
         "description": "One task event: a logical state change, a bounded output chunk, or a reference to an Artifact that received task output. High-volume logs and Monitor raw lines are aggregated into Artifacts and never become one event per line."
       },
-      "PublicTaskEventPage": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["data", "has_more", "next_cursor"],
-        "properties": {
-          "data": {
-            "type": "array",
-            "maxItems": 100,
-            "items": {
-              "$ref": "#/components/schemas/PublicTaskEvent"
-            }
-          },
-          "has_more": {
-            "type": "boolean"
-          },
-          "next_cursor": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512,
-            "description": "Position after the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
-          }
-        },
-        "x-qwen-implementation-status": "planned"
-      },
       "WebShellTask": {
         "type": "object",
         "additionalProperties": false,
@@ -5954,7 +5985,7 @@
               "minLength": 1,
               "maxLength": 128
             },
-            "description": "Artifacts that hold durable task output, at most 100; the Session artifact routes keep every Artifact readable."
+            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes."
           },
           "actionCapabilities": {
             "type": "array",
@@ -5998,7 +6029,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["running", "waiting", "degraded"]
+                  "enum": ["running", "waiting", "degraded", "completed"]
                 }
               },
               "required": ["state"]
@@ -6019,6 +6050,27 @@
             "then": {
               "not": {
                 "required": ["startedAt"]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "recovery_blocked"
+                }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "properties": {
+                "actionCapabilities": {
+                  "not": {
+                    "contains": {
+                      "const": "send_input"
+                    }
+                  }
+                }
               }
             }
           }
@@ -6045,12 +6097,32 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "planned",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "hasMore": {
+                  "const": true
+                }
+              },
+              "required": ["hasMore"]
+            },
+            "then": {
+              "required": ["nextCursor"],
+              "properties": {
+                "nextCursor": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
       },
       "WebShellTaskEvent": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["taskId", "sessionId", "type", "createdAt"],
+        "required": ["taskId", "sessionId", "type", "createdAt", "cursor"],
         "properties": {
           "taskId": {
             "type": "string",
@@ -6062,7 +6134,13 @@
             "format": "uuid"
           },
           "type": {
-            "enum": ["state_changed", "output", "artifact"]
+            "$ref": "#/components/schemas/TaskEventType"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Task event cursor positioned after this event. A consumer that stores it with each applied event resumes without applying an event twice."
           },
           "createdAt": {
             "type": "integer",
@@ -6076,6 +6154,7 @@
           },
           "text": {
             "type": "string",
+            "minLength": 1,
             "maxLength": 16384
           },
           "truncated": {
@@ -6193,7 +6272,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Position after the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The cursor of the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6283,6 +6362,38 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          }
+        },
+        "x-qwen-implementation-status": "planned"
+      },
+      "TaskEventType": {
+        "type": "string",
+        "enum": ["state_changed", "output", "artifact"],
+        "x-qwen-implementation-status": "planned"
+      },
+      "PublicTaskEventList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "data", "has_more", "next_cursor"],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicTaskEvent"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "The cursor of the last returned event, or the requested position when the page is empty; pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
