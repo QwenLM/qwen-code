@@ -155,16 +155,18 @@ it needs, as section 5 of the API contract allows. Clients ignore task event
 types they do not know; task events carry no terminal flag, so that section's
 refresh rule for unknown terminal events does not apply. Every event carries `schema_version` and
 `projection_version`, as section 5 of the API contract requires of public
-events. High-volume logs and Monitor raw lines go into Artifacts, never one
-event per line, as design section 11 requires, and events are retained for a
-bounded time rather than kept forever.
+events. High-volume logs and Monitor raw lines go into Artifacts or this
+paged stream and stay out of the Session event stream, as design section 11
+and API contract section 6 require, and events are retained for a bounded time
+rather than kept forever.
 
 Every event carries `cursor`, the position after it, which also serves as its
 identity. A consumer that stores the cursor with each event it applies resumes
 after a crash without applying an output chunk twice. A page's `next_cursor`
-is the position after the last event the server examined, including events
-the route does not return, so a page that filtered everything out still
-advances; when nothing was examined, it is the requested position, or the
+is the position after the last event the page covers: every earlier event was
+either returned or filtered out for this page, and an event held back by
+`limit` is never passed, so a page that filtered everything out still
+advances; when the page covers no event, it is the requested position, or the
 start of the retained events when `after` was omitted. Unlike list pages,
 `next_cursor` is required and never `null`: a running task can produce more
 events, so a caller that reached the end still needs a position to poll from.
@@ -210,8 +212,8 @@ Cancel reuses the command operation model instead of a new one:
   replay, then task state. A retry by the same actor with the same
   `Idempotency-Key` and request therefore replays the original operation even
   after the task settled, as the cwd change and API contract sections 3 and
-  10 require, and a lost `202` never turns into a `409` for the caller that
-  made the request.
+  10 require, so a lost `202` does not turn into a `409` for the caller that
+  made the request while the idempotency record is retained.
 - `202` and a `completed` operation mean that the authority recorded the
   cancel, not that the task stopped. The task becomes `cancelled` only after
   its physical execution settles, and an unknown outcome becomes

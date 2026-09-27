@@ -6376,7 +6376,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event the server examined, including events the route does not return, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event this page covers: every earlier event was either returned or filtered out for this page, and an event held back by limit is never passed, so an empty page can still advance past filtered events; when the page covers no event, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6499,7 +6499,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event the server examined, including events the route does not return, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event this page covers: every earlier event was either returned or filtered out for this page, and an event held back by limit is never passed, so an empty page can still advance past filtered events; when the page covers no event, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
