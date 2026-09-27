@@ -38,6 +38,12 @@ import {
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import {
+  WORKSPACE_ACTIVATION_ROUTE,
+  WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CONTEXT_CONFIG_REF,
+  WORKSPACE_EXECUTION_PROFILE,
+} from './managed-workspace-activation.js';
 
 interface Expected {
   readonly status: number;
@@ -80,6 +86,7 @@ const CONTEXT = '/internal/managed-runtime/v3/context';
 const EXECUTE = '/internal/managed-runtime/v2/execute';
 const STATUS = '/internal/managed-runtime/v2/status';
 const CANCEL = '/internal/managed-runtime/v2/cancel';
+const ACTIVATION = WORKSPACE_ACTIVATION_ROUTE.path;
 const UNAVAILABLE = {
   code: 'managed_context_unavailable',
   error: 'Managed context directory is unavailable.',
@@ -1125,5 +1132,285 @@ describe('Managed context tool gate', () => {
         .trim()
         .split(/\r?\n/),
     ).toHaveLength(1);
+  });
+});
+
+describe('Managed Workspace execution activation', () => {
+  function fixedInstallation(sessionId: string, cwd = '.') {
+    const request = installation(sessionId, cwd);
+    const binding = {
+      ...request.binding,
+      contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+    };
+    return {
+      ...request,
+      binding,
+      contextDigest: computeManagedContextDigest(binding),
+    };
+  }
+
+  function activation(
+    request: ReturnType<typeof fixedInstallation>,
+    operation = 'activate',
+  ) {
+    return {
+      protocolVersion: 1,
+      operation,
+      sessionId: request.sessionId,
+      contextDigest: request.contextDigest,
+      contextConfigRef: request.binding.contextConfigRef,
+      profile: WORKSPACE_EXECUTION_PROFILE,
+    };
+  }
+
+  it('pins the explicit frozen configuration and capability digests', () => {
+    const refs = 'managed-runtime-tools/1\0preapproved-workspace-tools/1';
+    const digest = (text: string) =>
+      `sha256:${createHash('sha256').update(text).digest('hex')}`;
+    expect(digest(refs)).toBe(WORKSPACE_CONTEXT_CONFIG_REF);
+    expect(digest(`${WORKSPACE_EXECUTION_PROFILE}\0${refs}`)).toBe(
+      WORKSPACE_CAPABILITY_DIGEST,
+    );
+  });
+
+  it('refuses activation for an unsupported frozen configuration', async () => {
+    const root = workspace();
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = installation('unsupported-profile', '.');
+    expect(request.binding.contextConfigRef).not.toBe(
+      WORKSPACE_CONTEXT_CONFIG_REF,
+    );
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(request.sessionId, 'unsupported', 'touch unsupported.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'unsupported.txt'))).toBe(false);
+  });
+
+  it('refuses workspace activation on a worker with a legacy capability', async () => {
+    const root = workspace();
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const request = fixedInstallation('legacy-capability');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+  });
+
+  it('requires activation, writes from a subdirectory, and permanently closes on release', async () => {
+    const root = workspace();
+    fs.mkdirSync(path.join(root, 'child'));
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('active-session', 'child');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo activated > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'child/proof.txt'))).toBe(false);
+    const activate = activation(request);
+    for (const invalid of [
+      { ...activate, extra: true },
+      { ...activate, contextDigest: BOOT.capabilityDigest },
+      { ...activate, profile: 'unknown' },
+      { ...activate, operation: ['activate'] },
+    ]) {
+      expect(
+        (await post(origin, ACTIVATION, invalid)).status,
+      ).toBeGreaterThanOrEqual(400);
+    }
+    expect(
+      (
+        await post(origin, ACTIVATION, activate, {
+          ...HEADERS,
+          authorization: 'Bearer invalid',
+        })
+      ).status,
+    ).toBe(401);
+    const receipt = {
+      ...activate,
+      runtimeInstanceId: BOOT.runtimeInstanceId,
+      runtimeIncarnation: BOOT.runtimeIncarnation,
+      epoch: BOOT.epoch,
+      active: true,
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await (await post(origin, ACTIVATION, activate)).json()).toEqual(
+        receipt,
+      );
+    }
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(
+      fs.readFileSync(path.join(root, 'child/proof.txt'), 'utf8').trim(),
+    ).toBe('activated');
+    const readRoot = {
+      ...shell(request.sessionId, 'read-root', ''),
+      toolName: 'read_file',
+      input: { file_path: path.join(realDirectory(root, '.'), 'root.txt') },
+    };
+    fs.writeFileSync(path.join(root, 'root.txt'), 'root-readable');
+    expect(
+      (await (await post(origin, EXECUTE, readRoot)).json()).result
+        .executionStatus,
+    ).toBe('success');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(
+        (await post(origin, ACTIVATION, activation(request, 'release'))).status,
+      ).toBe(200);
+    }
+    expect((await post(origin, ACTIVATION, activate)).status).toBe(409);
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(request.sessionId, 'late', 'touch late.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'child/late.txt'))).toBe(false);
+    // An original settled call remains observable and idempotent after gate closure.
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+  });
+
+  // Starts a shell call in the Session's `child` directory that runs for 30
+  // seconds unless it is cancelled. The call reports `executing` before its
+  // shell starts; the shell writes `started.txt` once it runs in the directory.
+  async function startSlowCall() {
+    const root = workspace();
+    fs.mkdirSync(path.join(root, 'child'));
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('running-session', 'child');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      200,
+    );
+    const call = shell(
+      request.sessionId,
+      'slow',
+      'echo started > started.txt && sleep 30 # intentional-sleep: in-flight release test',
+    );
+    const running = post(origin, EXECUTE, call);
+    // A test that fails before cancel() must not leave this unobserved.
+    running.catch(() => undefined);
+    const lookup = {
+      protocolVersion: 2,
+      reference: call.reference,
+      afterSequence: 0,
+    };
+    const status = async () =>
+      (await (await post(origin, STATUS, lookup)).json()).state;
+    await vi.waitFor(async () => {
+      expect(await status()).toBe('executing');
+    });
+    const cancel = async () => {
+      const cancelled = await post(origin, CANCEL, {
+        protocolVersion: 2,
+        reference: call.reference,
+      });
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toMatchObject({
+        state: 'cancel_requested',
+      });
+      // A cancel that does not stop the shell would still settle as cancelled
+      // once `sleep 30` ends, so the call must settle well before that.
+      await vi.waitFor(
+        async () => {
+          expect(await status()).toBe('settled');
+        },
+        { timeout: 10_000 },
+      );
+      expect((await (await running).json()).result.executionStatus).toBe(
+        'cancelled',
+      );
+    };
+    const release = async () =>
+      (await post(origin, ACTIVATION, activation(request, 'release'))).status;
+    return { root, status, cancel, release };
+  }
+
+  it('refuses release while an invocation is active, and allows it once the invocation settles', async () => {
+    const { cancel, release } = await startSlowCall();
+
+    expect(await release()).toBe(409);
+    await cancel();
+    expect(await release()).toBe(200);
+  });
+
+  // Windows refuses to rename a directory that a running process works in, and
+  // the call's shell works in this one, so there it cannot be lost this way.
+  it.skipIf(process.platform === 'win32')(
+    'retains status and cancel for an active invocation after its directory is lost',
+    async () => {
+      const { root, status, cancel, release } = await startSlowCall();
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(root, 'child', 'started.txt'))).toBe(
+            true,
+          );
+        },
+        { timeout: 10_000 },
+      );
+
+      fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
+      expect(await status()).toBe('executing');
+      await cancel();
+      expect(await release()).toBe(200);
+    },
+  );
+
+  it('rechecks a closed gate after an asynchronous tool resolver returns', async () => {
+    const root = workspace();
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let active = true;
+    const executor = new ManagedToolExecutor(async () => {
+      await waiting;
+      return { ...tools(root), isActive: () => active };
+    });
+    const reference = {
+      sessionId: 'session',
+      promptId: 'prompt',
+      callId: 'call',
+      argsDigest: 'digest',
+    };
+    const pending = executor.execute(reference, 'run_shell_command', {
+      command: 'touch late.txt',
+    });
+    expect(executor.hasActiveSession(reference.sessionId)).toBe(false);
+    active = false;
+    resume();
+    await expect(pending).rejects.toThrow('unavailable');
+    expect(executor.status(reference)).toBeNull();
+    expect(fs.existsSync(path.join(root, 'late.txt'))).toBe(false);
   });
 });

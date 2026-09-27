@@ -570,6 +570,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonRuntimeStopRequest,
   DaemonRuntimeStopSession,
+  DaemonRuntimeStopChannel,
   DaemonRuntimeStopResult,
   DaemonRuntimeStopSnapshot,
   DaemonRuntimeStopOption,

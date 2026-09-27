@@ -135,7 +135,7 @@ The envelope left four questions to W0c. The worker answers them as follows:
 - `packages/cli/src/serve/managed-runtime-attestation-worker.ts`: boot dispatch, the routes of each version, and ready v2.
 - `packages/cli/src/serve/managed-runtime-tool-executor.ts`: the tools come from a resolver asked before each new call is journaled. Boot v1 builds them once at startup; boot v2 builds them for each call. Each call runs as its session, whose project directory is registered for its shells.
 - `packages/cli/src/serve/managed-runtime-tool-routes.ts` and `managed-runtime-attestation-contract.ts`: the 409 for an unavailable directory, a route gate parameterized by boot version, and one JSON body parser for every owned route.
-- `packages/core/src/utils/schemaValidator.ts`: a parameter schema that JSON text describes exactly and that compiles the first time is compiled once per validator, keyed by that text, so a rebuilt schema object with an `$id` is now validated on its first use, where Ajv used to refuse that compile as a duplicate `$id` and skip validation. Any other schema is compiled as Ajv always compiled it and gives the same results, though when it fails to compile and carries an `$id`, the log can give that `$id` as a duplicate instead of the original error.
+- `packages/core/src/utils/schemaValidator.ts`: a parameter schema that JSON text describes exactly and that compiles the first time is compiled once per validator, keyed by that text, so a rebuilt schema object with an `$id` is now validated on its first use, where Ajv used to refuse that compile as a duplicate `$id` and skip validation. Whether the text describes a schema exactly is judged from its data, so a Proxy or a getter is taken at the value its text records. Any other schema is compiled as Ajv always compiled it, and gives the same results and logs the same compile error as before. For any schema, a reference that resolves through Ajv's registry of other schemas can resolve differently than before: rebuilt schema objects are no longer compiled, so they no longer refresh that registry.
 - The fake worker, its Java test, a helper it shares with `LocalProcessRuntimeProvisionerTest`, and the tests of the attestation worker, the tool worker, the envelope and the schema validator.
 - `packages/cli/src/serve/managed-workspace-binding.ts`: its header comment only.
 - This document in both languages; the status, errors, open questions and follow-up work of the envelope document; the status and the wiring line of the W0a document; and pointers here from the worker section and the error classes of the Tool v2 contract document.
@@ -162,9 +162,11 @@ The envelope left four questions to W0c. The worker answers them as follows:
 - **Boot v1:** the workspace is still taken at startup, the shells still see the Runtime's session and project directory, a document is still read when its bytes are not UTF-8, and the existing tool-worker tests pass unchanged.
 - **Boot v2 encoding:** a document whose bytes are not UTF-8 is refused.
 - **Core:**
-  - equal parameter schemas compile once, and a schema object is never serialized a second time, even one that JSON text does not describe exactly or that fails to compile;
-  - a schema that JSON text does not describe exactly is compiled from the object, not from its text;
-  - such a schema, and one that fails to compile, even with an `$id`, gives the results it gave before;
+  - equal parameter schemas that JSON text describes exactly and that compile the first time compile once, including ones holding `-0`, which their text writes as `0` and Ajv validates alike, so a rebuilt one with an `$id` is validated as well;
+  - a schema object is never serialized again, even one that JSON text does not describe exactly, that fails its first compile or that never compiles;
+  - a schema that JSON text does not describe exactly, such as one holding an array subclass, an array with a named property or an object without a prototype, is compiled from the object, not from its text;
+  - such a schema gives the results it gave before, and so does one that fails to compile, even with an `$id` and even when another schema holds that `$id`;
+  - a schema that fails to compile logs its own compile error, even when its copy claimed its `$id` first;
   - a schema that fails to compile is compiled from its text only once, however often it is rebuilt, and each rebuilt object is compiled on its second use, as before;
   - a caller that mutates its own schema object changes no other schema's validator;
   - a rebuilt schema with an `$id` is validated.

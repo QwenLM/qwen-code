@@ -576,6 +576,8 @@ final class JdbcRepositoryContract {
         typedReference.put("untyped", untypedReference);
         typedReference.put("scale",
                 new BigDecimal("1.2345678901234567890123E+30"));
+        typedReference.put("fraction",
+                new BigDecimal("0." + "1".repeat(2048)));
         typedReference.put("ratio", 162544.13f);
         typedReference.put("weight", -1363683.0538119469d);
         // Numbers nested in a map or a list come back as other subtypes too,
@@ -598,6 +600,19 @@ final class JdbcRepositoryContract {
                             prefix + "-types-turn", prefix + "-types-tool",
                             prefix + "-types-digest", invalidReference));
         }
+        Map<String, Object> unreadableReference = new LinkedHashMap<>(
+                typedReference);
+        unreadableReference.put("fraction",
+                new BigDecimal("0." + "1".repeat(2049)));
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared(
+                        prefix + "-unreadable-types-execution",
+                        prefix + "-unreadable-types-idempotency",
+                        prefix + "-types-binding", 1,
+                        prefix + "-types-harness",
+                        prefix + "-types-runtime-session",
+                        prefix + "-types-turn", prefix + "-types-tool",
+                        prefix + "-types-digest", unreadableReference));
         ToolExecutionRecord typedCandidate = ToolExecutionRecord.prepared(
                 prefix + "-types-execution", typesKey,
                 prefix + "-types-binding", 1, prefix + "-types-harness",
@@ -661,6 +676,14 @@ final class JdbcRepositoryContract {
         typedResult.put("jsonLd", jsonLdReference);
         typedResult.put("untyped", untypedReference);
         typedResult.put("limit", new BigDecimal("1E+400"));
+        typedResult.put("fraction",
+                new BigDecimal("0." + "1".repeat(2048)));
+        Map<String, Object> unreadableResult = new LinkedHashMap<>(
+                typedResult);
+        unreadableResult.put("fraction",
+                new BigDecimal("0." + "1".repeat(2049)));
+        assertThrows(IllegalArgumentException.class,
+                () -> typedClaim.withResult(unreadableResult, 1, START));
         ToolExecutionRecord typedSettled = rereader.compareAndSet(typedClaim,
                 typedClaim.withResult(typedResult, 1, START),
                 prefix + "-dispatcher-a",
