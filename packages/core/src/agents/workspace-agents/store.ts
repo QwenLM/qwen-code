@@ -15,6 +15,7 @@ import { Storage } from '../../config/storage.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { isNodeError } from '../../utils/errors.js';
 import { getProjectHash } from '../../utils/paths.js';
+import { outstandingCloseObligations } from './thread-status.js';
 import {
   DEFAULT_QUEUE_LIMIT,
   HUMAN_AUTHOR_ID,
@@ -973,9 +974,13 @@ function trimThread(thread: Thread): Thread {
     thread.messages.length - MAX_THREAD_MESSAGES,
   );
   const firstRetainedRun = Math.max(0, thread.runs.length - MAX_THREAD_RUNS);
+  const outstandingRunIds = new Set(
+    outstandingCloseObligations(thread).map((obligation) => obligation.runId),
+  );
   const retainedRuns = thread.runs.filter(
     (run, index) =>
       index >= firstRetainedRun ||
+      outstandingRunIds.has(run.id) ||
       run.usageByRound.length > 0 ||
       run.status === 'queued' ||
       run.status === 'running' ||
@@ -1021,6 +1026,7 @@ async function writeThreadUnlocked(
   return next;
 }
 
+/** Serialized workspace access; each file commits independently, without rollback. */
 export interface AgentStoreTransaction {
   readonly projectRoot: string;
   readonly workspaceId: string;
@@ -1210,29 +1216,31 @@ export async function setWorkspaceAgentEnabled(
     // success and change nothing a caller can observe — `isAgentAddressable`
     // still refuses it — which is worse than saying no.
     if (agent.retiredAt !== undefined) return 'retired';
-    if ((agent.enabled !== false) === enabled) return 'updated';
-    await transaction.writeAgents(
-      agents.map((candidate) =>
-        candidate.id === agentId ? { ...candidate, enabled } : candidate,
-      ),
-    );
-    if (!enabled) {
+    if (enabled && agent.enabled !== false) return 'updated';
+    const pending = enabled ? undefined : await transaction.listThreads();
+    if (pending && pending.unreadable.length > 0) {
+      throw new Error(
+        `Cannot change the agent roster while thread records are unreadable: ${pending.unreadable.join(', ')}.`,
+      );
+    }
+    if ((agent.enabled !== false) !== enabled) {
+      await transaction.writeAgents(
+        agents.map((candidate) =>
+          candidate.id === agentId ? { ...candidate, enabled } : candidate,
+        ),
+      );
+    }
+    if (pending) {
       // A disabled agent's queued runs can never start — candidate selection
       // skips non-addressable agents — but `queued` counts as live for
       // thread status and for `agentHasLiveWork`, so leaving one behind
       // pins its thread in `in_progress` and blocks retirement with no
-      // in-band explanation. Settle those runs here, in the roster change's
-      // own transaction; running work is left to finish.
-      const { threads, unreadable } = await transaction.listThreads();
-      if (unreadable.length > 0) {
-        throw new Error(
-          `Cannot change the agent roster while thread records are unreadable: ${unreadable.join(', ')}.`,
-        );
-      }
+      // in-band explanation. Repeat cleanup even when already disabled:
+      // an earlier call may have stopped after writing the roster.
       const now = Date.now();
       // Import lazily because run lifecycle is built on this store module.
       const { finishRunInTransaction } = await import('./run-lifecycle.js');
-      for (const thread of threads) {
+      for (const thread of pending.threads) {
         if (isThreadTerminal(thread.status)) continue;
         for (const run of thread.runs) {
           if (run.agentId !== agentId || run.status !== 'queued') continue;
