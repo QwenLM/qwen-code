@@ -15,7 +15,6 @@ import {
 } from './managed-extension-record.js';
 import {
   MANAGED_EXTENSION_RECORD_BODIES,
-  isExtensionDeliveryPending,
   managedExtensionRecordKey,
   managedTaskId,
   projectManagedTask,
@@ -1318,6 +1317,9 @@ export class LocalManagedSessionAuthority {
           throw new ManagedSessionConflictError(message);
         },
       );
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
       const recordRef = await store.publish(
         `managed-${request.domain}`,
         Buffer.from(JSON.stringify(parsed.record), 'utf8'),
@@ -1389,16 +1391,6 @@ export class LocalManagedSessionAuthority {
             ? 1
             : -1,
       );
-  }
-
-  /**
-   * The outbox: records whose delivery still has to be sent or reconciled.
-   * It is derived from the committed runs, so it commits with them.
-   */
-  extensionOutbox(): readonly ManagedSessionExtensionRecord[] {
-    return [...this.extensionRecords.values()].filter((record) =>
-      isExtensionDeliveryPending(record.run),
-    );
   }
 
   /**
@@ -1619,17 +1611,7 @@ export class LocalManagedSessionAuthority {
     return pending;
   }
 
-  /**
-   * `extensionEventId` names the one Stage H record event the caller
-   * prepared; any other event of a domain with a record body is refused, so
-   * no path commits one around its revision chain.
-   */
-  private async commit(
-    command: ManagedSessionCommand,
-    values: readonly unknown[],
-    actors: readonly ManagedSessionActor[],
-    extensionEventId?: string,
-  ): Promise<ManagedSessionCommitReceipt> {
+  private assertCommandWritable(command: ManagedSessionCommand): void {
     if (this.writeFailure !== undefined) {
       throw new ManagedSessionRecordError(
         `session log writes stopped after an earlier failure: ${this.writeFailure.message}`,
@@ -1640,6 +1622,32 @@ export class LocalManagedSessionAuthority {
         'command session key does not match this session.',
       );
     }
+  }
+
+  private assertExpectedSequence(command: ManagedSessionCommand): void {
+    if (
+      command.expectedSequence !== undefined &&
+      command.expectedSequence !== this.committed
+    ) {
+      throw new ManagedSessionConflictError(
+        `expectedSequence ${command.expectedSequence} does not match the committed sequence ${this.committed}; re-read before retrying.`,
+      );
+    }
+  }
+
+  /**
+   * `extensionEventId` names the one Stage H record event the caller
+   * prepared; any other event of a domain with a record body is refused, so
+   * no path commits one around its revision chain, and so is any other event
+   * that takes an ID of the form those events use, so none can block them.
+   */
+  private async commit(
+    command: ManagedSessionCommand,
+    values: readonly unknown[],
+    actors: readonly ManagedSessionActor[],
+    extensionEventId?: string,
+  ): Promise<ManagedSessionCommitReceipt> {
+    this.assertCommandWritable(command);
     const key = managedSessionCommandKey(command.operation, command.commandId);
     const previous = this.transactions.get(key);
     if (previous !== undefined) {
@@ -1654,14 +1662,7 @@ export class LocalManagedSessionAuthority {
         replayed: true,
       };
     }
-    if (
-      command.expectedSequence !== undefined &&
-      command.expectedSequence !== this.committed
-    ) {
-      throw new ManagedSessionConflictError(
-        `expectedSequence ${command.expectedSequence} does not match the committed sequence ${this.committed}; re-read before retrying.`,
-      );
-    }
+    this.assertExpectedSequence(command);
 
     const events = values.map((value, index) => {
       const event = parseManagedSessionEvent(value);
@@ -1685,6 +1686,14 @@ export class LocalManagedSessionAuthority {
       ) {
         throw new ManagedSessionConflictError(
           `${event.payload['domain']} records commit only through commitExtensionRecord.`,
+        );
+      }
+      if (
+        event.eventId !== extensionEventId &&
+        EXTENSION_EVENT_ID.test(event.eventId)
+      ) {
+        throw new ManagedSessionConflictError(
+          `event id ${event.eventId} is reserved for Stage H records.`,
         );
       }
       if (this.eventIds.has(event.eventId)) {
@@ -2191,6 +2200,11 @@ export class LocalManagedSessionAuthority {
     };
   }
 }
+
+/** The event IDs `commitExtensionRecord` assigns, `<domain>:<count>`. */
+const EXTENSION_EVENT_ID = new RegExp(
+  `^(?:${Object.keys(MANAGED_EXTENSION_RECORD_BODIES).join('|')}):[0-9]+$`,
+);
 
 const INPUT_ACTORS: readonly ManagedSessionActor[] = [
   { class: 'trusted_entry' },

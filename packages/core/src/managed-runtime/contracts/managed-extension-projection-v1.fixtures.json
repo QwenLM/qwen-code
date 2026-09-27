@@ -6411,6 +6411,76 @@
       }
     },
     {
+      "id": "second-record-by-the-same-command",
+      "accepted": [
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          }
+        }
+      ],
+      "next": {
+        "monitorId": "monitor-2",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "maxEvents": 100,
+        "idleTimeoutMs": 60000,
+        "debounceMs": 1000,
+        "startReceiptRef": null,
+        "observationSequence": 0,
+        "lastObservationRef": null,
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      },
+      "reuseCommandOf": 0
+    },
+    {
       "id": "changes-after-it-ended",
       "accepted": [
         {

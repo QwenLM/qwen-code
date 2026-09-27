@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -102,9 +103,19 @@ class ManagedExtensionRecordStoreTest {
                         1_000L * ++index);
             }
             long occurredAt = 1_000L * (index + 1);
-            assertRefused(reject.required("id").textValue(), sessionId,
-                    () -> journal.commitMonitor("rejected",
-                            reject.required("next"), occurredAt));
+            // A command that opened a record opens no other, whatever the
+            // operation that carries it.
+            JsonNode reuse = reject.get("reuseCommandOf");
+            String operation = reuse == null
+                    ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
+            String commandId = reuse == null ? "rejected"
+                    : "accepted-" + reuse.intValue();
+            assertRefused(reject.required("id").textValue(), sessionId, null,
+                    () -> journal.commit(journal.request(operation,
+                            commandId, ExtensionRecordJournal.bytes(
+                                    reject.required("next")), occurredAt,
+                            event -> {
+                            }, records -> records)));
         }
     }
 
@@ -127,51 +138,116 @@ class ManagedExtensionRecordStoreTest {
                 chain().get(0).required("monitorRun"));
         byte[] trailing = (new String(start, StandardCharsets.UTF_8)
                 + " {}").getBytes(StandardCharsets.UTF_8);
-        Map<String, Consumer<ObjectNode>> events = Map.of(
-                "another workspace", event -> ((ObjectNode) event
-                        .get("sessionKey")).put("workspaceId", "other"),
-                "an extra Session key field", event -> ((ObjectNode) event
-                        .get("sessionKey")).put("extra", true),
-                "a schema version as text", event -> ((ObjectNode) event
-                        .at("/payload/recordRef")).put("schemaVersion", "1"),
-                "a record version 2", event -> ((ObjectNode) event
-                        .get("payload")).put("version", 2),
-                "an event version 2", event -> event.put("v", 2),
-                "an extra payload field", event -> ((ObjectNode) event
-                        .get("payload")).put("extra", true));
-        for (Map.Entry<String, Consumer<ObjectNode>> edit
-                : events.entrySet()) {
-            refuse(edit.getKey(), start, edit.getValue(), records -> records);
+        Map<String, Refusal> events = Map.ofEntries(
+                Map.entry("another workspace", new Refusal(
+                        "names another Session", event -> ((ObjectNode) event
+                                .get("sessionKey")).put("workspaceId",
+                                        "other"))),
+                Map.entry("an extra Session key field", new Refusal(
+                        "event.sessionKey must be an object with exactly",
+                        event -> ((ObjectNode) event.get("sessionKey"))
+                                .put("extra", true))),
+                Map.entry("a schema version as text", new Refusal(
+                        "recordRef.schemaVersion is out of range",
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("schemaVersion",
+                                        "1"))),
+                Map.entry("a record version 2", new Refusal(
+                        "event.payload.version is out of range",
+                        event -> ((ObjectNode) event.get("payload"))
+                                .put("version", 2))),
+                Map.entry("an event version 2", new Refusal(
+                        "event.v is out of range", event -> event.put("v",
+                                2))),
+                Map.entry("an extra payload field", new Refusal(
+                        "event.payload must be an object with exactly",
+                        event -> ((ObjectNode) event.get("payload"))
+                                .put("extra", true))),
+                Map.entry("an event subject", new Refusal(
+                        "event must be an object with exactly",
+                        event -> event.putObject("subject")
+                                .put("type", "turn").put("id", "turn-1"))),
+                Map.entry("a sequence past its place", new Refusal(
+                        "event.sequence is out of range",
+                        event -> event.put("sequence", event.get("sequence")
+                                .longValue() + 1))),
+                Map.entry("a digest of another body", new Refusal(
+                        "does not match its resource",
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("digest",
+                                        ExtensionRecordJournal.sha256(
+                                                "another body")))),
+                Map.entry("a reference of another domain", new Refusal(
+                        "must reference managed-monitor_run version 1",
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("kind",
+                                        "managed-hook_execution"))));
+        for (Map.Entry<String, Refusal> edit : events.entrySet()) {
+            refuse(edit.getKey(), edit.getValue().message(), start,
+                    edit.getValue().editEvent(), records -> records);
         }
-        refuse("a body with trailing content", trailing, event -> {
-        }, records -> records);
-        refuse("an event line with trailing content", start, event -> {
-        }, records -> records.replaceFirst("\n", " xyz\n"));
+        refuse("a body with trailing content", "Stage H record is not valid"
+                + " JSON", trailing, event -> {
+                }, records -> records);
+        refuse("an event line with trailing content", "journal record is not"
+                + " valid JSON", start, event -> {
+                }, records -> records.replaceFirst("\n", " xyz\n"));
+        refuse("no commit marker", "ends with its commit marker", start,
+                event -> {
+                }, records -> records.substring(0, records.indexOf('\n')
+                        + 1) + "{\"subtype\":\"managed_session_note\"}\n");
     }
 
-    private void refuse(String label, byte[] body,
+    @Test
+    void refusesAStageHRecordInTheGenesis() throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = new ExtensionRecordJournal(
+                sessionStore, TENANT, WORKSPACE, sessionId).acquire();
+        CommitTransactionRequest revision = journal.request("genesis",
+                chain().get(0).required("monitorRun"), 1_000);
+        String event = new String(Base64.getDecoder().decode(
+                revision.recordBytesBase64()), StandardCharsets.UTF_8)
+                .split("\n")[0];
+        assertRefused("a genesis with a Stage H record", sessionId,
+                "is not one of the transaction's events",
+                () -> journal.commit(journal.genesis(event
+                        + "\n{\"subtype\":\"managed_session_header_v1\"}\n",
+                        revision.resources())));
+    }
+
+    private record Refusal(String message, Consumer<ObjectNode> editEvent) {
+    }
+
+    private void refuse(String label, String message, byte[] body,
             Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords) {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
-        assertRefused(label, sessionId, () -> journal.commit(journal.request(
-                "refused", body, 1_000, editEvent, editRecords)));
+        assertRefused(label, sessionId, message, () -> journal.commit(
+                journal.request(ExtensionRecordJournal.OPERATION, "refused",
+                        body, 1_000, editEvent, editRecords)));
     }
 
     /**
      * A refused commit leaves no journal row, no resource reference and no
-     * revision behind, which it would if the store did not roll back.
+     * revision behind, which it would if the store did not roll back. A
+     * {@code message} names the rule that refused it.
      */
     private void assertRefused(String label, String sessionId,
-            ThrowingCallable commit) {
+            String message, ThrowingCallable commit) {
         long transactions = rows("qwen_managed_session_journal_tx", sessionId);
         long references = rows("qwen_managed_session_resource_ref",
                 sessionId);
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
-                .isInstanceOfSatisfying(ApiException.class, error ->
-                        assertThat(error.getCode()).as(label).isEqualTo(
-                                ManagedExtensionRecordStore.ERROR_REJECTED));
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).as(label).isEqualTo(
+                            ManagedExtensionRecordStore.ERROR_REJECTED);
+                    if (message != null) {
+                        assertThat(error.getMessage()).as(label)
+                                .contains(message);
+                    }
+                });
         assertThat(rows("qwen_managed_session_journal_tx", sessionId))
                 .as(label).isEqualTo(transactions);
         assertThat(rows("qwen_managed_session_resource_ref", sessionId))
@@ -211,6 +287,34 @@ class ManagedExtensionRecordStoreTest {
         assertThat(announced).allSatisfy(event ->
                 assertThat(event.data().get("taskId")).isEqualTo(taskId));
         assertThat(expected.size()).isLessThan(chain().size());
+    }
+
+    @Test
+    void announcesNothingOnceThePublicSessionIsDeleted() throws Exception {
+        String sessionId = agents.createSession(TENANT, "deleted-"
+                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
+                List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        List<JsonNode> chain = chain();
+        journal.commitMonitor("deleted-0", chain.get(0).required(
+                "monitorRun"), chain.get(0).required("occurredAt")
+                        .longValue());
+        agents.deleteSession(TENANT, null, "delete-" + sessionId, sessionId);
+        // The next revision changes the view, which a live Session would
+        // hear about.
+        assertThat(ManagedExtensionProjectionContractTest.view(chain.get(1)
+                .required("view"))).isNotEqualTo(
+                        ManagedExtensionProjectionContractTest.view(chain
+                                .get(0).required("view")));
+        journal.commitMonitor("deleted-1", chain.get(1).required(
+                "monitorRun"), chain.get(1).required("occurredAt")
+                        .longValue());
+        List<EventRecord> events = state.findEvents(TENANT, sessionId, 0,
+                100);
+        assertThat(events).extracting(EventRecord::type)
+                .containsOnlyOnce("task.updated")
+                .endsWith("session.deleted");
+        assertThat(revisions(sessionId)).isEqualTo(2);
     }
 
     @Test

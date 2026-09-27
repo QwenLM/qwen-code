@@ -57,11 +57,12 @@ The facts below are from `main` at `848cf5e6c4`.
 2. A retried command returns the revision it committed before anything is published again, even if the domain was disabled since. The same command with other content is a conflict.
 3. The domain must be enabled for submission; `monitor_run` is not.
 4. The body is parsed and closed. The first revision of its record must open its run, and its command must not have opened another record; every later revision must be a successor of the latest.
-5. The parsed body is published as the resource, and the `domain.committed` event, with the input and its wake when given, commits in one transaction.
+5. The command must be writable: the log has not stopped after a failed write, the command names this Session, and its expected sequence, when given, is the committed one. These checks run again in the commit, but running them first means a refused retry publishes no body.
+6. The parsed body is published as the resource, and the `domain.committed` event, with the input and its wake when given, commits in one transaction.
 
-Any other path that tries to commit a `domain.committed` event for a domain with a body, such as `appendExecution` or `commitDomainRecord`, is refused, so no revision bypasses its chain.
+Any other path that tries to commit a `domain.committed` event for a domain with a body, such as `appendExecution` or `commitDomainRecord`, is refused, so no revision bypasses its chain. So is any other event whose ID has the form `<domain>:<n>` that Stage H record events use, so no event can take the ID a later revision needs.
 
-When an authority opens, it replays every Stage H revision in the journal through the same rules, reading each body from the resource store. A body that no longer reads or chains means the log or its resources are corrupt, and opening fails. `extensionRecord`, `taskViews` and `extensionOutbox` expose the rebuilt state, and `issueOperationGrant` issues grants from it. The HTTP store now also commits the resources a Stage H body names, as it does for a checkpoint, so the body never references a resource that only the writer holds.
+When an authority opens, it replays every Stage H revision in the journal through the same rules, reading each body from the resource store. A body that no longer reads or chains means the log or its resources are corrupt, and opening fails. Because a reopened authority applies the rules in force, tightening one of them changes the contract version: a log that the older rules accepted would no longer open. `extensionRecord` and `taskViews` expose the rebuilt state, and `issueOperationGrant` issues grants from it. The outbox is each record's delivery line, which `isExtensionDeliveryPending` tests; nothing reads it before H4. The HTTP store now also commits the resources a Stage H body names, as it does for a checkpoint, so the body never references a resource that only the writer holds.
 
 ## Task projection
 
@@ -100,9 +101,9 @@ The times are the `occurredAt` the authority records on each revision, not the s
 Flyway `V16` adds `qwen_managed_session_extension_record`: one row per record, keyed by the Session scope key and the record key, holding the record's identity, its latest revision and resource, the task projection and the delivery line. `ManagedExtensionRecordStore` writes it from `ManagedSessionStore.commit`, after the transaction's resources are stored and in the same SQL transaction:
 
 1. It parses each record line of the transaction as strictly as the authority's reader, refusing duplicate keys and trailing content, and picks the `domain.committed` events of domains with a body.
-2. It checks each such event as the authority's reader does: version 1, a closed key of this Session, and a closed payload whose reference names a version 1 record of the domain. It then reads the body from the verified resource, checks that it matches the reference, and checks the body with `ManagedExtensionRecords`.
-3. It checks the first-revision or successor rule against the stored latest revision, projects the task view with `ManagedExtensionProjection`, and inserts or updates the row.
-4. When the view changed and the Session has a public resource, it appends a `task.updated` event with `data.taskId` and `data.state`, keyed so a replayed transaction announces nothing twice.
+2. It checks each such event as the authority's reader does: a closed event with no subject, which the authority never gives one; version 1; the sequence of its place among the transaction's events, so it is never the marker's line or part of the genesis; a closed key of this Session; and a closed payload whose reference names a version 1 record of the domain. A transaction that carries one must end with its commit marker. It then reads the body from the verified resource, checks that it matches the reference, and checks the body with `ManagedExtensionRecords`.
+3. It checks the first-revision or successor rule against the stored latest revision, and that the command opening a record has opened no other, by a hash of the opening command that each row keeps. It then projects the task view with `ManagedExtensionProjection`, and inserts or updates the row.
+4. When the view changed and the Session has a public resource that is not deleted or being deleted, it appends a `task.updated` event with `data.taskId` and `data.state`, keyed so a replayed transaction announces nothing twice. The event is appended like any other Session event: it advances the Session's `updated_at` and version, and one that lands between two streamed text deltas splits the text part, as any interleaved event does.
 
 A revision that these rules refuse answers `409 managed_session_extension_record_rejected`. A body resource that is missing, belongs to another Session or fails verification keeps the store's existing answers (`409 managed_session_resource_missing`, `404 session_not_found`, `500 managed_session_resource_corrupt`). Either way the whole commit rolls back. A replayed transaction returns before any of this runs. Every record line must now be a JSON object; the authority has always written one. The rows are the durable read model: a restarted server reads the same list, and the journal they are derived from stays the source of truth.
 
@@ -126,10 +127,10 @@ The generated WebShell types gain the two task routes, the task schemas and the 
 - 7 task ID cases;
 - 50 run start and 31 Monitor start cases;
 - 45 single-revision views and 11 run histories, with their outbox membership;
-- 2 Monitor chains that both sides commit through their authority or store, and 8 chains they must refuse;
+- 2 Monitor chains that both sides commit through their authority or store, and 9 chains they must refuse, one of which reuses the command that opened another record;
 - 9 Broker and 8 wire-status execution cases.
 
-A Python labeler written from this document, independent of both languages and kept outside the repository as for H0b, produced the labels. `managed-extension-projection.test.ts` and `ManagedExtensionProjectionContractTest` replay the pure cases; the authority suite, `ManagedExtensionRecordStoreTest` and `ManagedAgentMySqlIT` commit the chains.
+A Python labeler written from this document, independent of both languages and kept outside the repository as for H0b, produced the labels. `managed-extension-projection.test.ts` and `ManagedExtensionProjectionContractTest` both replay the task ID, start, view and history cases. Each side replays the execution cases of the reports it reads: TypeScript the wire-status cases, which the Harness maps, and Java the Broker cases. The authority suite, `ManagedExtensionRecordStoreTest` and `ManagedAgentMySqlIT` commit the chains.
 
 ## Files affected
 
@@ -144,14 +145,14 @@ A Python labeler written from this document, independent of both languages and k
 
 ## Validation plan
 
-- **TypeScript:** the fixture replay; the authority suite for chains, refusals, replay, the notification and wake, the bypass guard, disabled domains, cold rebuild, a missing body and grants; the gate against H0b's replacement cases and revocation; the HTTP store for the nested resources and a cold rebuild over HTTP.
-- **Java:** the fixture replay; the chains, refusals, replay and announcements through `ManagedSessionStore`; the API contract test for every mapped route and record; the MySQL integration test on MariaDB 10.11 and MySQL 8.4, which also shows that a refused revision leaves no resource, resource reference or journal row behind.
+- **TypeScript:** the fixture replay; the authority suite for chains, refusals before publishing, replay, the notification and wake, the bypass guard, reserved event IDs, disabled domains, cold rebuild, a missing or non-chaining body and grants; the gate against H0b's replacement cases and revocation; the HTTP store for the nested resources and a cold rebuild over HTTP.
+- **Java:** the fixture replay; the chains, refusals with the rule that refused each, replay, announcements and a deleted Session through `ManagedSessionStore`; the API contract test for every mapped route and record; the MySQL integration test on MariaDB 10.11 and MySQL 8.4, which also shows that a refused revision leaves no resource, resource reference or journal row behind.
 - **Generated types:** the WebShell generator test.
-- **Mutation checks:** each rule of the projection, the start rules and the store checks is mutated in turn and a test fails.
+- **Mutation checks:** the projection rules, the start and chain rules, the authority's refusals and the store's checks were each disabled in turn, and a test failed for every one.
 
 ## Acceptance criteria
 
-- TypeScript and Java produce the same task IDs, task views, outbox membership and execution states for every fixture case, and refuse the same chains.
+- TypeScript and Java produce the same task IDs, task views and outbox membership for every fixture case and refuse the same chains, and each maps the Runtime reports it reads to the execution states the fixtures give.
 - A refused revision commits nothing on either side.
 - A reopened authority and a restarted server report the same task list as before.
 - No planned route is mapped, and nothing changes for Sessions without Stage H records except the empty task list and `capabilities.tasks`.
@@ -164,6 +165,7 @@ A Python labeler written from this document, independent of both languages and k
 3. **Nested resources.** The HTTP store lists every resource a Stage H body names with the commit, so the Java store's resource check refuses a body that names a resource the Session does not hold, such as a start receipt or an output manifest kept only in the Runtime or the tool result store; the Java store does not walk the body itself. H3 must either publish those as Session resources or exempt their kinds from the closure. A named resource whose metadata disagrees with a staged one fails the commit before it is sent and, as for a mismatched reference in an event payload, stops the writer; H3 should check the references before it publishes the body.
 4. **Logical and physical start.** H0b lets a run stay `admitted` while its execution is already `running_attached`, so such a task shows `pending` with the Runtime state `ready` and no start time. Tightening that rule is a change to the H0b contract.
 5. **Replayed domain records.** `commitDomainRecord` publishes a new body before it detects a replayed command, and returns that body's reference instead of the committed one. `commitExtensionRecord` checks for the replay first; the older method is left for a separate fix.
+6. **Notification wakes.** A revision that commits a notification input also commits its `wake.requested`, but nothing consumes the wake yet. The hosted Session path refuses to reopen a Session while an accepted input has no `turn.settled` (`hosted_turn_recovery_required`), so H3 must run or settle such inputs before it enables a domain that notifies.
 
 ## Follow-up work
 

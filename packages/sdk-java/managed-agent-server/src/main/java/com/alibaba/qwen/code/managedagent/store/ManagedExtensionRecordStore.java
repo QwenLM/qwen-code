@@ -14,9 +14,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -42,6 +45,9 @@ public class ManagedExtensionRecordStore {
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
+    private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
+    private static final Set<String> EVENT_FIELDS = Set.of("v", "sequence",
+            "eventId", "sessionKey", "kind", "occurredAt", "payload");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
     private static final long MAX_TIME = 8_640_000_000_000_000L;
@@ -80,13 +86,21 @@ public class ManagedExtensionRecordStore {
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
+     * A Stage H event must hold its declared place among the transaction's
+     * {@code eventCount} events, and the transaction must end with its
+     * commit marker, as the authority's reader requires.
      */
     void apply(String tenantId, String workspaceId, String sessionId,
-            byte[] recordBytes, Function<String, StoredResource> resources) {
-        for (String line : new String(recordBytes, StandardCharsets.UTF_8)
-                .split("\n")) {
-            JsonNode record = read(line, "journal record");
-            if (!EVENT_SUBTYPE.equals(record.path("subtype").textValue())) {
+            long firstSequence, int eventCount, byte[] recordBytes,
+            Function<String, StoredResource> resources) {
+        String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
+                .split("\n");
+        boolean applied = false;
+        String lastSubtype = null;
+        for (int index = 0; index < lines.length; index++) {
+            JsonNode record = read(lines[index], "journal record");
+            lastSubtype = record.path("subtype").textValue();
+            if (!EVENT_SUBTYPE.equals(lastSubtype)) {
                 continue;
             }
             JsonNode event = record.path("managedSession");
@@ -98,13 +112,20 @@ public class ManagedExtensionRecordStore {
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body != null) {
+                require(index < eventCount, "The Stage H record event is not"
+                        + " one of the transaction's events.");
                 requireEnvelope(event, domain, tenantId, workspaceId,
-                        sessionId);
+                        sessionId, firstSequence + index);
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
+                        payload.get("operationId").textValue(),
                         payload.get("recordRef"),
                         time(event.path("occurredAt")), resources);
+                applied = true;
             }
         }
+        require(!applied || COMMIT_SUBTYPE.equals(lastSubtype),
+                "A transaction with a Stage H record ends with its commit"
+                        + " marker.");
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -149,15 +170,19 @@ public class ManagedExtensionRecordStore {
 
     /**
      * Checks the domain.committed event of a Stage H record as the Session
-     * authority's reader does: its version, its Session, and a closed payload
-     * whose reference names a version 1 record of the domain.
+     * authority's reader does: a closed event at its sequence, its version,
+     * its Session, and a closed payload whose reference names a version 1
+     * record of the domain. The authority never gives such an event a
+     * subject.
      */
     private static void requireEnvelope(JsonNode event, String domain,
-            String tenantId, String workspaceId, String sessionId) {
+            String tenantId, String workspaceId, String sessionId,
+            long sequence) {
         try {
+            ManagedExtensionRecords.closed(event, EVENT_FIELDS, "event");
             ManagedExtensionRecords.count(event.get("v"), 1, 1, "event.v");
-            ManagedExtensionRecords.count(event.get("sequence"), 1,
-                    Long.MAX_VALUE, "event.sequence");
+            ManagedExtensionRecords.count(event.get("sequence"), sequence,
+                    sequence, "event.sequence");
             ManagedExtensionRecords.id(event.get("eventId"), "event.eventId");
             ManagedExtensionRecords.closed(event.get("sessionKey"),
                     SESSION_KEY_FIELDS, "event.sessionKey");
@@ -187,8 +212,9 @@ public class ManagedExtensionRecordStore {
     }
 
     private void applyRevision(String tenantId, String workspaceId,
-            String sessionId, String domain, Body body, JsonNode recordRef,
-            long occurredAt, Function<String, StoredResource> resources) {
+            String sessionId, String domain, Body body, String operationId,
+            JsonNode recordRef, long occurredAt,
+            Function<String, StoredResource> resources) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
         require(resource.kind().equals(recordRef.get("kind").textValue())
@@ -215,9 +241,18 @@ public class ManagedExtensionRecordStore {
                         + " session_scope_key = ? AND record_key = ?",
                 ManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
                 .stream().findFirst().orElse(null);
+        String operationHash = sha256(operationId);
         if (previous == null) {
             require(body.isStart().test(record), "The first revision of "
                     + domain + " record " + recordId + " must open its run.");
+            // The command that opens a record becomes the operation of its
+            // grants, so it opens no other record.
+            Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_scope_key = ? AND operation_hash = ?",
+                    Integer.class, scopeKey, operationHash);
+            require(opened != null && opened == 0, "Command " + operationId
+                    + " already opened another Stage H record.");
         } else {
             require(previous.domain().equals(domain)
                     && previous.recordId().equals(recordId)
@@ -243,14 +278,15 @@ public class ManagedExtensionRecordStore {
             jdbc.update("INSERT INTO qwen_managed_session_extension_record"
                             + " (session_scope_key, record_key, tenant_id,"
                             + " workspace_id, session_id, domain, record_id,"
-                            + " revision, record_resource_id, task_kind,"
-                            + " task_state, runtime_state,"
+                            + " operation_hash, revision, record_resource_id,"
+                            + " task_kind, task_state, runtime_state,"
                             + " definition_revision, delivery_target,"
                             + " delivery_state, created_at, started_at,"
                             + " settled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     scopeKey, recordKey, tenantId, workspaceId, sessionId,
-                    domain, recordId, revision, resourceId, body.taskKind(),
+                    domain, recordId, operationHash, revision, resourceId,
+                    body.taskKind(),
                     projection.state(), projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.createdAt(),
@@ -287,7 +323,10 @@ public class ManagedExtensionRecordStore {
             return;
         }
         Optional<SessionRecord> session = sessions.findSessionById(sessionId);
-        if (session.isEmpty() || !tenantId.equals(session.get().tenantId())) {
+        // A deleted Session's terminal event stays its last one.
+        if (session.isEmpty() || !tenantId.equals(session.get().tenantId())
+                || "DELETING".equals(session.get().status())
+                || "DELETED".equals(session.get().status())) {
             return;
         }
         sessions.appendPublicEventIfAbsent(tenantId, sessionId, null,
@@ -348,6 +387,15 @@ public class ManagedExtensionRecordStore {
                 && value.compareTo(BigDecimal.valueOf(MAX_TIME)) <= 0,
                 "The Stage H record event has no valid time.");
         return value.longValueExact();
+    }
+
+    private static String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(
+                    "SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
     }
 
     private static void require(boolean condition, String message) {

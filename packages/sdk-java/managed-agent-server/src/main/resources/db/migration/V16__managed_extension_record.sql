@@ -10,6 +10,7 @@ CREATE TABLE qwen_managed_session_extension_record (
     session_id VARCHAR(512) NOT NULL,
     domain VARCHAR(64) NOT NULL,
     record_id VARCHAR(512) NOT NULL,
+    operation_hash CHAR(64) NOT NULL,
     revision BIGINT NOT NULL,
     record_resource_id VARCHAR(512) NOT NULL,
     task_kind VARCHAR(32),

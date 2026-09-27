@@ -305,6 +305,7 @@ public class ManagedSessionStore {
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
         extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+                request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
                         resourceId));

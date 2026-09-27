@@ -28,6 +28,25 @@ import {
 } from './managed-session-records.js';
 
 const enablement = vi.hoisted(() => ({ monitorRun: true }));
+const chainRules = vi.hoisted(() => ({ lenient: false }));
+
+// Lets a test write revisions that do not chain, as a log written under
+// looser rules would hold them.
+vi.mock('./managed-extension-projection.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-extension-projection.js')>();
+  const monitor = actual.MANAGED_EXTENSION_RECORD_BODIES.monitor_run!;
+  return {
+    ...actual,
+    MANAGED_EXTENSION_RECORD_BODIES: {
+      monitor_run: {
+        ...monitor,
+        isSuccessor: (previous: unknown, next: unknown) =>
+          chainRules.lenient || monitor.isSuccessor(previous, next),
+      },
+    },
+  };
+});
 
 // monitor_run is enabled by H3; this suite runs the H0c path ahead of it.
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -49,6 +68,7 @@ const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
   enablement.monitorRun = true;
+  chainRules.lenient = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -264,6 +284,24 @@ async function commitLife(
 
 const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'monitor_run', 'monitor-1')}`;
 
+async function publishedBodies(harness: Harness): Promise<number> {
+  try {
+    return (
+      await fs.readdir(
+        path.join(
+          harness.runtimeBaseDir,
+          'resources',
+          sessionId,
+          'managed-monitor_run',
+        ),
+      )
+    ).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+}
+
 // The same chains ManagedExtensionRecordStoreTest commits through the Java
 // Session store, so both sides must project and refuse them alike.
 const chains = JSON.parse(
@@ -289,6 +327,7 @@ const chains = JSON.parse(
     readonly id: string;
     readonly accepted: readonly unknown[];
     readonly next: unknown;
+    readonly reuseCommandOf?: number;
   }>;
 };
 
@@ -329,9 +368,16 @@ describe('managed-extension-projection/1 monitor chains', () => {
         );
       }
       const before = authority.committedSequence;
+      const next =
+        each.reuseCommandOf === undefined
+          ? command('chain:next')
+          : {
+              ...command(`chain:${each.reuseCommandOf}`),
+              operation: 'reopenMonitorRun',
+            };
       await expect(
         authority.commitExtensionRecord(
-          command('chain:next'),
+          next,
           { domain: 'monitor_run', record: each.next },
           TRUSTED,
         ),
@@ -416,7 +462,6 @@ describe('managed session authority Stage H records', () => {
           settledAt: 7_000,
         },
       ]);
-      expect(authority.extensionOutbox()).toEqual([]);
     });
   });
 
@@ -438,8 +483,18 @@ describe('managed session authority Stage H records', () => {
         TRUSTED,
       );
       expect(second.revision).toBe(1);
+      const third = await authority.commitExtensionRecord(
+        command('monitor-3:1'),
+        {
+          domain: 'monitor_run',
+          record: { ...LIFE[0], monitorId: 'monitor-3' },
+        },
+        TRUSTED,
+      );
+      // Created at the same time, the two newest order by task ID.
+      const tied = [second.taskId, third.taskId].sort().reverse();
       expect(authority.taskViews().map((view) => view.taskId)).toEqual([
-        second.taskId,
+        ...tied,
         TASK_ID,
       ]);
     });
@@ -505,6 +560,66 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
+      expect(await publishedBodies(harness)).toBe(0);
+    });
+  });
+
+  it('refuses a stale or foreign command before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:1'), expectedSequence: 99 },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/re-read before retrying/);
+      await expect(
+        authority.commitExtensionRecord(
+          {
+            ...command('monitor-1:1'),
+            sessionKey: { ...sessionKey, sessionId: 'another-session' },
+          },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/does not match this session/);
+      expect(await publishedBodies(harness)).toBe(0);
+    });
+  });
+
+  it('keeps the Stage H event IDs for Stage H records', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.appendExecution(
+          command('squatter'),
+          [
+            {
+              v: 1,
+              sequence: authority.committedSequence + 1,
+              eventId: 'monitor_run:1',
+              sessionKey,
+              kind: 'cancel.requested',
+              occurredAt: harness.now,
+              payload: {
+                requestId: 'cancel-1',
+                target: null,
+                reason: 'user',
+                requestedBy: 'user',
+              },
+            },
+          ],
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/reserved for Stage H records/);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).resolves.toMatchObject({ revision: 1 });
     });
   });
 
@@ -698,6 +813,25 @@ describe('managed session authority Stage H records', () => {
     await expect(
       withAuthority(harness, async () => undefined, { create: false }),
     ).rejects.toThrow(ManagedSessionRecordError);
+  });
+
+  it('fails to reopen when committed revisions no longer chain', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      chainRules.lenient = true;
+      await commitLife(harness, authority, 1);
+      await authority.commitExtensionRecord(
+        command('monitor-1:skip'),
+        { domain: 'monitor_run', record: LIFE[3] },
+        TRUSTED,
+      );
+    });
+    chainRules.lenient = false;
+    await expect(
+      withAuthority(harness, async () => undefined, { create: false }),
+    ).rejects.toThrow(
+      /session log is corrupt: monitor_run record monitor-1 cannot follow its revision 1/,
+    );
   });
 
   it('issues grants the Runtime gate installs, renews and replaces', async () => {

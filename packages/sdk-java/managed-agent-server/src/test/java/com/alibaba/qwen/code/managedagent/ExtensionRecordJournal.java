@@ -27,6 +27,7 @@ final class ExtensionRecordJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WRITER = "writer-extension";
     private static final String TOKEN = "extension-writer-token-0123456789";
+    static final String OPERATION = "commitMonitorRun";
     private final ManagedSessionStore store;
     private final String tenantId;
     private final String workspaceId;
@@ -47,18 +48,30 @@ final class ExtensionRecordJournal {
 
     /** Acquires the writer and commits the Session's genesis. */
     ExtensionRecordJournal open() {
+        acquire().commit(genesis(
+                "{\"subtype\":\"session_execution_engine\"}\n"
+                        + "{\"subtype\":\"managed_session_header_v1\"}\n",
+                List.of()));
+        journalRevision = 1;
+        return this;
+    }
+
+    /** Acquires the writer and leaves the genesis to the test. */
+    ExtensionRecordJournal acquire() {
         writerGeneration = store.acquireWriter(tenantId, sessionId, TOKEN,
                 new AcquireWriterRequest(workspaceId, WRITER, 60_000L))
                 .writerGeneration();
-        String records = "{\"subtype\":\"session_execution_engine\"}\n"
-                + "{\"subtype\":\"managed_session_header_v1\"}\n";
-        store.commit(tenantId, sessionId, TOKEN, new CommitTransactionRequest(
-                workspaceId, WRITER, writerGeneration, 0, 0,
-                "transaction-genesis", "session.create", "command-genesis",
-                sha256("genesis"), 0, 0, 0, null, null, null, 0, null, 2,
-                base64(records), sha256(records), List.of()));
-        journalRevision = 1;
         return this;
+    }
+
+    /** The genesis transaction with two record lines. */
+    CommitTransactionRequest genesis(String records,
+            List<CommitResource> resources) {
+        return new CommitTransactionRequest(workspaceId, WRITER,
+                writerGeneration, 0, 0, "transaction-genesis",
+                "session.create", "command-genesis", sha256("genesis"), 0, 0,
+                0, null, null, null, 0, null, 2, base64(records),
+                sha256(records), resources);
     }
 
     CommitReceipt commitMonitor(String commandId, JsonNode monitor,
@@ -80,16 +93,18 @@ final class ExtensionRecordJournal {
      */
     CommitTransactionRequest request(String commandId, JsonNode monitor,
             long occurredAt) {
-        return request(commandId, bytes(monitor), occurredAt, event -> {
-        }, records -> records);
+        return request(OPERATION, commandId, bytes(monitor), occurredAt,
+                event -> {
+                }, records -> records);
     }
 
     /**
-     * A commit request whose body bytes, event or record lines a test may
-     * change, as a writer that does not follow the contract would.
+     * A commit request of an operation whose body bytes, event or record
+     * lines a test may change, as a writer that does not follow the contract
+     * would.
      */
-    CommitTransactionRequest request(String commandId, byte[] body,
-            long occurredAt, Consumer<ObjectNode> editEvent,
+    CommitTransactionRequest request(String operation, String commandId,
+            byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords) {
         String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
@@ -112,10 +127,10 @@ final class ExtensionRecordJournal {
         String records = editRecords.apply(line("managed_session_event_v1",
                 event) + line("managed_session_commit_v1",
                         JSON.createObjectNode().put("commandId", commandId)));
-        String transactionId = "transaction-" + commandId;
+        String transactionId = "transaction-" + operation + "-" + commandId;
         return new CommitTransactionRequest(workspaceId, WRITER,
                 writerGeneration, journalRevision, sequence, transactionId,
-                "commitMonitorRun", commandId, sha256(commandId), next, next,
+                operation, commandId, sha256(commandId), next, next,
                 1, sha256("events-" + commandId), lastCommitDigest,
                 sha256(transactionId), 0, null, 2, base64(records),
                 sha256(records), List.of(new CommitResource(resourceId,
