@@ -12,7 +12,7 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
-        <fastjson2.version>2.0.60</fastjson2.version>
+        <fastjson2.version>2.0.65</fastjson2.version>
         <h2.version>2.3.232</h2.version>
         <jackson.version>2.20.0</jackson.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>

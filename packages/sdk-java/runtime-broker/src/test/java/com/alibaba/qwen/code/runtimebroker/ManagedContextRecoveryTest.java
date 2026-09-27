@@ -114,8 +114,7 @@ class ManagedContextRecoveryTest {
         JdbcRuntimeBrokerSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(true);
         try (RuntimeBrokerService service = service(repository(source), provisioner)) {
-            assertThrows(ExecutionException.class,
-                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            assertBlocked(service);
             assertBlocked(service);
             RuntimeProvisionSeed seed = repository(source).findActive(REQUEST).getProvisionSeed();
             HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -428,7 +427,7 @@ class ManagedContextRecoveryTest {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
                 provisioner, new HttpRuntimeTransport(), bindings,
                 new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
-                UUID.randomUUID().toString(), Duration.ofSeconds(1), Duration.ofSeconds(1));
+                UUID.randomUUID().toString(), Duration.ofMillis(1500), Duration.ofMillis(1500));
     }
 
     private static JdbcRuntimeBindingRepository repository(DataSource source) {

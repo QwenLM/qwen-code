@@ -5,8 +5,9 @@
 ## Status
 
 Design for slice B2d of #12737, the Stage B host integration for #12380, based
-on upstream `663d98eac5`. Proposed, not implemented. It records in this
-repository the selection and scope rules decided in #12737
+on upstream `663d98eac5`. Implemented in #12828 behind
+`--experimental-paired-engines`, with no Managed engine registered. It records
+in this repository the selection and scope rules decided in #12737
 ([Q1/Q4](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846602143)),
 so that B2d is reviewed against this document instead of the
 [external engine-selection design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-session-execution-engine.md).
@@ -112,6 +113,16 @@ B2d adds no operator setting for them.
   paired Bridge would extend to a Managed factory it can never use.
 - A Bridge injected through `deps.bridge` or an injected workspace registry
   stays under its caller's control; the opt-in neither wraps nor replaces it.
+  `qwen serve` itself injects its workspace registry into the serve app, so
+  there the three `runQwenServe` sites do the work; the embedded default is
+  paired when an embedder that injects neither sets the option.
+- The embedded default reads owners from the embedding process's runtime
+  directory, where it already reads artifact snapshots and attachments, while
+  its children resolve theirs from their environment and the workspace
+  settings. An embedder whose workspace settings move the runtime directory
+  sets `QWEN_RUNTIME_DIR` for its process so that both agree; otherwise a
+  paired embedded host looks for owners in the wrong directory and a cold
+  restore answers 404. The daemon's runtimes set it for their children.
 - Channels have no Bridge of their own. Channel workers create sessions through
   the daemon with `sourceType: 'channel'`, which the purpose rules keep on
   Legacy.
@@ -153,7 +164,10 @@ session's own transcript.
   `session_execution_engine_unavailable` before any channel starts; the owner
   record is left as it is. Creation purposes are not evaluated again, because
   the owner already reflects them.
-- Unreadable, conflicting or incomplete ownership rejects, as in B2a.
+- Unreadable, conflicting or incomplete ownership rejects, as in B2a. That
+  includes a transcript with a line that does not parse whole, such as one left
+  by a crash mid-append, or with a record type the daemon's version does not
+  know; see Risks.
 
 **Hot attach** reuses the live entry and does not call the selector.
 
@@ -193,7 +207,20 @@ To be paired, a Managed engine supplies, per workspace runtime:
   workspace-control channel (B2b), so with only Managed live they cannot be
   applied. The engine slice decides whether the host starts workspace control
   for those routes; in B2d no Managed channel starts, so the case does not
-  arise.
+  arise;
+- a bounded evaluation: the Bridge bounds each selection, owner read included,
+  by its initialize timeout, and a selection that exceeds it fails the creation
+  or restore instead of selecting Legacy. The evaluation therefore settles well
+  within that budget. A thrown or rejected evaluation counts as `unknown`; the
+  selector keeps no detail of the failure, so the engine logs its own under the
+  logging rule of the compatibility contract;
+- purpose marking: every internal creator of a deferred purpose marks its
+  sessions, or is otherwise kept on Legacy, before the engine is registered.
+  The replacement session of a worktree reset does not today: it is created
+  without `worktree` and moved into the checkout afterwards. A task that a Live
+  conversation starts in a project also creates its thread with no source, and
+  the engine slice decides whether that thread is a Live purpose. To the rules
+  above, both are ordinary creations.
 
 B2d registers no engine. The paired `managed` factory then rejects with an
 unavailable error. The selector never returns `managed` without a registered
@@ -258,7 +285,9 @@ Legacy session's owner record, and an unpaired Legacy host restores such a
 session as before. With no Managed engine, paired hosts create only Legacy
 sessions, so switching the opt-in on or off cannot move a session to another
 engine. The Legacy refusal item of the Managed engine seam keeps this true once
-Managed sessions exist.
+Managed sessions exist. Until then, turning the opt-in off is also how an
+operator restores a Legacy session that a paired host refuses because its
+transcript cannot prove the owner.
 
 ## Files and consumers
 
@@ -267,6 +296,7 @@ Managed sessions exist.
 | Opt-in                | CLI `commands/serve.ts`; `serve/types.ts`; `serve/hosted-harness-profile.ts`                                          |
 | Pairing and selection | `serve/session-execution-engine-selector.ts`                                                                          |
 | Construction sites    | `serve/run-qwen-serve.ts` (primary, startup secondary, dynamic and replacement); `serve/server.ts` (embedded default) |
+| Owner evidence        | core `utils/transcript-records.ts` (the record types an owner read accepts)                                           |
 | Design links          | this document; [ACP Bridge execution engines](./acp-bridge-execution-engines.md)                                      |
 
 No daemon route is added. Workspace routes keep their scopes; session routes
@@ -303,7 +333,7 @@ classification is B2a's.
 ## Risks and open questions
 
 - Until a Managed engine lands, the opt-in runs nothing on Managed, but it still
-  changes Legacy behavior in two ways. Legacy sessions are durable from
+  changes Legacy behavior in three ways. Legacy sessions are durable from
   creation, with the owner-only transcripts for unused sessions described in
   B2a. A quarantined Legacy channel follows the B2c policy: it refuses new
   prompts, closes settled sessions and retires by the drain deadline, where an
@@ -311,13 +341,39 @@ classification is B2a's.
   follow-ups the B2c approval requires before B2d enables pairing (#12811: a
   background job finishing during a quarantine must not stall the drain, and
   exit verification must start when termination starts) therefore apply to
-  paired Legacy-only hosts too.
+  paired Legacy-only hosts too. And a cold restore reads the transcript once
+  more to verify its owner, which makes it stricter, as the items below
+  describe.
 - The serve app's Managed-engine dependency has no production caller until the
   engine slice lands; tests use it for the double.
+- Paired hosts restore more strictly than unpaired ones. A transcript that
+  cannot prove its owner, because a line does not parse whole or a record type
+  is unknown to the daemon, is refused with 409 where an unpaired host restores
+  it. A crash mid-append leaves such a line, and with the writer lease off,
+  which is the default, a later writer keeps appending after it. A daemon
+  upgraded in place keeps its older list of record types until it restarts,
+  while its new children may already write newer ones. Nothing repairs such
+  transcripts; B2c recovers channels, not transcripts. B2d still allows pairing
+  with the lease off: the opt-in is experimental and off by default, the
+  refusal is precise and leaves the bytes unchanged, and turning the opt-in off
+  restores the session on Legacy. The lists of known record types and
+  subtypes now cover every member of the chat record type, and a typechecked
+  test fails when that type gains one the lists lack; writers that build
+  records outside that type are not covered by it. Before this, a Legacy
+  session that recorded text elements could not be restored on a paired host.
+- The owner read runs within the selection budget, the initialize timeout
+  (10 seconds by default), instead of the restore budget (60 seconds by
+  default). A transcript too large, or storage too slow, to read within it
+  fails the restore on a paired host. Reading a 100 MB transcript took well
+  under a second in testing.
+- The daemon does not sweep old transcripts, so the owner-only transcripts of
+  sessions that are never used accumulate on a paired host (B2a). Default
+  enablement needs an answer for them.
 - The purpose rules rely on creator-attributed sources, which can only make a
-  session ineligible. An internal creator of a deferred purpose that stopped
-  marking its sessions would become eligible once an engine exists, so the
-  engine slice re-audits the internal creators.
+  session ineligible. An internal creator of a deferred purpose that does not
+  mark its sessions becomes eligible once an engine exists; the purpose marking
+  item of the Managed engine seam names the known cases, and the engine slice
+  re-audits the rest.
 - An unpaired Legacy host does not recognize a Managed owner record today. This
   is harmless while no ordinary host creates Managed sessions; the Managed
   engine seam makes closing it a precondition of the engine slice, which also
