@@ -15,6 +15,12 @@ const options = {
 describe('Hosted Harness profile', () => {
   it('leaves the ordinary daemon available', () => {
     expect(() => validateHostedHarnessProfile(options)).not.toThrow();
+    expect(() =>
+      validateHostedHarnessProfile({
+        ...options,
+        experimentalPairedEngines: true,
+      }),
+    ).not.toThrow();
   });
 
   it('accepts loopback no-tool deployment credentials', () => {
@@ -38,6 +44,10 @@ describe('Hosted Harness profile', () => {
     { clientMcpOverWs: true, error: 'WebSocket tunnels' },
     { cdpTunnelOverWs: true, error: 'WebSocket tunnels' },
     { allowOrigins: ['https://example.com'], error: 'browser origins' },
+    {
+      experimentalPairedEngines: true,
+      error: 'does not pair execution engines',
+    },
     {
       managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
       error: 'does not enable',

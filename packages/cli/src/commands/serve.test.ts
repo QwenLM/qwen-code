@@ -415,6 +415,26 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it.each([
+    ['--experimental-paired-engines --no-web', true],
+    ['--no-web', undefined],
+  ])('maps "%s" to experimentalPairedEngines', async (args, expected) => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(args);
+
+    expect(
+      (
+        mockRunQwenServe.mock.calls[0]?.[0] as {
+          experimentalPairedEngines?: boolean;
+        }
+      ).experimentalPairedEngines,
+    ).toBe(expected);
+  });
+
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
     mockRunQwenServe.mockImplementationOnce(
