@@ -323,9 +323,24 @@ old `FAILED` records are not stop proof. Online configuration migration while
 an unobserved old runtime is still READY remains unsupported: deployments must
 keep their mapping stable until verified cleanup.
 
+Before upgrading an installation that has enabled the Broker, quiesce new
+admission and inventory seeded `FAILED` bindings. A past crash can leave such a
+row even when a later generation is `READY`; the new guard will reject new
+placements for that tenant. If any exist, keep affected traffic stopped until
+the original writer domain has been physically stopped and an
+evidence-preserving operator migration is available. A later `READY` binding,
+row deletion or a synthetic stop receipt is not clearance. Deployments with
+these rows cannot safely resume admission through this slice alone.
+
 The local provisioner can certify journal loss for a process it still owns and
 has observed exit, using the exact seed, lease and handle. This proves neither
 that descendants stopped nor that a restarted Broker can adopt the worker.
+A transient attestation transport error against a still-live owned process
+fails that request but leaves the binding `READY` for a fresh attestation on
+the next call. Process death or an identity conflict still fences the binding;
+a network timeout alone never becomes permanent physical-loss evidence. The
+local process provisioner explicitly opts into this retry using its owned
+process liveness check; other provisioners retain the fail-closed default.
 Missing ownership after restart still provides no evidence. There is no
 production `WRITERS_STOPPED` producer in this slice; deterministic supervisor
 fixtures exercise its consumption. Workspace storage-holder cleanup remains

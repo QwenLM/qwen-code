@@ -1817,8 +1817,9 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
-    void failedReattestationPinsTheBindingWithoutStopEvidence() {
+    void transientReattestationFailureCanRetryTheLiveBinding() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.provisioner.retryFailedConfirm = true;
             RuntimeBindingRecord ready = join(fixture.service.warm(
                     "harness"));
             assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
@@ -1831,15 +1832,71 @@ class RuntimeBrokerServiceTest {
             RuntimeBrokerException error = failure(
                     fixture.service.warm("harness"));
             assertEquals("runtime_provision_failed", error.getCode());
-            assertEquals(RuntimeBindingRecord.State.LOST,
+            assertEquals(RuntimeBindingRecord.State.READY,
                     fixture.bindingRepository.findById(ready.getBindingId())
                             .getState());
 
             fixture.provisioner.confirmResult =
                     CompletableFuture.completedFuture(null);
+            assertEquals(ready.getBindingId(), join(fixture.service.warm("harness")).getBindingId());
+            fixture.resolver.result = CompletableFuture.completedFuture(new RuntimeScope(
+                    "tenant", "another-workspace", "generation", "/another-workspace",
+                    "capability", "workspace"));
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    join(fixture.service.warm("another-harness")).getState());
+            assertEquals(2, fixture.provisioner.calls.get());
+            assertEquals(0, fixture.provisioner.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void deadProcessReattestationPinsTheBindingWithoutStopEvidence() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.provisioner.retryFailedConfirm = true;
+            RuntimeBindingRecord ready = join(fixture.service.warm("harness"));
+            fixture.provisioner.usable = false;
+            fixture.provisioner.confirmResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(503, "runtime_provision_failed",
+                            "Managed Runtime process is not alive.", true));
+
+            assertEquals("runtime_provision_failed", failure(fixture.service.warm("harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    fixture.bindingRepository.findById(ready.getBindingId()).getState());
+            fixture.provisioner.confirmResult = CompletableFuture.completedFuture(null);
             assertEquals("runtime_broker_runtime_lost", failure(fixture.service.warm("harness")).getCode());
             assertEquals(1, fixture.provisioner.calls.get());
             assertEquals(0, fixture.provisioner.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void identityConflictStillPinsTheLiveBinding() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.provisioner.retryFailedConfirm = true;
+            RuntimeBindingRecord ready = join(fixture.service.warm("harness"));
+            fixture.provisioner.confirmResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "managed_runtime_identity_conflict",
+                            "Unexpected Runtime identity", false));
+
+            assertEquals("managed_runtime_identity_conflict",
+                    failure(fixture.service.warm("harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    fixture.bindingRepository.findById(ready.getBindingId()).getState());
+            assertEquals(0, fixture.provisioner.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void provisionerWithoutLiveRetryProofPinsAfterFailedConfirm() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeBindingRecord ready = join(fixture.service.warm("harness"));
+            fixture.provisioner.confirmResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(503, "runtime_provision_failed",
+                            "Attestation unavailable", true));
+
+            assertEquals("runtime_provision_failed", failure(fixture.service.warm("harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    fixture.bindingRepository.findById(ready.getBindingId()).getState());
         }
     }
 
@@ -2905,6 +2962,7 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Void> confirmResult =
                 CompletableFuture.completedFuture(null);
         volatile boolean usable = true;
+        volatile boolean retryFailedConfirm;
         volatile boolean closed;
 
         @Override
@@ -2923,6 +2981,11 @@ class RuntimeBrokerServiceTest {
                 RuntimeLease lease) {
             confirmCalls.incrementAndGet();
             return confirmResult;
+        }
+
+        @Override
+        public boolean canRetryFailedConfirm(RuntimeLease lease) {
+            return retryFailedConfirm && usable;
         }
 
         @Override

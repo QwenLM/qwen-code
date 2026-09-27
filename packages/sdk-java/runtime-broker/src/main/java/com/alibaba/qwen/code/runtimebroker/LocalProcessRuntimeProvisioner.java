@@ -142,6 +142,11 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     @Override
+    public boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return isUsable(lease);
+    }
+
+    @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         stop(lease);

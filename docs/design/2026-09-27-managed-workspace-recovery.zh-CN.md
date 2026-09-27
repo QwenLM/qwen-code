@@ -108,7 +108,9 @@ Binding 仓库负责准入和恢复事务。生产 JDBC 仓库必须使用同一
 
 新增小型租户 guard 表，将新 placement 创建与失联标记串行化。Managed Workspace 存在尚未回收的 lost／blocked generation 时，不能通过更换映射或 profile key 创建新 placement；稳定域为 `(tenantId, workspaceId)`，不包含物理和 profile 字段。Legacy Workspace ID 可能由路径派生，因此未清理的 legacy 失联会保守地阻止该租户创建新 placement，直到完成清理；已有 placement 仍可读取。此限制也识别历史 durable FAILED 行，旧 `FAILED` 记录不能作为停写证明。尚未观察到失联、仍为 READY 的旧 Runtime 不支持在线配置迁移；部署必须在验证清理前保持映射稳定。
 
-Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管；重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
+升级已启用 Broker 的部署前，先暂停新准入并盘点带 seed 的历史 `FAILED` Binding。即使后来代数已是 `READY`，早前崩溃仍可能留下这类记录；新 guard 会拒绝该租户创建 placement。若存在此类记录，受影响流量必须保持停止，直到原写入域已被物理停止，且有保留证据的运维迁移可用。后续 `READY` Binding、删行或伪造停写回执都不能作为清理证明。本切片本身无法让含有这些记录的部署安全恢复准入。
+
+Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管。对仍存活的自有进程，短暂的 attestation 传输错误只使本次请求失败；Binding 保持 `READY`，下次调用重新认证。进程死亡或身份冲突仍会封闭 Binding，单次网络超时不会变成永久的物理失联证据。只有本地进程 provisioner 通过自有进程存活检查显式启用此重试，其他 provisioner 默认保持封闭。重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
 
 私有终态读取、取消和同键创建重试校验原保存的 Binding 与 Session 身份，要求服务鉴权，不依赖本地存活 Session，也不重新解析当前 actor 或映射。HTTP 保留 `runtime_broker_execution_unknown`，附带 `details.terminal: true` 和 `details.reason: runtime_lost`；TypeScript adapter 在 inspect、reconcile 和 cancel 路径保留这些信息，不对外投影物理证据。
 

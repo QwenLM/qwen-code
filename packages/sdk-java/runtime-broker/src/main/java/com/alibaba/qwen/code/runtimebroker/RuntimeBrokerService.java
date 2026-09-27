@@ -847,8 +847,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (error == null) {
                             confirmed.complete(context);
                         } else {
-                            invalidateBinding(record);
-                            confirmed.completeExceptionally(unwrap(error));
+                            Throwable cause = unwrap(error);
+                            boolean invalidate = cause instanceof RuntimeBrokerException failure
+                                    && IDENTITY_FAILURES.contains(failure.getCode());
+                            if (!invalidate) {
+                                try {
+                                    invalidate = !provisioner.canRetryFailedConfirm(live.lease());
+                                } catch (RuntimeException checkFailure) {
+                                    cause.addSuppressed(checkFailure);
+                                    invalidate = true;
+                                }
+                            }
+                            try {
+                                if (invalidate) {
+                                    invalidateBinding(record);
+                                }
+                            } catch (RuntimeException invalidationFailure) {
+                                cause.addSuppressed(invalidationFailure);
+                            }
+                            confirmed.completeExceptionally(cause);
                         }
                     });
             return confirmed;
