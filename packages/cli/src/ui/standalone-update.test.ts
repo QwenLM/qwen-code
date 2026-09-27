@@ -1010,7 +1010,7 @@ describe('standalone-update', () => {
       );
     });
 
-    it('routes an aged deferred marker with a live PID to the pending-swap remedy', () => {
+    it('routes an aged deferred marker with a live PID to the marker remedy', () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       const lockPath = path.join(tempDir, '.qwen-update.lock');
       const markerPath = `${standaloneDir}.deferred`;
@@ -1020,12 +1020,19 @@ describe('standalone-update', () => {
       fs.utimesSync(markerPath, aged, aged);
 
       // A live bat PID with an aged marker is a hung bat or a reused PID;
-      // "please wait" can never resolve it. The escape must surface the
-      // actionable remedy (remove the pending swap) — and must not disturb
-      // the residue: a stale marker proves the bat is gone, not that .new
-      // is safe to delete, so swapProvenDead stays false.
+      // "please wait" can never resolve it. The escape must name the marker
+      // itself: removing only .new and the lock leaves the marker in place
+      // and the next update hits this same branch again. And because the
+      // branch fires precisely when a PID reads alive, the guard must stay
+      // actionable when a qwen-update.bat really is running (hung bat) —
+      // "act only if no bat is running" would be a dead end here. The
+      // residue must not be disturbed: a stale marker proves the bat is
+      // gone, not that .new is safe to delete, so swapProvenDead stays
+      // false.
       expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
-        'remove the pending swap',
+        `A previous update left a deferred-swap marker at ${markerPath}. ` +
+          'If a qwen-update.bat process is still running, end it first; ' +
+          `then remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, and try again.`,
       );
       expect(fs.existsSync(markerPath)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
@@ -1052,8 +1059,12 @@ describe('standalone-update', () => {
 
       // A torn marker cannot prove the bat is gone — the lock stays and the
       // marker is left for inspection instead of being swept under a heal.
+      // The remedy names the marker itself: it is the artifact that keeps
+      // re-triggering this branch once .new and the lock are removed.
       expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
-        'pending swap',
+        `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+          'If no qwen-update.bat process is running, remove the marker, ' +
+          `the pending swap at ${standaloneDir}.new, and .qwen-update.lock, then try again.`,
       );
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
     });
@@ -1076,9 +1087,13 @@ describe('standalone-update', () => {
       fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
 
       // The parent spawns the bat before writing the marker, so a fresh
-      // marker-less .new may belong to a swap in flight right now.
+      // marker-less .new may belong to a swap in flight right now. Pin the
+      // exact marker-less message: with no .deferred marker on disk the
+      // pending swap really is the blocking artifact, and this text must
+      // stay byte-identical.
       expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
-        'pending swap',
+        `A previous update left a pending swap at ${standaloneDir}.new. ` +
+          'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
       );
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
     });
