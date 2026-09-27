@@ -233,6 +233,7 @@ interface ServeArgs {
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
+  'experimental-paired-engines': boolean;
   'experimental-managed-agents': boolean;
   'experimental-managed-runtime-worker': boolean;
   'experimental-managed-runtime-auto-local': boolean;
@@ -614,6 +615,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
           'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
       })
+      .option('experimental-paired-engines', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Experimental: build workspace runtimes, other than the private ' +
+          'Conversations one, with paired Legacy and Managed engines. No ' +
+          'Managed engine is available yet, so sessions run on Legacy with a ' +
+          'durable owner.',
+      })
       .option('experimental-managed-agents', {
         type: 'boolean',
         default: false,
@@ -983,6 +993,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['experimental-paired-engines']
+          ? { experimentalPairedEngines: true }
           : {}),
         ...(argv['experimental-managed-agents']
           ? { experimentalManagedAgents: true }

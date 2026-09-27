@@ -112,6 +112,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toEqual({ sessionId: 'empty-1' });
     expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual(
       expect.objectContaining({
+        requestId: expect.stringMatching(/^managed_/),
         agentId: 'agent-a',
         input: [],
         idempotencyKey: 'key-a',
@@ -238,10 +239,11 @@ describe('createJavaManagedAgentProvider', () => {
     ]);
     expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
       expect.objectContaining({
+        requestId: expect.stringMatching(/^managed_/),
         idempotencyKey: 'key-1',
         agentId: 'qwen-code',
         environmentId: 'python',
-        input: [{ type: 'text', text: 'hello' }],
+        input: [{ type: 'input_text', text: 'hello' }],
       }),
     );
   });
@@ -275,6 +277,37 @@ describe('createJavaManagedAgentProvider', () => {
       sessionId: 'session-1',
       afterSequence: 8,
     });
+  });
+
+  it('turns a resync frame into a stream gap and stops', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            'event:agent.session.resync_required\ndata:{"type":"agent.session.resync_required","sessionId":"session-1","replayFloorSequence":40,"snapshotThroughSequence":42,"action":"reload_snapshot"}\n\nid: 43\nevent: turn.completed\ndata: {"sequence":43,"eventId":"evt_43","sessionId":"session-1","turnId":"turn-1","type":"turn.completed","createdAt":43,"data":{},"terminal":true}\n\n',
+            { status: 200 },
+          ),
+        ),
+    });
+
+    const events = [];
+    for await (const event of provider.subscribeEvents('session-1', {
+      clientId: 'client-1',
+      lastEventId: 3,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        id: 3,
+        type: 'stream_gap',
+        sessionId: 'session-1',
+        data: expect.objectContaining({ replayFloorSequence: 40 }),
+      }),
+    ]);
   });
 
   it('projects a bounded transcript snapshot from canonical Java events', async () => {

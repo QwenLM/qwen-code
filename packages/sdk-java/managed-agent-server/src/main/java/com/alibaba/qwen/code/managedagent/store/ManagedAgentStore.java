@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.EventIdentity.Identity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -13,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -24,7 +27,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -57,6 +59,11 @@ public class ManagedAgentStore implements AgentStateStore {
             new TypeReference<>() {
             };
     private static final String MESSAGE_PROJECTION = "message_projection";
+    private static final String INSERT_EVENT = "INSERT INTO managed_agent_event"
+            + " (tenant_id, session_id, sequence_id, event_id, turn_id,"
+            + " event_type, data_json, terminal, source_key, created_at,"
+            + " schema_version, projection_version, item_id, content_part_id)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final List<String> ACTIVE_TURN_STATES = List.of(
             "ACCEPTED", "RUNNING", "CANCELLING");
     private final JdbcTemplate jdbc;
@@ -64,15 +71,19 @@ public class ManagedAgentStore implements AgentStateStore {
     private final Clock clock;
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
+    private final String agentRevision;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
-                    result.getString("agent_id"), result.getString("title"),
+                    result.getString("agent_id"),
+                    result.getString("agent_revision"),
+                    result.getString("title"),
                     result.getString("status"),
                     result.getString("harness_boot_id"),
                     result.getString("harness_event_epoch"),
                     result.getLong("harness_last_event_id"),
                     result.getLong("last_sequence"),
+                    result.getLong("replay_floor_sequence"),
                     result.getLong("created_at"),
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
@@ -108,7 +119,11 @@ public class ManagedAgentStore implements AgentStateStore {
                     readMap(result.getString("data_json")),
                     result.getBoolean("terminal"),
                     result.getString("source_key"),
-                    result.getLong("created_at"));
+                    result.getLong("created_at"),
+                    result.getInt("schema_version"),
+                    result.getInt("projection_version"),
+                    result.getString("item_id"),
+                    result.getString("content_part_id"));
     private final RowMapper<ItemRow> itemMapper = (result, row) ->
             new ItemRow(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -136,20 +151,29 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces) {
+            ManagedWorkspaceRegistry workspaces,
+            ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.eventPublisher = eventPublisher;
         this.workspaces = workspaces;
+        this.agentRevision = properties.getAgentRevision();
+        if (agentRevision == null || agentRevision.isBlank()
+                || agentRevision.length() > 128) {
+            throw new IllegalArgumentException(
+                    "qwen.managed-agent.agent-revision must contain 1-128"
+                            + " characters");
+        }
     }
 
     @Override
     @Transactional
     public Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest) {
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
@@ -160,8 +184,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission insertWorkspaceSessionCommand(String tenantId,
             String actorId, String idempotencyKey, String requestDigest,
-            String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection) {
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection) {
         if (!input.isEmpty()) {
             throw workspaceExecutionUnavailable();
         }
@@ -171,6 +196,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst());
         }
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
@@ -263,6 +289,15 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    // Called only for a new admission; a retry has already replayed.
+    private void requireAgentRevision(String requested) {
+        if (requested != null && !requested.equals(agentRevision)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "Only the current agent revision can be selected.");
+        }
+    }
+
     private Admission insertSession(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String title, List<Map<String, Object>> input,
@@ -276,13 +311,14 @@ public class ManagedAgentStore implements AgentStateStore {
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, title, status, created_at,"
-                        + " updated_at, workspace_id, workspace_generation,"
-                        + " workspace_storage_id, cwd_relative,"
-                        + " context_config_ref, context_revision,"
-                        + " workspace_config_ref, workspace_policy_ref)"
-                        + " VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tenantId, sessionId, agentId, title, now, now,
+                        + " session_id, agent_id, agent_revision, title,"
+                        + " status, created_at, updated_at, workspace_id,"
+                        + " workspace_generation, workspace_storage_id,"
+                        + " cwd_relative, context_config_ref,"
+                        + " context_revision, workspace_config_ref,"
+                        + " workspace_policy_ref) VALUES (?, ?, ?, ?, ?,"
+                        + " 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
                 workspace == null ? null : workspace.getStorageId(),
@@ -731,6 +767,55 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
+    @Override
+    public long findSnapshotCoveredSequence(String tenantId,
+            String sessionId) {
+        List<Long> rows = jdbc.queryForList("SELECT covered_sequence FROM"
+                        + " managed_agent_snapshot WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                Long.class, tenantId, sessionId);
+        return rows.isEmpty() ? 0 : rows.getFirst();
+    }
+
+    public ReplayWindow findReplayWindow(String tenantId, String sessionId) {
+        List<ReplayWindow> rows = jdbc.query("SELECT"
+                        + " s.replay_floor_sequence, p.covered_sequence FROM"
+                        + " managed_agent_session s LEFT JOIN"
+                        + " managed_agent_snapshot p ON p.tenant_id ="
+                        + " s.tenant_id AND p.session_id = s.session_id WHERE"
+                        + " s.tenant_id = ? AND s.session_id = ?",
+                (result, row) -> new ReplayWindow(
+                        result.getLong("replay_floor_sequence"),
+                        result.getLong("covered_sequence")),
+                tenantId, sessionId);
+        if (rows.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                    "The Session was not found.");
+        }
+        return rows.getFirst();
+    }
+
+    /**
+     * Raises the replay floor, never above the Snapshot's covered sequence,
+     * so that a client told to resync can resume from the Snapshot. Nothing
+     * prunes events yet; the retention work will call this before pruning.
+     */
+    @Transactional
+    public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence) {
+        requireSessionForUpdate(tenantId, sessionId);
+        ReplayWindow window = findReplayWindow(tenantId, sessionId);
+        long floor = Math.min(floorSequence,
+                window.snapshotThroughSequence());
+        if (floor <= window.floorSequence()) {
+            return window;
+        }
+        jdbc.update("UPDATE managed_agent_session SET replay_floor_sequence"
+                        + " = ? WHERE tenant_id = ? AND session_id = ?",
+                floor, tenantId, sessionId);
+        return new ReplayWindow(floor, window.snapshotThroughSequence());
+    }
+
     public List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query("SELECT s.tenant_id, s.session_id FROM"
                         + " managed_agent_session s JOIN"
@@ -1064,6 +1149,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " IN ('item.output_text.delta',"
                         + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                 eventMapper, tenantId, sessionId, turnId);
+        long firstRetracted = Long.MAX_VALUE;
         for (EventRecord event : deltas) {
             if (event.sourceKey() == null
                     || !event.sourceKey().startsWith(sourcePrefix)) {
@@ -1075,6 +1161,10 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " WHERE tenant_id = ? AND session_id = ?"
                             + " AND sequence_id = ?",
                     writeJson(data), tenantId, sessionId, event.sequence());
+            firstRetracted = Math.min(firstRetracted, event.sequence());
+        }
+        if (firstRetracted != Long.MAX_VALUE) {
+            reassignIdentity(tenantId, sessionId, firstRetracted);
         }
         // Rebuild shared text parts from retained events, including any
         // output belonging to other Harness generations.
@@ -1191,12 +1281,19 @@ public class ManagedAgentStore implements AgentStateStore {
             long now) {
         List<EventRecord> records = new ArrayList<>();
         long next = sequence;
+        Identity previous = events.isEmpty() ? null
+                : findIdentity(tenantId, sessionId, next,
+                        events.getFirst().projection().type());
         for (HarnessEvent event : events) {
             ProjectedEvent projection = event.projection();
-            records.add(new EventRecord(tenantId, sessionId, ++next,
+            previous = EventIdentity.of(projection.type(), turnId, ++next,
+                    projection.data(), previous);
+            records.add(new EventRecord(tenantId, sessionId, next,
                     publicId("evt"), turnId, projection.type(),
                     projection.data(), projection.terminal(),
-                    event.sourceKey(), now));
+                    event.sourceKey(), now, EventIdentity.SCHEMA_VERSION,
+                    EventIdentity.PROJECTION_VERSION, previous.itemId(),
+                    previous.contentPartId()));
         }
         jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
                         + " ?, harness_last_event_id = ?, last_sequence = ?,"
@@ -1204,12 +1301,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " tenant_id = ? AND session_id = ?",
                 eventEpoch, lastSourceId, next, now, tenantId, sessionId);
         if (!records.isEmpty()) {
-            jdbc.batchUpdate("INSERT INTO managed_agent_event (tenant_id,"
-                            + " session_id, sequence_id, event_id, turn_id,"
-                            + " event_type, data_json, terminal, source_key,"
-                            + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?)",
-                    records, records.size(), (statement, event) -> {
+            jdbc.batchUpdate(INSERT_EVENT, records, records.size(),
+                    (statement, event) -> {
                         statement.setString(1, event.tenantId());
                         statement.setString(2, event.sessionId());
                         statement.setLong(3, event.sequence());
@@ -1220,6 +1313,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         statement.setBoolean(8, event.terminal());
                         statement.setString(9, event.sourceKey());
                         statement.setLong(10, event.createdAt());
+                        statement.setInt(11, event.schemaVersion());
+                        statement.setInt(12, event.projectionVersion());
+                        statement.setString(13, event.itemId());
+                        statement.setString(14, event.contentPartId());
                     });
         }
         return List.copyOf(records);
@@ -1320,7 +1417,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         String itemId = string(event.data().get("itemId"));
         if (itemId == null) {
-            itemId = inputItemId(event.turnId());
+            itemId = StoreModels.inputItemId(event.turnId());
         }
         upsertItem(event, itemId, "message", "user", "completed",
                 Map.of());
@@ -1343,7 +1440,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         String itemId = string(event.data().get("itemId"));
         if (itemId == null) {
-            itemId = "item_" + event.turnId() + "_assistant";
+            itemId = EventIdentity.assistantItemId(event.turnId());
         }
         List<String> preceding = jdbc.query("SELECT part_id FROM"
                         + " managed_agent_item_part WHERE tenant_id = ?"
@@ -1353,8 +1450,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 event.tenantId(), event.sessionId(), itemId, partType,
                 event.sequence() - 1);
         String partId = preceding.isEmpty()
-                ? "part_" + event.turnId() + "_" + partType + "_"
-                        + event.sequence()
+                ? EventIdentity.textPartId(event.turnId(), partType,
+                        event.sequence())
                 : preceding.get(0);
         upsertItem(event, itemId, "message", "assistant", "in_progress",
                 Map.of());
@@ -1362,18 +1459,8 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private void materializeTool(EventRecord event) {
-        String itemId = string(event.data().get("itemId"));
-        if (itemId == null) {
-            String callId = string(event.data().get("toolCallId"));
-            if (callId == null) {
-                callId = string(event.data().get("callId"));
-            }
-            String identity = callId == null
-                    ? event.turnId() + ":sequence:" + event.sequence()
-                    : event.turnId() + ":" + callId;
-            itemId = "item_tool_" + UUID.nameUUIDFromBytes(
-                    identity.getBytes(StandardCharsets.UTF_8));
-        }
+        String itemId = EventIdentity.toolItemId(event.turnId(),
+                event.sequence(), event.data());
         String sourceStatus = string(event.data().get("status"));
         String status = switch (sourceStatus == null ? ""
                 : sourceStatus.toLowerCase()) {
@@ -1515,12 +1602,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private static Map<String, Object> acceptedData(String turnId,
             List<Map<String, Object>> input) {
-        return Map.of("turnId", turnId, "itemId", inputItemId(turnId),
-                "input", input);
-    }
-
-    private static String inputItemId(String turnId) {
-        return "item_" + turnId + "_input";
+        return Map.of("turnId", turnId,
+                "itemId", StoreModels.inputItemId(turnId), "input", input);
     }
 
     private static String string(Object value) {
@@ -1709,23 +1792,75 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException("Session sequence is unavailable");
         }
         long next = sequence + 1;
+        Identity identity = EventIdentity.of(type, turnId, next, data,
+                findIdentity(tenantId, sessionId, sequence, type));
         EventRecord event = new EventRecord(tenantId, sessionId, next,
                 publicId("evt"), turnId, type, data, terminal, sourceKey,
-                now);
+                now, EventIdentity.SCHEMA_VERSION,
+                EventIdentity.PROJECTION_VERSION, identity.itemId(),
+                identity.contentPartId());
         jdbc.update("UPDATE managed_agent_session SET last_sequence = ?,"
                         + " updated_at = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 next, now, tenantId, sessionId);
-        jdbc.update("INSERT INTO managed_agent_event (tenant_id,"
-                        + " session_id, sequence_id, event_id, turn_id,"
-                        + " event_type, data_json, terminal, source_key,"
-                        + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                event.tenantId(), event.sessionId(), event.sequence(),
-                event.eventId(), event.turnId(), event.type(),
-                writeJson(event.data()), event.terminal(), event.sourceKey(),
-                event.createdAt());
+        jdbc.update(INSERT_EVENT, event.tenantId(), event.sessionId(),
+                event.sequence(), event.eventId(), event.turnId(),
+                event.type(), writeJson(event.data()), event.terminal(),
+                event.sourceKey(), event.createdAt(), event.schemaVersion(),
+                event.projectionVersion(), event.itemId(),
+                event.contentPartId());
         publishAfterCommit(List.of(event));
         return event;
+    }
+
+    // Emptied deltas name nothing, and a delta that continued one now starts
+    // a Part of its own, so identities from the first emptied event on are
+    // derived again as the rebuilt Items will name them.
+    private void reassignIdentity(String tenantId, String sessionId,
+            long fromSequence) {
+        List<EventRecord> events = jdbc.query("SELECT * FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id >= ? ORDER BY"
+                        + " sequence_id ASC",
+                eventMapper, tenantId, sessionId, fromSequence - 1);
+        Identity previous = null;
+        for (EventRecord event : events) {
+            if (event.sequence() < fromSequence) {
+                previous = new Identity(event.type(), event.itemId(),
+                        event.contentPartId());
+                continue;
+            }
+            Identity identity = EventIdentity.of(event.type(),
+                    event.turnId(), event.sequence(), event.data(), previous);
+            if (!Objects.equals(identity.itemId(), event.itemId())
+                    || !Objects.equals(identity.contentPartId(),
+                            event.contentPartId())) {
+                jdbc.update("UPDATE managed_agent_event SET item_id = ?,"
+                                + " content_part_id = ? WHERE tenant_id = ?"
+                                + " AND session_id = ? AND sequence_id = ?",
+                        identity.itemId(), identity.contentPartId(), tenantId,
+                        sessionId, event.sequence());
+            }
+            previous = identity;
+        }
+    }
+
+    // Only a text delta continues the event before it, so other events skip
+    // the lookup.
+    private Identity findIdentity(String tenantId, String sessionId,
+            long sequence, String nextType) {
+        if (!EventIdentity.continuesPrevious(nextType)) {
+            return null;
+        }
+        List<Identity> rows = jdbc.query("SELECT event_type, item_id,"
+                        + " content_part_id FROM managed_agent_event WHERE"
+                        + " tenant_id = ? AND session_id = ? AND sequence_id"
+                        + " = ?",
+                (result, row) -> new Identity(result.getString("event_type"),
+                        result.getString("item_id"),
+                        result.getString("content_part_id")),
+                tenantId, sessionId, sequence);
+        return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private void publishAfterCommit(List<EventRecord> events) {
