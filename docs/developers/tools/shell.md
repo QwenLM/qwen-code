@@ -167,7 +167,7 @@ When an interactive command is running, you can send input to it from the Qwen C
 - **Security:** Be cautious when executing commands, especially those constructed from user input, to prevent security vulnerabilities.
 - **Error handling:** Check the `Stderr`, `Error`, and `Exit Code` fields to determine if a command executed successfully.
 - **Background processes:** When `is_background=true` or when a command contains `&`, the tool will return immediately and the process will continue to run in the background. The `Background PIDs` field will contain the process ID of the background process.
-- **Background execution choices:** The `is_background` parameter is required and provides explicit control over execution mode. You can also add `&` to the command for manual background execution, but the `is_background` parameter must still be specified. The parameter provides clearer intent and automatically handles the background execution setup.
+- **Background execution choices:** The `is_background` parameter is optional (the schema requires only `command`); set `is_background: true` for a command that will not stop on its own, because leaving it in the foreground blocks the turn until it times out. You can also add `&` to the command for manual background execution, but `is_background` provides clearer intent and automatically handles the background execution setup.
 - **Command descriptions:** When using `is_background=true`, the command description will include a `[background]` indicator to clearly show the execution mode.
 
 ## Environment Variables
