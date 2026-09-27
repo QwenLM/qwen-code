@@ -212,6 +212,7 @@ describe('getInitialChatHistory', () => {
     isDeferredToolRevealed: Mock;
     getMcpServerInstructions: Mock;
     getTool: Mock;
+    getAllToolNames: Mock;
   };
 
   beforeEach(() => {
@@ -228,6 +229,10 @@ describe('getInitialChatHistory', () => {
             ? {}
             : null,
         ),
+      // Default main-session shape: the Skill tool is registered. Deferred
+      // registrations are also counted by getAllToolNames, so this default
+      // covers both.
+      getAllToolNames: vi.fn().mockReturnValue([ToolNames.SKILL]),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -380,6 +385,92 @@ describe('getInitialChatHistory', () => {
       'reachable through `tool_search` and `tool_call`',
     );
   });
+
+  describe('skills listing gating on the Skill tool (#12835)', () => {
+    const entries: AvailableSkillEntry[] = [
+      { name: 'test-skill', description: 'A test skill', level: 'project' },
+    ];
+
+    beforeEach(() => {
+      mockConfig.getSkillManager = vi
+        .fn()
+        .mockReturnValue({ listSkills: vi.fn() });
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+    });
+
+    it('omits the skills listing when the Skill tool is not registered', async () => {
+      // e.g. `--exclude-tools skill` or a coreTools allowlist without skill:
+      // the factory never reaches the registry at all.
+      mockToolRegistry.getAllToolNames.mockReturnValue([]);
+
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).not.toContain('<available_skills>');
+      expect(text).not.toContain('test-skill');
+      expect(snapshotEntries).toEqual([]);
+    });
+
+    it('omits even the no-skills fallback when the Skill tool is not registered', async () => {
+      mockToolRegistry.getAllToolNames.mockReturnValue([]);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).not.toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('includes the skills listing when the Skill tool is registered', async () => {
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).toContain('<available_skills>');
+      expect(text).toContain('test-skill');
+      expect(snapshotEntries).toHaveLength(1);
+      expect(snapshotEntries[0].name).toBe('test-skill');
+    });
+
+    it('keeps the no-skills fallback when the Skill tool is registered but no skills exist', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('still honors includeAvailableSkillsReminder: false even when the Skill tool is registered', async () => {
+      const [history] = await getInitialChatHistory(
+        mockConfig as Config,
+        undefined,
+        { includeAvailableSkillsReminder: false },
+      );
+
+      expect(JSON.stringify(history)).not.toContain('<available_skills>');
+    });
+  });
 });
 
 describe('stripStartupContext', () => {
@@ -458,6 +549,7 @@ describe('stripStartupContext', () => {
               ? {}
               : null,
           ),
+        getAllToolNames: vi.fn().mockReturnValue([ToolNames.SKILL]),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
