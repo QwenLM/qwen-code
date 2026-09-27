@@ -1,0 +1,609 @@
+{
+  "baselineCommit": "37412a57d473525a81f87e4ca36447981950d9a9",
+  "testFile": "packages/core/src/utils/schemaValidator.test.ts",
+  "hypothesis": "Replace single-field successful coercion examples with a complete handwritten object contract per schema path, while retaining independent negative, security, cache and denial-of-service boundaries. Case and assertion counts intentionally decrease; fault, complete static mutation and coverage comparisons must determine retention.",
+  "mappings": [
+    {
+      "before": "SchemaValidator boolean string coercion should handle nested objects with string booleans",
+      "after": "SchemaValidator boolean string coercion coerces nested booleans while preserving accepted string fields",
+      "reason": "The complete result jointly checks nested options.enabled=true, preserved non-boolean name=trueman, literal old_string=true/new_string=false strings, the boolean|string value=false string, and is_active=false boolean. Initially invalid boolean-only fields still force all four passes; expected values are independent literals."
+    },
+    {
+      "before": "SchemaValidator boolean string coercion should not affect non-boolean strings",
+      "after": "SchemaValidator boolean string coercion coerces nested booleans while preserving accepted string fields",
+      "reason": "The complete result jointly checks nested options.enabled=true, preserved non-boolean name=trueman, literal old_string=true/new_string=false strings, the boolean|string value=false string, and is_active=false boolean. Initially invalid boolean-only fields still force all four passes; expected values are independent literals."
+    },
+    {
+      "before": "SchemaValidator boolean string coercion should not corrupt string fields whose value is literally \"true\"/\"false\"",
+      "after": "SchemaValidator boolean string coercion coerces nested booleans while preserving accepted string fields",
+      "reason": "The complete result jointly checks nested options.enabled=true, preserved non-boolean name=trueman, literal old_string=true/new_string=false strings, the boolean|string value=false string, and is_active=false boolean. Initially invalid boolean-only fields still force all four passes; expected values are independent literals."
+    },
+    {
+      "before": "SchemaValidator boolean string coercion should preserve string \"true\"/\"false\" when the field also accepts string",
+      "after": "SchemaValidator boolean string coercion coerces nested booleans while preserving accepted string fields",
+      "reason": "The complete result jointly checks nested options.enabled=true, preserved non-boolean name=trueman, literal old_string=true/new_string=false strings, the boolean|string value=false string, and is_active=false boolean. Initially invalid boolean-only fields still force all four passes; expected values are independent literals."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should coerce stringified array for anyOf [array, null]",
+      "after": "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+      "reason": "The complete result retains nullable-anyOf array and object parsing, oneOf integer-array parsing, plain array parsing and the accepted string data=[\"hello\"]. Every parsed shape and every preserved sibling is checked together; the accepted-string input is now also checked while sibling fields trigger coercion."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should coerce stringified object for anyOf [object, null]",
+      "after": "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+      "reason": "The complete result retains nullable-anyOf array and object parsing, oneOf integer-array parsing, plain array parsing and the accepted string data=[\"hello\"]. Every parsed shape and every preserved sibling is checked together; the accepted-string input is now also checked while sibling fields trigger coercion."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should coerce stringified array for oneOf [array, null]",
+      "after": "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+      "reason": "The complete result retains nullable-anyOf array and object parsing, oneOf integer-array parsing, plain array parsing and the accepted string data=[\"hello\"]. Every parsed shape and every preserved sibling is checked together; the accepted-string input is now also checked while sibling fields trigger coercion."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should not coerce when schema accepts string type",
+      "after": "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+      "reason": "The complete result retains nullable-anyOf array and object parsing, oneOf integer-array parsing, plain array parsing and the accepted string data=[\"hello\"]. Every parsed shape and every preserved sibling is checked together; the accepted-string input is now also checked while sibling fields trigger coercion."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should not coerce invalid JSON strings",
+      "after": "SchemaValidator stringified JSON value coercion rejects invalid JSON input unchanged: [not valid json",
+      "reason": "Retains the malformed JSON input [not valid json in a nullable array schema; now asserts both rejection and the whole unchanged object."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should not coerce strings that do not look like JSON",
+      "after": "SchemaValidator stringified JSON value coercion rejects invalid JSON input unchanged: hello world",
+      "reason": "Retains required urls with hello world, verifies rejection and additionally pins the unchanged input."
+    },
+    {
+      "before": "SchemaValidator stringified JSON value coercion should handle stringified array with plain type (no anyOf)",
+      "after": "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+      "reason": "The complete result retains nullable-anyOf array and object parsing, oneOf integer-array parsing, plain array parsing and the accepted string data=[\"hello\"]. Every parsed shape and every preserved sibling is checked together; the accepted-string input is now also checked while sibling fields trigger coercion."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce string \"3\" to integer 3",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce string \"5.5\" to number 5.5",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce negative numeric strings",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should not coerce non-numeric strings",
+      "after": "SchemaValidator numeric string coercion rejects non-integer input unchanged: abc",
+      "reason": "Retains required integer count with abc, now also checks unchanged input."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should not coerce when schema also accepts string",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce numeric strings in nested objects",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should not affect actual number values",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should not corrupt string fields with numeric-looking values",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should not coerce decimal string for integer-only schema",
+      "after": "SchemaValidator numeric string coercion rejects non-integer input unchanged: 5.5",
+      "reason": "Retains integer-only rejection of decimal text 5.5 and independent unchanged-input assertion."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce decimal string when number is accepted via anyOf",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce whole-number decimal string to integer (e.g. \"3.0\")",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator numeric string coercion should coerce numeric strings inside arrays of integers",
+      "after": "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+      "reason": "The complete result retains integer 3, decimal number 5.5, negative integer -10, accepted string|integer value \"42\", nested retries=3, actual integer 3, string name=\"42\", integer count=7, integer|number decimal=5.5, whole-decimal \"3.0\"→3, and integer array [8080,3000]. Previously already-valid fields are now checked alongside invalid siblings through the coercion passes."
+    },
+    {
+      "before": "SchemaValidator JSON Schema version support should support JSON Schema draft-2020-12",
+      "after": "SchemaValidator JSON Schema version support validates draft-2020-12 properties, nested objects and nullable unions",
+      "reason": "One explicit draft-2020-12 schema checks string URL, valid and invalid integer count, a nested boolean and nullable array union. Separate validation calls retain nonempty array, null and absent optional-array inputs. The draft-07 selector, top-level prefixItems and unsupported-version cases remain independent."
+    },
+    {
+      "before": "SchemaValidator JSON Schema version support should validate correctly with draft-2020-12 schema",
+      "after": "SchemaValidator JSON Schema version support validates draft-2020-12 properties, nested objects and nullable unions",
+      "reason": "One explicit draft-2020-12 schema checks string URL, valid and invalid integer count, a nested boolean and nullable array union. Separate validation calls retain nonempty array, null and absent optional-array inputs. The draft-07 selector, top-level prefixItems and unsupported-version cases remain independent."
+    },
+    {
+      "before": "SchemaValidator JSON Schema version support should handle nested schemas with $schema",
+      "after": "SchemaValidator JSON Schema version support validates draft-2020-12 properties, nested objects and nullable unions",
+      "reason": "One explicit draft-2020-12 schema checks string URL, valid and invalid integer count, a nested boolean and nullable array union. Separate validation calls retain nonempty array, null and absent optional-array inputs. The draft-07 selector, top-level prefixItems and unsupported-version cases remain independent."
+    },
+    {
+      "before": "SchemaValidator JSON Schema version support should handle anyOf union types with draft-2020-12",
+      "after": "SchemaValidator JSON Schema version support validates draft-2020-12 properties, nested objects and nullable unions",
+      "reason": "One explicit draft-2020-12 schema checks string URL, valid and invalid integer count, a nested boolean and nullable array union. Separate validation calls retain nonempty array, null and absent optional-array inputs. The draft-07 selector, top-level prefixItems and unsupported-version cases remain independent."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should coerce number values to strings",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should coerce boolean values to strings",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should not coerce values that are already strings",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should not coerce non-string schema fields",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should coerce float to string",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should not coerce objects or arrays to strings",
+      "after": "SchemaValidator non-string to string coercion rejects object string-field input unchanged",
+      "reason": "The old object {x:1} and array [1,2,3] now have distinct table rows. Both assert validation failure and complete unchanged outputs. Actual nested input is structuredClone(value), keeping its expected object/array independent of in-place mutation. This mapping targets object; the added array row owns the second obligation."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should coerce nested string fields",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should not coerce null values",
+      "after": "SchemaValidator non-string to string coercion rejects null string-field input unchanged",
+      "reason": "Retains null under a string-only schema; asserts rejection as well as unchanged null, replacing the former coercion-only observation."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should handle bigint values",
+      "after": "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+      "reason": "One complete scalar/nested result retains integer 123→\"123\", float 3.14→\"3.14\", true/false→\"true\"/\"false\", existing string \"original\", bigint 9007199254740991→decimal text, numeric count=42 and nested label=42→\"42\" with enabled=true unchanged. All expected values are handwritten. Already-valid fields now additionally run alongside siblings that force coercion."
+    },
+    {
+      "before": "SchemaValidator non-string to string coercion should not coerce already-valid integers in union types",
+      "after": "SchemaValidator accepted numeric union values preserves integer and number subtypes through all coercion passes",
+      "reason": "The permanently invalid bad_field=\"not_a_number\" continues to trigger all coercion passes. Independent literal output checks integer|string, number|string, oneOf integer|string and array items number|string all preserve their existing integers. Validation failure is now asserted as well."
+    },
+    {
+      "before": "SchemaValidator schema-aware boolean coercion should not coerce \"true\" on enum-only schemas",
+      "after": "SchemaValidator schema-aware boolean coercion preserves enum, const, string arrays and unconstrained object values",
+      "reason": "A missing required count still forces validation failure and all coercion passes. The full unchanged expected object covers enum-only status=\"true\", const-only answer=\"true\", string array [active,True,false], and an unconstrained object with boolean-like strings. This replaces per-field assertions and now also asserts validation failure."
+    },
+    {
+      "before": "SchemaValidator schema-aware boolean coercion should not coerce \"true\" on const-only schemas",
+      "after": "SchemaValidator schema-aware boolean coercion preserves enum, const, string arrays and unconstrained object values",
+      "reason": "A missing required count still forces validation failure and all coercion passes. The full unchanged expected object covers enum-only status=\"true\", const-only answer=\"true\", string array [active,True,false], and an unconstrained object with boolean-like strings. This replaces per-field assertions and now also asserts validation failure."
+    },
+    {
+      "before": "SchemaValidator schema-aware boolean coercion should not corrupt string arrays with boolean-like elements",
+      "after": "SchemaValidator schema-aware boolean coercion preserves enum, const, string arrays and unconstrained object values",
+      "reason": "A missing required count still forces validation failure and all coercion passes. The full unchanged expected object covers enum-only status=\"true\", const-only answer=\"true\", string array [active,True,false], and an unconstrained object with boolean-like strings. This replaces per-field assertions and now also asserts validation failure."
+    },
+    {
+      "before": "SchemaValidator schema-aware boolean coercion should not coerce blindly in nested objects without schema",
+      "after": "SchemaValidator schema-aware boolean coercion preserves enum, const, string arrays and unconstrained object values",
+      "reason": "A missing required count still forces validation failure and all coercion passes. The full unchanged expected object covers enum-only status=\"true\", const-only answer=\"true\", string array [active,True,false], and an unconstrained object with boolean-like strings. This replaces per-field assertions and now also asserts validation failure."
+    },
+    {
+      "before": "SchemaValidator allOf support in getAcceptedTypes should coerce number to string when type is defined via allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator allOf support in getAcceptedTypes should coerce string to boolean when type is defined via allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator integer/number subtype handling should not coerce integers when schema accepts number via anyOf",
+      "after": "SchemaValidator accepted numeric union values preserves integer and number subtypes through all coercion passes",
+      "reason": "The permanently invalid bad_field=\"not_a_number\" continues to trigger all coercion passes. Independent literal output checks integer|string, number|string, oneOf integer|string and array items number|string all preserve their existing integers. Validation failure is now asserted as well."
+    },
+    {
+      "before": "SchemaValidator integer/number subtype handling should not coerce integers in arrays when items accept number",
+      "after": "SchemaValidator accepted numeric union values preserves integer and number subtypes through all coercion passes",
+      "reason": "The permanently invalid bad_field=\"not_a_number\" continues to trigger all coercion passes. Independent literal output checks integer|string, number|string, oneOf integer|string and array items number|string all preserve their existing integers. Validation failure is now asserted as well."
+    },
+    {
+      "before": "SchemaValidator deeply nested composition keywords should resolve types from nested allOf containing anyOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator deeply nested composition keywords should coerce to string when nested allOf/anyOf defines string type",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator fixStringValues with oneOf should not coerce already-valid integers in oneOf types",
+      "after": "SchemaValidator accepted numeric union values preserves integer and number subtypes through all coercion passes",
+      "reason": "The permanently invalid bad_field=\"not_a_number\" continues to trigger all coercion passes. Independent literal output checks integer|string, number|string, oneOf integer|string and array items number|string all preserve their existing integers. Validation failure is now asserted as well."
+    },
+    {
+      "before": "SchemaValidator fixStringifiedJsonValues with arrays should coerce stringified JSON via allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator $ref resolution should coerce number to string via $ref",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator $ref resolution should coerce string to boolean via $ref in $defs",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator $ref resolution should coerce stringified JSON via $ref",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator NaN/Infinity guard should not coerce NaN to string",
+      "after": "SchemaValidator non-string to string coercion rejects NaN string-field input unchanged",
+      "reason": "Retains NaN under a string-only schema; the value itself now triggers failure without a redundant invalid sibling. Complete equality preserves its numeric value and additionally asserts rejection."
+    },
+    {
+      "before": "SchemaValidator NaN/Infinity guard should not coerce Infinity to string",
+      "after": "SchemaValidator non-string to string coercion rejects Infinity string-field input unchanged",
+      "reason": "Retains Infinity under a string-only schema; the value itself now triggers failure without a redundant invalid sibling. Complete equality preserves its numeric value and additionally asserts rejection."
+    },
+    {
+      "before": "SchemaValidator $ref resolution in nested object recursion should coerce booleans in nested objects via $ref",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator $ref resolution in nested object recursion should coerce strings in nested objects via $ref in definitions",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator $ref resolution in nested object recursion should coerce stringified JSON in nested objects via $ref",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator multi-hop $ref chains should resolve $ref chains of 2+ hops",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator multi-hop $ref chains should resolve deep $ref chains (3 hops)",
+      "after": "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+      "reason": "The complete result retains direct definitions string/nullable-JSON refs, direct $defs boolean refs, nested $defs boolean/JSON objects, nested definitions string object, a two-hop string chain and three-hop boolean chain. Distinct hand-written outputs check every branch. The two-hop chain now crosses $defs into definitions; unresolved, circular, own-property, dangerous-key and depth protections remain separate."
+    },
+    {
+      "before": "SchemaValidator $ref inside composition variants should coerce via $ref inside anyOf variants",
+      "after": "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through anyOf references",
+      "reason": "The anyOf→$defs object path has its own runtime case. A complete result now checks enabled=true, label=\"42\" and tags=[a,b] together; anyOf/oneOf retain the null alternative, while allOf retains only the referenced object. This subsumes the earlier single-field check and adds the other coercion obligations through that same composition path."
+    },
+    {
+      "before": "SchemaValidator $ref inside composition variants should coerce strings via $ref inside anyOf variants",
+      "after": "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through anyOf references",
+      "reason": "The anyOf→$defs object path has its own runtime case. A complete result now checks enabled=true, label=\"42\" and tags=[a,b] together; anyOf/oneOf retain the null alternative, while allOf retains only the referenced object. This subsumes the earlier single-field check and adds the other coercion obligations through that same composition path."
+    },
+    {
+      "before": "SchemaValidator $ref inside composition variants should coerce via $ref inside oneOf variants",
+      "after": "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through oneOf references",
+      "reason": "The oneOf→$defs object path has its own runtime case. A complete result now checks enabled=true, label=\"42\" and tags=[a,b] together; anyOf/oneOf retain the null alternative, while allOf retains only the referenced object. This subsumes the earlier single-field check and adds the other coercion obligations through that same composition path."
+    },
+    {
+      "before": "SchemaValidator $ref inside composition variants should coerce via $ref inside allOf variants",
+      "after": "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through allOf references",
+      "reason": "The allOf→$defs object path has its own runtime case. A complete result now checks enabled=true, label=\"42\" and tags=[a,b] together; anyOf/oneOf retain the null alternative, while allOf retains only the referenced object. This subsumes the earlier single-field check and adds the other coercion obligations through that same composition path."
+    },
+    {
+      "before": "SchemaValidator composition keyword recursion should recurse into nested objects wrapped in allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator composition keyword recursion should recurse into nested objects wrapped in anyOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator composition keyword recursion should recurse into arrays of objects wrapped in allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    },
+    {
+      "before": "SchemaValidator composition keyword recursion should coerce stringified JSON in nested objects wrapped in allOf",
+      "after": "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+      "reason": "A complete object preserves distinct schema paths: direct allOf string and boolean, nested allOf(anyOf) accepted integer and coerced string, allOf object, anyOf nullable object, allOf array item objects, allOf nested nullable-JSON field and allOf JSON array. Handwritten fields assert every transformed or preserved value after all passes."
+    }
+  ],
+  "removed": [],
+  "originalTests": [
+    "SchemaValidator strictly validates without coercing application data",
+    "SchemaValidator should allow any params if schema is undefined",
+    "SchemaValidator rejects null params",
+    "SchemaValidator rejects params that are not objects",
+    "SchemaValidator allows schema with extra properties",
+    "SchemaValidator allows custom format values",
+    "SchemaValidator allows valid values for known formats",
+    "SchemaValidator rejects invalid values for known formats",
+    "SchemaValidator boolean string coercion should coerce string \"true\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"True\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"TRUE\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"false\" to boolean false",
+    "SchemaValidator boolean string coercion should coerce string \"False\" to boolean false",
+    "SchemaValidator boolean string coercion should coerce string \"FALSE\" to boolean false",
+    "SchemaValidator boolean string coercion should pass through actual boolean values unchanged",
+    "SchemaValidator boolean string coercion should handle nested objects with string booleans",
+    "SchemaValidator boolean string coercion should not affect non-boolean strings",
+    "SchemaValidator boolean string coercion should not corrupt string fields whose value is literally \"true\"/\"false\"",
+    "SchemaValidator boolean string coercion should preserve string \"true\"/\"false\" when the field also accepts string",
+    "SchemaValidator boolean string coercion should coerce string booleans inside arrays of booleans",
+    "SchemaValidator stringified JSON value coercion should coerce stringified array for anyOf [array, null]",
+    "SchemaValidator stringified JSON value coercion should coerce stringified object for anyOf [object, null]",
+    "SchemaValidator stringified JSON value coercion should coerce stringified array for oneOf [array, null]",
+    "SchemaValidator stringified JSON value coercion should not coerce when schema accepts string type",
+    "SchemaValidator stringified JSON value coercion should not coerce invalid JSON strings",
+    "SchemaValidator stringified JSON value coercion should not coerce strings that do not look like JSON",
+    "SchemaValidator stringified JSON value coercion should handle stringified array with plain type (no anyOf)",
+    "SchemaValidator numeric string coercion should coerce string \"3\" to integer 3",
+    "SchemaValidator numeric string coercion should coerce string \"5.5\" to number 5.5",
+    "SchemaValidator numeric string coercion should coerce negative numeric strings",
+    "SchemaValidator numeric string coercion should not coerce non-numeric strings",
+    "SchemaValidator numeric string coercion should not coerce when schema also accepts string",
+    "SchemaValidator numeric string coercion should coerce numeric strings in nested objects",
+    "SchemaValidator numeric string coercion should not affect actual number values",
+    "SchemaValidator numeric string coercion should not corrupt string fields with numeric-looking values",
+    "SchemaValidator numeric string coercion should work with draft-2020-12 schema (MCP servers)",
+    "SchemaValidator numeric string coercion should not coerce decimal string for integer-only schema",
+    "SchemaValidator numeric string coercion should coerce decimal string when number is accepted via anyOf",
+    "SchemaValidator numeric string coercion should coerce whole-number decimal string to integer (e.g. \"3.0\")",
+    "SchemaValidator numeric string coercion should coerce numeric strings inside arrays of integers",
+    "SchemaValidator JSON Schema version support should support JSON Schema draft-2020-12",
+    "SchemaValidator JSON Schema version support should validate correctly with draft-2020-12 schema",
+    "SchemaValidator JSON Schema version support should support JSON Schema draft-07 (default)",
+    "SchemaValidator JSON Schema version support should handle nested schemas with $schema",
+    "SchemaValidator JSON Schema version support should support 2020-12 specific keywords like prefixItems",
+    "SchemaValidator JSON Schema version support should handle anyOf union types with draft-2020-12",
+    "SchemaValidator JSON Schema version support should gracefully handle unsupported schema versions",
+    "SchemaValidator compileStrict returns null for a simple valid schema",
+    "SchemaValidator compileStrict returns null for draft-2020-12 schemas",
+    "SchemaValidator compileStrict returns null for empty object schema",
+    "SchemaValidator compileStrict returns an error string when type keyword has an illegal value",
+    "SchemaValidator compileStrict returns a descriptive error when schema is not an object",
+    "SchemaValidator compileStrict rejects arrays even though typeof === \"object\"",
+    "SchemaValidator compileStrict flags unknown keywords (typos) under strict mode",
+    "SchemaValidator compileStrict accepts type-union arrays under allowUnionTypes",
+    "SchemaValidator compileStrict accepts spec-valid schemas that Ajv `strict: true` would reject",
+    "SchemaValidator compileStrict accepts the draft-2020-12 URI with a trailing `#` fragment",
+    "SchemaValidator non-string to string coercion should coerce number values to strings",
+    "SchemaValidator non-string to string coercion should coerce boolean values to strings",
+    "SchemaValidator non-string to string coercion should not coerce values that are already strings",
+    "SchemaValidator non-string to string coercion should not coerce non-string schema fields",
+    "SchemaValidator non-string to string coercion should coerce float to string",
+    "SchemaValidator non-string to string coercion should not coerce objects or arrays to strings",
+    "SchemaValidator non-string to string coercion should coerce nested string fields",
+    "SchemaValidator non-string to string coercion should not coerce null values",
+    "SchemaValidator non-string to string coercion should handle bigint values",
+    "SchemaValidator non-string to string coercion should not coerce already-valid integers in union types",
+    "SchemaValidator non-string to string coercion should coerce primitives in string arrays",
+    "SchemaValidator schema-aware boolean coercion should not coerce \"true\" on enum-only schemas",
+    "SchemaValidator schema-aware boolean coercion should not coerce \"true\" on const-only schemas",
+    "SchemaValidator schema-aware boolean coercion should not corrupt string arrays with boolean-like elements",
+    "SchemaValidator schema-aware boolean coercion should not coerce blindly in nested objects without schema",
+    "SchemaValidator nested stringified JSON coercion should coerce stringified array in nested objects",
+    "SchemaValidator allOf support in getAcceptedTypes should coerce number to string when type is defined via allOf",
+    "SchemaValidator allOf support in getAcceptedTypes should coerce string to boolean when type is defined via allOf",
+    "SchemaValidator integer/number subtype handling should not coerce integers when schema accepts number via anyOf",
+    "SchemaValidator integer/number subtype handling should not coerce integers in arrays when items accept number",
+    "SchemaValidator deeply nested composition keywords should resolve types from nested allOf containing anyOf",
+    "SchemaValidator deeply nested composition keywords should coerce to string when nested allOf/anyOf defines string type",
+    "SchemaValidator fixBooleanValues with arrays should coerce primitives in boolean arrays",
+    "SchemaValidator fixBooleanValues with arrays should coerce booleans in arrays of objects",
+    "SchemaValidator fixBooleanValues with arrays should preserve string \"true\"/\"false\" in arrays whose items also accept string",
+    "SchemaValidator fixBooleanValues with arrays should preserve string \"true\"/\"false\" in tuple elements that also accept string",
+    "SchemaValidator fixStringValues with oneOf should not coerce already-valid integers in oneOf types",
+    "SchemaValidator fixStringifiedJsonValues with arrays should coerce stringified JSON in arrays of objects",
+    "SchemaValidator fixStringifiedJsonValues with arrays should coerce stringified JSON via allOf",
+    "SchemaValidator $ref resolution should coerce number to string via $ref",
+    "SchemaValidator $ref resolution should coerce string to boolean via $ref in $defs",
+    "SchemaValidator $ref resolution should coerce stringified JSON via $ref",
+    "SchemaValidator $ref resolution should handle unresolvable $ref gracefully",
+    "SchemaValidator fixStringValues array-of-objects recursion should coerce string fields in arrays of objects",
+    "SchemaValidator NaN/Infinity guard should not coerce NaN to string",
+    "SchemaValidator NaN/Infinity guard should not coerce Infinity to string",
+    "SchemaValidator additionalProperties fallback should coerce values in additionalProperties schemas",
+    "SchemaValidator additionalProperties fallback should coerce boolean strings in additionalProperties",
+    "SchemaValidator $ref resolution in nested object recursion should coerce booleans in nested objects via $ref",
+    "SchemaValidator $ref resolution in nested object recursion should coerce strings in nested objects via $ref in definitions",
+    "SchemaValidator $ref resolution in nested object recursion should coerce stringified JSON in nested objects via $ref",
+    "SchemaValidator circular $ref protection should not crash on circular $ref",
+    "SchemaValidator circular $ref protection should handle deeply nested anyOf without stack overflow",
+    "SchemaValidator additionalProperties recursion should coerce booleans in nested additionalProperties",
+    "SchemaValidator additionalProperties recursion should coerce strings in nested additionalProperties",
+    "SchemaValidator arrays of arrays coercion should coerce stringified JSON in arrays of arrays",
+    "SchemaValidator boolean/string round-trip safety should not coerce \"true\" when schema accepts both boolean and string",
+    "SchemaValidator boolean/string round-trip safety should preserve string when coercion runs due to other failure",
+    "SchemaValidator boolean/string round-trip safety should preserve string in tuple position when schema accepts both",
+    "SchemaValidator resolveRef prototype pollution guard should not resolve $ref to __proto__",
+    "SchemaValidator resolveRef prototype pollution guard should not resolve $ref to constructor",
+    "SchemaValidator multi-hop $ref chains should resolve $ref chains of 2+ hops",
+    "SchemaValidator multi-hop $ref chains should resolve deep $ref chains (3 hops)",
+    "SchemaValidator $ref inside composition variants should coerce via $ref inside anyOf variants",
+    "SchemaValidator $ref inside composition variants should coerce strings via $ref inside anyOf variants",
+    "SchemaValidator $ref inside composition variants should coerce via $ref inside oneOf variants",
+    "SchemaValidator $ref inside composition variants should coerce via $ref inside allOf variants",
+    "SchemaValidator Object.hasOwn regression should coerce property named toString (Object.prototype shadow)",
+    "SchemaValidator composition keyword recursion should recurse into nested objects wrapped in allOf",
+    "SchemaValidator composition keyword recursion should recurse into nested objects wrapped in anyOf",
+    "SchemaValidator composition keyword recursion should recurse into arrays of objects wrapped in allOf",
+    "SchemaValidator composition keyword recursion should coerce stringified JSON in nested objects wrapped in allOf",
+    "SchemaValidator prefixItems (tuple) coercion should coerce stringified JSON in tuple with prefixItems-only schema",
+    "SchemaValidator prefixItems (tuple) coercion should coerce boolean strings in tuple with prefixItems",
+    "SchemaValidator prefixItems (tuple) coercion should coerce non-string values to strings in tuple with prefixItems",
+    "SchemaValidator prefixItems (tuple) coercion should handle mixed prefixItems + items",
+    "SchemaValidator prefixItems (tuple) coercion should skip elements beyond prefixItems range when no items",
+    "SchemaValidator prefixItems (tuple) coercion should recurse into object elements in prefixItems tuple",
+    "SchemaValidator prefixItems (tuple) coercion should resolve $ref inside prefixItems entries",
+    "SchemaValidator prefixItems (tuple) coercion should coerce stringified JSON inside nested tuple elements",
+    "SchemaValidator prefixItems (tuple) coercion should handle stringified JSON array inside nested tuple element",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should not coerce data via __proto__-polluted property prototype",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should still coerce legitimate sibling keys when __proto__ is in properties",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should skip constructor and prototype keys as own properties",
+    "SchemaValidator fixStringifiedJsonValuesInArray element-level schema should coerce stringified JSON in nested uniform arrays of objects",
+    "SchemaValidator getAcceptedTypes memoization (branching $ref DoS guard) collapses an exponentially branching $ref type tree to linear time",
+    "SchemaValidator compile cache compiles equal schemas once, whatever their object identity",
+    "SchemaValidator compile cache never hands a mutated schema object its old validator for fresh text",
+    "SchemaValidator compile cache keeps apart schemas that JSON text cannot tell apart",
+    "SchemaValidator compile cache does not let a toJSON method stand in for a schema",
+    "SchemaValidator compile cache validates a rebuilt schema that carries an $id",
+    "SchemaValidator compile cache compiles a schema that fails to compile as Ajv always has",
+    "SchemaValidator compile cache shares no validator with a caller that mutates its schema object",
+    "SchemaValidator compile cache validates a schema that JSON text does not describe by its own content",
+    "SchemaValidator compile cache does not serialize a schema object it has already compiled"
+  ],
+  "candidateTests": [
+    "SchemaValidator strictly validates without coercing application data",
+    "SchemaValidator should allow any params if schema is undefined",
+    "SchemaValidator rejects null params",
+    "SchemaValidator rejects params that are not objects",
+    "SchemaValidator allows schema with extra properties",
+    "SchemaValidator allows custom format values",
+    "SchemaValidator allows valid values for known formats",
+    "SchemaValidator rejects invalid values for known formats",
+    "SchemaValidator boolean string coercion should coerce string \"true\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"True\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"TRUE\" to boolean true",
+    "SchemaValidator boolean string coercion should coerce string \"false\" to boolean false",
+    "SchemaValidator boolean string coercion should coerce string \"False\" to boolean false",
+    "SchemaValidator boolean string coercion should coerce string \"FALSE\" to boolean false",
+    "SchemaValidator boolean string coercion should pass through actual boolean values unchanged",
+    "SchemaValidator boolean string coercion coerces nested booleans while preserving accepted string fields",
+    "SchemaValidator boolean string coercion should coerce string booleans inside arrays of booleans",
+    "SchemaValidator stringified JSON value coercion parses accepted array/object forms and preserves accepted strings",
+    "SchemaValidator stringified JSON value coercion rejects invalid JSON input unchanged: [not valid json",
+    "SchemaValidator stringified JSON value coercion rejects invalid JSON input unchanged: hello world",
+    "SchemaValidator numeric string coercion coerces numeric fields, nested objects and arrays without changing strings",
+    "SchemaValidator numeric string coercion should work with draft-2020-12 schema (MCP servers)",
+    "SchemaValidator numeric string coercion rejects non-integer input unchanged: abc",
+    "SchemaValidator numeric string coercion rejects non-integer input unchanged: 5.5",
+    "SchemaValidator JSON Schema version support validates draft-2020-12 properties, nested objects and nullable unions",
+    "SchemaValidator JSON Schema version support should support JSON Schema draft-07 (default)",
+    "SchemaValidator JSON Schema version support should support 2020-12 specific keywords like prefixItems",
+    "SchemaValidator JSON Schema version support should gracefully handle unsupported schema versions",
+    "SchemaValidator compileStrict returns null for a simple valid schema",
+    "SchemaValidator compileStrict returns null for draft-2020-12 schemas",
+    "SchemaValidator compileStrict returns null for empty object schema",
+    "SchemaValidator compileStrict returns an error string when type keyword has an illegal value",
+    "SchemaValidator compileStrict returns a descriptive error when schema is not an object",
+    "SchemaValidator compileStrict rejects arrays even though typeof === \"object\"",
+    "SchemaValidator compileStrict flags unknown keywords (typos) under strict mode",
+    "SchemaValidator compileStrict accepts type-union arrays under allowUnionTypes",
+    "SchemaValidator compileStrict accepts spec-valid schemas that Ajv `strict: true` would reject",
+    "SchemaValidator compileStrict accepts the draft-2020-12 URI with a trailing `#` fragment",
+    "SchemaValidator non-string to string coercion converts scalar string fields and preserves strings and numeric siblings",
+    "SchemaValidator non-string to string coercion rejects object string-field input unchanged",
+    "SchemaValidator non-string to string coercion rejects array string-field input unchanged",
+    "SchemaValidator non-string to string coercion rejects null string-field input unchanged",
+    "SchemaValidator non-string to string coercion rejects NaN string-field input unchanged",
+    "SchemaValidator non-string to string coercion rejects Infinity string-field input unchanged",
+    "SchemaValidator non-string to string coercion should coerce primitives in string arrays",
+    "SchemaValidator schema-aware boolean coercion preserves enum, const, string arrays and unconstrained object values",
+    "SchemaValidator nested stringified JSON coercion should coerce stringified array in nested objects",
+    "SchemaValidator composition keyword recursion resolves composed scalar types, nested objects and object arrays",
+    "SchemaValidator accepted numeric union values preserves integer and number subtypes through all coercion passes",
+    "SchemaValidator fixBooleanValues with arrays should coerce primitives in boolean arrays",
+    "SchemaValidator fixBooleanValues with arrays should coerce booleans in arrays of objects",
+    "SchemaValidator fixBooleanValues with arrays should preserve string \"true\"/\"false\" in arrays whose items also accept string",
+    "SchemaValidator fixBooleanValues with arrays should preserve string \"true\"/\"false\" in tuple elements that also accept string",
+    "SchemaValidator fixStringifiedJsonValues with arrays should coerce stringified JSON in arrays of objects",
+    "SchemaValidator $ref resolution coerces scalar and nested values through definitions, $defs and ref chains",
+    "SchemaValidator $ref resolution should handle unresolvable $ref gracefully",
+    "SchemaValidator fixStringValues array-of-objects recursion should coerce string fields in arrays of objects",
+    "SchemaValidator additionalProperties fallback should coerce values in additionalProperties schemas",
+    "SchemaValidator additionalProperties fallback should coerce boolean strings in additionalProperties",
+    "SchemaValidator circular $ref protection should not crash on circular $ref",
+    "SchemaValidator circular $ref protection should handle deeply nested anyOf without stack overflow",
+    "SchemaValidator additionalProperties recursion should coerce booleans in nested additionalProperties",
+    "SchemaValidator additionalProperties recursion should coerce strings in nested additionalProperties",
+    "SchemaValidator arrays of arrays coercion should coerce stringified JSON in arrays of arrays",
+    "SchemaValidator boolean/string round-trip safety should not coerce \"true\" when schema accepts both boolean and string",
+    "SchemaValidator boolean/string round-trip safety should preserve string when coercion runs due to other failure",
+    "SchemaValidator boolean/string round-trip safety should preserve string in tuple position when schema accepts both",
+    "SchemaValidator resolveRef prototype pollution guard should not resolve $ref to __proto__",
+    "SchemaValidator resolveRef prototype pollution guard should not resolve $ref to constructor",
+    "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through anyOf references",
+    "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through oneOf references",
+    "SchemaValidator $ref inside composition variants coerces nested boolean, string and JSON fields through allOf references",
+    "SchemaValidator Object.hasOwn regression should coerce property named toString (Object.prototype shadow)",
+    "SchemaValidator prefixItems (tuple) coercion should coerce stringified JSON in tuple with prefixItems-only schema",
+    "SchemaValidator prefixItems (tuple) coercion should coerce boolean strings in tuple with prefixItems",
+    "SchemaValidator prefixItems (tuple) coercion should coerce non-string values to strings in tuple with prefixItems",
+    "SchemaValidator prefixItems (tuple) coercion should handle mixed prefixItems + items",
+    "SchemaValidator prefixItems (tuple) coercion should skip elements beyond prefixItems range when no items",
+    "SchemaValidator prefixItems (tuple) coercion should recurse into object elements in prefixItems tuple",
+    "SchemaValidator prefixItems (tuple) coercion should resolve $ref inside prefixItems entries",
+    "SchemaValidator prefixItems (tuple) coercion should coerce stringified JSON inside nested tuple elements",
+    "SchemaValidator prefixItems (tuple) coercion should handle stringified JSON array inside nested tuple element",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should not coerce data via __proto__-polluted property prototype",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should still coerce legitimate sibling keys when __proto__ is in properties",
+    "SchemaValidator getEffectiveProperties prototype pollution guard should skip constructor and prototype keys as own properties",
+    "SchemaValidator fixStringifiedJsonValuesInArray element-level schema should coerce stringified JSON in nested uniform arrays of objects",
+    "SchemaValidator getAcceptedTypes memoization (branching $ref DoS guard) collapses an exponentially branching $ref type tree to linear time",
+    "SchemaValidator compile cache compiles equal schemas once, whatever their object identity",
+    "SchemaValidator compile cache never hands a mutated schema object its old validator for fresh text",
+    "SchemaValidator compile cache keeps apart schemas that JSON text cannot tell apart",
+    "SchemaValidator compile cache does not let a toJSON method stand in for a schema",
+    "SchemaValidator compile cache validates a rebuilt schema that carries an $id",
+    "SchemaValidator compile cache compiles a schema that fails to compile as Ajv always has",
+    "SchemaValidator compile cache shares no validator with a caller that mutates its schema object",
+    "SchemaValidator compile cache validates a schema that JSON text does not describe by its own content",
+    "SchemaValidator compile cache does not serialize a schema object it has already compiled"
+  ],
+  "assertionReduction": {
+    "reason": "Each consolidated contract keeps one validation-result assertion and one independent complete-output assertion for several previously separate validation/field pairs. Redundant setup and scalar expectations are removed. Negative object/array inputs are cloned independently of their expected fixtures. This changes failure localization and test isolation; fewer expects alone do not establish equal detection."
+  },
+  "preservedBoundaries": [
+    "All compile-cache, compileStrict, circular/deep reference, prototype-pollution, Object.hasOwn and branching $ref DoS tests remain unchanged apart from Prettier line wrapping.",
+    "Boolean case variants and actual boolean; malformed/non-JSON strings; invalid/decimal numeric strings; object/array/null/NaN/Infinity string targets retain independent runtime rows.",
+    "Initially valid inputs remain in the boolean scalar, JSON version, round-trip, cache and strict-validation groups. Guard values consolidated with invalid siblings are now observed through all coercion passes.",
+    "Permanently failing sibling/missing-required cases retain failure-path mutation checks separately from successful coercion contracts.",
+    "All prefixItems/default-draft tuple, nested uniform-array, unresolved reference, two/three-hop reference, additionalProperties and no-properties object boundaries remain represented."
+  ],
+  "risks": [
+    "A failure in the validation-result assertion stops the consolidated output assertion; complete-output diffs identify multiple fields but old individual case names disappear.",
+    "Combining independent schemas into one larger schema changes compilation/cache identity and execution ordering; cache-specific contracts remain independent.",
+    "Previously valid standalone guard values now also appear in invalid-sibling contracts. Full module mutation and historical fault replay remain required before retention."
+  ],
+  "validation": {
+    "status": "pending",
+    "required": [
+      "Package-local targeted tests and coverage comparison against the baseline",
+      "Complete utils/schemaValidator.ts mutation including static mutants, with frozen input set",
+      "Applicable historical schema faults with healthy baseline and candidate runs",
+      "Format/lint/typecheck and independent semantic audit"
+    ]
+  }
+}

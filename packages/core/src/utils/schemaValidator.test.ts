@@ -133,66 +133,32 @@ describe('SchemaValidator', () => {
       );
     });
 
-    it('should handle nested objects with string booleans', () => {
-      const schema = obj({ options: obj({ enabled: { type: 'boolean' } }) });
-      const params = valid(schema, { options: { enabled: 'true' } });
-      expect(params.options.enabled).toBe(true);
-    });
-
-    it('should not affect non-boolean strings', () => {
+    it('coerces nested booleans while preserving accepted string fields', () => {
       const schema = obj({
+        options: obj({ enabled: { type: 'boolean' } }),
         name: { type: 'string' },
+        old_string: { type: 'string' },
+        new_string: { type: 'string' },
+        value: anyOf('boolean', 'string'),
         is_active: { type: 'boolean' },
       });
-      const params = valid(schema, { name: 'trueman', is_active: 'true' });
-      expect(params.name).toBe('trueman');
-      expect(params.is_active).toBe(true);
-    });
-
-    it('should not corrupt string fields whose value is literally "true"/"false"', () => {
-      const schema = obj(
-        {
-          old_string: { type: 'string' },
-          new_string: { type: 'string' },
-          is_active: { type: 'boolean' },
-        },
-        'old_string',
-        'new_string',
-        'is_active',
-      );
-      // A self-hosted LLM sends `is_active` as the string "false" (the case this
-      // coercion exists for) which fails initial validation and triggers
-      // fixBooleanValues. The string-typed `old_string`/`new_string` arguments
-      // legitimately hold the text "true"/"false" and must survive untouched —
-      // previously they were rewritten into booleans, corrupting the edit.
-      const params = valid(schema, {
+      expect(
+        valid(schema, {
+          options: { enabled: 'true' },
+          name: 'trueman',
+          old_string: 'true',
+          new_string: 'false',
+          value: 'false',
+          is_active: 'false',
+        }),
+      ).toEqual({
+        options: { enabled: true },
+        name: 'trueman',
         old_string: 'true',
         new_string: 'false',
-        is_active: 'false',
+        value: 'false',
+        is_active: false,
       });
-      expect(params.old_string).toBe('true');
-      expect(params.new_string).toBe('false');
-      expect(params.is_active).toBe(false);
-    });
-
-    it('should preserve string "true"/"false" when the field also accepts string', () => {
-      // When a field accepts both boolean AND string (a common Pydantic /
-      // draft-2020-12 union), a string value of "true"/"false" is legitimate
-      // — e.g. user content that happens to be the text "true"/"false" — and
-      // must NOT be coerced to a boolean. Coercing it would corrupt the tool
-      // call. Mirrors main's pre-existing guard and the symmetric guard in
-      // fixStringValues. Previously this regressed vs main (the string was
-      // silently rewritten into a boolean).
-      const schema = obj(
-        { value: anyOf('boolean', 'string'), is_active: { type: 'boolean' } },
-        'value',
-        'is_active',
-      );
-      const params = valid(schema, { value: 'false', is_active: 'false' });
-      // value accepts string → the string "false" is preserved, not coerced.
-      expect(params.value).toBe('false');
-      // is_active is boolean-only → still coerced to false.
-      expect(params.is_active).toBe(false);
     });
 
     it('should coerce string booleans inside arrays of booleans', () => {
@@ -203,155 +169,128 @@ describe('SchemaValidator', () => {
   });
 
   describe('stringified JSON value coercion', () => {
-    it('should coerce stringified array for anyOf [array, null]', () => {
-      const schema = obj({ urls: { ...orNull(strings()), default: null } });
-      const params = valid(schema, { urls: '["https://example.com"]' });
-      expect(params.urls).toEqual(['https://example.com']);
-    });
-
-    it('should coerce stringified object for anyOf [object, null]', () => {
-      const schema = obj({ config: orNull(obj({ key: { type: 'string' } })) });
-      const params = valid(schema, { config: '{"key":"value"}' });
-      expect(params.config).toEqual({ key: 'value' });
-    });
-
-    it('should coerce stringified array for oneOf [array, null]', () => {
+    it('parses accepted array/object forms and preserves accepted strings', () => {
       const schema = obj({
+        urls: { ...orNull(strings()), default: null },
+        config: orNull(obj({ key: { type: 'string' } })),
         items: { oneOf: [arrayOf({ type: 'integer' }), { type: 'null' }] },
+        data: { anyOf: [{ type: 'string' }, strings()] },
+        plain: strings(),
       });
-      const params = valid(schema, { items: '[1, 2, 3]' });
-      expect(params.items).toEqual([1, 2, 3]);
-    });
-
-    it('should not coerce when schema accepts string type', () => {
-      const schema = obj({ data: { anyOf: [{ type: 'string' }, strings()] } });
-      const params = valid(schema, { data: '["hello"]' });
-      // Value should remain a string since string is accepted
-      expect(params.data).toBe('["hello"]');
-    });
-
-    it('should not coerce invalid JSON strings', () => {
-      invalid(obj({ urls: orNull(strings()) }), { urls: '[not valid json' });
-    });
-
-    it('should not coerce strings that do not look like JSON', () => {
-      invalid(obj({ urls: orNull(strings()) }, 'urls'), {
-        urls: 'hello world',
+      expect(
+        valid(schema, {
+          urls: '["https://example.com"]',
+          config: '{"key":"value"}',
+          items: '[1, 2, 3]',
+          data: '["hello"]',
+          plain: '["https://example.com"]',
+        }),
+      ).toEqual({
+        urls: ['https://example.com'],
+        config: { key: 'value' },
+        items: [1, 2, 3],
+        data: '["hello"]',
+        plain: ['https://example.com'],
       });
     });
 
-    it('should handle stringified array with plain type (no anyOf)', () => {
-      // No anyOf/oneOf here — the schema just says type: array. Yet
-      // getAcceptedTypes reads plain 'type' too, so the string is still
-      // coerced since 'string' is not among the accepted types.
-      const schema = obj({ urls: strings() }, 'urls');
-      const params = valid(schema, { urls: '["https://example.com"]' });
-      expect(params.urls).toEqual(['https://example.com']);
-    });
+    it.each(['[not valid json', 'hello world'])(
+      'rejects invalid JSON input unchanged: %s',
+      (urls) => {
+        expect(
+          invalid(obj({ urls: orNull(strings()) }, 'urls'), { urls }),
+        ).toEqual({ urls });
+      },
+    );
   });
 
   describe('numeric string coercion', () => {
-    // Validates `{ [key]: input }` against a schema requiring only `key`
-    // (validation must pass) and returns the coerced value.
-    const validField = (
-      key: string,
-      field: unknown,
-      input: unknown,
-      $schema?: string,
-    ) =>
-      valid(
-        { ...($schema && { $schema }), ...obj({ [key]: field }, key) },
-        { [key]: input },
-      )[key];
-
-    it('should coerce string "3" to integer 3', () => {
-      expect(validField('depth', { type: 'integer' }, '3')).toBe(3);
-    });
-
-    it('should coerce string "5.5" to number 5.5', () => {
-      expect(validField('timeout', { type: 'number' }, '5.5')).toBe(5.5);
-    });
-
-    it('should coerce negative numeric strings', () => {
-      expect(validField('offset', { type: 'integer' }, '-10')).toBe(-10);
-    });
-
-    it('should not coerce non-numeric strings', () => {
-      invalid(obj({ count: { type: 'integer' } }, 'count'), { count: 'abc' });
-    });
-
-    it('should not coerce when schema also accepts string', () => {
-      // Should remain a string since string is accepted
-      expect(validField('value', anyOf('string', 'integer'), '42')).toBe('42');
-    });
-
-    it('should coerce numeric strings in nested objects', () => {
-      const schema = obj({ options: obj({ retries: { type: 'integer' } }) });
-      expect(valid(schema, { options: { retries: '3' } }).options.retries).toBe(
-        3,
-      );
-    });
-
-    it('should not affect actual number values', () => {
-      expect(validField('depth', { type: 'integer' }, 3)).toBe(3);
-    });
-
-    it('should not corrupt string fields with numeric-looking values', () => {
-      const schema = obj(
-        { name: { type: 'string' }, count: { type: 'integer' } },
-        'name',
-        'count',
-      );
-      const params = valid(schema, { name: '42', count: '7' });
-      expect(params.name).toBe('42');
-      expect(params.count).toBe(7);
+    it('coerces numeric fields, nested objects and arrays without changing strings', () => {
+      const schema = obj({
+        depth: { type: 'integer' },
+        timeout: { type: 'number' },
+        offset: { type: 'integer' },
+        value: anyOf('string', 'integer'),
+        options: obj({ retries: { type: 'integer' } }),
+        actual: { type: 'integer' },
+        name: { type: 'string' },
+        count: { type: 'integer' },
+        decimal: anyOf('integer', 'number'),
+        whole: { type: 'integer' },
+        ports: arrayOf({ type: 'integer' }),
+      });
+      expect(
+        valid(schema, {
+          depth: '3',
+          timeout: '5.5',
+          offset: '-10',
+          value: '42',
+          options: { retries: '3' },
+          actual: 3,
+          name: '42',
+          count: '7',
+          decimal: '5.5',
+          whole: '3.0',
+          ports: ['8080', '3000'],
+        }),
+      ).toEqual({
+        depth: 3,
+        timeout: 5.5,
+        offset: -10,
+        value: '42',
+        options: { retries: 3 },
+        actual: 3,
+        name: '42',
+        count: 7,
+        decimal: 5.5,
+        whole: 3,
+        ports: [8080, 3000],
+      });
     });
 
     it('should work with draft-2020-12 schema (MCP servers)', () => {
-      expect(validField('time', { type: 'number' }, '5', DRAFT_2020)).toBe(5);
+      expect(
+        valid(
+          { $schema: DRAFT_2020, ...obj({ time: { type: 'number' } }) },
+          { time: '5' },
+        ),
+      ).toEqual({ time: 5 });
     });
 
-    it('should not coerce decimal string for integer-only schema', () => {
-      // Should NOT coerce — let validation fail so LLM self-corrects
-      const params = invalid(obj({ count: { type: 'integer' } }, 'count'), {
-        count: '5.5',
-      });
-      expect(params.count).toBe('5.5');
-    });
-
-    it('should coerce decimal string when number is accepted via anyOf', () => {
-      expect(validField('value', anyOf('integer', 'number'), '5.5')).toBe(5.5);
-    });
-
-    it('should coerce whole-number decimal string to integer (e.g. "3.0")', () => {
-      // "3.0" represents an integer — coerce it rather than rejecting.
-      expect(validField('depth', { type: 'integer' }, '3.0')).toBe(3);
-    });
-
-    it('should coerce numeric strings inside arrays of integers', () => {
-      const schema = obj({ ports: arrayOf({ type: 'integer' }) }, 'ports');
-      expect(valid(schema, { ports: ['8080', '3000'] }).ports).toEqual([
-        8080, 3000,
-      ]);
-    });
+    it.each(['abc', '5.5'])(
+      'rejects non-integer input unchanged: %s',
+      (count) => {
+        expect(
+          invalid(obj({ count: { type: 'integer' } }, 'count'), { count }),
+        ).toEqual({ count });
+      },
+    );
   });
 
   describe('JSON Schema version support', () => {
-    it('should support JSON Schema draft-2020-12', () => {
+    it('validates draft-2020-12 properties, nested objects and nullable unions', () => {
       const schema = {
         $schema: DRAFT_2020,
-        ...obj({ url: { type: 'string' } }, 'url'),
+        ...obj(
+          {
+            url: { type: 'string' },
+            count: { type: 'integer' },
+            config: obj({ enabled: { type: 'boolean' } }),
+            urls: { ...orNull(strings()), default: null },
+          },
+          'url',
+          'count',
+        ),
       };
-      valid(schema, { url: 'https://example.com' });
-    });
-
-    it('should validate correctly with draft-2020-12 schema', () => {
-      const schema = {
-        $schema: DRAFT_2020,
-        ...obj({ count: { type: 'integer' } }, 'count'),
-      };
-      valid(schema, { count: 42 });
-      invalid(schema, { count: 'not a number' });
+      valid(schema, {
+        url: 'https://example.com',
+        count: 42,
+        config: { enabled: true },
+        urls: ['https://example.com'],
+      });
+      valid(schema, { url: 'https://example.com', count: 42, urls: null });
+      valid(schema, { url: 'https://example.com', count: 42 });
+      invalid(schema, { url: 'https://example.com', count: 'not a number' });
     });
 
     it('should support JSON Schema draft-07 (default)', () => {
@@ -362,14 +301,6 @@ describe('SchemaValidator', () => {
       valid(schema, { name: 'test' });
     });
 
-    it('should handle nested schemas with $schema', () => {
-      const schema = {
-        $schema: DRAFT_2020,
-        ...obj({ config: obj({ enabled: { type: 'boolean' } }) }),
-      };
-      valid(schema, { config: { enabled: true } });
-    });
-
     it('should support 2020-12 specific keywords like prefixItems', () => {
       const schema = {
         $schema: DRAFT_2020,
@@ -377,16 +308,6 @@ describe('SchemaValidator', () => {
         prefixItems: [{ type: 'string' }, { type: 'integer' }],
       };
       valid(schema, ['hello', 42]);
-    });
-
-    it('should handle anyOf union types with draft-2020-12', () => {
-      const schema = {
-        $schema: DRAFT_2020,
-        ...obj({ urls: { ...orNull(strings()), default: null } }),
-      };
-      valid(schema, { urls: ['https://example.com'] });
-      valid(schema, { urls: null });
-      valid(schema, {});
     });
 
     it('should gracefully handle unsupported schema versions', () => {
@@ -489,102 +410,55 @@ describe('SchemaValidator', () => {
   });
 
   describe('non-string to string coercion', () => {
-    const schema = obj(
-      {
-        old_string: { type: 'string' },
-        content: { type: 'string' },
+    it('converts scalar string fields and preserves strings and numeric siblings', () => {
+      const schema = obj({
+        integer: { type: 'string' },
+        float: { type: 'string' },
+        yes: { type: 'string' },
+        no: { type: 'string' },
+        text: { type: 'string' },
+        big: { type: 'string' },
         count: { type: 'integer' },
-      },
-      'old_string',
-      'content',
-    );
-
-    it('should coerce number values to strings', () => {
-      expect(
-        valid(schema, { old_string: 123, content: 'hello' }).old_string,
-      ).toBe('123');
-    });
-
-    it('should coerce boolean values to strings', () => {
-      const params = valid(schema, { old_string: true, content: false });
-      expect(params.old_string).toBe('true');
-      expect(params.content).toBe('false');
-    });
-
-    it('should not coerce values that are already strings', () => {
-      const params = valid(schema, { old_string: 'original', content: 'text' });
-      expect(params.old_string).toBe('original');
-    });
-
-    it('should not coerce non-string schema fields', () => {
-      const params = valid(schema, {
-        old_string: 'text',
-        content: 'hello',
-        count: 42,
-      });
-      expect(params.count).toBe(42);
-    });
-
-    it('should coerce float to string', () => {
-      expect(
-        valid(schema, { old_string: 3.14, content: 'hello' }).old_string,
-      ).toBe('3.14');
-    });
-
-    it('should not coerce objects or arrays to strings', () => {
-      const params = invalid(schema, {
-        old_string: { x: 1 },
-        content: 'hello',
-      });
-      expect(params.old_string).toEqual({ x: 1 });
-
-      const arrayParams = invalid(schema, {
-        old_string: [1, 2, 3],
-        content: 'hello',
-      });
-      expect(arrayParams.old_string).toEqual([1, 2, 3]);
-    });
-
-    it('should coerce nested string fields', () => {
-      const nestedSchema = obj({
         options: obj({
           label: { type: 'string' },
           enabled: { type: 'boolean' },
         }),
       });
-      const { options } = valid(nestedSchema, {
-        options: { label: 42, enabled: true },
-      });
-      expect(options.label).toBe('42');
-      expect(options.enabled).toBe(true);
-    });
-
-    it('should not coerce null values', () => {
-      // null is left in place — validation result depends on schema nullability
       expect(
-        coerced(schema, { old_string: null, content: 'hello' }).old_string,
-      ).toBeNull();
-    });
-
-    it('should handle bigint values', () => {
-      const params = valid(schema, {
-        old_string: BigInt(9007199254740991),
-        content: 'hello',
+        valid(schema, {
+          integer: 123,
+          float: 3.14,
+          yes: true,
+          no: false,
+          text: 'original',
+          big: BigInt(9007199254740991),
+          count: 42,
+          options: { label: 42, enabled: true },
+        }),
+      ).toEqual({
+        integer: '123',
+        float: '3.14',
+        yes: 'true',
+        no: 'false',
+        text: 'original',
+        big: '9007199254740991',
+        count: 42,
+        options: { label: '42', enabled: true },
       });
-      expect(params.old_string).toBe('9007199254740991');
     });
 
-    it('should not coerce already-valid integers in union types', () => {
-      const unionSchema = obj(
-        { val: anyOf('integer', 'string'), bad_field: { type: 'number' } },
-        'val',
-        'bad_field',
-      );
-      // val=42 is already valid as integer; bad_field causes the failure, and
-      // val must NOT be coerced to '42'.
+    it.each([
+      ['object', { x: 1 }],
+      ['array', [1, 2, 3]],
+      ['null', null],
+      ['NaN', NaN],
+      ['Infinity', Infinity],
+    ])('rejects %s string-field input unchanged', (_label, value) => {
       expect(
-        coerced(unionSchema, { val: 42, bad_field: 'not_a_number' }).val,
-      ).toBe(42);
+        invalid(obj({ value: { type: 'string' } }), {
+          value: structuredClone(value),
+        }),
+      ).toEqual({ value });
     });
 
     it('should coerce primitives in string arrays', () => {
@@ -593,61 +467,39 @@ describe('SchemaValidator', () => {
         'tags',
         'bad_field',
       );
-      const params = coerced(arraySchema, {
-        tags: [1, 2.5, true],
-        bad_field: 'not_a_number',
-      });
-      expect(params.tags).toEqual(['1', '2.5', 'true']);
+      expect(
+        invalid(arraySchema, {
+          tags: [1, 2.5, true],
+          bad_field: 'not_a_number',
+        }),
+      ).toEqual({ tags: ['1', '2.5', 'true'], bad_field: 'not_a_number' });
     });
   });
 
   describe('schema-aware boolean coercion', () => {
-    it('should not coerce "true" on enum-only schemas', () => {
-      const enumSchema = obj(
+    it('preserves enum, const, string arrays and unconstrained object values', () => {
+      const schema = obj(
         {
           status: { enum: ['active', 'true', 'false'] },
+          answer: { const: 'true' },
+          tags: strings(),
+          config: { type: 'object' },
           count: { type: 'number' },
         },
         'count',
       );
-      // count missing causes validation failure → coercion runs. "true" must
-      // NOT be coerced to boolean — enum-only schema has no boolean type.
-      expect(coerced(enumSchema, { status: 'true' }).status).toBe('true');
-    });
-
-    it('should not coerce "true" on const-only schemas', () => {
-      const constSchema = obj(
-        { answer: { const: 'true' }, count: { type: 'number' } },
-        'count',
-      );
-      expect(coerced(constSchema, { answer: 'true' }).answer).toBe('true');
-    });
-
-    it('should not corrupt string arrays with boolean-like elements', () => {
-      const schema = obj(
-        { tags: strings(), bad_field: { type: 'number' } },
-        'bad_field',
-      );
-      const params = coerced(schema, {
+      const params = {
+        status: 'true',
+        answer: 'true',
         tags: ['active', 'True', 'false'],
-        bad_field: 'not_a_number',
-      });
-      expect(params.tags).toEqual(['active', 'True', 'false']);
-    });
-
-    it('should not coerce blindly in nested objects without schema', () => {
-      // config has type:object but no properties defined — nested fields are
-      // unconstrained, so their strings must NOT be coerced.
-      const schema = obj(
-        { config: { type: 'object' }, bad_field: { type: 'number' } },
-        'bad_field',
-      );
-      const params = coerced(schema, {
         config: { name: 'True', mode: 'false' },
-        bad_field: 'not_a_number',
+      };
+      expect(invalid(schema, params)).toEqual({
+        status: 'true',
+        answer: 'true',
+        tags: ['active', 'True', 'false'],
+        config: { name: 'True', mode: 'false' },
       });
-      expect(params.config.name).toBe('True');
-      expect(params.config.mode).toBe('false');
     });
   });
 
@@ -660,58 +512,72 @@ describe('SchemaValidator', () => {
     });
   });
 
-  describe('allOf support in getAcceptedTypes', () => {
-    it('should coerce number to string when type is defined via allOf', () => {
-      const schema = obj({ name: { allOf: [{ type: 'string' }] } });
-      expect(valid(schema, { name: 42 }).name).toBe('42');
-    });
-
-    it('should coerce string to boolean when type is defined via allOf', () => {
-      const schema = obj({ flag: { allOf: [{ type: 'boolean' }] } });
-      expect(valid(schema, { flag: 'true' }).flag).toBe(true);
+  describe('composition keyword recursion', () => {
+    it('resolves composed scalar types, nested objects and object arrays', () => {
+      const schema = obj({
+        name: { allOf: [{ type: 'string' }] },
+        flag: { allOf: [{ type: 'boolean' }] },
+        accepted: { allOf: [anyOf('string', 'integer')] },
+        nested: { allOf: [anyOf('string')] },
+        config: { allOf: [obj({ enabled: { type: 'boolean' } })] },
+        nullable: orNull(obj({ label: { type: 'string' } })),
+        items: arrayOf({ allOf: [obj({ enabled: { type: 'boolean' } })] }),
+        data: { allOf: [obj({ tags: orNull(strings()) })] },
+        json: { allOf: [strings()] },
+      });
+      expect(
+        valid(schema, {
+          name: 42,
+          flag: 'true',
+          accepted: 42,
+          nested: 42,
+          config: { enabled: 'true' },
+          nullable: { label: 42 },
+          items: [{ enabled: 'true' }, { enabled: 'false' }],
+          data: { tags: '["a","b"]' },
+          json: '["x","y"]',
+        }),
+      ).toEqual({
+        name: '42',
+        flag: true,
+        accepted: 42,
+        nested: '42',
+        config: { enabled: true },
+        nullable: { label: '42' },
+        items: [{ enabled: true }, { enabled: false }],
+        data: { tags: ['a', 'b'] },
+        json: ['x', 'y'],
+      });
     });
   });
 
-  describe('integer/number subtype handling', () => {
-    it('should not coerce integers when schema accepts number via anyOf', () => {
-      const schema = obj(
-        { val: anyOf('number', 'string'), bad_field: { type: 'number' } },
-        'val',
-        'bad_field',
-      );
-      // 42 is an integer, which is a subtype of number — should not coerce
-      expect(coerced(schema, { val: 42, bad_field: 'not_a_number' }).val).toBe(
-        42,
-      );
-    });
-
-    it('should not coerce integers in arrays when items accept number', () => {
+  describe('accepted numeric union values', () => {
+    it('preserves integer and number subtypes through all coercion passes', () => {
       const schema = obj(
         {
+          integer: anyOf('integer', 'string'),
+          number: anyOf('number', 'string'),
+          one: { oneOf: [{ type: 'integer' }, { type: 'string' }] },
           vals: arrayOf(anyOf('number', 'string')),
           bad_field: { type: 'number' },
         },
-        'vals',
         'bad_field',
       );
-      const params = coerced(schema, {
+      expect(
+        invalid(schema, {
+          integer: 42,
+          number: 42,
+          one: 42,
+          vals: [1, 2, 3],
+          bad_field: 'not_a_number',
+        }),
+      ).toEqual({
+        integer: 42,
+        number: 42,
+        one: 42,
         vals: [1, 2, 3],
         bad_field: 'not_a_number',
       });
-      expect(params.vals).toEqual([1, 2, 3]);
-    });
-  });
-
-  describe('deeply nested composition keywords', () => {
-    it('should resolve types from nested allOf containing anyOf', () => {
-      const schema = obj({ val: { allOf: [anyOf('string', 'integer')] } });
-      // 42 is integer, which is accepted by the nested anyOf
-      expect(valid(schema, { val: 42 }).val).toBe(42);
-    });
-
-    it('should coerce to string when nested allOf/anyOf defines string type', () => {
-      const schema = obj({ name: { allOf: [anyOf('string')] } });
-      expect(valid(schema, { name: 42 }).name).toBe('42');
     });
   });
 
@@ -791,22 +657,6 @@ describe('SchemaValidator', () => {
     });
   });
 
-  describe('fixStringValues with oneOf', () => {
-    it('should not coerce already-valid integers in oneOf types', () => {
-      const schema = obj(
-        {
-          val: { oneOf: [{ type: 'integer' }, { type: 'string' }] },
-          bad_field: { type: 'number' },
-        },
-        'val',
-        'bad_field',
-      );
-      expect(coerced(schema, { val: 42, bad_field: 'not_a_number' }).val).toBe(
-        42,
-      );
-    });
-  });
-
   describe('fixStringifiedJsonValues with arrays', () => {
     it('should coerce stringified JSON in arrays of objects', () => {
       const schema = obj({ items: arrayOf(obj({ tags: orNull(strings()) })) });
@@ -815,37 +665,56 @@ describe('SchemaValidator', () => {
       });
       expect(params.items).toEqual([{ tags: ['a', 'b'] }, { tags: ['c'] }]);
     });
-
-    it('should coerce stringified JSON via allOf', () => {
-      const schema = obj({ data: { allOf: [strings()] } });
-      expect(valid(schema, { data: '["x","y"]' }).data).toEqual(['x', 'y']);
-    });
   });
 
   describe('$ref resolution', () => {
-    it('should coerce number to string via $ref', () => {
+    it('coerces scalar and nested values through definitions, $defs and ref chains', () => {
       const schema = {
-        ...obj({ name: { $ref: '#/definitions/NameProp' } }),
-        definitions: { NameProp: { type: 'string' } },
+        ...obj({
+          name: { $ref: '#/definitions/NameProp' },
+          flag: { $ref: '#/$defs/FlagProp' },
+          urls: { $ref: '#/definitions/UrlsProp' },
+          config: { $ref: '#/$defs/Config' },
+          settings: { $ref: '#/definitions/Settings' },
+          data: { $ref: '#/$defs/Data' },
+          twoHops: { $ref: '#/$defs/A' },
+          threeHops: { $ref: '#/$defs/B' },
+        }),
+        definitions: {
+          NameProp: { type: 'string' },
+          UrlsProp: orNull(strings()),
+          Settings: obj({ label: { type: 'string' } }),
+        },
+        $defs: {
+          FlagProp: { type: 'boolean' },
+          Config: obj({ enabled: { type: 'boolean' } }),
+          Data: obj({ tags: orNull(strings()) }),
+          A: { $ref: '#/definitions/NameProp' },
+          B: { $ref: '#/$defs/C' },
+          C: { $ref: '#/$defs/FlagProp' },
+        },
       };
-      expect(valid(schema, { name: 42 }).name).toBe('42');
-    });
-
-    it('should coerce string to boolean via $ref in $defs', () => {
-      const schema = {
-        ...obj({ flag: { $ref: '#/$defs/FlagProp' } }),
-        $defs: { FlagProp: { type: 'boolean' } },
-      };
-      expect(valid(schema, { flag: 'true' }).flag).toBe(true);
-    });
-
-    it('should coerce stringified JSON via $ref', () => {
-      const schema = {
-        ...obj({ urls: { $ref: '#/definitions/UrlsProp' } }),
-        definitions: { UrlsProp: orNull(strings()) },
-      };
-      const params = valid(schema, { urls: '["https://example.com"]' });
-      expect(params.urls).toEqual(['https://example.com']);
+      expect(
+        valid(schema, {
+          name: 42,
+          flag: 'true',
+          urls: '["https://example.com"]',
+          config: { enabled: 'true' },
+          settings: { label: 42 },
+          data: { tags: '["a","b"]' },
+          twoHops: 42,
+          threeHops: 'true',
+        }),
+      ).toEqual({
+        name: '42',
+        flag: true,
+        urls: ['https://example.com'],
+        config: { enabled: true },
+        settings: { label: '42' },
+        data: { tags: ['a', 'b'] },
+        twoHops: '42',
+        threeHops: true,
+      });
     });
 
     it('should handle unresolvable $ref gracefully', () => {
@@ -877,28 +746,6 @@ describe('SchemaValidator', () => {
     });
   });
 
-  describe('NaN/Infinity guard', () => {
-    const schema = () =>
-      obj(
-        { val: { type: 'string' }, bad_field: { type: 'number' } },
-        'bad_field',
-      );
-
-    it('should not coerce NaN to string', () => {
-      // NaN should NOT be coerced to "NaN"
-      expect(
-        coerced(schema(), { val: NaN, bad_field: 'not_a_number' }).val,
-      ).toBeNaN();
-    });
-
-    it('should not coerce Infinity to string', () => {
-      // Infinity should NOT be coerced to "Infinity"
-      expect(
-        coerced(schema(), { val: Infinity, bad_field: 'not_a_number' }).val,
-      ).toBe(Infinity);
-    });
-  });
-
   describe('additionalProperties fallback', () => {
     it('should coerce values in additionalProperties schemas', () => {
       const schema = {
@@ -923,40 +770,6 @@ describe('SchemaValidator', () => {
       const params = valid(schema, { flag1: 'true', flag2: 'false' });
       expect(params.flag1).toBe(true);
       expect(params.flag2).toBe(false);
-    });
-  });
-
-  describe('$ref resolution in nested object recursion', () => {
-    it('should coerce booleans in nested objects via $ref', () => {
-      // Finding #1: $ref must be resolved before recursion into nested objects
-      const schema = {
-        ...obj({ config: { $ref: '#/$defs/Config' } }),
-        $defs: { Config: obj({ enabled: { type: 'boolean' } }) },
-      };
-      expect(
-        valid(schema, { config: { enabled: 'true' } }).config.enabled,
-      ).toBe(true);
-    });
-
-    it('should coerce strings in nested objects via $ref in definitions', () => {
-      const schema = {
-        ...obj({ settings: { $ref: '#/definitions/Settings' } }),
-        definitions: { Settings: obj({ label: { type: 'string' } }) },
-      };
-      expect(valid(schema, { settings: { label: 42 } }).settings.label).toBe(
-        '42',
-      );
-    });
-
-    it('should coerce stringified JSON in nested objects via $ref', () => {
-      const schema = {
-        ...obj({ data: { $ref: '#/$defs/Data' } }),
-        $defs: { Data: obj({ tags: orNull(strings()) }) },
-      };
-      expect(valid(schema, { data: { tags: '["a","b"]' } }).data.tags).toEqual([
-        'a',
-        'b',
-      ]);
     });
   });
 
@@ -1088,95 +901,34 @@ describe('SchemaValidator', () => {
     });
   });
 
-  describe('multi-hop $ref chains', () => {
-    it('should resolve $ref chains of 2+ hops', () => {
-      // $defs/A -> $defs/B -> { type: 'string' }
-      const schema = {
-        ...obj({ name: { $ref: '#/$defs/A' } }),
-        $defs: { A: { $ref: '#/$defs/B' }, B: { type: 'string' } },
-      };
-      expect(valid(schema, { name: 42 }).name).toBe('42');
-    });
-
-    it('should resolve deep $ref chains (3 hops)', () => {
-      // $defs/A -> $defs/B -> $defs/C -> { type: 'boolean' }
-      const schema = {
-        ...obj({ flag: { $ref: '#/$defs/A' } }),
-        $defs: {
-          A: { $ref: '#/$defs/B' },
-          B: { $ref: '#/$defs/C' },
-          C: { type: 'boolean' },
-        },
-      };
-      expect(valid(schema, { flag: 'true' }).flag).toBe(true);
-    });
-  });
-
   describe('$ref inside composition variants', () => {
-    // `{ [key]: { [keyword]: variants } }` where `$defs[name]` is an object
-    // with one `field` of the given `type`.
-    const withDef = (
-      key: string,
-      composition: object,
-      name: string,
-      field: string,
-      type: string,
-    ) => ({
-      ...obj({ [key]: composition }),
-      $defs: { [name]: obj({ [field]: { type } }) },
-    });
-
-    it('should coerce via $ref inside anyOf variants', () => {
-      const schema = withDef(
-        'config',
-        orNull({ $ref: '#/$defs/Config' }),
-        'Config',
-        'enabled',
-        'boolean',
-      );
-      expect(
-        valid(schema, { config: { enabled: 'true' } }).config.enabled,
-      ).toBe(true);
-    });
-
-    it('should coerce strings via $ref inside anyOf variants', () => {
-      const schema = withDef(
-        'data',
-        orNull({ $ref: '#/$defs/Data' }),
-        'Data',
-        'label',
-        'string',
-      );
-      expect(valid(schema, { data: { label: 42 } }).data.label).toBe('42');
-    });
-
-    it('should coerce via $ref inside oneOf variants', () => {
-      const composition = {
-        oneOf: [{ $ref: '#/$defs/Config' }, { type: 'null' }],
-      };
-      const schema = withDef(
-        'config',
-        composition,
-        'Config',
-        'enabled',
-        'boolean',
-      );
-      expect(
-        valid(schema, { config: { enabled: 'true' } }).config.enabled,
-      ).toBe(true);
-    });
-
-    it('should coerce via $ref inside allOf variants', () => {
-      const composition = { allOf: [{ $ref: '#/$defs/Config' }] };
-      const schema = withDef(
-        'config',
-        composition,
-        'Config',
-        'label',
-        'string',
-      );
-      expect(valid(schema, { config: { label: 42 } }).config.label).toBe('42');
-    });
+    it.each(['anyOf', 'oneOf', 'allOf'])(
+      'coerces nested boolean, string and JSON fields through %s references',
+      (keyword) => {
+        const schema = {
+          ...obj({
+            config: {
+              [keyword]:
+                keyword === 'allOf'
+                  ? [{ $ref: '#/$defs/Config' }]
+                  : [{ $ref: '#/$defs/Config' }, { type: 'null' }],
+            },
+          }),
+          $defs: {
+            Config: obj({
+              enabled: { type: 'boolean' },
+              label: { type: 'string' },
+              tags: orNull(strings()),
+            }),
+          },
+        };
+        expect(
+          valid(schema, {
+            config: { enabled: 'true', label: 42, tags: '["a","b"]' },
+          }),
+        ).toEqual({ config: { enabled: true, label: '42', tags: ['a', 'b'] } });
+      },
+    );
   });
 
   describe('Object.hasOwn regression', () => {
@@ -1190,45 +942,6 @@ describe('SchemaValidator', () => {
       });
       const params = valid(schema, { obj: { toString: 42 } });
       expect((params.obj as Record<string, unknown>)['toString']).toBe('42');
-    });
-  });
-
-  describe('composition keyword recursion', () => {
-    it('should recurse into nested objects wrapped in allOf', () => {
-      // allOf wrapping object schema with properties
-      const schema = obj({
-        config: { allOf: [obj({ enabled: { type: 'boolean' } })] },
-      });
-      expect(
-        valid(schema, { config: { enabled: 'true' } }).config.enabled,
-      ).toBe(true);
-    });
-
-    it('should recurse into nested objects wrapped in anyOf', () => {
-      const schema = obj({
-        config: orNull(obj({ label: { type: 'string' } })),
-      });
-      expect(valid(schema, { config: { label: 42 } }).config.label).toBe('42');
-    });
-
-    it('should recurse into arrays of objects wrapped in allOf', () => {
-      const schema = obj({
-        items: arrayOf({ allOf: [obj({ enabled: { type: 'boolean' } })] }),
-      });
-      const params = valid(schema, {
-        items: [{ enabled: 'true' }, { enabled: 'false' }],
-      });
-      expect(params.items).toEqual([{ enabled: true }, { enabled: false }]);
-    });
-
-    it('should coerce stringified JSON in nested objects wrapped in allOf', () => {
-      const schema = obj({
-        data: { allOf: [obj({ tags: orNull(strings()) })] },
-      });
-      expect(valid(schema, { data: { tags: '["a","b"]' } }).data.tags).toEqual([
-        'a',
-        'b',
-      ]);
     });
   });
 
