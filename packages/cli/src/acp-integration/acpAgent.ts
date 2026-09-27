@@ -363,6 +363,7 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
@@ -1592,6 +1593,8 @@ type QwenMcpServerConfig = {
   headers?: Record<string, string>;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -2329,6 +2332,12 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   return numberValue;
 }
 
+function toMcpAppResourceLimit(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   const input = toRecord(value);
   const transport = input['transport'];
@@ -2361,6 +2370,12 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
     );
   }
   server.versionNegotiation = versionNegotiation;
+  server.appResourceMaxBytes = toMcpAppResourceLimit(
+    input['appResourceMaxBytes'],
+  );
+  server.appResourceTimeoutMs = toMcpAppResourceLimit(
+    input['appResourceTimeoutMs'],
+  );
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -2400,6 +2415,8 @@ function toStoredMcpServerConfig(
   for (const key of [
     'timeout',
     'versionNegotiation',
+    'appResourceMaxBytes',
+    'appResourceTimeoutMs',
     'trust',
     'description',
     'includeTools',
@@ -2431,6 +2448,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2451,6 +2472,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2473,6 +2498,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -4467,6 +4496,7 @@ class QwenAgent implements Agent {
           }`,
         );
       }
+      session.cancelMcpAppCalls();
       void session.cancelPendingPrompt().catch((error) => {
         debugLogger.debug(
           `Session ${session.getId()} cancel during managed shutdown failed: ${
@@ -5361,6 +5391,7 @@ class QwenAgent implements Agent {
       await waitForSessionDrain(
         (async () => {
           try {
+            session.cancelMcpAppCalls();
             await session.cancelPendingPrompt();
           } catch (err) {
             debugLogger.debug(
@@ -6736,6 +6767,9 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
+            if (enforceLimits) {
+              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            }
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
@@ -6925,6 +6959,12 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
+                if (restoreOptions.replay.kind === 'recent') {
+                  degradeReplayEnvelopeAppHtml(
+                    replayEnvelope,
+                    LOAD_REPLAY_MAX_BYTES,
+                  );
+                }
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,
@@ -12038,6 +12078,51 @@ class QwenAgent implements Agent {
           this.workspaceGenerationControllers.delete(requestId);
         }
         return { requestId, cancelled };
+      }
+      case 'qwen/session/mcp-app/call':
+      case 'qwen/session/mcp-app/cancel': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP App calls require a trusted private ACP parent',
+          );
+        }
+        const { sessionId, callId } = params;
+        if (
+          typeof sessionId !== 'string' ||
+          typeof callId !== 'string' ||
+          !callId.startsWith('mcp-app-')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App session or call id',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (method === 'qwen/session/mcp-app/cancel') {
+          session.cancelMcpAppCall(callId);
+          return {};
+        }
+        const { serverName, resourceUri, name, arguments: args } = params;
+        if (
+          typeof serverName !== 'string' ||
+          typeof resourceUri !== 'string' ||
+          typeof name !== 'string' ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App tool call',
+          );
+        }
+        return session.callMcpAppTool(callId, {
+          serverName,
+          resourceUri,
+          name,
+          arguments: args as Record<string, unknown>,
+        });
       }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':

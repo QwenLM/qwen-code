@@ -552,6 +552,276 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('degrades queued App HTML without disconnecting or changing healthy delivery and replay', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const slow = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    const fast = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const pending = bus.publish({
+        type: 'session_update',
+        data: {
+          update: { sessionUpdate: 'tool_call_update', status: 'in_progress' },
+        },
+      });
+      await fast.next();
+      const fastDelivery = fast.next();
+      const html = 'x'.repeat(3 * 1024 * 1024);
+      const completed = bus.publish({
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html,
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect((await fastDelivery).value).toBe(completed);
+      expect((await slow.next()).value).toBe(pending);
+      const fallback = (await slow.next()).value;
+      expect(fallback).toMatchObject({
+        id: completed?.id,
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html: '',
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect(completed).toHaveProperty('data.update.rawOutput.html', html);
+      expect(bus.subscriberCount).toBe(2);
+      const resumed = bus
+        .subscribe({ lastEventId: pending?.id, signal: abort.signal })
+        [Symbol.asyncIterator]();
+      expect((await resumed.next()).value).toBe(completed);
+      const following = bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      expect((await slow.next()).value).toBe(following);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('keeps an oversized App intact in an empty queue and evicts on the next frame', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const app = bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(3 * 1024 * 1024),
+              fallbackText: 'Dashboard ready',
+            },
+          },
+        },
+      });
+      bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      const delivered = (await iter.next()).value;
+      expect(delivered).toMatchObject({ id: app?.id, type: 'session_update' });
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        'x'.repeat(3 * 1024 * 1024),
+      );
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.fallbackText',
+        'Dashboard ready',
+      );
+      expect((await iter.next()).value).toMatchObject({
+        type: 'slow_client_warning',
+      });
+      expect((await iter.next()).value).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it.each([false, true])(
+    'bounds an App whose degraded frame still exceeds the queue budget (pending: %s)',
+    async (pending) => {
+      const bus = new EventBus(100, undefined, undefined, {
+        maxQueuedBytes: 1200,
+      });
+      const abort = new AbortController();
+      const iterator = bus
+        .subscribe({ signal: abort.signal })
+        [Symbol.asyncIterator]();
+      if (pending) bus.publish({ type: 'session_update', data: 'pending' });
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(2000),
+              fallbackText: 'y'.repeat(2000),
+            },
+          },
+        },
+      });
+      if (pending) {
+        // A backlogged subscriber still evicts: the degraded frame does
+        // not fit behind the pending one.
+        expect((await iterator.next()).value).toMatchObject({
+          type: 'session_update',
+          data: 'pending',
+        });
+        expect((await iterator.next()).value).toMatchObject({
+          type: 'client_evicted',
+          data: { reason: 'queue_bytes_overflow' },
+        });
+        expect(bus.subscriberCount).toBe(0);
+      } else {
+        // First-item rule: an empty queue admits the original frame — the
+        // subscriber is keeping up, and the ring keeps the original frame
+        // for a `Last-Event-ID` resume.
+        const delivered = (await iterator.next()).value;
+        expect(delivered).toMatchObject({ type: 'session_update' });
+        expect(delivered).toHaveProperty(
+          'data.update.rawOutput.html',
+          'x'.repeat(2000),
+        );
+        expect(delivered).toHaveProperty(
+          'data.update.rawOutput.fallbackText',
+          'y'.repeat(2000),
+        );
+        expect(bus.subscriberCount).toBe(1);
+      }
+      abort.abort();
+      bus.close();
+    },
+  );
+
+  it('preserves App HTML when its tool result overflows an empty queue', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iterator = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      // `html` is tiny; the untruncated `toolResult` is what overflows.
+      // An empty queue admits the original frame without stripping HTML.
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: '<b>ok</b>',
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'z'.repeat(2000) }],
+              },
+            },
+          },
+        },
+      });
+      const delivered = (await iterator.next()).value;
+      expect(delivered).toMatchObject({ type: 'session_update' });
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.html',
+        '<b>ok</b>',
+      );
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.fallbackText',
+        'Dashboard ready',
+      );
+      expect(delivered).toHaveProperty('data.update.rawOutput.toolResult', {
+        content: [{ type: 'text', text: 'z'.repeat(2000) }],
+      });
+      expect(bus.subscriberCount).toBe(1);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('still evicts an over-budget App frame whose fallbackText is empty', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iterator = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      bus.publish({ type: 'session_update', data: 'pending' });
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(2000),
+              fallbackText: '',
+            },
+          },
+        },
+      });
+      // A degraded frame with empty fallback text would render nothing at
+      // all, so the bus keeps the pre-degrade contract: evict the lagging
+      // subscriber and let a resume replay the original from the ring.
+      expect((await iterator.next()).value).toMatchObject({
+        type: 'session_update',
+        data: 'pending',
+      });
+      expect((await iterator.next()).value).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
   it('evicts a slow subscriber when live queued bytes overflow', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1200,

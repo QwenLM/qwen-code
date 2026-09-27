@@ -5316,6 +5316,7 @@ async function runQwenServeImpl(
     if (!app || stoppedRuntimeAppProducers.has(app)) return;
     stoppedRuntimeAppProducers.add(app);
     const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
@@ -5333,6 +5334,7 @@ async function runQwenServeImpl(
         );
       }
     };
+    stopSafely('MCP App sandbox', locals.stopMcpAppSandbox);
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
