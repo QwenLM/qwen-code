@@ -98,23 +98,48 @@ export const superfastCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t(
-          'Superfast is OFF. Run /superfast on to enable it (install the backend first with: von-install).',
+          'Superfast is OFF. Run /superfast on to enable it (install the backend first with: qwen von-install).',
         ),
       };
     }
-    const healthy = await probeBackend(s);
+    const probe = await probeBackend(s);
+    if (probe === 'healthy') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Superfast is ON. Backend reachable at {{endpoint}} (model {{model}}).',
+          { endpoint: s.endpoint, model: s.model },
+        ),
+      };
+    }
+    if (probe === 'auth_failed') {
+      return {
+        type: 'message',
+        messageType: 'warning',
+        content: t(
+          'Superfast is ON but the backend at {{endpoint}} rejected the request (authentication failed). The server is running; set the API key env var named by superfast.apiKeyEnv, or clear the key on the server. The gate fails open (normal behaviour).',
+          { endpoint: s.endpoint },
+        ),
+      };
+    }
+    if (probe === 'unhealthy') {
+      return {
+        type: 'message',
+        messageType: 'warning',
+        content: t(
+          'Superfast is ON but the backend at {{endpoint}} did not answer the health check. The gate fails open (normal behaviour). Check that it serves /v1/systemone.',
+          { endpoint: s.endpoint },
+        ),
+      };
+    }
     return {
       type: 'message',
-      messageType: healthy ? 'info' : 'warning',
-      content: healthy
-        ? t(
-            'Superfast is ON. Backend reachable at {{endpoint}} (model {{model}}).',
-            { endpoint: s.endpoint, model: s.model },
-          )
-        : t(
-            'Superfast is ON but the backend at {{endpoint}} is not reachable. The gate fails open (normal behaviour). Start it with `von serve` or run von-install.',
-            { endpoint: s.endpoint },
-          ),
+      messageType: 'warning',
+      content: t(
+        'Superfast is ON but the backend at {{endpoint}} is not reachable. The gate fails open (normal behaviour). Start it with `von serve` or run qwen von-install.',
+        { endpoint: s.endpoint },
+      ),
     };
   },
 };

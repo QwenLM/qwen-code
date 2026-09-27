@@ -98,14 +98,56 @@ describe('querySystemOne', () => {
     expect(JSON.parse(init.body).model).toBe(DEFAULT_GATE_SETTINGS.model);
   });
 
-  it('fails open (null) on a non-2xx response', async () => {
-    fetchMock.mockResolvedValue(jsonResponse({}, false, 503));
+  it('fails open (null) on a non-2xx response even with a valid envelope', async () => {
+    // A valid envelope on a 503: only the status guard can reject it, so this
+    // pins the `!res.ok` check rather than the malformed-body guard.
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { answers: { ok: { type: 'noul', noul: 0.9 } } },
+        false,
+        503,
+      ),
+    );
     const answers = await querySystemOne(
       'hi',
       { a: { type: 'noul', instructions: 'x' } },
       settingsWith(),
     );
     expect(answers).toBeNull();
+  });
+
+  it('sends an Authorization header when apiKeyEnv names a set variable', async () => {
+    process.env['VON_TEST_KEY'] = 'secret123';
+    try {
+      fetchMock.mockResolvedValue(
+        jsonResponse({ answers: { a: { noul: 0.5 } } }),
+      );
+      await querySystemOne(
+        'hi',
+        { a: { type: 'noul', instructions: 'x' } },
+        settingsWith({
+          apiKeyEnv: 'VON_TEST_KEY',
+          endpoint: 'http://example.invalid/v1/systemone',
+        }),
+      );
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers['Authorization']).toBe('Bearer secret123');
+    } finally {
+      delete process.env['VON_TEST_KEY'];
+    }
+  });
+
+  it('sends no Authorization header when apiKeyEnv is unset', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ answers: { a: { noul: 0.5 } } }),
+    );
+    await querySystemOne(
+      'hi',
+      { a: { type: 'noul', instructions: 'x' } },
+      settingsWith({ endpoint: 'http://example.invalid/v1/systemone' }),
+    );
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['Authorization']).toBeUndefined();
   });
 
   it('fails open (null) on a malformed response body', async () => {
@@ -242,16 +284,31 @@ describe('probeBackend', () => {
     vi.unstubAllGlobals();
   });
 
-  it('returns true when the endpoint answers a noul', async () => {
+  it('returns healthy when the endpoint answers a noul', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ answers: { ok: { noul: 0.7 } } }),
     );
-    await expect(probeBackend(settingsWith())).resolves.toBe(true);
+    await expect(probeBackend(settingsWith())).resolves.toBe('healthy');
   });
 
-  it('returns false when the endpoint is unreachable', async () => {
+  it('returns unreachable when the endpoint is unreachable', async () => {
     fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
-    await expect(probeBackend(settingsWith())).resolves.toBe(false);
+    await expect(probeBackend(settingsWith())).resolves.toBe('unreachable');
+  });
+
+  it('returns auth_failed on a 401', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, false, 401));
+    await expect(probeBackend(settingsWith())).resolves.toBe('auth_failed');
+  });
+
+  it('returns auth_failed on a 403', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}, false, 403));
+    await expect(probeBackend(settingsWith())).resolves.toBe('auth_failed');
+  });
+
+  it('returns unhealthy on a 200 that carries no numeric ok', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ answers: { other: {} } }));
+    await expect(probeBackend(settingsWith())).resolves.toBe('unhealthy');
   });
 });
 
@@ -316,7 +373,9 @@ describe('querySystemOne proxy bypass (real network, no fetch stub)', () => {
       }),
     );
 
-    await expect(probeBackend(settingsWith({ endpoint }))).resolves.toBe(true);
+    await expect(probeBackend(settingsWith({ endpoint }))).resolves.toBe(
+      'healthy',
+    );
   });
 
   it('a raw global fetch through the same proxy would NOT reach loopback (control)', async () => {

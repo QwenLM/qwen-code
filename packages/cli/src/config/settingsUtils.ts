@@ -294,6 +294,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'ui', key: 'allowedApprovalModes' },
   { section: 'superfast', key: 'enabled' },
   { section: 'superfast', key: 'endpoint' },
+  { section: 'superfast', key: 'apiKeyEnv' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

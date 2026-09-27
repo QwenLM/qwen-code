@@ -149,7 +149,7 @@ describe('superfastCommand', () => {
   });
 
   it('status reports reachable when the backend answers', async () => {
-    probeBackendMock.mockResolvedValue(true);
+    probeBackendMock.mockResolvedValue('healthy');
     const ctx = ctxWith(true);
     const result = (await superfastCommand.action?.(ctx, 'status')) as {
       messageType: string;
@@ -159,8 +159,19 @@ describe('superfastCommand', () => {
     expect(result.content).toContain('reachable');
   });
 
+  it('status warns on an authentication failure', async () => {
+    probeBackendMock.mockResolvedValue('auth_failed');
+    const ctx = ctxWith(true);
+    const result = (await superfastCommand.action?.(ctx, 'status')) as {
+      messageType: string;
+      content: string;
+    };
+    expect(result.messageType).toBe('warning');
+    expect(result.content).toContain('authentication failed');
+  });
+
   it('status warns when the backend is unreachable', async () => {
-    probeBackendMock.mockResolvedValue(false);
+    probeBackendMock.mockResolvedValue('unreachable');
     const ctx = ctxWith(true);
     const result = (await superfastCommand.action?.(ctx, 'status')) as {
       messageType: string;
