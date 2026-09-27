@@ -319,9 +319,14 @@ describe('worktreeResidue', () => {
       );
       writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=xform\n');
       gitRepo('add', '.gitattributes', 'a.ts');
+      gitRepo('add', '--renormalize', 'a.ts');
       gitRepo('commit', '-qm', 'filtered head');
       const head = gitRepo('rev-parse', 'HEAD');
       git('reset', '--hard', '-q', head);
+      expect(git('show', `${head}:a.ts`)).toBe('EXPORT CONST X = 1;');
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const x = 1;\n',
+      );
       expect(git('status', '--porcelain')).toBe('');
       const stale = new Date(Date.now() + 60_000);
       utimesSync(join(tree, 'a.ts'), stale, stale);
@@ -2358,6 +2363,29 @@ describe('filterCommandsIn — the include walk', () => {
       globalConfig,
       `[include]\n\tpath = ${JSON.stringify(included)}\n` +
         `\tpath = ${JSON.stringify(join(gitIsolation.home, 'missing.cfg'))}\n`,
+    );
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
+    );
+
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.lfs.clean'],
+      reachedExempt: ['filter.lfs.clean'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
+  });
+
+  it('continues through a trusted global boundary to mark transitive filters reached', () => {
+    const included = join(gitIsolation.home, 'filters.inc');
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
+    writeFileSync(
+      globalConfig,
+      `[include]\n\tpath = ${JSON.stringify(included)}\n`,
     );
     writeFileSync(
       join(dir, 'config'),

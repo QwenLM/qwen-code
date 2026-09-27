@@ -1499,9 +1499,21 @@ export function filterCommandsIn(
         'value' in discoveredCommon &&
         isSubpath(pathIdentity(commonDir), pathIdentity(discoveredCommon.value))
       ) {
-        // Submodule admin state belongs to this project, not an independent
-        // user repository, even when screening another linked worktree.
-        verdict = 'unknown';
+        // A submodule's admin directory lives under the superproject's
+        // common dir (`.git/modules/...`). Its tracked worktree content is
+        // therefore still content delivered by the repository being
+        // screened, even when that screen runs from a linked superproject
+        // worktree whose own top level does not contain the submodule.
+        const discoveredTop = gitOutput(
+          dirname(file),
+          ['rev-parse', '--path-format=absolute', '--show-toplevel'],
+          128,
+        );
+        const tracked =
+          'value' in discoveredTop
+            ? trackedAt(discoveredTop.value, file)
+            : 'unknown';
+        verdict = tracked === 'tracked' ? 'controlled' : 'unknown';
       } else if (
         ('absent' in discoveredCommon && !discoveredCommon.absent) ||
         ('absent' in configuredWorktreeRead && !configuredWorktreeRead.absent)
