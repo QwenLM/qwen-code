@@ -658,8 +658,47 @@ describe('GitHub helper tests', () => {
       .filter((step) => String(step.run ?? '').includes('env.HELPER_TESTS'));
     expect(helperSteps).not.toHaveLength(0);
     for (const step of helperSteps) {
-      expect(String(step.run), step.name).toContain('--test-concurrency=1');
+      // Split at each `node --test` occurrence, not per line: a second
+      // invocation on the SAME line still gets its own segment.
+      const invocations = String(step.run)
+        .split(/(?=node --test)/)
+        .filter((segment) => segment.startsWith('node --test'));
+      expect(invocations, step.name).not.toHaveLength(0);
+      for (const invocation of invocations) {
+        expect(invocation, step.name).toContain('--test-concurrency=1');
+      }
     }
+  });
+
+  it('retries the full-profile battery once against pool contention', () => {
+    // #12772: the battery spawns real subprocess loops on the shared ECS
+    // pool, and a push to main has no flaky-rerun patrol — one host hiccup
+    // failed the lane on a CSS-only commit. The unit lane got VITEST_RETRY
+    // for the same fleet condition (#10868); this lane retries inline. The
+    // github_ci_only fast lane stays single-attempt: it runs only on PRs, so
+    // a red check is visible to its author and manually re-runnable. (The
+    // flaky-rerun patrol is PR-scoped but best-effort — do not rely on it.)
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    const invocations =
+      String(step.run).match(/node --test --test-concurrency=1/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(String(step.run)).toContain('||');
+    // The retry re-runs the SAME battery, not a cheaper subset.
+    expect(String(step.run)).not.toContain('HELPER_TESTS_DEP_FREE');
+    // The retry's exit status decides the step: nothing swallows it.
+    expect(String(step.run)).not.toMatch(/\|\|\s*(true|:)/);
+    expect(String(step.run).trimEnd().endsWith('}')).toBe(true);
+    expect(step['continue-on-error']).toBeUndefined();
+    // The warning fires only when the retry absorbed the flake, and names
+    // the attempt-1 failures (the datum #12772 asked for).
+    expect(String(step.run)).toMatch(/&&\s+echo "::warning::/);
+    expect(String(step.run)).toMatch(
+      /tee "\$\{RUNNER_TEMP\}\/helper-attempt1\.log"/,
+    );
+    expect(String(step.run)).toMatch(/::warning::.*\$\(/);
   });
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {

@@ -146,3 +146,4 @@ owner 自己的 transcript 本就应当存在；发现它不能导致 runtime �
 - 选择器在冷恢复前读取整个 transcript，与恢复本身相同，成本随 transcript 增长。
 - 选择器尚未接线。B2d 必须用 runtime 的会话 base 目录构造它，并决定新会话的选择。
   #12737 中关于选择器输入、下发失败、隔离恢复和 Hosted 边界的问题不由本切片决定。
+  B2d 的设计见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。

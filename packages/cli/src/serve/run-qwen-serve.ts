@@ -5044,6 +5044,7 @@ async function runQwenServeImpl(
     if (!app || stoppedRuntimeAppProducers.has(app)) return;
     stoppedRuntimeAppProducers.add(app);
     const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
@@ -5061,6 +5062,7 @@ async function runQwenServeImpl(
         );
       }
     };
+    stopSafely('MCP App sandbox', locals.stopMcpAppSandbox);
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
@@ -6296,7 +6298,8 @@ async function runQwenServeImpl(
       workspaceSkillsStatusProvider,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
@@ -6801,7 +6804,9 @@ async function runQwenServeImpl(
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
-        isChannelLive: () => secondaryBridge.isChannelLive(),
+        isChannelLive: () =>
+          secondaryBridge.isWorkspaceControlLive?.() ??
+          secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
@@ -7035,9 +7040,10 @@ async function runQwenServeImpl(
           primaryEntry.state === 'active'
             ? primaryEntry.current?.runtime.bridge
             : undefined;
-        // The ring's `childRssBytes` gauge stays the PRIMARY child's reading —
-        // its published meaning is "ACP child process RSS", singular. The
-        // aggregate across every workspace is reported separately, under
+        // The ring's `childRssBytes` gauge stays the PRIMARY workspace's
+        // reading — its published meaning is "ACP child process RSS", which on
+        // a paired Bridge is the sum of its engines' children. The aggregate
+        // across every workspace is reported separately, under
         // `runtime.memory.children` in daemon status.
         const child = primaryRuntimeBridge?.getChildResourceSnapshot?.();
         // Only poll the child's resources when someone is watching: the
@@ -7049,7 +7055,7 @@ async function runQwenServeImpl(
           // this warms are what `runtime.memory.children` sums, and a child
           // nobody refreshed reads as unmeasured there. No `isChannelLive`
           // filter is needed — `refreshChildResource` already no-ops without a
-          // live channel and is single-flight per bridge.
+          // live channel and is single-flight per child.
           for (const managed of workspaceRegistry.listManaged()) {
             // The shipped bridge's `refreshChildResource` never rejects: it
             // catches the RPC failure itself, keeps the last good cache, and
@@ -7514,7 +7520,8 @@ async function runQwenServeImpl(
           ...(buildOptions?.primary === true
             ? {}
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
-          isChannelLive: () => wsBridge.isChannelLive(),
+          isChannelLive: () =>
+            wsBridge.isWorkspaceControlLive?.() ?? wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
