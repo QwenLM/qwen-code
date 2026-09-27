@@ -2434,17 +2434,27 @@ terminal the region outgrows the window and the rows below it stay blank, three 
 them on a forty-row terminal — and at a region of fourteen rows or below the
 overlay still cannot fit, which Follow-ups records.
 
-The same pass also reaches the four sibling frames beside it — the memory,
-statusline, stats and skills frames and the arena's — which each opened one row
-below the region's top, so their bottom borders were measured painting past it.
-They now open flush with it, and they stay unshrinkable: the renderer defaults an
-unsized box to shrinkable, and a shrunk frame squeezes its text rows to zero
-height and paints them over each other — measured on /stats and /statusline at
-80×24 and on /skills at 100×20 — so each root box refuses the shrink explicitly
-and lets the region's clip cut whatever does not fit, the way ink's stats dialog
-clips. A structural test pins each frame's flush opening and its refusal to
-shrink. The sized bodies inside the frames are not covered by this change;
-Follow-ups records them.
+The same pass also reaches the frames beside it — the shared chrome the auth,
+trust, branch, rewind, diff and subagents dialogs mount through, and the four
+sibling frames (memory, statusline, stats, skills, arena) — which each opened
+one row below the region's top, so their bottom borders were measured painting
+past it. They now open flush with it, and they all stay unshrinkable: the
+renderer defaults an unsized box to shrinkable, and a shrunk frame lets the
+region take the deficit out of the body's only unsized child, squeezing text
+rows to zero height and painting them over each other — measured on /stats and
+/statusline at 80×24 and on /skills at 100×20 — while the unshrinkable frame
+keeps its rows contiguous for the region's clip to cut at the tail, the way
+ink's stats dialog clips. One measured correction stands against the first
+phrasing of this rule: the region's clip cuts a child's text rows but not the
+frame's own border strokes, so a frame whose natural height exceeds the region
+still paints its bottom border past it, over whatever mounts below. That is why
+the two sized bodies that can produce such a height — the diff dialog's
+fourteen-row scroll region and the subagents dialog's twelve-row one — now
+window themselves from the region budget, leaving the unshrinkable frame's
+natural height no taller than the region at every budget. A structural test
+pins each frame's flush opening and its refusal to shrink, and the misc
+dialog's tests pin the two windowed heights at the boundary. The skills
+dialog's twelve-row body is not windowed the same way; Follow-ups records it.
 
 ## Coverage boundary
 
@@ -3184,21 +3194,15 @@ What was verified, and how far the verification reaches:
   24-hour bracketed time inline, with an identical locale call. Pointing ink at the
   shared one would edit the very file the frame evidence was captured against, so
   the second copy stays and the two are only kept equal by hand.
-- Three sized bodies inside the dialog frames still hold their own height: the
-  diff dialog's fourteen-row scroll region, the subagents dialog's twelve-row
-  one, and the skills dialog's twelve-row one. The first two sit in the shared
-  dialog chrome, which shrinks with the region, and a frame that shrinks around a
-  body that does not overpaints its own bottom border — measured at a region of
-  seventeen rows and below for the fourteen-row body and of fifteen rows and
-  below for the twelve-row one, where the last body row lands on the border,
-  while the two region heights above each boundary are absorbed silently into the
-  frame's inner spacing. Windowing those two heights from the region budget is
-  the fix — it closes the overpaint and the absorption band together — and the
-  height has to be folded into the body's key the way the session picker folds
-  its own, because the renderer clears the shrink on an explicitly sized node and
-  never re-applies a prop whose value did not change. The skills body needs no
-  such windowing: its frame keeps its natural height and the region clips it, the
-  way ink clips /stats.
+- One sized body inside a dialog frame still holds its own height: the skills
+  dialog's twelve-row one. The diff dialog's fourteen-row scroll region and the
+  subagents dialog's twelve-row one were the same shape — a frame whose natural
+  height outgrew the region overpainted its own bottom border, measured at a
+  region of seventeen rows and below for the fourteen-row body and of fifteen
+  rows and below for the twelve-row one — and both now window their height from
+  the region budget, so the unshrinkable frame is never taller than the region.
+  The skills body needs no such windowing: its frame keeps its natural height
+  and the region clips it, the way ink clips /stats.
 - Decision 68's shrink emulation still sits inline in the completion row's map
   body, so the twenty-three measured combinations cannot live in the repo as a
   test, and two of the four numbers the arithmetic reads — the non-shared column

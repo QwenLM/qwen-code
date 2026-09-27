@@ -46,6 +46,7 @@ import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { resumeEventsFromSession } from './resume-session.js';
 import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
@@ -71,6 +72,13 @@ export interface OpenTuiSessionPickerProps {
   onConfirmMulti?: (sessionIds: string[]) => void;
   /** Rows the user may not check or Enter — the live session, for /delete. */
   disabledIds?: readonly string[];
+  /**
+   * The popup region's row budget. The visible window derives from it rather
+   * than the raw terminal height, so a row the region's clip takes is a row
+   * the window never offers — Enter and the checkboxes only address painted
+   * rows.
+   */
+  availableTerminalHeight?: number;
 }
 
 /** Header/search/list/footers/separators/borders, in ink's own accounting. */
@@ -125,6 +133,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     enableMultiSelect = false,
     onConfirmMulti,
     disabledIds,
+    availableTerminalHeight,
   } = props;
 
   const { width, height } = useTerminalDimensions();
@@ -133,9 +142,15 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   // terminal width would lose the right border and every row's tail on a
   // terminal wider than 104 columns.
   const boxWidth = Math.max(0, dialogAreaWidth(width));
+  // The window sizes from the popup region the mount hands over, not the raw
+  // terminal height: the region is five rows shorter, so a raw-height window
+  // offers rows the clip takes — the last windowed session's title row,
+  // painted with the down-scroll marker on it, was Enter-committable without
+  // ever being shown.
+  const listRegionRows = clampDialogHeight(availableTerminalHeight) ?? height;
   const maxVisibleItems = Math.max(
     1,
-    Math.floor((height - RESERVED_LINES) / ITEM_HEIGHT),
+    Math.floor((listRegionRows - RESERVED_LINES) / ITEM_HEIGHT),
   );
 
   const hasInitialSessions = initialSessions !== undefined;

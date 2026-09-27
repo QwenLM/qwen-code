@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -62,9 +62,12 @@ import { useBatchSafeCursor } from './batch-cursor.js';
 import {
   DialogFrame,
   DialogSelect,
+  dialogContentWidth,
   FooterHint,
   useDialogSelect,
 } from './dialogs-shared.js';
+import { wrappedRows } from './dialogs-modes.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 import { followScrollOffset } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
@@ -84,13 +87,19 @@ export const SETTINGS_LIST_MAX_ITEMS = 8;
 // its spacer (4), the two scroll arrows (2), the description row and its
 // margin (2), and the footer hint's (2) — ink's SettingsDialog charges the
 // same items (its footer is one row; this port's FooterHint carries a margin
-// row) before windowing its list to what is left.
+// row) before windowing its list to what is left. The description and the
+// footer hint are clipped to the frame's content width at paint time, the
+// way ink's wrap="truncate" keeps them to the charged row; the restart
+// prompt stays wrapped, so its rows are measured and charged on top.
 const SETTINGS_LIST_CHROME_ROWS = 16;
 // The scope step beside it has no search box, arrows, description or restart
-// prompt: its chrome is the frame (4), the tab bar and its spacer (2) and the
-// `> Apply To` title and its spacer (2). The footer hint below the list is
-// what a squeeze sheds first, so it is not charged.
-const SETTINGS_SCOPE_CHROME_ROWS = 8;
+// prompt: its chrome is the frame (4), the tab bar and its spacer (2), the
+// `> Apply To` title and its spacer (2), and the footer hint (2), which this
+// step paints unconditionally. Leaving the hint out granted the list two
+// rows the region could not pay — measured at region ten, where one down
+// moved the highlight onto a row nothing painted and onHighlight retargeted
+// every later write.
+const SETTINGS_SCOPE_CHROME_ROWS = 10;
 
 /** Parity of configTabLabel in SettingsDialog.tsx. */
 export function settingsTabLabel(tab: SettingsTab): string {
@@ -310,6 +319,9 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const [statusReloadNonce, setStatusReloadNonce] = useState(0);
 
   const showRestartPrompt = restartRequiredSettings.size > 0;
+  const restartText = t(
+    'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+  );
 
   // Rebase the pending snapshot on scope switches, mirroring the ink effect.
   useEffect(() => {
@@ -361,6 +373,15 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   // rows there overpaints its neighbours into illegibility while Enter keeps
   // committing the row under the cursor.
   const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The prompt renders as wrapping text, so the flat one-row charge ink pays
+  // is short a row at any content width under 83 columns — and the list is
+  // granted a row the region cannot pay for. Charge the rows the text
+  // actually takes, measured at the frame's content width.
+  const restartRows = showRestartPrompt
+    ? wrappedRows(restartText, contentWidth)
+    : 0;
   const maxItemsToShow =
     regionHeight === undefined
       ? SETTINGS_LIST_MAX_ITEMS
@@ -368,9 +389,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
           0,
           Math.min(
             SETTINGS_LIST_MAX_ITEMS,
-            regionHeight -
-              SETTINGS_LIST_CHROME_ROWS -
-              (showRestartPrompt ? 1 : 0),
+            regionHeight - SETTINGS_LIST_CHROME_ROWS - restartRows,
           ),
         );
   // Re-follow the highlight when the window's own size changes — a resize,
@@ -970,29 +989,26 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
 
       {activeDescription && mode === 'settings' && activeTab === 'settings' ? (
         <box marginTop={1}>
-          <text fg={C.dim}>{activeDescription}</text>
+          <text fg={C.dim}>
+            {truncateToWidth(activeDescription, contentWidth)}
+          </text>
         </box>
       ) : null}
 
       {activeTab === 'settings' && (
         <FooterHint
-          text={
+          text={truncateToWidth(
             mode === 'settings'
               ? t('(Use Enter to select, Tab to configure scope)')
-              : t('(Use Enter to apply scope, Tab to go back)')
-          }
+              : t('(Use Enter to apply scope, Tab to go back)'),
+            contentWidth,
+          )}
         />
       )}
       {showRestartPrompt &&
         activeTab === 'settings' &&
         mode === 'settings' &&
-        focusZone === 'list' && (
-          <text fg={C.yellow}>
-            {t(
-              'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
-            )}
-          </text>
-        )}
+        focusZone === 'list' && <text fg={C.yellow}>{restartText}</text>}
     </DialogFrame>
   );
 }

@@ -69,9 +69,13 @@ const Shell = ({
     paddingRight={2}
     paddingTop={1}
     paddingBottom={1}
-    // A shrinkable frame squeezes its text rows to zero on a short region
-    // and paints them over each other; staying natural height lets the
-    // region's overflow="hidden" clip instead, as ink does for /stats.
+    // A shrinkable frame lets a short region squeeze its text rows to zero
+    // and paint them over each other; staying natural height keeps the rows
+    // contiguous for the region's clip to cut at the tail, as ink does for
+    // /stats. The clip cuts child text but not the frame's own border
+    // strokes, so a frame taller than the region still paints its border
+    // past it, and a body with an explicit height windows itself from the
+    // region budget instead of relying on the clip (Decision 71).
     flexShrink={0}
   >
     <box flexDirection="row" justifyContent="space-between">

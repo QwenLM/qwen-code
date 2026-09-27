@@ -674,6 +674,28 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
     });
   });
 
+  it('windows the list from the region budget, not the raw terminal height', () => {
+    // The region is five rows shorter than the raw terminal: at a 40-row
+    // terminal the region is 35 and the window is floor((35 - 7) / 3) = 9
+    // rows, not the 11 the raw height would offer. The two extra rows were
+    // the clip's — the last one took the down-scroll marker with it, so the
+    // list looked complete while Enter could still commit the clipped row.
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect } = renderPicker(sessions, {
+      availableTerminalHeight: 35,
+    });
+    expect(screen.getAllByText(/^Session \d\d$/)).toHaveLength(9);
+    expect(lines('Session 01').row).toBe('› Session 01');
+    expect(lines('Session 09').row).toBe('↓ Session 09');
+
+    // The window follows the cursor, so the row Enter commits is always one
+    // the region painted.
+    for (let i = 0; i < 9; i++) press({ name: 'down' });
+    expect(lines('Session 10').row).toBe('› Session 10');
+    press({ name: 'return' });
+    expect(onSelect).toHaveBeenCalledWith('id-10');
+  });
+
   it('lets the region press the box down instead of pushing the composer out', () => {
     // ink asks for `height - 1` too and lets its fixed-height popup wrapper
     // compress the box, because ink's Box defaults to flexShrink 1. @opentui

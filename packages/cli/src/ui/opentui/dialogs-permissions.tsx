@@ -37,6 +37,7 @@ import {
   FooterHint,
   useDialogSelect,
 } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export type PermissionsTabId = 'allow' | 'ask' | 'deny' | 'workspace';
 
@@ -197,6 +198,12 @@ export interface OpenTuiPermissionsDialogProps {
   onAddDirectory: (resolvedDir: string) => void;
   onRemoveDirectory: (dir: string) => void;
   onExit: () => void;
+  /**
+   * The popup region's row budget. The rule and directory lists window from
+   * it rather than painting a constant fifteen rows, so a short region's
+   * clip never hides a row the digits and Enter can still commit.
+   */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
@@ -264,11 +271,26 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
       .map((dir) => ({ label: dir, value: dir, key: `dir-${dir}` })),
   ];
 
+  // Chrome the rule list view pays outside the list: the tab bar (1), the
+  // tab description and its margin (2), the bordered search box and its
+  // margin (4), the spacer (1) and the footer hint (2). The workspace tab's
+  // chrome is the tab bar, its description, a spacer and the footer hint
+  // (5), plus one row per initial directory listed above the list.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const maxRulesToShow =
+    regionHeight === undefined
+      ? 15
+      : Math.max(0, Math.min(15, regionHeight - 10));
+  const maxDirsToShow =
+    regionHeight === undefined
+      ? 15
+      : Math.max(0, Math.min(15, regionHeight - 5 - initialDirectories.length));
+
   const ruleList = useDialogSelect({
     items: ruleListItems,
     focused: view === 'rule-list' && activeTab.id !== 'workspace',
     numbers: true,
-    maxItemsToShow: 15,
+    maxItemsToShow: maxRulesToShow,
     onSelect: (value) => {
       if (value === '__add__') {
         setNewRuleInput('');
@@ -288,7 +310,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     items: dirListItems,
     focused: view === 'ws-dir-list' && activeTab.id === 'workspace',
     numbers: true,
-    maxItemsToShow: 15,
+    maxItemsToShow: maxDirsToShow,
     onSelect: (value) => {
       if (value === '__add_dir__') {
         setNewDirInput('');
@@ -579,7 +601,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           items={dirListItems}
           activeIndex={dirList.activeIndex}
           scrollOffset={dirList.scrollOffset}
-          maxItemsToShow={15}
+          maxItemsToShow={maxDirsToShow}
           showNumbers={true}
           focused={view === 'ws-dir-list'}
           onHover={dirList.setActiveIndex}
@@ -741,7 +763,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         items={ruleListItems}
         activeIndex={ruleList.activeIndex}
         scrollOffset={ruleList.scrollOffset}
-        maxItemsToShow={15}
+        maxItemsToShow={maxRulesToShow}
         showNumbers={true}
         focused={view === 'rule-list'}
         onHover={ruleList.setActiveIndex}

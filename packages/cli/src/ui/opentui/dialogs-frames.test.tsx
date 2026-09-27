@@ -9,11 +9,15 @@
 /**
  * Structural pins for the four sibling dialog frames (arena, memory +
  * statusline shell, stats, skills): they open flush with the popup region
- * (no marginTop) and keep their natural height (flexShrink 0), so a short
- * region's overflow="hidden" clips them the way ink clips /stats. A
- * shrinkable frame instead lets the renderer squeeze its text rows to zero
- * height and paint them over each other — measured on /stats and /statusline
- * at 80x24 and on /skills at 100x20.
+ * (no marginTop) and keep their natural height (flexShrink 0). A shrinkable
+ * frame lets the renderer squeeze its text rows to zero height and paint
+ * them over each other — measured on /stats and /statusline at 80x24 and on
+ * /skills at 100x20 — while an unshrinkable one keeps its rows contiguous
+ * for the region's clip to cut at the tail, the way ink clips /stats. The
+ * clip cuts child text but not the frame's own border strokes, so a frame
+ * taller than the region still paints its border past it, and a body with an
+ * explicit height (the /diff and /subagents scrollboxes) windows that height
+ * from the region budget instead of relying on the clip.
  */
 
 import { describe, expect, it, vi } from 'vitest';

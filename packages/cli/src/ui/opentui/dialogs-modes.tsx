@@ -162,14 +162,25 @@ function DialogTitle(props: {
       ? leftover
       : Math.floor(contentWidth / 2)
     : 0;
+  // The subtitle is an adjacent text with no gap of its own, so the run's
+  // trailing separator space is budgeted outside the clip and re-appended:
+  // the fallback branch's budget is always strict, and a clip that reaches
+  // the space glues the two runs into one unreadable word.
+  const separated = Boolean(props.subtitle) && subtitleColumns > 0;
+  const titleBudget = Math.max(
+    0,
+    contentWidth - subtitleColumns - (separated ? 1 : 0),
+  );
   return (
     <box flexDirection="row" marginBottom={props.marginBottom ?? 1}>
       <text fg={C.text} attributes={1}>
-        {clipToWidth(titleRun, contentWidth - subtitleColumns)}
+        {separated
+          ? `${clipToWidth(titleRun, titleBudget)} `
+          : clipToWidth(titleRun, titleBudget)}
       </text>
-      {props.subtitle && subtitleColumns > 0 ? (
+      {separated ? (
         <text fg={C.dim}>
-          {truncateToWidth(props.subtitle, subtitleColumns)}
+          {truncateToWidth(props.subtitle ?? '', subtitleColumns)}
         </text>
       ) : null}
     </box>

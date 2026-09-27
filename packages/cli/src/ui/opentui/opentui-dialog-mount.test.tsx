@@ -340,6 +340,32 @@ describe('OpenTuiDialogMount routing', () => {
     ).toBe(20);
   });
 
+  it('hands the region height to every dialog leg that windows a body from it', () => {
+    // The permissions rule and directory lists, the delete/resume session
+    // picker and the diff/subagents scrollboxes size themselves from the
+    // region; a leg left off this list renders unbudgeted inside the fixed
+    // region, where the clip takes rows the keys still commit.
+    const legs: Array<[string, OpenTuiDialogRequest]> = [
+      ['theme', { dialog: 'theme' }],
+      ['settings', { dialog: 'settings' }],
+      ['approval-mode', { dialog: 'approval-mode' }],
+      ['model', { dialog: 'model', mode: 'primary' }],
+      ['permissions', { dialog: 'permissions' }],
+      ['delete', { dialog: 'delete' }],
+      ['resume', { dialog: 'resume' }],
+      ['diff', { dialog: 'diff' }],
+      ['subagent_list', { dialog: 'subagent_list' }],
+    ];
+    for (const [dialog, request] of legs) {
+      const { unmount } = mount(request, { availableTerminalHeight: 23 });
+      expect(
+        mocks.state.dialogProps[dialog]?.['availableTerminalHeight'],
+        `mount did not forward the region budget to ${dialog}`,
+      ).toBe(23);
+      unmount();
+    }
+  });
+
   it.each([true, false])(
     'gates the hooks reload notice on hook system availability: %s',
     (available) => {

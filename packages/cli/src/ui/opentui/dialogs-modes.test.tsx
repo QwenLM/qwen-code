@@ -960,7 +960,14 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     press('return');
 
     expect(setValue).not.toHaveBeenCalled();
-    expect(screen.getByText(/^Cannot/)).not.toBeNull();
+    const refusal = screen.getByText(/^Cannot/);
+    // The subtitle abuts the title run with no gap of its own, and this
+    // branch's clip budget is always strict — the run's trailing separator
+    // space must be budgeted outside the clip, or the row paints as one
+    // unreadable '> ApprovCannot …'.
+    const titleEl = refusal.parentElement!.firstElementChild!;
+    expect(titleEl.textContent).toMatch(/ $/);
+    expect(titleEl.nextElementSibling).toBe(refusal);
   });
 
   it('clears the refusal when the highlight moves to a mode the gate allows', () => {
@@ -1777,6 +1784,51 @@ describe('OpenTuiSettingsDialog region budget', () => {
     );
   });
 
+  it('charges the scope step its footer hint, so region ten paints no scope row', () => {
+    // The scope step paints the footer hint unconditionally, so its chrome is
+    // ten rows, not eight: at region ten the window is zero rows — not the
+    // two an eight-row charge grants — and a down there cannot move the
+    // highlight onto an unpainted row whose onHighlight alone would retarget
+    // every later write to Workspace.
+    const setValue = vi.fn();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    const { rerender } = render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={10}
+      />,
+    );
+    press('tab'); // → scope step
+
+    expect(screen.queryByText('User Settings')).toBeNull();
+    expect(screen.queryByText('Workspace Settings')).toBeNull();
+    press('down'); // zero-row window: nothing painted, nothing adopted
+
+    rerender(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={20}
+      />,
+    );
+    press('tab'); // → back to the settings list
+    press('down'); // tools.codeModeOnly — a boolean
+    press('return');
+
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'tools.codeModeOnly',
+      true,
+    );
+  });
+
   it('lays the search box out as the one text row the chrome budget counts', () => {
     // The budget charges the bordered search box three rows; its two text
     // children lay out as a column by default, making it four — one row more
@@ -1829,6 +1881,43 @@ describe('OpenTuiSettingsDialog region budget', () => {
     ).not.toBeNull();
     expect(screen.getByText(items[0]!.label)).not.toBeNull();
     expect(screen.getByText(items[1]!.label)).not.toBeNull();
+    expect(screen.queryByText(items[2]!.label)).toBeNull();
+  });
+
+  it('charges the restart prompt the rows it wraps into, not a flat one', () => {
+    // At 88 columns the frame's content width is 80 and the 83-cell prompt
+    // wraps to two rows; a flat one-row charge grants the list a row the
+    // region cannot pay, and the renderer takes it out of the list while the
+    // keys keep committing the row under the cursor. The measured charge
+    // leaves the one row that fits, and the window follows the toggled row.
+    mocks.state.width = 88;
+    const items = buildSettingsListItems();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+    // 19 - 16 chrome rows: three list rows paint before the toggle.
+    expect(screen.getByText(items[2]!.label)).not.toBeNull();
+
+    press('down'); // tools.codeModeOnly — a boolean that requires restart
+    press('return');
+
+    expect(
+      screen.getByText(/To see changes, Qwen Code must be restarted/),
+    ).not.toBeNull();
+    // The prompt paints the rows it wraps into, so the window is one row:
+    // the toggled row the highlight sits on.
+    expect(screen.getByText(items[1]!.label)).not.toBeNull();
+    expect(screen.queryByText(items[0]!.label)).toBeNull();
     expect(screen.queryByText(items[2]!.label)).toBeNull();
   });
 
@@ -1933,6 +2022,12 @@ describe('OpenTuiSettingsDialog region budget', () => {
     const items = buildSettingsListItems();
     expect(items[1]!.key).toBe('tools.codeModeOnly');
     expect(items[1]!.description).toBeTruthy();
+    // The description line paints clipped to the frame's content width (ink's
+    // wrap="truncate-end" parity), so the tell matches on a prefix.
+    const descriptionPaints = (index: number) =>
+      screen.queryByText((content) =>
+        content.startsWith(items[index]!.description!.slice(0, 24)),
+      ) !== null;
     const settings = {
       isTrusted: true,
       merged: {},
@@ -1948,18 +2043,18 @@ describe('OpenTuiSettingsDialog region budget', () => {
     );
     press('down'); // tools.codeModeOnly
     press('return'); // the restart prompt takes the last row — window is zero
-    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
+    expect(descriptionPaints(1)).toBe(true);
 
     press('up');
     press('j'); // the down alias: each move key gets its own assertion,
     // because a j/k pair would move the highlight down and back
-    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
-    expect(screen.queryByText(items[0]!.description!)).toBeNull();
-    expect(screen.queryByText(items[2]!.description!)).toBeNull();
+    expect(descriptionPaints(1)).toBe(true);
+    expect(descriptionPaints(0)).toBe(false);
+    expect(descriptionPaints(2)).toBe(false);
 
     press('k');
-    expect(screen.getByText(items[1]!.description!)).not.toBeNull();
-    expect(screen.queryByText(items[0]!.description!)).toBeNull();
+    expect(descriptionPaints(1)).toBe(true);
+    expect(descriptionPaints(0)).toBe(false);
   });
 
   it('keeps type-to-search live when the region leaves the list no rows', () => {
