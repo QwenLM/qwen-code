@@ -66,16 +66,19 @@ While the episode lasts:
   A prompt queued before the episode began is refused when it reaches the head
   of its queue, and a mid-turn message the running turn never drained is
   removed from the queue view instead of starting a turn.
-- Background work already under way may settle too. A background notification
-  turn that reports it is admitted, and its session drains once that turn ends;
-  refusing it would leave the child retrying and holding the work until the
-  deadline. A message from another session is new input, and a notification
-  for work that such an admitted turn started is new work; both are refused.
-  Goal turns are started by the child itself and cannot be refused; they settle
-  or are cancelled at the deadline. On a session fenced by a change that
-  tightens permissions, including one whose restore or creation lands after
-  the change, every background turn is refused and a Goal turn is cancelled as
-  soon as it is reported, as
+- Background work may settle too. A background notification turn that reports
+  it is admitted, whether the work began before the quarantine or was started
+  by a turn admitted during it, and its session drains once that turn ends. A
+  refused report never retires the channel sooner: the child keeps it queued,
+  retries, and keeps reporting it as held work, so its session stays unsettled
+  until the deadline. The deadline, not a refusal, is what bounds admitted
+  turns. A message from another session is new input and is refused, and no
+  background turn is admitted once the channel's termination has begun. Goal
+  turns are started by the child itself and cannot be refused; they settle or
+  are cancelled at the deadline. On a session fenced by a change that tightens
+  permissions, including one whose restore or creation lands after the change,
+  every background turn is refused and a Goal turn is cancelled as soon as it
+  is reported, as
   [workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md)
   describes.
 - The Bridge closes the channel's settled sessions at the start and again
@@ -176,10 +179,12 @@ by the existing 503 `acp_channel_unavailable` body.
 Each behavior is covered on a paired Bridge, not only on Legacy.
 
 1. A quarantined channel refuses new prompts, mid-turn messages, side requests
-   and messages from other sessions while a running turn settles, admits the
-   notification turn of a background job that finishes during the quarantine
-   but not one for work that turn started or one on a session fenced by a
-   tightening change, and the other engine keeps accepting work.
+   and messages from other sessions while a running turn settles, and still
+   refuses them after admitting a report. It admits the notification turns of
+   background jobs that finish during the quarantine, including work an
+   admitted turn started and reports that name no source turn, but none on a
+   session fenced by a tightening change and none once its termination has
+   begun. The other engine keeps accepting work.
 2. Settled sessions on a quarantined channel are closed, a session with a side
    request or notification in flight is kept until it answers, and the channel
    retires before the deadline once it drains.

@@ -3281,7 +3281,7 @@ describe('paired quarantine recovery', () => {
     await vi.waitFor(() => expect(managed.killed).toBe(true));
   });
 
-  it('lets a background job that finishes during a quarantine settle', async () => {
+  it('lets background jobs that finish during a quarantine settle', async () => {
     const managed = engineChannel('managed', {
       initializeImpl: () => activeWorkInitialize(),
       newSessionImpl: (_request, agent) => ({
@@ -3295,6 +3295,21 @@ describe('paired quarantine recovery', () => {
     const p = paired({}, engineChannel('legacy'), managed);
     const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const sessionId = session.sessionId;
+    const report = (turnId: string, fields: Record<string, unknown>) =>
+      managed.agentConnection.extMethod('_qwencode/start_turn', {
+        sessionId,
+        source: 'background_notification',
+        turnId,
+        startedAt: Date.now(),
+        ...fields,
+      });
+    const endReport = (turnId: string) =>
+      managed.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId,
+        reason: 'end_turn',
+        source: 'background_notification',
+        turnId,
+      });
     await p.bridge.sendPrompt(
       sessionId,
       prompt(sessionId, 'start a job'),
@@ -3317,17 +3332,13 @@ describe('paired quarantine recovery', () => {
 
     // The job finishes and its report is admitted, so the work can settle.
     await expect(
-      managed.agentConnection.extMethod('_qwencode/start_turn', {
-        sessionId,
-        source: 'background_notification',
-        turnId: 'notification-1',
+      report('notification-1', {
         taskId: 'shell-1',
         kind: 'shell',
         sourceTurnId: 'user-1',
-        startedAt: Date.now(),
       }),
     ).resolves.toEqual({ accepted: true });
-    // Work started by that report is new work: its own report is refused.
+    // That turn started more work.
     await reportActiveWork(managed, 2, [
       {
         sessionId,
@@ -3335,25 +3346,32 @@ describe('paired quarantine recovery', () => {
         hasRunningBackgroundTasks: true,
       },
     ]);
-    await managed.agentConnection.extNotification('_qwencode/end_turn', {
-      sessionId,
-      reason: 'end_turn',
-      source: 'background_notification',
-      turnId: 'notification-1',
-    });
+    await endReport('notification-1');
+    // An admitted report does not reopen the channel.
     await expect(
-      managed.agentConnection.extMethod('_qwencode/start_turn', {
-        sessionId,
-        source: 'background_notification',
-        turnId: 'notification-2',
-        taskId: 'agent-1',
-        kind: 'agent',
-        sourceTurnId: 'notification-1',
-        startedAt: Date.now(),
-      }),
-    ).resolves.toEqual({ accepted: false });
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+    expect(promptRefusal(p.bridge, sessionId, 'more')).toMatchObject({
+      reason: 'new_session_cleanup_failed',
+    });
+
+    // Refusing a report would only keep it queued and held in the child, so
+    // reports of work an admitted turn started, or that name no turn, are
+    // admitted too; the drain deadline bounds them.
+    for (const [turnId, fields] of [
+      [
+        'notification-2',
+        { taskId: 'agent-1', kind: 'agent', sourceTurnId: 'notification-1' },
+      ],
+      ['notification-3', { taskId: 'monitor-1', kind: 'monitor' }],
+      ['notification-4', { taskId: 'agent-2', kind: 'agent' }],
+    ] as const) {
+      await expect(report(turnId, fields)).resolves.toEqual({
+        accepted: true,
+      });
+      await endReport(turnId);
+    }
     await settleRealTime();
-    expect(p.bridge.getSessionSummary(sessionId)).toBeDefined();
     expect(managed.killed).toBe(false);
 
     // Once the child holds nothing, the session closes and the channel
@@ -3362,6 +3380,64 @@ describe('paired quarantine recovery', () => {
       { sessionId, holds: [], hasRunningBackgroundTasks: false },
     ]);
     await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('admits no background turn once a quarantined channel starts terminating', async () => {
+    vi.useFakeTimers();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      // The child refuses to close the settled session, so it stays.
+      extMethodImpl: (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          throw new RequestError(-32600, 'close refused');
+        }
+        return {};
+      },
+    });
+    // The kill never returns, so the channel stays alive while it terminates.
+    const kill = vi.fn(() => new Promise<void>(() => {}));
+    const p = paired(
+      { initializeTimeoutMs: 100, quarantineDrainTimeoutMs: 1_000 },
+      engineChannel('legacy'),
+      managed,
+    );
+    p.managedFactory.mockResolvedValueOnce({
+      ...managed.channel,
+      kill,
+      killSync: vi.fn(),
+    });
+    try {
+      const { sessionId } = await p.bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+      await flushWithoutTime();
+      expect(p.bridge.getSessionSummary(sessionId)).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(kill).toHaveBeenCalledTimes(1);
+      await expect(
+        managed.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId,
+          source: 'background_notification',
+          turnId: 'notification-1',
+          taskId: 'shell-1',
+          kind: 'shell',
+          startedAt: Date.now(),
+        }),
+      ).resolves.toEqual({ accepted: false });
+      expect(p.bridge.getSessionSummary(sessionId)).toBeDefined();
+    } finally {
+      managed.crash();
+    }
   });
 
   it('starts the exit check when a quarantined channel loses its transport', async () => {

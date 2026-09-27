@@ -693,7 +693,8 @@ interface ChannelInfo {
 /**
  * A paired channel's quarantine, from the moment it first stops taking fresh
  * sessions until its process tree is confirmed gone. While it lasts the
- * channel admits no new prompt, background turn or side request, and its
+ * channel admits no new prompt, message from another session or side request,
+ * and a background notification turn only until its termination starts; its
  * engine admits no fresh session — even after termination starts, because a
  * child that has not exited may still hold work nobody can cancel.
  */
@@ -706,8 +707,6 @@ interface ChannelQuarantine {
   exitTimer?: NodeJS.Timeout;
   /** Not confirmed gone one budget after termination; operators must act. */
   exitUnverified: boolean;
-  /** Background notification turns admitted since the quarantine began. */
-  readonly admittedTurnIds: Set<string>;
 }
 
 interface SessionEntry {
@@ -3667,7 +3666,6 @@ export function createSessionControlPlane(
       startedAt: Date.now(),
       reason,
       exitUnverified: false,
-      admittedTurnIds: new Set(),
     };
     episode.drainTimer = setTimeout(
       () => onChannelQuarantineDeadline(ci, episode),
@@ -3793,23 +3791,21 @@ export function createSessionControlPlane(
   }
 
   /**
-   * Whether a quarantined channel may run a background notification turn. It
-   * reports work that was already under way, and refusing it would leave that
-   * work unsettled until the deadline: the child keeps retrying and keeps
-   * reporting the hold. A message from another session is new input, and work
-   * started by a turn admitted during the quarantine is new work; both are
-   * refused, so admitted turns cannot keep the channel busy on their own. A
-   * session fenced by a tightening change is refused before this is asked.
+   * Whether a quarantined channel may run a background notification turn. A
+   * report of background work is admitted whether that work began before the
+   * quarantine or was started by a turn admitted during it: the work already
+   * exists, and refusing its report never retires the channel sooner, because
+   * the child keeps the report queued and keeps reporting it as held work. The
+   * drain deadline, not a refusal, bounds how long admitted turns keep the
+   * channel busy. A message from another session is new input and is refused,
+   * and so is every turn once the channel's termination has begun. A session
+   * fenced by a tightening change is refused before this is asked.
    */
   function quarantineAdmitsBackgroundTurn(
-    episode: ChannelQuarantine,
+    ci: ChannelInfo,
     turn: BackgroundNotificationTurn,
   ): boolean {
-    if (turn.kind === 'peer') return false;
-    return (
-      turn.sourceTurnId === undefined ||
-      !episode.admittedTurnIds.has(turn.sourceTurnId)
-    );
+    return turn.kind !== 'peer' && !ci.harness.isDying;
   }
 
   /**
@@ -4846,10 +4842,9 @@ export function createSessionControlPlane(
           // model turn at all until it is acknowledged (#12737 Q2).
           entry.workspaceChangeFence !== undefined ||
           (infoRef.current?.quarantine !== undefined &&
-            !quarantineAdmitsBackgroundTurn(infoRef.current.quarantine, turn))
+            !quarantineAdmitsBackgroundTurn(infoRef.current, turn))
         )
           return false;
-        infoRef.current?.quarantine?.admittedTurnIds.add(turn.turnId);
         entry.backgroundTurn = turn;
         delete entry.cancelBroadcastWithoutPrompt;
         // turnError/turnErrorEvent stay: only a new user prompt
