@@ -283,6 +283,15 @@ describe('createServeApp default bridge wiring', () => {
       { experimentalPairedEngines: true },
       { managedChildProcesses },
     );
+    // Options that are off by default, so a paired Bridge that reset them
+    // would differ.
+    const enabled = { token: 'secret', enableSessionShell: true };
+    const plainEnabled = build(enabled);
+    const pairedEnabled = build({
+      ...enabled,
+      experimentalPairedEngines: true,
+    });
+    expect(plainEnabled.sessionShellCommandEnabled).toBe(true);
     const withArgs = spawnFactories.filter((created) =>
       created.extraArgs?.includes('--experimental-lsp'),
     );
@@ -321,11 +330,15 @@ describe('createServeApp default bridge wiring', () => {
     expect(comparableBridgeOptions(pairedWithChildren)).toEqual(
       comparableBridgeOptions(plainWithChildren),
     );
+    expect(comparableBridgeOptions(pairedEnabled)).toEqual(
+      comparableBridgeOptions(plainEnabled),
+    );
     for (const options of [
       paired,
       pairedWithArgs,
       pairedWithEngine,
       pairedWithChildren,
+      pairedEnabled,
     ]) {
       expect(options.channelFactory).toBeUndefined();
     }

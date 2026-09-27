@@ -5994,6 +5994,8 @@ describe('runQwenServe paired execution engines', () => {
         mode: 'http-bridge',
         workspace: [workspaces.primary, workspaces.secondary],
         token: 'paired-token',
+        // Off by default, so a paired Bridge that reset it would differ.
+        enableSessionShell: true,
         serveWebShell: false,
         ...(paired ? { experimentalPairedEngines: true } : {}),
       },
@@ -6102,6 +6104,7 @@ describe('runQwenServe paired execution engines', () => {
     }
     for (const [index, option] of plain.options.entries()) {
       expect(option.executionEngines).toBeUndefined();
+      expect(option.sessionShellCommandEnabled).toBe(true);
       expect(plain.factoryStorage.get(option.channelFactory)).toBe(
         option.artifactSnapshotRuntimeBaseDir,
       );
