@@ -12,6 +12,7 @@ import java.util.Map;
 
 final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
+    private static final int MAXIMUM_DECIMAL_SCALE = 2048;
 
     private BrokerValues() {
     }
@@ -22,6 +23,20 @@ final class BrokerValues {
                 || value.indexOf('\0') >= 0) {
             throw new IllegalArgumentException(name
                     + " must be a bounded non-empty string");
+        }
+        return value;
+    }
+
+    /**
+     * Text without an unpaired surrogate: the JSON writer turns one into
+     * '?', so two identifiers could reach the Runtime as one.
+     */
+    static String requireWellFormed(String value, String name) {
+        if (value.codePoints().anyMatch(point ->
+                point >= Character.MIN_SURROGATE
+                        && point <= Character.MAX_SURROGATE)) {
+            throw new IllegalArgumentException(name
+                    + " must be well-formed text");
         }
         return value;
     }
@@ -71,6 +86,12 @@ final class BrokerValues {
         if (value instanceof Number number && !isJsonFinite(number)) {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
+        }
+        if (value instanceof BigDecimal decimal
+                && decimal.scale() > MAXIMUM_DECIMAL_SCALE) {
+            throw new IllegalArgumentException(
+                    "JSON number scale must be at most "
+                            + MAXIMUM_DECIMAL_SCALE);
         }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.

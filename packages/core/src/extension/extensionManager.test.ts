@@ -4086,6 +4086,30 @@ describe('extension tests', () => {
         'Marketplace source cannot be empty.',
       );
 
+      // Imported dynamically (not at file top) so this suite's './github.js'
+      // mock keeps its registration order relative to the real marketplace
+      // module graph. Loopback port 1 fails instantly (ECONNREFUSED) — never
+      // touches the network, unlike an example.com fixture which performs a
+      // real DNS lookup and HTTP GET from this suite.
+      const { InsecureArchiveUrlError } = await import('./marketplace.js');
+      await expect(
+        manager.addSource('http://127.0.0.1:1/plugin.zip'),
+      ).rejects.toBeInstanceOf(InsecureArchiveUrlError);
+
+      // The reason the user sees — the offending URL plus the git@/SSH and
+      // local-path remedies — must survive the marketplace.ts → addSource
+      // boundary, not just the error type. A later edit that re-wraps the
+      // probe failure with a stripped-down message goes red here.
+      await expect(
+        manager.addSource('http://127.0.0.1:1/plugin.zip'),
+      ).rejects.toThrow(/Archive URLs must use https:\/\/ \(got /);
+
+      // Non-archive probe failures must keep the marketplace-specific
+      // guidance rather than surfacing the raw install-source error.
+      await expect(
+        manager.addSource('invalid-format-no-slash'),
+      ).rejects.toThrow(/No marketplace found at/);
+
       expect(events).toEqual([]);
     });
 

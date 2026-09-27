@@ -244,6 +244,17 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
   /**
+   * A paired Bridge sends a session-affecting workspace change, already
+   * persisted by the workspace-control engine or the daemon, to every other
+   * live engine. Params: `{ v: 1, revision, kind, tightening, cwd }` plus
+   * `enabled` for `sessionWorkflow` and `reason` for `skills`. The engine
+   * re-reads that setting, applies it to every live session before the
+   * session's next prompt, model request or tool dispatch, cancels a turn it
+   * cannot revalidate, and only then answers `{ v: 1, revision,
+   * acknowledged: true }`. Any other answer is not an acknowledgement.
+   */
+  workspaceChange: 'qwen/control/workspace/change',
+  /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
    * here — which the PARENT serve process calls DOWN into the `qwen --acp`
    * child — this one is called by the CHILD UP into the parent: a
@@ -653,6 +664,12 @@ export interface ServeContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
   startupContext?: number;
+  /**
+   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older servers report 0 there.
+   */
   messages: number;
   /** Provider total not accounted for by any category. Absent from older servers. */
   unattributed?: number;

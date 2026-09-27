@@ -115,9 +115,13 @@ type CaptureLocalResult = PlanReport & {
   /** Present only when `--cache` scoped this capture incrementally. */
   incremental?: IncrementalBlock;
   /**
-   * Where this round's content anchor landed — Step 8 promotes it on a clean
-   * run. ABSENT when the capture withheld the candidate (a mid-capture tree
-   * change), because Step 8 branches on this field's presence.
+   * Where this round's cache candidate landed — Step 8 promotes it on a
+   * clean run. A round that could not anchor still publishes one, carrying
+   * the findings ledger alone (#12657). ABSENT when the write failed, or on
+   * a plain local ledger-only round with no chunks — the 0-chunk WARNING
+   * shapes end without a verdict, so there is no ledger to persist (a file
+   * review keeps it: it reviews the whole file whatever the diff) — because
+   * Step 8 branches on this field's presence.
    */
   cacheCandidatePath?: string;
   /**
@@ -128,8 +132,8 @@ type CaptureLocalResult = PlanReport & {
    * shape — and the command refuses a candidate whose stateId is not this
    * one at the read it promotes from (a check the orchestrator made earlier
    * would not bind that read). The refusal is treated exactly like a
-   * withheld candidate (R17-4, R24-2). Absent when the candidate was
-   * withheld.
+   * withheld candidate (R17-4, R24-2). Absent exactly when
+   * `cacheCandidatePath` is.
    */
   cacheCandidateStateId?: string;
   /**
@@ -323,22 +327,23 @@ function untrackedStopRefusal(): string {
 }
 
 /**
- * Why the cache candidate is withheld when tracked paths carry a visibility
- * bit — or when the bits themselves could not be enumerated.
+ * Why the cache candidate carries no anchor when tracked paths carry a
+ * visibility bit — or when the bits themselves could not be enumerated.
  */
 function invisibleCandidateRefusal(invisible: string[] | null): string {
   return invisible === null
     ? 'The tracked-file visibility bits could not be enumerated ' +
-        '(`git ls-files -v` failed) — the cache candidate is withheld: an ' +
-        'anchor recorded over a tree the capture cannot measure would let ' +
+        '(`git ls-files -v` failed) — the cache candidate carries the ' +
+        'findings ledger only, no anchor: one recorded over a tree the ' +
+        'capture cannot measure would let ' +
         'a later round certify bytes no round ever read. Re-run the review.'
     : `${invisible.length} tracked path(s) carry an --assume-unchanged or ` +
         `--skip-worktree bit (e.g. ${display(
           invisible[0].slice(0, 96),
         )}) — \`hash-object\` reads the worktree bytes through the bit ` +
-        `while \`git diff\` cannot see them, so the cache candidate is ` +
-        `withheld: promoted, it would anchor a later round on bytes this ` +
-        `round never reviewed. Clear the bit(s) ` +
+        `while \`git diff\` cannot see them, so the cache candidate ` +
+        `carries the findings ledger only, no anchor: one would anchor a ` +
+        `later round on bytes this round never reviewed. Clear the bit(s) ` +
         `(\`git update-index --no-assume-unchanged\` / ` +
         `\`--no-skip-worktree\`) and re-run the review.`;
 }
@@ -369,7 +374,7 @@ function anchorRefusalReason(
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
     // that moved while they were being taken — the same uncertainty that
-    // withholds the cache candidate. Withholding only the candidate protects
+    // withholds the anchor. Withholding only the anchor protects
     // the NEXT round and leaves THIS one wrong: a file whose bytes changed
     // during the hash pass hashes equal to the cached round, `changedSince`
     // reports nothing, and its diff section is sliced out of scope — so the
@@ -656,7 +661,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // TOCTOU guard: the diff was snapshotted before the hashes were computed,
   // and an editor save landing in that window makes the candidate certify
   // bytes THIS round never reviewed — the one uncertainty in this module
-  // that failed OPEN. Differing bytes withhold the candidate (the plan still
+  // that failed OPEN. Differing bytes withhold the anchor (the plan still
   // reviews the FIRST capture) AND refuse this round's own incremental
   // scoping, which reads the very same hashes — see `anchorRefusalReason`'s
   // first clause. The cost is a full-range review now and no anchor next
@@ -689,7 +694,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // from three timed writes to five, and every write has to land in a
   // window bounded by the neighbouring sample of the OTHER kind. The
   // honest description is a tightened sample, not a proof — and every
-  // failure of it withholds the candidate, so the cost of being wrong is a
+  // failure of it withholds the anchor, so the cost of being wrong is a
   // full round, never a false certification.
   //
   // The extra pass is one more `git diff` and one more batched
@@ -720,7 +725,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     skippedPasses.every((l) => skipSet(l) === skipSet(skippedPasses[0])) &&
     // `movedSince`, not `changedSince`: a path unhashable on both reads did
     // not move between them, and treating it as a move would withhold the
-    // candidate on every round holding a pending deletion — the same
+    // anchor on every round holding a pending deletion — the same
     // conflation that made the convergence stop unreachable.
     hashPasses.every((h) => movedSince(hashPasses[0], h).length === 0);
   // Read ONCE, above the candidate that records it and the decision that
@@ -798,11 +803,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     return inv !== null && inv.length === 0;
   };
   const candidatePath = tmpFile(target, 'cache-candidate.json');
-  // The field rides the plan ONLY when a candidate exists to promote: Step 8
-  // keys its cache-commit-vs-hand-write branch on the field's presence, and
-  // announcing a path to a file this run deliberately withheld would send it
-  // promoting a stale candidate from an earlier round.
+  // The field rides the plan ONLY when this round's own candidate was
+  // written: Step 8 keys its cache-commit branch on the field's presence,
+  // and announcing a path the write never reached would send it promoting
+  // a stale candidate from an earlier round.
   let cacheCandidatePath: string | undefined;
+  let cacheCandidateStateId: string | undefined;
   // Read the cache BEFORE the candidate write: the dropped-out-while-on-disk
   // set gates that write (below), and computing it after let a refused
   // anchor's round write a candidate that silently OMITTED the dropped path
@@ -841,7 +847,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           hashes,
         );
   // The same uncertainty that withholds a decided stop withholds the
-  // candidate: `hash-object` reads the worktree bytes THROUGH a set
+  // anchor: `hash-object` reads the worktree bytes THROUGH a set
   // assume-unchanged/skip-worktree bit while `git diff` cannot see them, so
   // the hashes above record the identity of bytes this round's diff never
   // showed. Promoted, the unread bytes become anchor state — and when the
@@ -857,73 +863,107 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     invisible !== null &&
     invisible.length === 0 &&
     vanishedPresent.length === 0;
-  if (candidateWritten) {
-    // Guarded as a whole, like the PR flow's candidate write and for the
-    // reason that one states: a convenience artefact must never take the
-    // round with it. The refusal below arrives AFTER the capture, the
-    // hashing and the plan are all done; letting it escape `runCaptureLocal`
-    // — which the yargs handler does not catch — exited non-zero with no
-    // plan, no report and no diff, over a check whose whole cost is supposed
-    // to be the next round's anchor. The pre-guard code wrote here with a
-    // plain `writeFileSync` and could not fail this way at all.
-    try {
-      // noFollow: a planted symlink at this deterministic path would redirect
-      // the candidate write onto its target (see cache-commit's note). The
-      // directory above it is the entry guard's: a redirected `.qwen/tmp`
-      // refused the round before anything was written. That check is at the
-      // capture's entry rather than here, so it answers for the committed
-      // link this threat model names, not for a directory swapped mid-round
-      // by something that already has write access to the tree.
-      atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
-        noFollow: true,
-      });
-      cacheCandidatePath = candidatePath;
-      if (roundModelId === '') {
-        writeStderrLine(
-          'The runtime published no model identity — the cache candidate ' +
-            "carries no certifier, so Step 8 persists this round's findings " +
-            'ledger without an anchor and the next round reviews in full. ' +
-            'The review itself is unaffected.',
-        );
-      }
-    } catch (err) {
-      // Said out loud, and the field stays absent: Step 8 branches on its
-      // presence, so a silent drop would send it promoting an earlier
-      // round's candidate.
+  // Not anchorable is not nothing to persist. A local or file round posts no
+  // marker, so this candidate is the ONLY write path its findings ledger
+  // has: withholding it on these three conditions made every Critical first
+  // filed in such a round miss the cache — for as long as the condition held,
+  // which for a dropped-out-while-on-disk path is every round until the
+  // ignore rule or the file changes (#12657). So the round writes a
+  // candidate carrying no anchor state at all, which `cache-commit` promotes
+  // as the ledger alone (the same shape an identity-less capture gets).
+  // Promoted, it replaces the previous cache's anchor too — correctly: that
+  // anchor paired with this round's ledger would claim a verdict nobody gave.
+  //
+  // One consequence to know: the dropped-out-while-on-disk branch fires once,
+  // not every round. With no anchor promoted, the next round has no cached
+  // set for the path to drop out of, reviews in full, and writes an anchored
+  // candidate that simply does not list the hidden path. That is the shape
+  // R23 refused ON TOP OF an anchor that still certified the path — here no
+  // anchor certifies it, the round read everything it could see, and when
+  // the path becomes visible again it is new to the cache and in scope.
+  //
+  // Its `stateId` lives in its own namespace: `--state-id` binds the
+  // promotion to this round's file, and a concurrent anchored round over the
+  // same content computes the bare id — which must never pass for this one,
+  // nor this one for it.
+  const ledgerOnlyReason = !treeHeldStill
+    ? 'the working tree changed while the capture was being hashed'
+    : invisible === null
+      ? 'the tracked-file visibility bits could not be enumerated'
+      : invisible.length > 0
+        ? 'tracked-file visibility bits hide bytes from the diff'
+        : `${vanishedPresent.length} cached path(s) dropped out of this ` +
+          'capture while still on disk';
+  const ledgerOnlyCandidate = {
+    v: 1,
+    target,
+    ...(sourcePath !== undefined ? { source: sourcePath } : {}),
+    stateId: `ledger-${candidate.stateId}`,
+    ledgerOnly: ledgerOnlyReason,
+  };
+  const written = candidateWritten ? candidate : ledgerOnlyCandidate;
+  // Guarded as a whole, like the PR flow's candidate write and for the
+  // reason that one states: a convenience artefact must never take the
+  // round with it. The refusal below arrives AFTER the capture, the
+  // hashing and the plan are all done; letting it escape `runCaptureLocal`
+  // — which the yargs handler does not catch — exited non-zero with no
+  // plan, no report and no diff, over a check whose whole cost is supposed
+  // to be the next round's anchor. The pre-guard code wrote here with a
+  // plain `writeFileSync` and could not fail this way at all.
+  try {
+    // noFollow: a planted symlink at this deterministic path would redirect
+    // the candidate write onto its target (see cache-commit's note). The
+    // directory above it is the entry guard's: a redirected `.qwen/tmp`
+    // refused the round before anything was written. That check is at the
+    // capture's entry rather than here, so it answers for the committed
+    // link this threat model names, not for a directory swapped mid-round
+    // by something that already has write access to the tree.
+    atomicWriteFileSync(candidatePath, JSON.stringify(written, null, 2), {
+      noFollow: true,
+    });
+    cacheCandidatePath = candidatePath;
+    cacheCandidateStateId = written.stateId;
+    if (roundModelId === '') {
       writeStderrLine(
-        `Could not write the cache candidate ` +
-          `(${(err as Error).message}); this round cannot anchor the next ` +
-          `one, but the review itself is unaffected.`,
+        'The runtime published no model identity — the cache candidate ' +
+          "carries no certifier, so Step 8 persists this round's findings " +
+          'ledger without an anchor and the next round reviews in full. ' +
+          'The review itself is unaffected.',
       );
     }
-  } else {
-    // The path is stable per target, so an earlier round's candidate still
-    // sits under the `cacheCandidatePath` this plan publishes, and Step 8
-    // would promote that stale anchor merged with this round's ledger.
-    // Absent IS the withheld state — fail quiet.
+  } catch (err) {
+    // Said out loud, and the field stays absent: Step 8 branches on its
+    // presence, so a silent drop would send it promoting an earlier
+    // round's candidate. The stale file goes too, best-effort, so the
+    // stable path holds this round's file or nothing.
     try {
-      // Through the real directory the entry guard certified: a planted
-      // `.qwen/tmp` link would have redirected this removal exactly as it
-      // redirects a write, and refused the round instead.
       rmSync(candidatePath, { force: true });
     } catch {
-      // The absent field above is the load-bearing half.
+      // The absent field is the load-bearing half.
     }
+    writeStderrLine(
+      `Could not write the cache candidate ` +
+        `(${(err as Error).message}); this round's findings ledger will not ` +
+        `persist and it cannot anchor the next one, but the review itself ` +
+        `is unaffected.`,
+    );
+  }
+  if (!candidateWritten && cacheCandidatePath !== undefined) {
     if (!treeHeldStill) {
       writeStderrLine(
         'The working tree changed while the capture was being hashed — the ' +
-          'cache candidate is withheld, so the next round cannot anchor on ' +
-          'bytes this round never reviewed. The review itself proceeds on ' +
-          'the first capture.',
+          'cache candidate carries the findings ledger only, no anchor, so ' +
+          'the next round cannot anchor on bytes this round never reviewed. ' +
+          'The review itself proceeds on the first capture.',
       );
     } else if (invisible === null || invisible.length > 0) {
       writeStderrLine(invisibleCandidateRefusal(invisible));
     } else {
       writeStderrLine(
-        `The cache candidate is withheld: ${vanishedPresent.length} cached ` +
-          `path(s) dropped out of this capture while still on disk, so the ` +
-          `candidate would record their absence as reviewed state. The ` +
-          `review itself proceeds in full.`,
+        `The cache candidate carries the findings ledger only, no anchor: ` +
+          `${vanishedPresent.length} cached path(s) dropped out of this ` +
+          `capture while still on disk, so an anchor would record their ` +
+          `absence as reviewed state. The review itself proceeds in full.`,
       );
     }
   }
@@ -976,13 +1016,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       args.untracked !== false,
       vanishedPresent,
     );
-    // A ledger-only cache — promoted from a candidate with no identity — is
+    // A ledger-only cache — promoted from a candidate with no anchor — is
     // unanchored by design, and "missing or unreadable" is a line the skill
     // relays to the user while it reads that very file's findings.
     const refusal =
       reason === MISSING_CACHE && isLedgerOnlyCache(cacheEarlyBytes)
         ? 'the cache holds the findings ledger only (its round recorded no ' +
-          'model identity, so no anchor)'
+          'anchor)'
         : reason;
     if (refusal !== null) {
       writeStderrLine(
@@ -1376,6 +1416,38 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
   writeFileSync(diffPath, diffBytes);
 
+  // Not on a plain local ledger-only round with no chunks: SKILL.md's
+  // 0-chunk WARNING shapes end without a verdict, and published, the path
+  // would let an orchestrator that still ran Step 8 overwrite the previous
+  // round's open Criticals with an empty ledger — the loss #12657 fixes,
+  // reversed. A FILE review is exempt: an unmodified tracked file has no
+  // chunks on EVERY round and still gets a whole-file review with a verdict,
+  // and the visibility oracle is repo-wide, so a bit on any other path
+  // makes its round ledger-only.
+  const publishCandidate =
+    cacheCandidatePath !== undefined &&
+    (candidateWritten || plan.chunks.length > 0 || args.file !== undefined);
+  if (cacheCandidatePath !== undefined && !publishCandidate) {
+    // Compare-and-remove: this runs after the scoping and stop work, and a
+    // concurrent same-target round may have written — and published — its
+    // own candidate at the stable path since ours. Only our own file goes.
+    try {
+      const onDisk = JSON.parse(
+        readFileSync(cacheCandidatePath, 'utf8'),
+      ) as Record<string, unknown>;
+      if (onDisk['stateId'] === cacheCandidateStateId) {
+        rmSync(cacheCandidatePath, { force: true });
+      }
+    } catch {
+      // The absent field is the load-bearing half.
+    }
+    writeStderrLine(
+      'No chunks to review — the ledger-only cache candidate is not ' +
+        'published: this round ends without a verdict and owes no cache ' +
+        'write.',
+    );
+  }
+
   const wall = captureDeadline(process.env, args.deadline, plan);
   const result: CaptureLocalResult = {
     // The token the CLI derived, so nothing downstream has to re-derive it.
@@ -1412,9 +1484,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
     cachePath,
-    ...(cacheCandidatePath
-      ? { cacheCandidatePath, cacheCandidateStateId: candidate.stateId }
-      : {}),
+    ...(publishCandidate ? { cacheCandidatePath, cacheCandidateStateId } : {}),
     ...planEffortField(args.effort),
   };
 

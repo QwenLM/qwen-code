@@ -40,6 +40,13 @@ export interface QueuedUserSubmission {
    */
   reminders?: string;
   turnKey: string;
+  /**
+   * Shell intent recorded when the message was submitted. The drain routes
+   * on this record instead of the live shell-mode flag, which may have
+   * flipped while the entry waited in the queue (#11626). Undefined means
+   * the producer recorded no intent; the drain falls back to the live flag.
+   */
+  shellMode?: boolean;
 }
 
 export interface DirectUserAdmission {
@@ -72,6 +79,7 @@ export interface UseMessageQueueReturn {
     message: string,
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
+    shellMode?: boolean,
   ) => void;
   addPeerMessage: (
     message: string,
@@ -100,6 +108,7 @@ export interface UseMessageQueueReturn {
     messages: string[],
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
+    shellMode?: boolean,
     reminders?: string,
   ) => void;
   restorePeerMessage: (
@@ -124,6 +133,12 @@ interface QueuedMessage {
    */
   reminders?: string;
   deferUntilIdle: boolean;
+  /**
+   * Shell intent recorded at submit time (see QueuedUserSubmission).
+   * Batches are kept intent-homogeneous so one routing decision never
+   * misroutes another entry's command or prompt.
+   */
+  shellMode?: boolean;
   /**
    * A delivered cross-session envelope. Drained alone and submitted on a
    * path that skips user-input preprocessing — the text is peer-authored,
@@ -216,6 +231,11 @@ function aggregateUserMessages(
       ? { submittedPrompt: projections.join('\n\n') }
       : {}),
     ...(reminders === '' ? {} : { reminders }),
+    // Callers keep batches intent-homogeneous, so every member carries the
+    // same value; the first represents the batch.
+    ...(messages[0].shellMode === undefined
+      ? {}
+      : { shellMode: messages[0].shellMode }),
   };
 }
 
@@ -227,7 +247,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
   const nextMessageKey = useCallback(() => `message-queue:${randomUUID()}`, []);
 
   const addMessage = useCallback(
-    (message: string, deferUntilIdle = false, submittedPrompt?: string) => {
+    (
+      message: string,
+      deferUntilIdle = false,
+      submittedPrompt?: string,
+      shellMode?: boolean,
+    ) => {
       const text = message.trim();
       if (!text) return;
       queueRef.current = [
@@ -237,6 +262,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           deferUntilIdle,
           submittedPrompt,
+          ...(shellMode === undefined ? {} : { shellMode }),
         },
       ];
       setQueuedMessages(queueRef.current);
@@ -378,11 +404,25 @@ export function useMessageQueue(): UseMessageQueueReturn {
         ({ text, peer }) => !isSlashCommand(text) && !peer,
       );
       if (plainMessages.length > 0) {
+        // One routing decision per batch: the batch is the contiguous run of
+        // entries from the head that share the first plain entry's recorded
+        // shell intent, so a shell command and a model prompt never merge
+        // into a blob the drain can only route one way (#11626). Stopping at
+        // the first difference keeps submission order too — a later entry
+        // with the head's intent never overtakes an earlier entry queued
+        // with a different one.
+        const headIntent = plainMessages[0].shellMode;
+        const batch: QueuedMessage[] = [];
+        for (const message of plainMessages) {
+          if (message.shellMode !== headIntent) break;
+          batch.push(message);
+        }
+        const batchKeys = new Set(batch.map(({ key }) => key));
         queueRef.current = queueRef.current.filter(
-          ({ text, peer }) => isSlashCommand(text) || Boolean(peer),
+          ({ key }) => !batchKeys.has(key),
         );
         setQueuedMessages(queueRef.current);
-        return aggregateUserMessages(plainMessages);
+        return aggregateUserMessages(batch);
       }
 
       const [userHead, ...userRest] = queueRef.current;
@@ -431,6 +471,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
       messages: string[],
       submittedPrompt?: string,
       deferUntilIdle = false,
+      shellMode?: boolean,
       reminders?: string,
     ) => {
       const restored = messages
@@ -446,6 +487,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
             ? { reminders }
             : {}),
           deferUntilIdle,
+          ...(shellMode === undefined ? {} : { shellMode }),
         }));
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];

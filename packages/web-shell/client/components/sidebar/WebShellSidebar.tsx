@@ -32,6 +32,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
+  BotIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -136,6 +137,7 @@ import {
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import { UpdateControl } from './UpdateControl';
 import {
   useSessionCatalogController,
   useSessionCatalogPolling,
@@ -229,6 +231,7 @@ function comparePinnedSectionSessions(
 
 export type WebShellSidebarFooterItem =
   | 'settings'
+  | 'update'
   | 'version'
   | 'theme'
   | 'sessionsOverview'
@@ -259,7 +262,8 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'scheduledTasks'
   | 'workflows'
-  | 'goals';
+  | 'goals'
+  | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
   /** Built-in primary nav entries to show. Defaults to all. */
@@ -277,6 +281,7 @@ export interface WebShellSidebarFooterOptions {
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
+  'update',
   'version',
   'theme',
   'sessionsOverview',
@@ -300,6 +305,7 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'scheduledTasks',
   'workflows',
   'goals',
+  'managed',
 ];
 
 export type WebShellSidebarSessionActionItem =
@@ -403,6 +409,7 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
@@ -430,7 +437,16 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
-  onSessionsDeleted?: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before the delete request resolves, so the attachment is no longer
+   * readable off the connection by the time this callback runs (#12619).
+   */
+  onSessionsDeleted?: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -937,6 +953,7 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenPlugins,
   onOpenChannels,
+  onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenWorkflows,
@@ -1006,6 +1023,10 @@ export function WebShellSidebar({
     () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
     [primaryNavOptions?.items],
   );
+  const showUpdate =
+    footerItems.has('update') &&
+    !isDesktopShell() &&
+    connection.capabilities?.features?.includes('daemon_update');
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
@@ -1013,6 +1034,7 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
+    (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
@@ -1974,7 +1996,12 @@ export function WebShellSidebar({
   );
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
-      !isCurrentSession(session) && canShowDeleteSession(session),
+      // The current session is deletable too (issue #12619), but deleting the
+      // session the client is attached to tears its runtime down — match the
+      // Session Overview's idle-only policy for that case.
+      (!isCurrentSession(session) ||
+        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
   const canOrganizeSession = useCallback(
@@ -2110,11 +2137,7 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
-  // One breakpoint degrades the whole footer: below it the settings button
-  // drops its text label, every footer button becomes a fixed 26px icon, and the
-  // version label leaves the row. That label can neither shrink nor truncate
-  // (`flex: 0 0 auto; white-space: nowrap`), so keeping it rendered past this
-  // point overflowed `.footerPrimary` into the action icons (#11453).
+  // Keep action buttons compact; the version and update share a separate row.
   const footerCompact =
     !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
   const sidebarStyle = {
@@ -3101,6 +3124,12 @@ export function WebShellSidebar({
       setDeleteCandidate(null);
       return;
     }
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = isCurrentSession(deleteCandidate)
+      ? sessionId
+      : undefined;
     const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
     const removeSession =
@@ -3125,7 +3154,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        onSessionsDeleted?.([sessionId]);
+        onSessionsDeleted?.([sessionId], { attachedSessionId });
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -3144,6 +3173,7 @@ export function WebShellSidebar({
     deleteCandidate,
     deleteSession,
     getIdentityForSession,
+    isCurrentSession,
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,
@@ -4480,6 +4510,21 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
+      // `showDelete` already applied the workspace-scope gate — standalone rows
+      // bypass it on purpose — so the disabled state only carries #12619's rule:
+      // the session this client is attached to is deletable once it goes idle.
+      // The no-workspace row is the exception: its delete route answers
+      // `session_busy` while this tab is still attached, so offering it would be
+      // a button that can never succeed. Keep it disabled until the user opens
+      // another chat (leaving first, then deleting, is tracked separately).
+      const currentStandalone = Boolean(standalone?.active);
+      const deleteDisabled =
+        busy || currentStandalone || (isCurrent && running);
+      const deleteDisabledTitle = currentStandalone
+        ? t('sidebar.currentStandaloneDeleteDisabled')
+        : isCurrent && running
+          ? t('sidebar.currentDeleteDisabled')
+          : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
@@ -4708,11 +4753,9 @@ export function WebShellSidebar({
                           key: 'delete',
                           icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.delete'),
-                          disabled: busy || isCurrent,
+                          disabled: deleteDisabled,
                           destructive: true,
-                          title: isCurrent
-                            ? t('sidebar.currentDeleteDisabled')
-                            : undefined,
+                          title: deleteDisabledTitle,
                           visible:
                             showDelete && inlineActionItems.has('delete'),
                           onClick: () => {
@@ -4844,12 +4887,8 @@ export function WebShellSidebar({
                             {showDelete && !inlineActionItems.has('delete') && (
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={busy || isCurrent}
-                                title={
-                                  isCurrent
-                                    ? t('sidebar.currentDeleteDisabled')
-                                    : undefined
-                                }
+                                disabled={deleteDisabled}
+                                title={deleteDisabledTitle}
                                 onSelect={() => {
                                   if (standalone) standalone.onDelete();
                                   else handleDeleteSession(session);
@@ -5268,6 +5307,7 @@ export function WebShellSidebar({
         ref={sidebarRef}
         className={cx(
           styles.sidebar,
+          (footerItems.has('version') || showUpdate) && styles.withVersion,
           collapsed && styles.collapsed,
           isResizing && styles.resizing,
           mobileOpen && styles.mobileOpen,
@@ -5709,6 +5749,20 @@ export function WebShellSidebar({
                     <TargetIcon size={16} strokeWidth={1.2} />
                   </span>
                   {!collapsed && <span>{t('sidebar.goals')}</span>}
+                </button>
+              )}
+              {primaryNavItems.has('managed') && onOpenManagedSessions && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('managed.title')}
+                  aria-label={t('managed.title')}
+                  onClick={onOpenManagedSessions}
+                >
+                  <span className={styles.navIcon}>
+                    <BotIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('managed.title')}</span>}
                 </button>
               )}
               {primaryNavOptions?.render?.()}
@@ -6386,6 +6440,24 @@ export function WebShellSidebar({
           <div
             className={cx(styles.footer, footerCompact && styles.footerCompact)}
           >
+            <div className={styles.footerVersion}>
+              {!collapsed && versionLabel && footerItems.has('version') && (
+                <span
+                  className={styles.version}
+                  title={`${brandName} ${versionLabel}`}
+                >
+                  {versionLabel}
+                </span>
+              )}
+              {showUpdate && (
+                <UpdateControl
+                  client={workspace.client}
+                  collapsed={collapsed && !mobileOpen}
+                  currentVersion={qwenCodeVersion}
+                  onError={onError}
+                />
+              )}
+            </div>
             <div className={styles.footerPrimary}>
               {footer && typeof footer === 'object' && footer.render?.()}
               {projectFeaturesEnabled && footerItems.has('settings') && (
@@ -6406,17 +6478,6 @@ export function WebShellSidebar({
                   )}
                 </button>
               )}
-              {!collapsed &&
-                !footerCompact &&
-                versionLabel &&
-                footerItems.has('version') && (
-                  <span
-                    className={styles.version}
-                    title={`${brandName} ${versionLabel}`}
-                  >
-                    {versionLabel}
-                  </span>
-                )}
             </div>
             <div className={styles.footerActions}>
               {footerItems.has('theme') && (

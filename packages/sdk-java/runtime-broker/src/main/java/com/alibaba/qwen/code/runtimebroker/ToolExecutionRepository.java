@@ -48,4 +48,8 @@ public interface ToolExecutionRepository {
             Map<String, Object> resolutionResult, Instant resolutionTime);
 
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
+
+    /** Any unsettled execution still points at this binding generation, so
+     * the binding must not be reclaimed. UNKNOWN counts as active. */
+    boolean hasActiveByBinding(String bindingId, long runtimeGeneration);
 }

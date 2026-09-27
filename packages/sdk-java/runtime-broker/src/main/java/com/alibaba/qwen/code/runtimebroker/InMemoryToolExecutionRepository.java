@@ -223,6 +223,20 @@ public final class InMemoryToolExecutionRepository
                         && !record.isSettled());
     }
 
+    @Override
+    public synchronized boolean hasActiveByBinding(String bindingId,
+            long runtimeGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0) {
+            throw new IllegalArgumentException(
+                    "runtimeGeneration must be positive");
+        }
+        return recordsById.values().stream()
+                .anyMatch(record -> id.equals(record.getBindingId())
+                        && record.getRuntimeGeneration() == runtimeGeneration
+                        && !record.isSettled());
+    }
+
     private ToolExecutionRecord requireRecord(String executionCallId) {
         return recordsById.get(BrokerValues.requireId(executionCallId,
                 "executionCallId"));
