@@ -77,6 +77,9 @@ vi.mock('@qwen-code/channel-base', () => ({
       mockHandleInbound(env);
       return Promise.resolve();
     }
+    protected getResponseMessageId(_sessionId: string): string | undefined {
+      return undefined;
+    }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
     }
@@ -1881,15 +1884,18 @@ describe('群管理事件', () => {
 
     // B6: the widened predicate, where it genuinely differs from
     // isMsgIdAnchoredBySession — the session anchor has moved to a different
-    // msgId while a streamState entry for that session still carries the
-    // context msgId with a non-empty buffer. The anchor-only predicate would
-    // drop the counter; the shared predicate must keep it.
-    it('keeps the counter when the session anchor moved but a buffered entry still holds the context msgId (R10-7)', () => {
+    // msgId while a streamState entry still carries the context msgId with a
+    // non-empty buffer. The anchor-only predicate would drop the counter; the
+    // shared predicate must keep it. The entry belongs to another chat, so this
+    // teardown does not destroy it and its veto is the legitimate one; an entry
+    // the same block deletes is covered by the case below.
+    it('keeps the counter when the session anchor moved but a surviving buffered entry still holds the context msgId (R10-7)', () => {
       const ch = makeChannel();
       const pvt = ch as unknown as QQChannelRaw;
       const chp = ch as unknown as Record<string, unknown>;
 
       const groupId = 'group-del-moved-1';
+      const otherGroupId = 'group-del-moved-other';
       const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
         string,
         { msgId: string; timestamp: number }
@@ -1913,7 +1919,9 @@ describe('群管理事件', () => {
 
       // The session has already moved to a newer anchor (msg-Y), but its
       // streamState entry still carries the older context msgId (msg-X) with
-      // a buffered residual.
+      // a buffered residual. The predicate is keyed by msgId and is
+      // deliberately chat-agnostic, so the entry keeps the counter even though
+      // it belongs to another chat that this teardown leaves alone.
       sessionReplyMsgId.set('sid-1', {
         msgId: 'msg-Y',
         timestamp: Date.now(),
@@ -1925,7 +1933,7 @@ describe('群管理事件', () => {
         timestamp: Date.now(),
       });
       streamState.set('sid-1', {
-        chatId: groupId,
+        chatId: otherGroupId,
         buffer: 'pending tail',
         timer: null,
         retryCount: 0,
@@ -1942,6 +1950,45 @@ describe('群管理事件', () => {
 
       // The context loop's guard saw the buffered entry and kept the counter.
       expect(msgSeqMap.get('msg-X')).toBe(3);
+    });
+
+    it('cascades the msg_seq counter of a stream whose buffer it discards', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+      const groupId = 'group-del-orphan-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const streamState = chp['streamState'] as Map<string, unknown>;
+      (chp['setReplyMsgId'] as (c: string, m: string) => void)(
+        groupId,
+        'msg-1',
+      );
+      (chp['onPromptStart'] as (c: string, s: string, m: string) => void)(
+        groupId,
+        'sid-1',
+        'msg-1',
+      );
+      (chp['onResponseChunk'] as (c: string, t: string, s: string) => void)(
+        groupId,
+        'partial',
+        'sid-1',
+      );
+      msgSeqMap.set('msg-1', 2); // consumed by an earlier segment
+      expect((streamState.get('sid-1') as { buffer: string }).buffer).toBe(
+        'partial',
+      );
+      pvt['handleGroupDelRobot']({
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      });
+      expect(streamState.has('sid-1')).toBe(false);
+      expect(sessionReplyMsgId.has('sid-1')).toBe(false);
+      expect(msgSeqMap.has('msg-1')).toBe(false);
     });
 
     // R9-5: the release must carry the matched entry's msgId identity (the

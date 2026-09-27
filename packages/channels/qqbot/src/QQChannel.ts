@@ -1526,12 +1526,27 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] dropping ${state.buffer.length} chars of superseded turn ${state.turn} for ${sanitizeLogText(sessionId, 64)}\n`,
         );
       }
-      if (state.timer) clearTimeout(state.timer);
+      // Disarm the entry before the release below: the release guard treats a
+      // truthy timer handle or a non-empty buffer as a live flush and vetoes
+      // the counter, but this block deletes the entry a few lines later, so no
+      // path can ever re-drive that flush. clearTimeout leaves the handle
+      // truthy, so null it explicitly. flushingSessions is deliberately left
+      // set: a genuinely in-flight send must still veto the release.
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+      state.buffer = '';
+      // The entry carries the sealed pre-boundary head, which the boundary
+      // cleared from the bridge's collection — dropping it here would truncate
+      // this turn's opening with no other copy. Hand it off before the delete,
+      // like every other doomed-entry site.
+      this.handOffSealedPre(state, sessionId);
       // Release before the delete: the release guard scans streamState +
-      // flushingSessions for a live flush, so it must still see this entry
-      // (and marker) or it would drop the msg_seq counter under a send still
-      // in flight — QQ dedupes on msg_id + msg_seq and silently drops the
-      // tail. The expectedMsgId identity check keeps a successor turn's
+      // flushingSessions for a live flush, so it must still see this entry's
+      // in-flight marker or it would drop the msg_seq counter under a send
+      // still in flight — QQ dedupes on msg_id + msg_seq and silently drops
+      // the tail. The expectedMsgId identity check keeps a successor turn's
       // anchor untouched while still cascading this turn's counter away.
       if (state.msgId !== undefined) {
         this.releaseSessionReplyAnchor(sessionId, state.msgId);
@@ -1773,36 +1788,13 @@ export class QQChannel extends ChannelBase {
           // Drop everything — including any residual buffer that arrived concurrently.
           const current = this.streamState.get(sessionId);
           if (current === state) {
+            // Hand the sealed pre-boundary head off BEFORE the delete: this
+            // entry carries the only copy, and the boundary cleared the
+            // bridge's collection so it is absent from fullText. A later
+            // settle or a successor turn can still prepend a re-stash; a
+            // parked turn with no successor delivers it on its own anchor.
+            this.handOffSealedPre(state, sessionId);
             this.streamState.delete(sessionId);
-            // The sealed pre-boundary head was drained into this buffer and is
-            // absent from fullText (the boundary cleared the bridge's
-            // collection), so re-stash it: onResponseComplete can then prepend
-            // it instead of losing it with the permanently-failed buffer. Merge
-            // into a stash a successor turn already holds rather than skipping
-            // it — skipping drops this sealed head with no other copy. The
-            // sealed head is older than anything the successor stashed, so it
-            // is prepended. `pre` carries only text the bridge's cleared
-            // collection no longer holds, so when the existing stash has no
-            // seal its `text` is already in fullText and only our sealed head
-            // is prepended; otherwise the successor's text would be delivered
-            // twice.
-            if (state.sealedPre !== undefined) {
-              const existing = this.streamOrphanBuffer.get(sessionId);
-              this.streamOrphanBuffer.set(
-                sessionId,
-                existing === undefined
-                  ? {
-                      turn: state.turn,
-                      text: state.sealedPre,
-                      pre: state.sealedPre,
-                    }
-                  : {
-                      turn: existing.turn,
-                      text: state.sealedPre + existing.text,
-                      pre: state.sealedPre + (existing.pre ?? ''),
-                    },
-              );
-            }
           }
           // Release only when the settle is terminal (the session was parked
           // for teardown) or this entry was superseded by a later turn. While
@@ -1867,6 +1859,12 @@ export class QQChannel extends ChannelBase {
               current.timerReconnectId = reconnectId;
               current.timer.unref?.();
             } else {
+              // The entry carries the sealed pre-boundary head; hand it off
+              // before the delete drops the only copy (see handOffSealedPre).
+              // This branch consumed the park flag above, so it states the
+              // turn is over explicitly — otherwise the handoff would re-stash
+              // into a turn whose counter it is about to drop.
+              this.handOffSealedPre(state, sessionId, true);
               this.streamState.delete(sessionId);
               if (state.msgId !== undefined) {
                 this.releaseSessionReplyAnchor(sessionId, state.msgId);
@@ -1894,6 +1892,9 @@ export class QQChannel extends ChannelBase {
                 this.maxFlushRetries > 0 &&
                 current.retryCount >= this.maxFlushRetries
               ) {
+                // Hand the sealed pre-boundary head off before the delete
+                // drops the only copy (see handOffSealedPre).
+                this.handOffSealedPre(state, sessionId);
                 this.streamState.delete(sessionId);
                 // No release here: the turn is not over (onResponseComplete
                 // has not fired) — the anchor still belongs to this reply,
@@ -1926,6 +1927,9 @@ export class QQChannel extends ChannelBase {
                   current.timer.unref?.();
                 }
               } else {
+                // Hand the sealed pre-boundary head off before the delete
+                // drops the only copy (see handOffSealedPre).
+                this.handOffSealedPre(state, sessionId);
                 this.streamState.delete(sessionId);
                 // No release here — same rationale as the buffer-over-limit
                 // branch above: the turn has not ended, so the anchor is
@@ -2340,16 +2344,83 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * Hand a doomed entry's sealed pre-boundary head to whatever can still
+   * deliver it, before the entry carrying the only copy is dropped. The
+   * boundary cleared the bridge's chunk collection, so this text is absent
+   * from fullText: dropping it truncates the reply's opening with no log.
+   *
+   * A later settle of this turn (onResponseComplete has not run yet), or a
+   * successor turn that owns the counter now, can still prepend it — re-stash,
+   * merging into an existing stash. A fresh entry is tagged with the turn that
+   * owns the counter, never the doomed one: every consumer gates on the entry
+   * turn matching the live turn, so a doomed tag is dropped as superseded by
+   * the successor's first chunk and the head is lost anyway. The merge branch
+   * keeps the existing entry's turn, which a stash always carries as the turn
+   * that wrote it. `pre` carries the sealed head alone and is never widened to
+   * the whole dropped buffer: the post-boundary text is still in fullText and
+   * prepending it again would deliver it twice (R9-1).
+   *
+   * Otherwise the turn is already over — completion returned and parked the
+   * session, or the caller is the park-consuming exhaustion branch, which
+   * clears the flag before reaching here — and this turn still owns the
+   * counter, so the block that drops the entry also drops the counter and a
+   * stash would be discarded as superseded. Deliver the sealed head on this
+   * turn's own anchor instead — the same path onPromptEnd already uses for a
+   * parked cancelled turn's HEAD.
+   *
+   * `turnIsOver` defaults to the park flag, which is still armed at the four
+   * sites that reach here while it is; the pending-exhaustion branch has
+   * already consumed it, so it passes the fact explicitly.
+   */
+  private handOffSealedPre(
+    state: QQStreamState,
+    sessionId: string,
+    turnIsOver = this.pendingStreamDelete.has(sessionId),
+  ): void {
+    const sealed = state.sealedPre;
+    if (sealed === undefined) return;
+    state.sealedPre = undefined;
+    const noSuccessorCanConsume =
+      turnIsOver && (this.turnCounter.get(sessionId) ?? 0) === state.turn;
+    if (noSuccessorCanConsume) {
+      void this.deliverCancelledStash(state.chatId, sessionId, sealed);
+      return;
+    }
+    const existing = this.streamOrphanBuffer.get(sessionId);
+    this.streamOrphanBuffer.set(
+      sessionId,
+      existing === undefined
+        ? {
+            turn: this.turnCounter.get(sessionId) ?? state.turn,
+            text: sealed,
+            pre: sealed,
+          }
+        : {
+            turn: existing.turn,
+            text: sealed + existing.text,
+            pre: sealed + (existing.pre ?? ''),
+          },
+    );
+  }
+
   override onSessionDied(sessionId: string): void {
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
       clearTimeout(state.timer);
+      state.timer = null;
     }
+    // Disarm the residual too, for the same reason as onResponseChunk's
+    // superseded branch: the release below must not veto on state this block
+    // destroys, or the dead session's counter orphans with nothing left to
+    // reclaim it. flushingSessions stays set — a genuine in-flight send still
+    // owns that marker.
+    if (state) state.buffer = '';
     // Release before the deletes so the release guard still sees this
-    // session's entry (with its buffered/flushing state) and can keep the
-    // msg_seq counter while a live flush owns it — a delete-then-release
-    // order would drop the counter under an in-flight send and its tail
-    // would re-resolve msg_seq from 1 (QQ dedupes on msg_id + msg_seq).
+    // session's in-flight marker (flushingSessions) and can keep the msg_seq
+    // counter while a live flush owns it — a delete-then-release order would
+    // drop the counter under an in-flight send and its tail would re-resolve
+    // msg_seq from 1 (QQ dedupes on msg_id + msg_seq).
     this.releaseSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
@@ -4136,9 +4207,18 @@ export class QQChannel extends ChannelBase {
     let cleanedStreams = 0;
     for (const [sid, state] of this.streamState) {
       if (state.chatId === groupId) {
-        if (state.timer) clearTimeout(state.timer);
+        if (state.timer) {
+          clearTimeout(state.timer);
+          state.timer = null;
+        }
+        // Disarm the residual before the release: the guard would otherwise
+        // veto on state this same block destroys (the entry is deleted two
+        // lines later), leaving the counter orphaned with no path left to
+        // reclaim it. Same ordering property as onResponseChunk's superseded
+        // branch; flushingSessions stays set for a genuine in-flight send.
+        state.buffer = '';
         // Release before the deletes so the release guard still sees this
-        // entry's live flush state and keeps the msg_seq counter while a
+        // entry's in-flight marker and keeps the msg_seq counter while a
         // send owns it (release-before-delete ordering). Expected-msgId-gated:
         // under 'single' scope the matched session is channel-wide and may
         // already belong to a newer turn, whose anchor must not be deleted. A
