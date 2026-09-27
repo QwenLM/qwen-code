@@ -177,6 +177,14 @@ describe('WorkflowJournal', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
+  async function loadedReplay(journal: WorkflowJournal) {
+    const loaded = await journal.load();
+    if (loaded.kind !== 'loaded') {
+      throw new Error(`expected a loaded journal, got ${loaded.kind}`);
+    }
+    return loaded.replay;
+  }
+
   it('append then load round-trips entries', async () => {
     const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
@@ -186,7 +194,7 @@ describe('WorkflowJournal', () => {
       agentId: '1',
       result: { v: 9 },
     });
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);
   });
@@ -196,7 +204,7 @@ describe('WorkflowJournal', () => {
     await j.append({ type: 'started', key: 'k1', agentId: '1' });
     await j.append({ type: 'failed', key: 'k1', agentId: '1' });
 
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.failed.has('k1')).toBe(true);
     expect(replay.results.has('k1')).toBe(false);
     // The record is on disk in the same one-JSON-object-per-line shape as
@@ -228,17 +236,63 @@ describe('WorkflowJournal', () => {
 
     await j.drain();
 
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.started.get('k1')).toHaveLength(1);
     expect(replay.results.get('k1')?.result).toBe('done');
   });
 
-  it('load on a missing file returns empty maps', async () => {
+  // A resume has to tell these three apart: an empty journal belongs to a run
+  // with nothing cached yet, a missing one leaves nothing to resume, and an
+  // unreadable one must not pass for either.
+  it('reports a missing file as missing, not as an empty replay', async () => {
     const j = new WorkflowJournal(path.join(dir, 'nope.jsonl'));
-    const replay = await j.load();
+    await expect(j.load()).resolves.toEqual({ kind: 'missing' });
+  });
+
+  it('loads a file that exists and holds no entries', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    expect(await j.ensureExists()).toBe(true);
+    const replay = await loadedReplay(j);
     expect(replay.results.size).toBe(0);
     expect(replay.started.size).toBe(0);
     expect(replay.failed.size).toBe(0);
+  });
+
+  it('reports a path that cannot be read as unreadable', async () => {
+    // A directory where the journal file should be: it is there, and it is
+    // not a journal.
+    const journalPath = path.join(dir, 'sub', 'journal.jsonl');
+    await fs.mkdir(journalPath, { recursive: true });
+    const loaded = await new WorkflowJournal(journalPath).load();
+    expect(loaded.kind).toBe('unreadable');
+    expect(loaded).toHaveProperty('reason', expect.stringMatching(/\S/));
+  });
+
+  it('records a launch as a line no replay reads', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.markLaunched();
+    await j.append({ type: 'started', key: 'k1', agentId: '1' });
+
+    const written = (
+      await fs.readFile(path.join(dir, 'sub', 'journal.jsonl'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(written[0]).toEqual({ type: 'launched', version: 1 });
+    const replay = await loadedReplay(j);
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.results.size).toBe(0);
+    expect(replay.failed.size).toBe(0);
+  });
+
+  it('does not fail a launch whose record cannot be written', async () => {
+    // The parent of the run directory is a file, so the append cannot create
+    // the directory it needs.
+    const blocker = path.join(dir, 'blocker');
+    await fs.writeFile(blocker, '');
+    const j = new WorkflowJournal(path.join(blocker, 'run', 'journal.jsonl'));
+    await expect(j.markLaunched()).resolves.toBeUndefined();
   });
 
   it.skipIf(process.platform === 'win32')(

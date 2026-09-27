@@ -392,6 +392,27 @@ export function createHookOutput(
 }
 
 /**
+ * Whether a hook's output is a blocking decision on this event: for PreToolUse
+ * the permission decision wins over the generic `decision` field. The HTTP
+ * runner and the progress reporting both use this one test, so they report
+ * such a decision the same way.
+ *
+ * It covers decisions only. Output that stops the turn with `continue: false`,
+ * or a PreToolUse `ask`, also keeps a tool call from proceeding but is not a
+ * blocking decision here, and the function runner applies its own test that
+ * counts `continue: false`. Reporting a stop is left to the progress display.
+ */
+export function isBlockingHookOutput(
+  eventName: string,
+  data: Partial<HookOutput>,
+): boolean {
+  const output = createHookOutput(eventName, data);
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
+}
+
+/**
  * Default implementation of HookOutput with utility methods
  */
 export class DefaultHookOutput implements HookOutput {

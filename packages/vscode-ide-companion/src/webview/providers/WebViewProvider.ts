@@ -25,6 +25,7 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   applyProviderInstallPlanToFile,
   snapshotSettingsForRollback,
+  resolveProviderSettings,
   restoreSettingsSnapshot,
   writeCodingPlanConfig,
   readQwenSettingsForVSCode,
@@ -32,6 +33,8 @@ import {
 } from '../../services/settingsWriter.js';
 import {
   buildInstallPlan,
+  getModelsForProviderProtocol,
+  type ProviderProtocolConfig,
   parseInsightMessage,
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
@@ -1232,13 +1235,33 @@ export class WebViewProvider {
     try {
       // Use core's buildInstallPlan to create a standardized install plan,
       // then apply it via the VSCode settings adapter.
-      const existingProviders = rollbackSnapshot?.['modelProviders'] as
+      const resolvedSnapshot = rollbackSnapshot
+        ? resolveProviderSettings(rollbackSnapshot)
+        : null;
+      const existingProviders = resolvedSnapshot?.['modelProviders'] as
         | ModelProvidersConfig
         | undefined;
+      const protocol = inputs.protocol ?? providerConfig.protocol;
+      const existingModelsForProtocol = getModelsForProviderProtocol(
+        existingProviders,
+        protocol,
+        resolvedSnapshot?.['providerProtocol'] as
+          | ProviderProtocolConfig
+          | undefined,
+      );
+      const saved = resolvedSnapshot as {
+        model?: { name?: string; baseUrl?: string };
+        security?: { auth?: { selectedType?: string } };
+      } | null;
       const plan = buildInstallPlan(
         providerConfig,
         inputs,
-        existingProviders?.[inputs.protocol ?? providerConfig.protocol],
+        existingModelsForProtocol,
+        {
+          authType: saved?.security?.auth?.selectedType,
+          id: saved?.model?.name,
+          baseUrl: saved?.model?.baseUrl,
+        },
       );
       await applyProviderInstallPlanToFile(plan);
 
@@ -1711,11 +1734,17 @@ export class WebViewProvider {
       vscode.Uri.parse(baseUrl),
     );
     const externalUrl = externalUri.toString();
+    const hostname = new URL(externalUrl).hostname;
+    if (hostname.startsWith('[')) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", but the webview cannot connect to an IPv6 literal under its content security policy.`,
+      );
+    }
     // This URL shares its payload with the daemon's bearer token. A
     // browser-based remote resolves to a relay origin rather than a forwarded
     // loopback one, and the webview CSP would then be the only thing keeping
     // that token away from a third-party host — so refuse here instead.
-    if (!isLoopbackHostname(new URL(externalUrl).hostname)) {
+    if (!isLoopbackHostname(hostname)) {
       throw new Error(
         `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
       );

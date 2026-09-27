@@ -522,6 +522,7 @@ impl Tool for ListWindowsTool {
                 relying on array order.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer"},
+                "app_context":{"type":"boolean","description":"Resolve the current app window and owned dialog. Requires pid."},
                 "on_screen_only":{"type":"boolean","description":"When true, filter to visible windows only. Default false."}
             },"additionalProperties":false}),
             read_only: true, destructive: false, idempotent: true, open_world: false,
@@ -531,15 +532,43 @@ impl Tool for ListWindowsTool {
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
         let filter_pid = args.opt_u64("pid").map(|v| v as u32);
+        let app_context = args.bool_or("app_context", false);
+        if app_context && filter_pid.is_none() {
+            return ToolResult::error("app_context requires pid");
+        }
         let on_screen_only = args.bool_or("on_screen_only", false);
-        let mut windows =
-            match tokio::task::spawn_blocking(move || discovery_windows(filter_pid)).await {
-                Ok(Ok(windows)) => windows,
-                Ok(Err(error)) => return desktop_discovery_error(error),
-                Err(error) => return ToolResult::error(error.to_string()),
-            };
+        let mut windows = match tokio::task::spawn_blocking(move || {
+            if app_context && !crate::wayland::is_wayland() {
+                crate::x11::try_list_app_windows(filter_pid.expect("validated"))
+            } else {
+                discovery_windows(filter_pid)
+            }
+        })
+        .await
+        {
+            Ok(Ok(windows)) => windows,
+            Ok(Err(error)) => return desktop_discovery_error(error),
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
         if on_screen_only {
             windows.retain(|window| window.is_on_screen);
+        }
+        let app_target = if app_context {
+            if crate::wayland::is_wayland() {
+                crate::x11::select_app_window(
+                    &windows,
+                    crate::wayland::focused_app_window(filter_pid.expect("validated")),
+                )
+            } else {
+                crate::x11::resolve_app_window(&windows)
+            }
+        } else {
+            None
+        };
+        if app_context && crate::wayland::is_wayland() && app_target.is_none() && windows.len() > 1
+        {
+            return ToolResult::error("The Wayland compositor did not expose an unambiguous active app window. This compositor cannot track this app's multiple windows; keep only the intended window open.")
+                .with_structured(json!({"code":"app_window_unavailable"}));
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {
@@ -548,8 +577,11 @@ impl Tool for ListWindowsTool {
                 w.xid, w.pid, w.title, w.width, w.height, w.x, w.y
             ));
         }
-        let structured =
-            json!({ "windows": windows.iter().map(window_record_json).collect::<Vec<_>>() });
+        let structured = json!({ "windows": windows.iter().map(|w| {
+                let mut record = window_record_json(w);
+                if app_context { record["is_app_target"] = json!(app_target == Some(w.xid)); }
+                record
+            }).collect::<Vec<_>>() });
         ToolResult::text(lines.join("\n")).with_structured(structured)
     }
 }
@@ -693,6 +725,7 @@ impl Tool for GetWindowStateTool {
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":{"type":"integer"},
                 "window_id":{"type":"integer","description":"X11 XID from list_windows."},
+                "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_screenshot":{"type":"boolean",
                     "description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
@@ -740,6 +773,7 @@ impl Tool for GetWindowStateTool {
         // time: an element ax action (element_index) or element px action (x,y).
         // We don't even read the arg; it stays in the schema only so old callers
         // don't trip additionalProperties:false.
+        let app_context = args.bool_or("app_context", false);
         let query = args.opt_str("query");
         let observation_revision_request =
             match cua_driver_core::observation_revision::parse_observation_revision_request(
@@ -753,6 +787,17 @@ impl Tool for GetWindowStateTool {
                     }))
                 }
             };
+        if observation_revision_request
+            .as_ref()
+            .is_some_and(|request| {
+                (request.projection_version
+                    == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION)
+                    != app_context
+            })
+        {
+            return ToolResult::error("app_context and observation projection must agree")
+                .with_structured(json!({ "code": "unsupported_observation_projection" }));
+        }
         if observation_revision_request.is_some() && query.is_some() {
             return ToolResult::error(
                 "observation_revision v1 does not support the legacy query projection",
@@ -841,79 +886,95 @@ impl Tool for GetWindowStateTool {
         let query_for_walk = query.clone();
 
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let mut tree = crate::atspi::walk_tree_bounded(
-                pid,
-                xid,
-                query_for_walk.as_deref(),
-                max_elements,
-                max_depth,
-            );
-            // Compact model observations only. Internal browser setup/consent
-            // matching needs the original label boundaries from the native tree.
-            if revision_request_for_capture.is_some() {
-                tree.nodes = crate::atspi::projection::compact(tree.nodes);
-            }
-            let tree_result = Some(tree);
-            // Bounds and element indices come from the same captured AT-SPI
-            // traversal. Joining two live walks by ordinal mis-associated
-            // Chromium controls when its lazy subtree changed between walks.
-            let bounds = tree_result
-                .as_ref()
-                .map(|tree| tree.bounds.clone())
-                .unwrap_or_default();
-            let observation_revision = match (
-                revision_request_for_capture.as_ref(),
-                observation_session,
-                tree_result.as_ref(),
-            ) {
-                (Some(request), Some(session), Some(tree)) => Some(
-                    observation_revisions
-                        .observe(
-                            session,
-                            pid,
-                            xid,
-                            max_elements.unwrap_or(5000),
-                            max_depth.unwrap_or(usize::MAX),
-                            tree,
-                            request,
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                ),
-                _ => None,
-            };
-            // Capture and DELIVER the screenshot alongside the tree by default — the
-            // grounding frame the agent cross-checks the tree against. With
-            // screenshot_out_file set, write to disk and surface the path instead
-            // of embedding base64; otherwise embed base64. Skipped only when
-            // include_screenshot:false and no disk path was requested.
-            // Tuple: (Option<b64>, Option<file_path>, w, h, Option<original_w>).
-            let screenshot = if should_capture {
-                match crate::wayland::screenshot_dispatch(xid) {
-                    Ok(raw) => {
-                        let orig_w = crate::capture::png_dimensions_pub(&raw)
-                            .map(|(w, _)| w)
-                            .unwrap_or(0);
-                        let png = crate::capture::resize_png_if_needed(&raw, max_dim)?;
-                        let (w, h) = crate::capture::png_dimensions_pub(&png)?;
-                        let original_w = if w < orig_w { Some(orig_w) } else { None };
-                        if let Some(ref path) = screenshot_out_file {
-                            std::fs::write(path, &png)?;
-                            Some((None, Some(path.clone()), w, h, original_w))
-                        } else {
-                            use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-                            Some((Some(B64.encode(&png)), None, w, h, original_w))
+            let capture = || -> anyhow::Result<_> {
+                let mut tree = crate::atspi::walk_tree_bounded(
+                    pid,
+                    xid,
+                    query_for_walk.as_deref(),
+                    max_elements,
+                    max_depth,
+                );
+                // Compact model observations only. Internal browser setup/consent
+                // matching needs the original label boundaries from the native tree.
+                if revision_request_for_capture.is_some() {
+                    tree.nodes = crate::atspi::projection::compact(tree.nodes);
+                }
+                let tree_result = Some(tree);
+                // Bounds and element indices come from the same captured AT-SPI
+                // traversal. Joining two live walks by ordinal mis-associated
+                // Chromium controls when its lazy subtree changed between walks.
+                let bounds = tree_result
+                    .as_ref()
+                    .map(|tree| tree.bounds.clone())
+                    .unwrap_or_default();
+                let observation_revision = match (
+                    revision_request_for_capture.as_ref(),
+                    observation_session,
+                    tree_result.as_ref(),
+                ) {
+                    (Some(request), Some(session), Some(tree)) => Some(
+                        observation_revisions
+                            .observe(
+                                session,
+                                pid,
+                                xid,
+                                max_elements.unwrap_or(5000),
+                                max_depth.unwrap_or(usize::MAX),
+                                tree,
+                                request,
+                            )
+                            .map_err(anyhow::Error::msg)?,
+                    ),
+                    _ => None,
+                };
+                // Capture and DELIVER the screenshot alongside the tree by default — the
+                // grounding frame the agent cross-checks the tree against. With
+                // screenshot_out_file set, write to disk and surface the path instead
+                // of embedding base64; otherwise embed base64. Skipped only when
+                // include_screenshot:false and no disk path was requested.
+                // Tuple: (Option<b64>, Option<file_path>, w, h, Option<original_w>).
+                let screenshot = if should_capture {
+                    match crate::wayland::screenshot_dispatch(xid) {
+                        Ok(raw) => {
+                            let orig_w = crate::capture::png_dimensions_pub(&raw)
+                                .map(|(w, _)| w)
+                                .unwrap_or(0);
+                            let png = crate::capture::resize_png_if_needed(&raw, max_dim)?;
+                            let (w, h) = crate::capture::png_dimensions_pub(&png)?;
+                            let original_w = if w < orig_w { Some(orig_w) } else { None };
+                            if let Some(ref path) = screenshot_out_file {
+                                std::fs::write(path, &png)?;
+                                Some((None, Some(path.clone()), w, h, original_w))
+                            } else {
+                                use base64::{
+                                    engine::general_purpose::STANDARD as B64, Engine as _,
+                                };
+                                Some((Some(B64.encode(&png)), None, w, h, original_w))
+                            }
+                        }
+                        Err(error) => {
+                            return Err(anyhow::anyhow!(
+                                "window screenshot failed for window {xid}: {error}"
+                            ));
                         }
                     }
-                    Err(error) => {
-                        return Err(anyhow::anyhow!(
-                            "window screenshot failed for window {xid}: {error}"
-                        ));
-                    }
-                }
-            } else {
-                None
+                } else {
+                    None
+                };
+                Ok((tree_result, screenshot, bounds, observation_revision))
             };
-            Ok((tree_result, screenshot, bounds, observation_revision))
+            if app_context
+                && should_capture
+                && !crate::wayland::is_wayland()
+                && crate::x11::is_minimized(xid)
+            {
+                crate::input::with_x11_foreground(xid, 1000, || {
+                    crate::x11::wait_for_restored_capture(xid)?;
+                    capture()
+                })
+            } else {
+                capture()
+            }
         })
         .await;
 
@@ -986,7 +1047,6 @@ impl Tool for GetWindowStateTool {
                     }
                     let stable_ids = observation_revision
                         .as_ref()
-                        .filter(|_| revision_capture_complete)
                         .map(|revision| {
                             revision
                                 .nodes
@@ -1030,6 +1090,10 @@ impl Tool for GetWindowStateTool {
                             });
                             if let Some(element_id) = stable_ids.get(&idx) {
                                 entry["element_id"] = json!(element_id);
+                            }
+                            if let Some(element_id) =
+                                stable_ids.get(&idx).filter(|_| revision_capture_complete)
+                            {
                                 entry["element_token"] = json!(
                                     cua_driver_core::observation_revision::revision_token_for(
                                         observation_revision
@@ -1177,7 +1241,7 @@ impl Tool for GetWindowStateTool {
                         "version":
                             cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
                         "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
-                        "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                        "projection_version": if app_context { cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION } else { cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION },
                         "mode": revision.mode.as_str(),
                         "lineage_id": revision.lineage_id,
                         "revision_id": revision.revision_id,
@@ -2569,6 +2633,22 @@ fn inject_terminal_input(pid: u32, xid: u64, text: &str) -> anyhow::Result<bool>
 
 // ── click ─────────────────────────────────────────────────────────────────────
 
+fn with_wayland_app_focus<T>(
+    app_context: bool,
+    pid: u32,
+    window_id: u64,
+    body: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if app_context && crate::wayland::is_inject_mode() {
+        anyhow::bail!("app_window_unavailable: configured compositor injection addresses a process, not an exact window; App input is unsupported on this route; no input was sent");
+    }
+    if app_context {
+        crate::wayland::with_target_foreground(pid, window_id, body)
+    } else {
+        body()
+    }
+}
+
 pub struct ClickTool {
     state: Arc<ToolState>,
 }
@@ -2603,6 +2683,7 @@ impl Tool for ClickTool {
                 // so it is NOT pinned in `required` — matches the click→[] canon
                 // in cua_driver_core::tool_schema.
                 "type":"object","required":[],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                     "pid":{"type":"integer"},
@@ -2709,6 +2790,7 @@ impl Tool for ClickTool {
             Err(e) => return e,
         };
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
+        let app_context = args.bool_or("app_context", false);
         let count = args.u64_or("count", 1) as usize;
         // Surface 5: reject unknown buttons so a typo can't silently fall through
         // to a left-click. Empty string keeps back-compat with old clients.
@@ -2815,7 +2897,14 @@ impl Tool for ClickTool {
 
             // Chromium can execute a genuine AT-SPI action without focus. Try
             // that route before applying its background synthetic-input gate.
-            if button == 1 && count == 1 && modifiers.is_empty() {
+            // An entry's AT-SPI "activate" can submit instead of focusing it.
+            // App clicks use pointer semantics so a subsequent typeText keeps
+            // the insertion point established by this click.
+            if !args.bool_or("app_context", false)
+                && button == 1
+                && count == 1
+                && modifiers.is_empty()
+            {
                 let identity_for_action = exact_identity.clone();
                 let ax_result = tokio::task::spawn_blocking(move || match identity_for_action {
                     Some(identity) => crate::atspi::perform_action_exact(pid, idx, identity),
@@ -2865,6 +2954,21 @@ impl Tool for ClickTool {
                 // selectable rows) expose bounds but no AT-SPI Action and
                 // ignore a targeted XSendEvent; limiting XTest to modified
                 // clicks made those rows addressable but not selectable.
+                if app_context && crate::wayland::is_inject_mode() {
+                    return with_wayland_app_focus(true, pid, xid2, || {
+                        crate::wayland::inject_click(pid, xid2, lx, ly, count as u32, button)
+                    });
+                }
+                if app_context && crate::wayland::wayland_input_enabled() {
+                    return crate::wayland::with_target_foreground(pid, xid2, || {
+                        let (sx, sy) = crate::wayland::window_local_to_output(
+                            xid2,
+                            lx.round() as i32,
+                            ly.round() as i32,
+                        );
+                        crate::wayland::click(xid2, sx, sy, count as u32, button)
+                    });
+                }
                 if delivery.is_foreground() && !crate::wayland::wayland_input_enabled() {
                     crate::input::with_x11_foreground(xid2, 80, || {
                         let (sx, sy) =
@@ -3004,7 +3108,9 @@ impl Tool for ClickTool {
                     }
                 }
                 if crate::wayland::is_inject_mode() {
-                    crate::wayland::inject_click(pid, xid, x, y, count as u32, button)?;
+                    with_wayland_app_focus(app_context, pid, xid, || {
+                        crate::wayland::inject_click(pid, xid, x, y, count as u32, button)
+                    })?;
                     return Ok("wayland_cua_compositor");
                 }
                 if !delivery.is_foreground() {
@@ -3013,7 +3119,9 @@ impl Tool for ClickTool {
                 // Native Wayland: focus+raise the target toplevel
                 // (foreign-toplevel `activate`), then drive `count` virtual-pointer
                 // button events. Wayland injection routes to the compositor focus.
-                crate::wayland::click(xid, output_x, output_y, count as u32, button)?;
+                with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::click(xid, output_x, output_y, count as u32, button)
+                })?;
                 return Ok("wayland_activate");
             }
             // X11 injection. Tiered no-focus-steal delivery (background):
@@ -3212,6 +3320,7 @@ impl Tool for TypeTextTool {
             description: "Type text to a window via XSendEvent (KeyPress/KeyRelease). No focus steal.".into(),
             input_schema: json!({
                 "type":"object","required":["text"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "pid":{"type":"integer"},
                     "window_id":{"type":"integer"},
@@ -4807,6 +4916,7 @@ impl Tool for ScrollTool {
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                     "pid":{"type":"integer"},
+                    "app_context":{"type":"boolean","description":"Use the app-bound target and focus policy."},
                     "direction":{"type":"string","enum":["up","down","left","right"]},
                     "by":{"type":"string","enum":["line","page"]},
                     "amount":{"type":"integer","minimum":1,"maximum":50},
@@ -4930,6 +5040,7 @@ impl Tool for ScrollTool {
         };
 
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
+        let app_context = args.bool_or("app_context", false);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
         }
@@ -5009,7 +5120,16 @@ impl Tool for ScrollTool {
             };
             let direction_for_inject = direction.clone();
             let result = tokio::task::spawn_blocking(move || {
-                crate::wayland::inject_scroll(pid, xid, x, y, &direction_for_inject, amount as u32)
+                with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::inject_scroll(
+                        pid,
+                        xid,
+                        x,
+                        y,
+                        &direction_for_inject,
+                        amount as u32,
+                    )
+                })
             })
             .await;
             return match result {
@@ -5065,7 +5185,14 @@ impl Tool for ScrollTool {
                 crate::wayland::window_local_to_output(xid, x.round() as i32, y.round() as i32)
             });
             let result = tokio::task::spawn_blocking(move || {
-                crate::wayland::scroll_at(xid, output_point, &direction_for_wayland, amount as u32)
+                with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::scroll_at(
+                        xid,
+                        output_point,
+                        &direction_for_wayland,
+                        amount as u32,
+                    )
+                })
             })
             .await;
             return match result {
@@ -5248,6 +5375,7 @@ impl Tool for DoubleClickTool {
                 No focus steal. Provide either (window_id + x/y) or (pid + element_index). \
                 After a zoom call, pass from_zoom=true to auto-translate zoom-image coords.".into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                 "pid":{"type":"integer"},
@@ -5270,6 +5398,7 @@ impl Tool for DoubleClickTool {
             Err(e) => return e,
         };
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
+        let app_context = args.bool_or("app_context", false);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
         }
@@ -5355,11 +5484,15 @@ impl Tool for DoubleClickTool {
                     let cursor_id_for_task = cursor_id.clone();
                     let click_result = tokio::task::spawn_blocking(move || {
                         if crate::wayland::is_inject_mode() {
-                            return crate::wayland::inject_click(pid, xid, lx, ly, 2, 1);
+                            return with_wayland_app_focus(app_context, pid, xid, || {
+                                crate::wayland::inject_click(pid, xid, lx, ly, 2, 1)
+                            });
                         }
                         if crate::wayland::wayland_input_enabled() {
                             let (output_x, output_y) = wayland_point.unwrap_or((lxi, lyi));
-                            return crate::wayland::click(xid, output_x, output_y, 2, 1);
+                            return with_wayland_app_focus(app_context, pid, xid, || {
+                                crate::wayland::click(xid, output_x, output_y, 2, 1)
+                            });
                         }
                         if delivery.is_foreground() {
                             return crate::input::with_x11_foreground(xid, 80, || {
@@ -5448,11 +5581,15 @@ impl Tool for DoubleClickTool {
         let cursor_id_for_task = cursor_id.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if crate::wayland::is_inject_mode() {
-                return crate::wayland::inject_click(pid, xid, x, y, 2, 1);
+                return with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::inject_click(pid, xid, x, y, 2, 1)
+                });
             }
             if crate::wayland::wayland_input_enabled() {
                 let (output_x, output_y) = wayland_output_point.unwrap_or((xi, yi));
-                return crate::wayland::click(xid, output_x, output_y, 2, 1);
+                return with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::click(xid, output_x, output_y, 2, 1)
+                });
             }
             if delivery.is_foreground() {
                 return crate::input::with_x11_foreground(xid, 80, || {
@@ -5507,6 +5644,7 @@ impl Tool for RightClickTool {
                 No focus steal. Provide either (window_id + x/y) or (pid + element_index). \
                 After a zoom call, pass from_zoom=true to auto-translate zoom-image coords.".into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                 "pid":{"type":"integer"},
@@ -5530,6 +5668,7 @@ impl Tool for RightClickTool {
             Err(e) => return e,
         };
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
+        let app_context = args.bool_or("app_context", false);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
         }
@@ -5615,11 +5754,15 @@ impl Tool for RightClickTool {
                     let cursor_id_for_task = cursor_id.clone();
                     let click_result = tokio::task::spawn_blocking(move || {
                         if crate::wayland::is_inject_mode() {
-                            return crate::wayland::inject_click(pid, xid, lx, ly, 1, 3);
+                            return with_wayland_app_focus(app_context, pid, xid, || {
+                                crate::wayland::inject_click(pid, xid, lx, ly, 1, 3)
+                            });
                         }
                         if crate::wayland::wayland_input_enabled() {
                             let (output_x, output_y) = wayland_point.unwrap_or((lxi, lyi));
-                            return crate::wayland::click(xid, output_x, output_y, 1, 3);
+                            return with_wayland_app_focus(app_context, pid, xid, || {
+                                crate::wayland::click(xid, output_x, output_y, 1, 3)
+                            });
                         }
                         if delivery.is_foreground() {
                             return crate::input::with_x11_foreground(xid, 80, || {
@@ -5708,11 +5851,15 @@ impl Tool for RightClickTool {
         let cursor_id_for_task = cursor_id.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if crate::wayland::is_inject_mode() {
-                return crate::wayland::inject_click(pid, xid, x, y, 1, 3);
+                return with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::inject_click(pid, xid, x, y, 1, 3)
+                });
             }
             if crate::wayland::wayland_input_enabled() {
                 let (output_x, output_y) = wayland_output_point.unwrap_or((xi, yi));
-                return crate::wayland::click(xid, output_x, output_y, 1, 3);
+                return with_wayland_app_focus(app_context, pid, xid, || {
+                    crate::wayland::click(xid, output_x, output_y, 1, 3)
+                });
             }
             if delivery.is_foreground() {
                 return crate::input::with_x11_foreground(xid, 80, || {
@@ -5766,6 +5913,7 @@ impl Tool for DragTool {
                           window-local screenshot pixels via XSendEvent (ButtonPress + MotionNotify × steps + ButtonRelease). \
                           duration_ms (default 500), steps (default 20). No focus steal.".into(),
             input_schema: json!({"type":"object","required":["from_x","from_y","to_x","to_y"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "cursor_id":{"type":"string","description":"Optional multi-cursor instance id. Default: 'default'."},
                 "pid":{"type":"integer"},
@@ -5854,6 +6002,7 @@ impl Tool for DragTool {
             None => return ToolResult::error("window_id is required on Linux."),
         };
         let delivery = crate::input::delivery::DeliveryMode::from_args(&args);
+        let app_context = args.bool_or("app_context", false);
         if let Some(refusal) = unavailable_chromium_background(pid, delivery) {
             return refusal;
         }
@@ -5964,14 +6113,16 @@ impl Tool for DragTool {
             let steps_u32 = steps as u32;
             let drag_result = if crate::wayland::is_inject_mode() {
                 tokio::task::spawn_blocking(move || {
-                    crate::wayland::inject_drag(
-                        pid,
-                        xid,
-                        (from_x, from_y),
-                        (to_x, to_y),
-                        steps,
-                        button as u32,
-                    )
+                    with_wayland_app_focus(app_context, pid, xid, || {
+                        crate::wayland::inject_drag(
+                            pid,
+                            xid,
+                            (from_x, from_y),
+                            (to_x, to_y),
+                            steps,
+                            button as u32,
+                        )
+                    })
                 })
             } else {
                 let ((fxi, fyi), (txi, tyi)) = wayland_points.unwrap_or((
@@ -5979,7 +6130,18 @@ impl Tool for DragTool {
                     (to_x.round() as i32, to_y.round() as i32),
                 ));
                 tokio::task::spawn_blocking(move || {
-                    crate::wayland::drag(xid, fxi, fyi, txi, tyi, steps_u32, duration_ms, button)
+                    with_wayland_app_focus(app_context, pid, xid, || {
+                        crate::wayland::drag(
+                            xid,
+                            fxi,
+                            fyi,
+                            txi,
+                            tyi,
+                            steps_u32,
+                            duration_ms,
+                            button,
+                        )
+                    })
                 })
             };
             let ((from_output_x, from_output_y), (to_output_x, to_output_y)) = wayland_points
@@ -9026,5 +9188,28 @@ mod app_discovery_tests {
         assert!(message.contains("DISPLAY"));
         assert!(message.contains("MCP server environment"));
         assert!(message.contains("restart"));
+    }
+}
+
+#[cfg(test)]
+mod app_inject_tests {
+    use super::*;
+    #[test]
+    #[ignore = "changes process environment; run alone"]
+    fn app_inject_refuses_process_addressing_before_dispatch() {
+        let old = std::env::var_os("CUA_INJECT_SOCKET");
+        std::env::set_var("CUA_INJECT_SOCKET", "/tmp/cua-fixture-unused.sock");
+        let called = std::cell::Cell::new(false);
+        let result = with_wayland_app_focus(true, 42, 7, || {
+            called.set(true);
+            Ok(())
+        });
+        if let Some(value) = old {
+            std::env::set_var("CUA_INJECT_SOCKET", value);
+        } else {
+            std::env::remove_var("CUA_INJECT_SOCKET");
+        }
+        assert!(result.unwrap_err().to_string().contains("exact window"));
+        assert!(!called.get());
     }
 }

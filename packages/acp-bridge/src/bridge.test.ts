@@ -3179,6 +3179,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('reports the live execution cwd and worktree ownership snapshot', async () => {
+    const target = path.join(WS_A, '.qwen', 'worktrees', 'branch-test');
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.changeSessionCwd(session.sessionId, {
+      path: target,
+      allowedRoots: [path.join(WS_A, '.qwen', 'worktrees')],
+    });
+    bridge.setSessionWorktree(session.sessionId, {
+      slug: 'branch-test',
+      path: target,
+      branch: 'worktree-branch-test',
+    });
+
+    expect(bridge.getSessionExecutionSnapshot(session.sessionId)).toEqual({
+      workspaceCwd: WS_A,
+      effectiveCwd: target,
+      worktree: {
+        slug: 'branch-test',
+        path: target,
+        branch: 'worktree-branch-test',
+      },
+    });
+    await bridge.shutdown();
+  });
+
   it('holds standalone prompts until the exact managed binding is released', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const target = path.join(WS_A, 'conversation-standalone');
@@ -18804,6 +18837,91 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps a latest-state worktree branch persisted and forwards its target id', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return { newSessionId: targetSessionId, title: 'Worktree branch' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = await bridge.branchSession(source.sessionId, {
+        name: 'Worktree branch',
+        targetSessionId,
+        persistOnly: true,
+      });
+
+      expect(branch).toMatchObject({
+        sessionId: targetSessionId,
+        displayName: 'Worktree branch',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+          params: expect.objectContaining({ targetSessionId }),
+        }),
+      );
+      expect(handle.agent.loadSessionCalls).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('rejects a persisted worktree branch before dispatch at the session cap', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxSessions: 1,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 1,
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('rejects a persisted branch whose returned target id changed', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return {
+            newSessionId: '22222222-2222-4222-8222-222222222222',
+            title: 'Wrong target',
+          };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toThrow('different target session id');
+      expect(handle.agent.loadSessionCalls).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('a failed prompt does not poison the queue for subsequent prompts', async () => {
       let promptCount = 0;
       const handles: ChannelHandle[] = [];
@@ -25607,6 +25725,177 @@ describe('createAcpSessionBridge', () => {
       );
 
       await bridge.shutdown();
+    });
+
+    it.each([
+      [{ persisted: false }, 'negative_ack'],
+      [
+        { persisted: false, reason: 'recording_unavailable' },
+        'recording_unavailable',
+      ],
+      [
+        { persisted: false, reason: 'write_not_confirmed' },
+        'write_not_confirmed',
+      ],
+      [{ persisted: false, reason: 'SECRET_REASON' }, 'unknown'],
+      [{ persisted: 'SECRET_ACK' }, 'invalid_ack'],
+      [null, 'invalid_ack'],
+      [
+        new Error('SECRET_RPC', { cause: { token: 'SECRET_TOKEN' } }),
+        'rpc_rejected',
+      ],
+    ])(
+      'safely classifies source persistence response %j as %s',
+      async (result, reason) => {
+        const onDiagnosticLine = vi.fn();
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionSource) return {};
+            if (result instanceof Error) throw result;
+            return result as Record<string, unknown>;
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          onDiagnosticLine,
+        });
+        try {
+          const session = await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sessionScope: 'thread',
+            sourceType: 'scheduled_task',
+            sourceId: 'SECRET_SOURCE',
+          });
+          expect(session.sourcePersisted).toBe(false);
+          const failures = onDiagnosticLine.mock.calls.filter(([line]) =>
+            line.includes('source_persistence_failed'),
+          );
+          expect(failures).toEqual([
+            [
+              `qwen serve: source_persistence_failed sessionId=${session.sessionId} reason=${reason} sourcePersisted=false`,
+              'warn',
+            ],
+          ]);
+          expect(JSON.stringify(failures)).not.toContain('SECRET_');
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it.each(['rpc_timeout', 'transport_closed'] as const)(
+      'classifies actual source transport failure %s',
+      async (reason) => {
+        const sourceStarted = deferred<void>();
+        const sourceReply = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionSource) return {};
+            sourceStarted.resolve();
+            return sourceReply.promise;
+          },
+        });
+        const onDiagnosticLine = vi.fn();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          initializeTimeoutMs: 500,
+          onDiagnosticLine,
+        });
+        try {
+          const pending = bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sourceType: 'scheduled_task',
+          });
+          const result = pending.catch((error: unknown) => error);
+          await sourceStarted.promise;
+          if (reason === 'transport_closed')
+            handle.crash({ exitCode: 1, signalCode: null });
+          await result;
+          expect(
+            onDiagnosticLine.mock.calls.filter(([line]) =>
+              line.includes('source_persistence_failed'),
+            ),
+          ).toEqual([
+            [
+              expect.stringContaining(`reason=${reason} sourcePersisted=false`),
+              'warn',
+            ],
+          ]);
+        } finally {
+          sourceReply.resolve({ persisted: false });
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it.each(['load', 'resume', 'live-backfill'] as const)(
+      'correlates source failures on %s without logging source payloads',
+      async (mode) => {
+        const onDiagnosticLine = vi.fn();
+        const handle = makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionSource
+              ? { persisted: false, reason: 'write_not_confirmed' }
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          onDiagnosticLine,
+        });
+        try {
+          const sessionId =
+            mode === 'live-backfill'
+              ? (await bridge.spawnOrAttach({ workspaceCwd: WS_A })).sessionId
+              : `source-${mode}`;
+          const request = {
+            sessionId,
+            workspaceCwd: WS_A,
+            sourceType: 'channel',
+            sourceId: 'SECRET_SOURCE',
+          };
+          const restored = await (mode === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request));
+          expect(restored.sourcePersisted).toBe(false);
+          const failures = onDiagnosticLine.mock.calls.filter(([line]) =>
+            line.includes('source_persistence_failed'),
+          );
+          expect(failures).toEqual([
+            [
+              `qwen serve: source_persistence_failed sessionId=${sessionId} reason=write_not_confirmed sourcePersisted=false`,
+              'warn',
+            ],
+          ]);
+          expect(JSON.stringify(failures)).not.toContain('SECRET_SOURCE');
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it('keeps source persistence booleans when the diagnostic callback throws', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: () => {
+          throw new Error('sink failed');
+        },
+      });
+      try {
+        await expect(
+          bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sourceType: 'scheduled_task',
+          }),
+        ).resolves.toMatchObject({ sourcePersisted: false });
+      } finally {
+        await bridge.shutdown();
+      }
     });
 
     it('persists and returns source metadata in status and list summaries', async () => {

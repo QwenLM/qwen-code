@@ -439,3 +439,211 @@ for (const key of ['Enter', 'Space']) {
     await expect(ring).toBeFocused();
   });
 }
+
+test('@smoke a compression outcome replaces the daemon sentence and refreshes the ring', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    supportedCommands: {
+      availableCommands: [
+        {
+          name: 'compress',
+          description: 'Compress context',
+          input: null,
+          _meta: { source: 'builtin-command' },
+        },
+      ],
+    },
+    state: {
+      models: {
+        currentModelId: 'qwen-test',
+        availableModels: [
+          { modelId: 'qwen-test', name: 'Qwen Test', contextLimit: 100_000 },
+        ],
+      },
+    },
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  let used = 64_000;
+  let reads = 0;
+  const reading = (): DaemonSessionContextUsageStatus => ({
+    v: 1,
+    sessionId: scenario.sessionId,
+    workspaceCwd: scenario.workspaceCwd,
+    formattedText: '',
+    usage: {
+      modelName: 'Qwen Test',
+      totalTokens: used,
+      contextWindowSize: 100_000,
+      breakdown: {
+        systemPrompt: 5_000,
+        builtinTools: 5_000,
+        mcpTools: 0,
+        memoryFiles: 0,
+        skills: 0,
+        messages: used - 10_000,
+        freeSpace: 90_000 - used,
+        autocompactBuffer: 10_000,
+      },
+      builtinTools: [],
+      mcpTools: [],
+      memoryFiles: [],
+      skills: [],
+      showDetails: false,
+    },
+  });
+  await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) => {
+    reads++;
+    return route.fulfill({ json: reading() });
+  });
+  const slashCommandChunk = (
+    id: number,
+    text: string,
+    meta: Record<string, unknown>,
+  ) => ({
+    id,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+        _meta: { source: 'slash_command', ...meta },
+      },
+    },
+  });
+  await page.goto(`/session/${scenario.sessionId}`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId }),
+  );
+  await daemon.sendEvent({
+    id: 20,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { inputTokens: used } },
+      },
+    },
+  });
+  const ring = page.locator('[data-web-shell-context-usage]');
+  await expect(ring).toHaveAttribute('aria-label', '64.0% context used');
+
+  // Two commands are two turns in production, and the frames of one turn share
+  // the record the daemon recorded them under: the reducer splits blocks on a
+  // change in that identity (a successful turn_complete normalizes to nothing).
+  // Held as one block instead, the fast no-op would overwrite the result payload
+  // in place and the result row would only exist between the two commands.
+  const compressRecord = {
+    qwenTranscript: { sourceRecordIds: ['record-compress'] },
+  };
+  const compressFastRecord = {
+    qwenTranscript: { sourceRecordIds: ['record-compress-fast'] },
+  };
+  await daemon.sendEvent(
+    slashCommandChunk(
+      29,
+      'Compression instructions were truncated to 2000 characters.',
+      {
+        ...compressRecord,
+        // Its own key, so folding this turn into one block cannot overwrite it
+        // with the compression payload that follows.
+        contextCompressionNotice: { phase: 'notice', instructionsLimit: 2000 },
+      },
+    ),
+  );
+  await daemon.sendEvent(
+    slashCommandChunk(30, 'Compressing context...', {
+      ...compressRecord,
+      contextCompression: { phase: 'progress' },
+    }),
+  );
+  await expect(
+    page.getByText(
+      'Compression instructions were truncated to 2,000 characters.',
+    ),
+  ).toBeVisible();
+  // The compression reports itself in the conversation while it runs, in the
+  // client's own language rather than with the daemon's sentence.
+  await expect(page.getByText('Compressing…')).toBeVisible();
+  await expect(page.getByText('Compressing context...')).toHaveCount(0);
+
+  used = 20_000;
+  await daemon.sendEvent(
+    slashCommandChunk(31, 'Context compressed (263195 -> ~99799).', {
+      ...compressRecord,
+      contextCompression: {
+        phase: 'done',
+        originalTokenCount: 263_195,
+        newTokenCount: 99_799,
+        originalTokenCountIsEstimated: false,
+        newTokenCountIsEstimated: true,
+      },
+    }),
+  );
+
+  // The result replaces that same row: the client renders the payload in its own
+  // language, and the daemon's English sentence stays on the wire only for hosts
+  // that render text as-is.
+  await expect(
+    page.getByText('Context compressed 263,195 → ~99,799'),
+  ).toBeVisible();
+  await expect(page.getByText('Compressing…')).toHaveCount(0);
+  await expect(
+    page.getByText('Context compressed (263195 -> ~99799).'),
+  ).toHaveCount(0);
+  // The notice is its own row and survives the result it precedes.
+  await expect(
+    page.getByText(
+      'Compression instructions were truncated to 2,000 characters.',
+    ),
+  ).toBeVisible();
+  // The daemon emits no usage frame for a compression, so the transcript
+  // outcome is what reconciles the composer ring.
+  await expect.poll(() => reads).toBeGreaterThan(0);
+  await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
+  // `/compress-fast` with nothing to strip ends on a terminal no-op: the same
+  // row flips to the outcome instead of staying on the pending copy and being
+  // dropped once the turn's block stops streaming.
+  await daemon.sendEvent(
+    slashCommandChunk(32, 'Compressing context (fast)...', {
+      ...compressFastRecord,
+      contextCompression: { phase: 'progress' },
+    }),
+  );
+  await expect(page.getByText('Compressing…')).toBeVisible();
+  await daemon.sendEvent(
+    slashCommandChunk(33, 'No compression needed.', {
+      ...compressFastRecord,
+      contextCompression: { phase: 'noop' },
+    }),
+  );
+  await daemon.sendEvent(
+    turnCompleteEvent('compression-4', { sessionId: scenario.sessionId }),
+  );
+  // Exact, not a substring: the daemon's own sentence is the same string in EN,
+  // so a substring match would also pass if the payload stopped rendering.
+  await expect(
+    page.getByText('No compression needed.', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('Compressing…')).toHaveCount(0);
+  // Two commands, two turns: the fast no-op is its own row and left the first
+  // command's rows standing.
+  await expect(
+    page.getByText('Context compressed 263,195 → ~99,799'),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'Compression instructions were truncated to 2,000 characters.',
+    ),
+  ).toBeVisible();
+
+  await page.screenshot({
+    path: testInfo.outputPath('context-compression-transcript.png'),
+  });
+});

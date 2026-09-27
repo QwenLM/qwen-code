@@ -64,6 +64,16 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('rejects tool sandbox sessions before starting host speculation', async () => {
+    const config = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(config, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    expect(forkedAgentMocks.getCacheSafeParams).not.toHaveBeenCalled();
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
   it('does not start when the session-scoped lookup returns null', async () => {
     const config = {
       getSessionId: vi.fn().mockReturnValue('spec-session'),

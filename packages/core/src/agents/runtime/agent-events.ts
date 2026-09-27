@@ -120,6 +120,8 @@ export interface AgentToolCallEvent {
   callId: string;
   name: string;
   args: Record<string, unknown>;
+  modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
   description: string;
   /** Whether the tool's output should be rendered as markdown. */
   isOutputMarkdown?: boolean;

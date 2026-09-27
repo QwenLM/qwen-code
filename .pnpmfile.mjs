@@ -12,6 +12,7 @@
 export const workspacePackageNames = new Set([
   '@qwen-code/acp-bridge',
   '@qwen-code/audio-capture',
+  '@qwen-code/browser-use',
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',
   '@qwen-code/channel-dws',

@@ -1481,6 +1481,12 @@ function parseAgentConfig(
   level: SubagentLevel,
   res: Response,
 ): SubagentConfig | undefined {
+  if ('executionBackend' in body) {
+    return sendInvalidConfig(
+      res,
+      'Daemon agents do not support executionBackend.',
+    );
+  }
   const rawName = body['name'];
   if (typeof rawName !== 'string' || rawName.trim().length === 0) {
     res.status(422).json({
@@ -1683,6 +1689,12 @@ function parseAgentUpdates(
   body: Record<string, unknown>,
   res: Response,
 ): Partial<SubagentConfig> | undefined {
+  if ('executionBackend' in body) {
+    return sendInvalidConfig(
+      res,
+      'Daemon agents do not support executionBackend.',
+    );
+  }
   const updates: Partial<SubagentConfig> = {};
   if ('description' in body) {
     const value = body['description'];

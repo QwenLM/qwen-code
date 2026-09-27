@@ -9,10 +9,12 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import {
   buildSessionHistoryFromConversation,
   detectTurnInterruption,
+  effectiveHistoryEnd,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   type ChatRecord,
   type ResumedSessionData,
+  type SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   appendPromptLedgerRecord,
@@ -211,26 +213,67 @@ export async function reconcileDanglingPromptTerminals(
   // last write on the raw stream instead would let evidence that the
   // verdict never sees pass the guard.
   let lastVisibleWriteMs = NaN;
+  let lastVisibleNonSystem: ChatRecord | undefined;
   let compressedAfterAdmission = false;
+  let localCommandCompleted = false;
+  // Marker-bearing admissions order by position: anything past the marker
+  // postdates admission, so a backward clock step cannot hide a
+  // post-admission write. Marker-less admissions fall back to the wall clock.
+  const admissionAt = targetAdmission.at;
+  const isAfterAdmission = (idx: number, writeMs: number): boolean =>
+    admissionMarker !== undefined
+      ? idx > markerIndex
+      : Number.isFinite(writeMs) && writeMs >= admissionAt;
   for (let idx = 0; idx < messages.length; idx++) {
     const record = messages[idx];
     const writeMs = Date.parse(record.timestamp);
     if (record.type === 'system') {
       if (isCompressionResetRecord(record)) {
-        // Marker-bearing admissions order by position: anything past the
-        // marker postdates admission, so a backward clock step cannot hide
-        // a post-admission compression. Marker-less admissions fall back
-        // to the wall clock.
-        const afterAdmission =
-          admissionMarker !== undefined
-            ? idx > markerIndex
-            : Number.isFinite(writeMs) && writeMs >= targetAdmission.at;
-        if (afterAdmission) compressedAfterAdmission = true;
+        if (isAfterAdmission(idx, writeMs)) compressedAfterAdmission = true;
+      } else if (
+        !localCommandCompleted &&
+        isAfterAdmission(idx, writeMs) &&
+        isLocalSlashCommandResult(record, lastVisibleNonSystem)
+      ) {
+        // A LOCALLY handled slash command (`/help`, `/docs`, `/export md`, ...)
+        // completes without ever reaching the model: `Session.prompt()` records
+        // the prompt as an ordinary user message, the command writes a
+        // `system` / `slash_command` `phase: 'result'` record, and
+        // `SessionApiHistoryAccumulator` pops the user entry back out of the
+        // projection (session-api-history.test.ts asserts the projection is
+        // `[]` for exactly these commands). The verdict below therefore reads
+        // `none` while the last visible non-system write is still
+        // `type: 'user'` — the result record is the only completion evidence
+        // this shape has, so recognise it here instead of leaving the promptId
+        // permanently `unknown` (the ledger is append-only and
+        // `settledPromptIds` filters it, so nothing would ever resolve it).
+        localCommandCompleted = true;
       }
       continue;
     }
     if (!record.message || record.subtype === 'realtime_message') continue;
+    // Entering the projection is necessary but not sufficient: the record also
+    // has to be the target turn's OWN write. A system-injected background
+    // notification is not — `createNotificationRecord`
+    // (packages/core/src/services/chatRecordingService.ts) stamps
+    // `provenance: 'system'` on a user-role record the daemon persists BEFORE
+    // the automatic turn runs, and it does enter the projection. Counting one
+    // as evidence lets a notification-only post-admission tail pass
+    // attribution for a prompt that never dispatched, and what the classifier
+    // then sees is whatever the PREVIOUS turn left behind once the
+    // notification is trimmed: a dangling `functionCall` there upgrades the
+    // verdict, so a wrong `interrupted / daemon_lost` terminal is appended.
+    // (When the previous turn ended in model text instead, the tail reads
+    // `none` and the provenance-bound completion guard below vetoes the shape
+    // on its own — so this skip is what keeps the ATTRIBUTION direction
+    // honest, not what prevents that second shape.) Everything a prompt's own
+    // turn writes is `real_user` / `assistant_output` / `tool_result`
+    // (`createBaseRecord`), so this skip can only veto the notification/cron
+    // family. The verdict's tail is deliberately NOT trimmed here — the
+    // classifier owns that trim (`effectiveHistoryEnd` below).
+    if (record.provenance === 'system') continue;
     if (Number.isFinite(writeMs)) lastVisibleWriteMs = writeMs;
+    lastVisibleNonSystem = record;
   }
   // FIFO evidence: under FIFO admission the target's turn can only start
   // after every other prompt settled, so any visible tail not strictly
@@ -260,15 +303,81 @@ export async function reconcileDanglingPromptTerminals(
   }
   const { apiHistory, completedToolCallIds } =
     buildSessionHistoryFromConversation(resumed.conversation);
-  const historyTail = apiHistory.slice(-TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+  // Trim BEFORE windowing: the bounded tail has to be cut from the
+  // classifiable projection, not from the raw one. Slicing first lets a run of
+  // trailing system-injected notifications fill the entire window — they are
+  // unbounded, since `#persistDaemonBackgroundNotification` (packages/core
+  // Session.ts) persists each one on enqueue and
+  // `MAX_BACKGROUND_NOTIFICATION_QUEUE` bounds the PENDING queue, not the
+  // persisted records. An all-notification window leaves the classifiable tail
+  // empty while the attribution loop above, which walks the WHOLE transcript
+  // rather than the window, still reports the model entry as the last visible
+  // non-system write: detection reads `none` (`boundary >= end` with
+  // `end === 0`), the id-less guard below has nothing to upgrade, and the
+  // provenance-bound guard accepts that `assistant` tail — stamping
+  // `completed` for a prompt that died mid tool-run. Cost is unchanged: the
+  // window still holds at most TURN_INTERRUPTION_HISTORY_TAIL_COUNT entries.
+  const classifiableEnd = effectiveHistoryEnd(apiHistory);
+  const historyTail = apiHistory.slice(
+    Math.max(0, classifiableEnd - TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+    classifiableEnd,
+  );
   const verdict = detectTurnInterruption(historyTail, completedToolCallIds);
   // Id-less tool-call guard: `detectTurnInterruption` ignores functionCalls
   // without an id (they cannot be paired on the wire), but reconciliation
   // needs no wire pairing — a model tail holding ANY functionCall means the
   // daemon died mid tool-run, so upgrade the verdict to interrupted
   // (`interrupted_turn` semantics).
+  //
+  // The guard reads the SAME tail the verdict read, which the trim-first
+  // window above now guarantees by construction: no trailing notification can
+  // hide the model entry from this guard while detection trims it away, the
+  // both-miss-at-once shape that stamped a mid-tool-run death `completed`.
   const interrupted =
     verdict.kind !== 'none' || tailHoldsAnyFunctionCall(historyTail);
+  // Provenance-bound completion guard. A `none` verdict rests on the
+  // classifier's TEXT-SHAPE trim, which cannot tell a real prompt whose whole
+  // text happens to be an envelope (pasted out of a transcript, or forwarded
+  // verbatim by a channel/SDK client — `createBaseRecord` stamps it
+  // `provenance: 'real_user'`, so the attribution loop above counts it as the
+  // target's own write) from a system-injected one. Trimming that entry
+  // exposes the PREVIOUS turn's model text as the tail, so `verdict.kind` is
+  // `none` and `tailHoldsAnyFunctionCall` is false, and a `completed`
+  // terminal would be synthesized for a prompt the model never answered —
+  // then served by every later load, because the ledger is append-only and
+  // `settledPromptIds` filters it. Only a model-facing write by the target's
+  // own turn can certify completion, so bind the stamp to the authoritative
+  // `provenance` signal instead of to the shape-derived verdict.
+  //
+  // `tool_result` is accepted alongside `assistant` for the GOAL-BOUNDARY
+  // shape only. `boundary >= end` in `detectTurnInterruption` requires the
+  // closing call id to be in `completedToolCallIds`, and that set has exactly
+  // two producers — the `goal_turn_end` branch and the compression payload,
+  // both in `packages/core/src/services/session-api-history.ts`. An ordinary
+  // closed tool pair never reaches this guard: it classifies as
+  // `interrupted_prompt` and takes the interrupted path above.
+  //
+  // A LOCALLY handled slash command is the one user-role tail that does prove
+  // completion, and it is recognised from its own authoritative record (the
+  // `slash_command` result the attribution loop matched above), not from the
+  // shape of any text.
+  const lastVisibleNonSystemType = lastVisibleNonSystem?.type;
+  if (
+    !interrupted &&
+    lastVisibleNonSystemType !== 'assistant' &&
+    lastVisibleNonSystemType !== 'tool_result' &&
+    !localCommandCompleted
+  ) {
+    // Fail closed: a user-role tail with no local-command result cannot prove
+    // the turn completed. The veto is silent — reconciliation runs in the
+    // serve daemon, which binds no debug-log session (no `runWithDebugLogSession`
+    // or `sessionIdContext` binding exists in `packages/cli/src/serve` or
+    // `packages/acp-bridge`, and the agent child that constructs Configs is a
+    // separate spawned process), so a `debug()` call here would be dropped
+    // before writing. The observable consequence is the ledger itself: no
+    // record is appended, so this promptId keeps reporting `unknown`.
+    return;
+  }
   // TOCTOU fence: a prompt admitted while `loadSession` ran appended its
   // `in_flight` after the snapshot above, and the visible tail may now
   // belong to it — the verdict computed from the snapshot must not be
@@ -317,6 +426,57 @@ function isCompressionResetRecord(record: ChatRecord): boolean {
   return Boolean(
     (record.systemPayload as { compressedHistory?: unknown } | undefined)
       ?.compressedHistory,
+  );
+}
+
+/**
+ * Whether `record` is the result half of a LOCALLY handled slash command
+ * whose input is `previous`: the exact shape `SessionApiHistoryAccumulator`
+ * pops out of the api history projection
+ * (`packages/core/src/services/session-api-history.ts`). The payload is read
+ * through core's exported `SlashCommandRecordPayload` (a type-only barrel
+ * import, like `ChatRecord` above), so renaming or retyping any field named
+ * below is a compile error here instead of a silent `undefined` comparison
+ * that would leave `localCommandCompleted` false forever — and, the ledger
+ * being append-only, every later load of that session reporting `unknown`.
+ *
+ * The CONDITIONS stay mirrored rather than shared: sharing them means exporting
+ * a predicate from core and handing it the accumulator's notion of `previous`
+ * (`lastMaterialRecord`, which does NOT skip `provenance: 'system'` records and
+ * is cleared after a pop), whereas this loop passes `lastVisibleNonSystem`
+ * (which skips them and is never cleared) — wiring the wrong one through would
+ * make a notification-interleaved ordering pop in one module and not the
+ * other. Drift is asymmetric, and only one direction is safe: if the
+ * accumulator STOPS popping a shape, that shape's user entry stays in the
+ * projection, the verdict classifies it, and this predicate's answer no longer
+ * matters. If it STARTS popping one, or relaxes a condition, the projection
+ * loses the user entry while this mirror returns false, so the completion guard
+ * vetoes and that command's promptId stays `unknown` — a MISSING terminal, the
+ * failure this module is allowed to have, never a wrong one.
+ */
+function isLocalSlashCommandResult(
+  record: ChatRecord,
+  previous: ChatRecord | undefined,
+): boolean {
+  if (record.subtype !== 'slash_command') return false;
+  const payload = record.systemPayload as SlashCommandRecordPayload | undefined;
+  const items = payload?.outputHistoryItems;
+  const parts = previous?.message?.parts;
+  const first = parts?.[0];
+  return (
+    payload?.phase === 'result' &&
+    payload.sentToModel !== true &&
+    Array.isArray(items) &&
+    items.length > 0 &&
+    items.every((item) => item['type'] === 'assistant') &&
+    previous?.type === 'user' &&
+    previous.subtype === undefined &&
+    previous.message?.role === 'user' &&
+    parts?.length === 1 &&
+    first !== undefined &&
+    typeof first.text === 'string' &&
+    Object.keys(first).length === 1 &&
+    first.text === payload.rawCommand
   );
 }
 

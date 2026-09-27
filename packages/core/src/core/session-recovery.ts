@@ -61,6 +61,17 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   sessionId: string;
   apiHistory: Content[];
   completedToolCallIds?: readonly string[];
+  /**
+   * Authoritative count of trailing `apiHistory` entries whose source record
+   * the recorder stamped as a system-injected notification, as reported by
+   * `buildSessionHistoryFromConversation`. Forwarded to
+   * `detectTurnInterruption` so the notification trim narrows to entries that
+   * really are notifications instead of trusting the `<task-notification>`
+   * shape — without it, a real user prompt whose whole text is a bare envelope
+   * is trimmed, the session is certified `clean`, and the unanswered prompt
+   * gets no banner and no Retry.
+   */
+  trailingSystemNotifications?: number;
   historyGaps?: HistoryGap[];
   options?: {
     allowAutoContinue?: boolean;
@@ -123,6 +134,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   sessionId,
   apiHistory: inputApiHistory,
   completedToolCallIds,
+  trailingSystemNotifications,
   historyGaps,
   options,
 }: BuildSessionRecoveryPlanFromApiHistoryInput): SessionRecoveryPlan {
@@ -170,6 +182,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   const interruption = detectTurnInterruption(
     originalApiHistory,
     completedToolCallIds,
+    trailingSystemNotifications,
   );
   if (interruption.kind === 'none') {
     return {

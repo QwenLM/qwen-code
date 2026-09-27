@@ -148,6 +148,7 @@ export function WorkspaceSelector({
           <TooltipContent side="top">{triggerLabel}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
+          side="top"
           align="start"
           className="min-w-56"
           onPointerDownCapture={() => {

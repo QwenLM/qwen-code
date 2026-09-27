@@ -425,8 +425,16 @@ export function projectContextUsage(item: Record<string, unknown>): string {
   const showDetails = Boolean(item['showDetails']);
   const lines = ['Context Usage', ''];
   if (totalTokens <= 0) {
-    lines.push('No API response yet. Send a message to see actual usage.');
-    lines.push('Estimated pre-conversation overhead');
+    // Parity of views/ContextUsage: an estimated history changes the captions.
+    if (Number(breakdown['messages'] ?? 0) > 0) {
+      lines.push(
+        'No provider usage yet. These are local estimates, including the conversation.',
+      );
+      lines.push('Estimated usage, including the conversation');
+    } else {
+      lines.push('No API response yet. Send a message to see actual usage.');
+      lines.push('Estimated pre-conversation overhead');
+    }
   }
   lines.push(
     `Model: ${modelName} Context window: ${fmtTokensShort(windowSize)} tokens`,
@@ -441,6 +449,12 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Used ${fmtTokensShort(totalTokens)} tokens (${pct(totalTokens, windowSize)}%)`,
     );
+    const cached = Number(breakdown['cachedTokens'] ?? 0);
+    if (cached > 0) {
+      lines.push(
+        `█ Cached prefix ${fmtTokensShort(cached)} tokens (${pct(cached, windowSize)}%)`,
+      );
+    }
     lines.push(
       `░ Free ${fmtTokensShort(free)} tokens (${pct(free, windowSize)}%)`,
     );
@@ -456,19 +470,28 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['MCP tools', 'mcpTools'],
     ['Memory files', 'memoryFiles'],
     ['Skills', 'skills'],
+    ['Startup context', 'startupContext'],
   ];
   for (const [label, key] of categories) {
     const value = Number(breakdown[key] ?? 0);
-    if (key === 'mcpTools' && value <= 0) continue;
+    if ((key === 'mcpTools' || key === 'startupContext') && value <= 0) {
+      continue;
+    }
     lines.push(
       `█ ${label} ${fmtTokensShort(value)} tokens (${pct(value, windowSize)}%)`,
     );
   }
-  if (totalTokens > 0) {
-    const messages = Number(breakdown['messages'] ?? 0);
+  const messages = Number(breakdown['messages'] ?? 0);
+  if (totalTokens > 0 || messages > 0) {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
+    const unattributed = Number(breakdown['unattributed'] ?? 0);
+    if (unattributed > 0) {
+      lines.push(
+        `█ Unattributed ${fmtTokensShort(unattributed)} tokens (${pct(unattributed, windowSize)}%)`,
+      );
+    }
   }
   // Three-tier compaction ladder — ink renders it whenever thresholds +
   // currentTier are present (even while usage is still estimated).
@@ -550,7 +573,7 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ];
     // Loaded skills first, then by total (listing + body) token cost.
     skills.sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       const aTotal = a.tokens + (a.bodyTokens ?? 0);
       const bTotal = b.tokens + (b.bodyTokens ?? 0);
       return bTotal - aTotal;

@@ -232,7 +232,10 @@ vi.mock('vscode', () => ({
   },
 }));
 
-vi.mock('../../services/settingsWriter.js', () => ({
+vi.mock('../../services/settingsWriter.js', async (importOriginal) => ({
+  resolveProviderSettings: (
+    await importOriginal<typeof import('../../services/settingsWriter.js')>()
+  ).resolveProviderSettings,
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
@@ -1858,6 +1861,146 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: 'Responses-only reconnect',
+      sibling: false,
+      savedAuth: undefined,
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Responses beside Chat',
+      sibling: true,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Chat beside Responses',
+      sibling: true,
+      savedAuth: 'openai',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'new endpoint',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: true,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'explicit Chat choice',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: true,
+      expected: 'openai',
+    },
+  ])(
+    'preserves preset routes and selects the identified wire: $name',
+    async ({ sibling, savedAuth, otherEndpoint, explicitChat, expected }) => {
+      const model = {
+        id: inputs.modelIds[0],
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        name: '[DeepSeek] Tuned',
+        wireApi: 'responses',
+        generationConfig: { contextWindowSize: 32000 },
+      };
+      mockSnapshotSettingsForRollback.mockReturnValue({
+        modelProviders: {
+          openai: [
+            ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+            model,
+          ],
+        },
+        model: { name: model.id },
+        security: { auth: { selectedType: savedAuth } },
+      });
+      const provider = makeProvider();
+      (
+        provider as unknown as {
+          doInitializeAgentConnection: () => Promise<void>;
+        }
+      ).doInitializeAgentConnection = vi.fn(async () => {
+        (provider as unknown as { authState: boolean }).authState = true;
+      });
+      await provider['handleAuthInteractive'](providerConfig, {
+        ...inputs,
+        ...(otherEndpoint ? { baseUrl: 'https://another.example/v1' } : {}),
+        ...(explicitChat ? { wireApi: 'chat-completions' as const } : {}),
+      });
+      expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+      const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+      expect(plan.authType).toBe(expected);
+      if (!otherEndpoint && !explicitChat) {
+        expect(plan.modelProviders[0].models).toEqual([
+          ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+          model,
+        ]);
+      } else {
+        expect(plan.modelProviders[0].models).toHaveLength(1);
+        expect(plan.modelProviders[0].models[0]).toMatchObject({
+          id: model.id,
+          baseUrl: otherEndpoint
+            ? 'https://another.example/v1'
+            : inputs.baseUrl,
+          ...(explicitChat ? { wireApi: 'chat-completions' } : {}),
+        });
+        if (otherEndpoint) {
+          expect(plan.modelProviders[0].models[0].wireApi).toBeUndefined();
+        }
+      }
+    },
+  );
+
+  it('reconnects a mixed preset without changing either API or the selected model', async () => {
+    const models = [
+      {
+        id: 'deepseek-v4-pro',
+        name: '[DeepSeek] Pro',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      {
+        id: 'deepseek-v4-flash',
+        name: '[DeepSeek] Flash',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        wireApi: 'responses',
+      },
+    ];
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: models },
+      model: { name: 'deepseek-v4-flash', baseUrl: inputs.baseUrl },
+      security: { auth: { selectedType: 'openai-responses' } },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](
+      { ...providerConfig, models: models.map(({ id }) => ({ id })) },
+      { ...inputs, modelIds: models.map(({ id }) => id) },
+    );
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+    expect(plan.modelProviders[0].models).toEqual(models);
+    expect(plan.authType).toBe('openai-responses');
+    expect(plan.modelSelection).toEqual({ modelId: 'deepseek-v4-flash' });
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
     mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
@@ -2539,6 +2682,31 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.data?.message).toContain(
       'not a forwarded loopback address',
+    );
+  });
+
+  it('refuses an IPv6 loopback that the webview CSP cannot express', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://[::1]:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'cannot connect to an IPv6 literal',
     );
   });
 });

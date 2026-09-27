@@ -41,6 +41,44 @@ import { isDiscontinuedModel } from './utils/discontinuedModel.js';
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 
+/** Longest an edit submit waits for the rewind to land in the transcript. */
+const REWIND_APPLIED_TIMEOUT_MS = 2_000;
+
+/** Conversational user turns — the blocks a rewind indexes against. */
+function countEditableUserTurns(
+  blocks: readonly DaemonTranscriptBlock[],
+): number {
+  let count = 0;
+  for (const block of blocks) {
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function waitForRewindApplied(
+  getBlocks: () => readonly DaemonTranscriptBlock[],
+  targetTurnIndex: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + REWIND_APPLIED_TIMEOUT_MS;
+    const poll = () => {
+      if (countEditableUserTurns(getBlocks()) <= targetTurnIndex) {
+        resolve(true);
+      } else if (Date.now() >= deadline) {
+        resolve(false);
+      } else {
+        setTimeout(poll, 16);
+      }
+    };
+    poll();
+  });
+}
+
 const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
@@ -1598,8 +1636,14 @@ export function EmbeddedApp() {
                 throw new Error(t('composer.editExpired'));
               }
               try {
+                // No X-Qwen-Client-Id on purpose: the daemon registers a
+                // session-bound id (`client_<uuid>`) at create/load that the
+                // raw DaemonClient here never learns, and the extension's own
+                // `vscode-<uuid>` is not registered either — sending it makes
+                // the rewind 400 `invalid_client_id`. Like the host's other
+                // session mutations (rename, delete), the rewind is
+                // unattributed and still token-authenticated.
                 await daemonClient.rewindSession(sessionId, snapshot.promptId, {
-                  clientId: runtime.clientId,
                   rewindFiles: false,
                 });
               } catch (err) {
@@ -1607,6 +1651,23 @@ export function EmbeddedApp() {
               }
               setEditingMessage(undefined);
               clearInsight();
+              // The daemon delivers `session.rewound` on the session stream,
+              // which lands in the transcript store after the rewind HTTP
+              // response resolves. Returning now would let the web shell add
+              // its optimistic user message before the rewind event truncates
+              // the transcript, and that late truncation would wipe the
+              // message from the view. Skip the failure when the user has
+              // navigated to another session — the send is cancelled on
+              // switch and the transcript reloads from the daemon anyway.
+              if (
+                !(await waitForRewindApplied(
+                  () => transcriptBlocksRef.current,
+                  snapshot.turnIndex,
+                )) &&
+                runtimeRef.current?.sessionId === sessionId
+              ) {
+                throw new Error(t('composer.editSyncFailed'));
+              }
             }
 
             if (!activeFile || !includeActiveFile) return undefined;

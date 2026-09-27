@@ -5,7 +5,11 @@
  */
 
 import type { Application, RequestHandler } from 'express';
-import { ALL_PROVIDERS, ProviderInstallError } from '@qwen-code/qwen-code-core';
+import {
+  ALL_PROVIDERS,
+  ProviderInstallError,
+  resolveModelProtocol,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -340,6 +344,20 @@ export function registerWorkspaceAuthRoutes(
           });
           return;
         }
+      }
+      try {
+        resolveModelProtocol(
+          installRequest.protocol ?? knownProvider.protocol,
+          {
+            wireApi: installRequest.wireApi,
+          },
+        );
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : String(error),
+          code: 'invalid_api',
+        });
+        return;
       }
       try {
         const assertGenerationOpen = captureGenerationAssertion?.();

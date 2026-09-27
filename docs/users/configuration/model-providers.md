@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `openai-responses`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
@@ -16,11 +16,11 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
+> **Model uniqueness:** Models are identified by their effective API protocol, `id`, and configured `baseUrl`. You can define the same model and URL with both `wireApi: "chat-completions"` and `wireApi: "responses"`, or use different URLs for the same model and API. If entries share all three values, the first occurrence wins and subsequent duplicates are skipped with a warning.
 
 > [!note]
 >
-> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). `providerProtocol` is read once at startup and **requires a restart**.
+> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). Changing the active model's `wireApi` creates a different route; select that route explicitly or restart to use it. Invalid API edits leave the prior registry usable. `providerProtocol` is read once at startup and **requires a restart**.
 
 ### Image generation routes
 
@@ -68,6 +68,67 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 `envKey`. Image generation uses the same endpoint and credential as the route;
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
+
+### Live Voice routes
+
+Set `realtimeOnly: true` on a route that speaks the DashScope Realtime
+(speech-to-speech) protocol. Such a route is never offered as a chat, fast,
+vision, voice or image model; it can only be chosen as the Live Voice model
+through `experimental.liveVoice.model` (a `modelId`, or `provider:modelId` when
+the same id exists under more than one provider).
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.5-omni-plus-realtime",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "envKey": "DASHSCOPE_API_KEY",
+        "realtimeOnly": true
+      }
+    ]
+  },
+  "experimental": {
+    "liveVoice": {
+      "enabled": true,
+      "model": "qwen3.5-omni-plus-realtime",
+      "voice": "Tina"
+    }
+  }
+}
+```
+
+When the selected model names a `realtimeOnly` route, Live Voice reads the API
+key through the route's `envKey` (process environment first, then the `env`
+block of `settings.json`) and derives the WebSocket endpoint from its `baseUrl`
+(`https://<host>/compatible-mode/v1` becomes `wss://<host>/api-ws/v1/realtime`).
+The route must declare both `baseUrl` and `envKey`, and the host must be a
+DashScope endpoint.
+
+Two rules are deliberate:
+
+- Workspace settings are never consulted, only user- and system-level ones. A
+  project's `.qwen/settings.json` cannot add or redirect a Live Voice route.
+- A **bare** `modelId` that matches no `realtimeOnly` route uses the
+  free-standing `experimental.liveVoice.endpoint` and
+  `experimental.liveVoice.apiKey` fields as before, so existing setups keep
+  working unchanged. A `provider:modelId` selector whose provider exists but
+  has no such route is an error instead: a deleted or mistyped route never
+  falls back to a stored key silently.
+- While a route is selected, `experimental.liveVoice.apiKey` and
+  `experimental.liveVoice.endpoint` are unused, and the setup API refuses to
+  store new ones.
+
+On the free-standing path the Web Shell's Qwen Live settings set the endpoint
+and model directly. Enter the OpenAI-compatible base URL of the region or
+dedicated domain your key belongs to, such as
+`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; left empty, Live uses
+Beijing (`https://dashscope.aliyuncs.com/compatible-mode/v1`), and a key from
+elsewhere is rejected with `401`. The base URL is stored as entered and
+converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
+be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
+endpoint is checked with a Realtime handshake before it is saved.
 
 ## Override reasoning capabilities
 
@@ -118,12 +179,11 @@ Below are comprehensive configuration examples for different authentication type
 
 ### Supported Auth Types
 
-The `modelProviders` object keys must be valid `authType` values. Currently supported auth types are:
+Use one of the built-in provider ids below, or map a custom id with `providerProtocol`:
 
-| Auth Type          | Description                                                                                                                                     |
+| Effective protocol | Description                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openai`           | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama)                                                         |
-| `openai-responses` | OpenAI's `/v1/responses` API (native reasoning replay via `reasoning.encrypted_content`, not the Chat Completions format used by `openai`)      |
+| `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `wireApi` to `responses` for the Responses API.                             |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
 | `qwen-oauth`       | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
@@ -137,7 +197,7 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 
 ### Custom provider ids (`providerProtocol`)
 
-Built-in provider ids (`openai`, `openai-responses`, `gemini`, `anthropic`, `vertex-ai`, `qwen-oauth`) are routed to their SDK protocol automatically. To use a **custom** provider id — for example to group several OpenAI-compatible endpoints under a friendlier name — declare it under `modelProviders` and map it to a built-in protocol with the top-level `providerProtocol` setting:
+Built-in provider ids (`openai`, `gemini`, `anthropic`, `vertex-ai`, `qwen-oauth`) are routed to their SDK protocol automatically. To use a **custom** provider id — for example to group several OpenAI-compatible endpoints under a friendlier name — declare it under `modelProviders` and map it to a built-in protocol with the top-level `providerProtocol` setting:
 
 ```json
 {
@@ -158,11 +218,40 @@ Built-in provider ids (`openai`, `openai-responses`, `gemini`, `anthropic`, `ver
 
 Without a matching `providerProtocol` entry, a custom provider id is skipped (see the warning above).
 
+### Selecting the OpenAI API
+
+Set `wireApi` beside `id`, `envKey`, and `baseUrl` on an OpenAI-compatible model:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "my-model",
+        "wireApi": "responses",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1"
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "my-model" }
+}
+```
+
+The supported values are `chat-completions` and `responses`. Omitting `wireApi` uses Chat Completions for `openai`, including custom providers mapped to `openai`. Other values, or `wireApi` on an Anthropic, Gemini, Vertex AI, or Qwen OAuth model, are configuration errors.
+
+Use `openai` with per-model `wireApi` for new configurations. The `modelProviders.openai-responses` format and `providerProtocol` mappings to `openai-responses` released in v0.23.3 remain readable. Explicit provider mappings take precedence over bucket names; explicit `wireApi` takes precedence over either OpenAI protocol. Loading does not rewrite settings or change credential references. Reconfiguration writes the selected routes in the new format and removes only their matching old entries in the writable scope; entries under a provider id that contains a dot are left in place, and unrelated models, endpoints, APIs and scopes remain unchanged. `api` is not an alias for `wireApi`.
+
+`wireApi` is local routing metadata; it does not belong in `generationConfig` or `extra_body` and is not sent in the request body. New custom setup shares one credential slot for the same OpenAI endpoint across both APIs, so rotating that key updates both routes. Manually configured models can use distinct explicit `envKey` references when independent credentials are needed. In `/auth` → Custom Provider, select OpenAI-compatible and then the API format.
+
+At startup, `selectedType: "openai"` can resolve a model explicitly configured with `wireApi: "responses"` when there is no matching Chat route at the selected configured endpoint. The model picker and recorded sessions retain the effective protocol (`openai` or `openai-responses`) so both routes can be selected and resumed independently. No endpoint detection or automatic fallback occurs when an API request fails.
+
 ### Transports Used for API Requests
 
-Qwen Code sends requests to each provider through an official SDK, except for `openai-responses`, which talks to the endpoint over direct HTTP/SSE:
+The effective model protocol determines the transport. Both OpenAI APIs use the `openai` provider group; `wireApi` selects Chat Completions or Responses:
 
-| Auth Type          | Transport                                                                                                          |
+| Effective protocol | Transport                                                                                                          |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `openai`           | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                                     |
 | `openai-responses` | Direct HTTP/SSE calls to `/v1/responses` (no SDK); embeddings use [`openai`](https://www.npmjs.com/package/openai) |
@@ -170,7 +259,7 @@ Qwen Code sends requests to each provider through an official SDK, except for `o
 | `gemini`           | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK                         |
 | `qwen-oauth`       | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)                       |
 
-This means the `baseUrl` you configure should be compatible with the corresponding transport's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
+This means the `baseUrl` you configure should be compatible with the corresponding transport's expected API format. For example, `wireApi: "responses"` requires a Responses-compatible endpoint.
 
 ### OpenAI-compatible providers (`openai`)
 
@@ -260,9 +349,11 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
+
 ### OpenAI Responses API (`openai-responses`)
 
-This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Completions. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
+Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
 
 ```json
 {
@@ -270,9 +361,10 @@ This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Comple
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here"
   },
   "modelProviders": {
-    "openai-responses": [
+    "openai": [
       {
         "id": "gpt-5.1",
+        "wireApi": "responses",
         "name": "GPT-5.1 (Responses API)",
         "envKey": "OPENAI_API_KEY",
         "baseUrl": "https://api.openai.com/v1",
@@ -465,7 +557,7 @@ export VLLM_API_KEY="not-needed"
 
 > [!note]
 >
-> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `openai-responses`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers. On `openai-responses` the `enable_thinking` key is translated rather than forwarded — see the [OpenAI Responses API](#openai-responses-api-openai-responses) note.
+> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers. On `openai-responses` the `enable_thinking` key is translated rather than forwarded — see the [OpenAI Responses API](#openai-responses-api-openai-responses) note.
 
 > [!note]
 >

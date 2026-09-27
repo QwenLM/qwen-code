@@ -229,6 +229,10 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'refreshCacheWithSnapshot',
   ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'refreshCatalogSnapshot',
+  ).mockResolvedValue({ snapshot, extensions: [extension] });
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
@@ -434,13 +438,139 @@ describe('extension management v2 REST', () => {
         ],
       });
       expect(
-        ExtensionManager.prototype.refreshCacheWithSnapshot,
+        ExtensionManager.prototype.refreshCatalogSnapshot,
       ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).not.toHaveBeenCalled();
       expect(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
       ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves an unmocked catalog and selected-workspace activation projection', async () => {
+    // No manager mocks: real fixture files on disk, real manifest-head load.
+    // Pins the response mapping against entries built by the head-only path,
+    // including a linked install's extension id and install type.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const extensionsDir = path.join(qwenHome, 'extensions');
+    await fsp.mkdir(path.join(extensionsDir, 'plain'), { recursive: true });
+    await fsp.writeFile(
+      path.join(extensionsDir, 'plain', 'qwen-extension.json'),
+      JSON.stringify({ name: 'plain', version: '1.1.0' }),
+    );
+    const linkedSource = path.join(qwenHome, 'linked-source');
+    await fsp.mkdir(linkedSource, { recursive: true });
+    await fsp.writeFile(
+      path.join(linkedSource, 'qwen-extension.json'),
+      JSON.stringify({ name: 'linked', version: '2.0.0' }),
+    );
+    await fsp.mkdir(path.join(extensionsDir, 'linked-install'), {
+      recursive: true,
+    });
+    await fsp.writeFile(
+      path.join(
+        extensionsDir,
+        'linked-install',
+        '.qwen-extension-install.json',
+      ),
+      JSON.stringify({ type: 'link', source: linkedSource }),
+    );
+    try {
+      const h = await makeHarness();
+      const manager = new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+      });
+      const full = await manager.refreshCacheWithSnapshot();
+      const expected = manager
+        .getLoadedExtensions()
+        .map((extension) => {
+          const policy = full.extensions[extension.id];
+          return {
+            id: extension.id,
+            name: extension.name,
+            version: extension.version,
+            ...(extension.installMetadata?.type
+              ? { installType: extension.installMetadata.type }
+              : {}),
+            defaultActivation: policy?.defaultActivation ?? 'enabled',
+            workspaceOverrideCount: 0,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const response = await auth(request(h.app).get('/extensions'));
+      expect(response.status).toBe(200);
+      expect(response.body.v).toBe(1);
+      expect(
+        response.body.extensions.sort(
+          (a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+        ),
+      ).toEqual(expected);
+      expect(expected.map((e) => e.name)).toEqual(['linked', 'plain']);
+      expect(expected.find((e) => e.name === 'linked')?.installType).toBe(
+        'link',
+      );
+
+      const linked = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'linked')!;
+      const activation = await manager.setExtensionWorkspaceActivation(
+        linked.id,
+        h.secondary.workspaceCwd,
+        'disabled',
+      );
+      const fullRefresh = vi.spyOn(
+        ExtensionManager.prototype,
+        'refreshCacheWithSnapshot',
+      );
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.status).toBe(200);
+      expect(projection.body).toMatchObject({
+        workspaceId: h.secondary.workspaceId,
+        workspaceCwd: h.secondary.workspaceCwd,
+        desiredGeneration: activation.generation,
+        appliedGeneration: 0,
+      });
+      expect(projection.body.extensions).toHaveLength(2);
+      expect(projection.body.extensions).toEqual(
+        expect.arrayContaining([
+          {
+            extensionId: linked.id,
+            name: 'linked',
+            version: '2.0.0',
+            defaultActivation: 'enabled',
+            workspaceActivation: 'disabled',
+            effectiveActivation: 'disabled',
+            activationSource: 'workspace_override',
+          },
+          expect.objectContaining({
+            name: 'plain',
+            workspaceActivation: null,
+            effectiveActivation: 'enabled',
+            activationSource: 'default',
+          }),
+        ]),
+      );
+      expect(fullRefresh).not.toHaveBeenCalled();
+    } finally {
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
     }
   });
 
@@ -1093,14 +1223,27 @@ describe('extension management v2 REST', () => {
         ],
       });
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
       ).toHaveBeenCalledWith(
-        extensionId,
+        { id: extensionId, name: 'demo' },
         expect.objectContaining({ generation: 7 }),
         h.secondary.workspaceCwd,
       );
       expect(
         ExtensionManager.prototype.getExtensionActivation,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.getLoadedExtensions,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
       ).not.toHaveBeenCalled();
       const state = await auth(
         request(h.app).get(
@@ -1706,6 +1849,12 @@ describe('extension management v2 REST', () => {
       vi.mocked(
         ExtensionManager.prototype.refreshCacheWithSnapshot,
       ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).mockResolvedValue({
+        snapshot: rolledBackSnapshot,
+        extensions: ExtensionManager.prototype.getLoadedExtensions(),
+      });
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
@@ -1854,6 +2003,12 @@ describe('extension management v2 REST', () => {
     vi.mocked(
       ExtensionManager.prototype.refreshCacheWithSnapshot,
     ).mockResolvedValue(snapshot(9));
+    vi.mocked(
+      ExtensionManager.prototype.refreshCatalogSnapshot,
+    ).mockResolvedValue({
+      snapshot: snapshot(9),
+      extensions: ExtensionManager.prototype.getLoadedExtensions(),
+    });
     vi.mocked(
       h.secondary.bridge.refreshExtensionsForAllSessions,
     ).mockResolvedValue({ refreshed: 1, failed: 0 });
@@ -2508,6 +2663,17 @@ describe('extension management v2 REST', () => {
         legacyProjectionHash: 'hash',
         extensions: {},
       });
+      vi.mocked(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).mockResolvedValue({
+        snapshot: {
+          version: 2,
+          generation: 8,
+          legacyProjectionHash: 'hash',
+          extensions: {},
+        },
+        extensions: ExtensionManager.prototype.getLoadedExtensions(),
+      });
       const disable = await auth(
         request(h.app)
           .post('/workspace/extensions/demo/disable')
@@ -2527,6 +2693,7 @@ describe('extension management v2 REST', () => {
           `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
         ),
       );
+      expect(disabledProjection.status).toBe(200);
       expect(disabledProjection.body).toMatchObject({
         desiredGeneration: 8,
         appliedGeneration: 0,

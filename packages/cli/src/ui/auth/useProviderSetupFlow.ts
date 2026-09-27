@@ -11,12 +11,19 @@ import {
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  buildInstallPlan,
+  getModelsForProviderProtocol,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
+  ModelWireApi,
+  ModelProvidersConfig,
+  ProviderModelConfig,
+  ProviderProtocolConfig,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
+import { preserveModelProviderPlaceholders } from '@qwen-code/qwen-code-core/providers/model-config-serialization.js';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
@@ -26,6 +33,7 @@ import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
 export type SetupStep =
   | 'protocol'
+  | 'wireApi'
   | 'baseUrl'
   | 'apiKey'
   | 'models'
@@ -34,6 +42,7 @@ export type SetupStep =
 
 const STEP_ORDER: SetupStep[] = [
   'protocol',
+  'wireApi',
   'baseUrl',
   'apiKey',
   'models',
@@ -41,12 +50,20 @@ const STEP_ORDER: SetupStep[] = [
   'review',
 ];
 
-function getVisibleSteps(config: ProviderConfig): SetupStep[] {
+function getVisibleSteps(
+  config: ProviderConfig,
+  protocol: AuthType,
+): SetupStep[] {
   return STEP_ORDER.filter((step) => {
     if (step === 'review') return config.showAdvancedConfig === true;
-    return shouldShowStep(config, step);
+    return shouldShowStep(config, step, protocol);
   });
 }
+
+// The effective wire route of an OpenAI-family selection: a `responses` API
+// rides the Responses wire even though the provider bucket stays `openai`.
+const routeProtocol = (proto: AuthType, wireApi: ModelWireApi): AuthType =>
+  wireApi === 'responses' ? AuthType.USE_OPENAI_RESPONSES : proto;
 
 // ---------------------------------------------------------------------------
 // State type
@@ -60,6 +77,7 @@ export interface ProviderSetupState {
 
   // Protocol (for custom provider)
   protocol: AuthType;
+  wireApi: ModelWireApi;
 
   // BaseUrl
   baseUrl: string;
@@ -87,6 +105,9 @@ export interface ProviderSetupState {
 
   // Preview
   previewJson: string;
+  // The planner's refusal, shown in place of the JSON. Always set by the
+  // hook; optional so hand-built state fixtures keep compiling.
+  previewError?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,12 +119,17 @@ export function useProviderSetupFlow(
     config: ProviderConfig,
     inputs: ProviderSetupInputs,
   ) => Promise<void>,
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+  selection?: Parameters<typeof buildInstallPlan>[3],
+  rawModelProviders?: ModelProvidersConfig,
 ) {
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
 
   const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
+  const [wireApi, setWireApi] = useState<ModelWireApi>('chat-completions');
   const [baseUrl, setBaseUrl] = useState('');
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
@@ -133,19 +159,28 @@ export function useProviderSetupFlow(
       existingModelIds?: string[],
     ) => {
       setProvider(config);
-      const steps = getVisibleSteps(config);
+      const initial = initialProtocol ?? config.protocol;
+      const proto =
+        initial === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI
+          : initial;
+      const steps = getVisibleSteps(config, proto);
       setVisibleSteps(steps);
       setStepIndex(0);
 
-      const proto = initialProtocol ?? config.protocol;
       setProtocol(proto);
+      setWireApi(
+        initial === AuthType.USE_OPENAI_RESPONSES
+          ? 'responses'
+          : 'chat-completions',
+      );
       // For presets the baseUrl is fixed (string) or selected from options;
       // for the custom provider it's empty and the placeholder hints at the
-      // default endpoint for the chosen protocol.
+      // default endpoint for the effective route.
       const resolved = resolveBaseUrl(config);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
-        resolved ? '' : getDefaultBaseUrlForProtocol(proto),
+        resolved ? '' : getDefaultBaseUrlForProtocol(initial),
       );
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
@@ -203,16 +238,43 @@ export function useProviderSetupFlow(
 
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
-      setProtocol(selectedProtocol);
-      // Clear baseUrl so the user types fresh; show the protocol's default
-      // endpoint as a placeholder (used if they submit blank).
+      const proto =
+        selectedProtocol === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI
+          : selectedProtocol;
+      const nextWireApi: ModelWireApi =
+        selectedProtocol === AuthType.USE_OPENAI_RESPONSES
+          ? 'responses'
+          : proto === protocol
+            ? wireApi
+            : 'chat-completions';
+      setProtocol(proto);
+      setWireApi(nextWireApi);
+      if (provider) setVisibleSteps(getVisibleSteps(provider, proto));
+      // Clear baseUrl so the user types fresh; show the default endpoint of
+      // the effective route as a placeholder (used if they submit blank).
       setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+      setBaseUrlPlaceholder(
+        getDefaultBaseUrlForProtocol(routeProtocol(proto, nextWireApi)),
+      );
       setApiKey('');
       setApiKeyError(null);
       goNext();
     },
-    [goNext],
+    [goNext, provider, protocol, wireApi],
+  );
+
+  const selectWireApi = useCallback(
+    (selectedApi: ModelWireApi) => {
+      setWireApi(selectedApi);
+      const nextPlaceholder = getDefaultBaseUrlForProtocol(
+        routeProtocol(protocol, selectedApi),
+      );
+      if (baseUrl === baseUrlPlaceholder) setBaseUrl(nextPlaceholder);
+      setBaseUrlPlaceholder(nextPlaceholder);
+      goNext();
+    },
+    [goNext, protocol, baseUrl, baseUrlPlaceholder],
   );
 
   const selectBaseUrl = useCallback(
@@ -260,16 +322,53 @@ export function useProviderSetupFlow(
     setApiKeyError(null);
   }, []);
 
-  // Shared helper: assemble ProviderSetupInputs from current form state
+  // Shared by the preview and submission so the persisted model shape agrees.
   const buildCurrentInputs = useCallback(
-    (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => ({
-      protocol: provider?.protocolOptions ? protocol : undefined,
-      baseUrl: baseUrl.trim(),
-      apiKey: apiKey.trim(),
-      modelIds: normalizeModelIds(modelIds),
-      ...overrides,
-    }),
-    [provider, protocol, baseUrl, apiKey, modelIds],
+    (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => {
+      const multimodal: InputModalities | undefined = modalityEnabled
+        ? {
+            image: modalityImage || undefined,
+            video: modalityVideo || undefined,
+            audio: modalityAudio || undefined,
+            pdf: modalityPdf || undefined,
+          }
+        : undefined;
+      const ctxSize = parseInt(contextWindowSize, 10);
+      // TODO: add maxTokens input field — type and buildInstallPlan support it but UI is deferred
+      const hasAdvanced = thinkingEnabled || modalityEnabled || ctxSize > 0;
+      return {
+        protocol: provider?.protocolOptions ? protocol : undefined,
+        ...(provider && shouldShowStep(provider, 'wireApi', protocol)
+          ? { wireApi }
+          : {}),
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+        modelIds: normalizeModelIds(modelIds),
+        advancedConfig: hasAdvanced
+          ? {
+              enableThinking: thinkingEnabled || undefined,
+              multimodal,
+              contextWindowSize: ctxSize > 0 ? ctxSize : undefined,
+            }
+          : undefined,
+        ...overrides,
+      };
+    },
+    [
+      provider,
+      protocol,
+      wireApi,
+      baseUrl,
+      apiKey,
+      modelIds,
+      modalityEnabled,
+      modalityImage,
+      modalityVideo,
+      modalityAudio,
+      modalityPdf,
+      contextWindowSize,
+      thinkingEnabled,
+    ],
   );
 
   const submitOrNext = useCallback(
@@ -385,114 +484,99 @@ export function useProviderSetupFlow(
   }, []);
 
   const submit = useCallback(() => {
-    if (!provider) return;
-    const multimodal: InputModalities | undefined = modalityEnabled
-      ? {
-          image: modalityImage || undefined,
-          video: modalityVideo || undefined,
-          audio: modalityAudio || undefined,
-          pdf: modalityPdf || undefined,
-        }
-      : undefined;
-    const ctxSize = parseInt(contextWindowSize, 10);
-    // TODO: add maxTokens input field — type and buildInstallPlan support it but UI is deferred
-    const hasAdvanced =
-      thinkingEnabled || modalityEnabled || (ctxSize > 0 && !isNaN(ctxSize));
-    const advancedConfig = hasAdvanced
-      ? {
-          enableThinking: thinkingEnabled || undefined,
-          multimodal,
-          contextWindowSize:
-            ctxSize > 0 && !isNaN(ctxSize) ? ctxSize : undefined,
-        }
-      : undefined;
-    void onSubmit(provider, buildCurrentInputs({ advancedConfig }));
-  }, [
-    provider,
-    thinkingEnabled,
-    modalityEnabled,
-    modalityImage,
-    modalityVideo,
-    modalityAudio,
-    modalityPdf,
-    contextWindowSize,
-    onSubmit,
-    buildCurrentInputs,
-  ]);
+    if (provider) void onSubmit(provider, buildCurrentInputs());
+  }, [provider, onSubmit, buildCurrentInputs]);
 
-  // -- Preview JSON (for review step) ---------------------------------------
-
-  const getPreviewJson = useCallback((): string => {
-    if (!provider) return '';
-    const envKey =
-      typeof provider.envKey === 'function'
-        ? provider.envKey(protocol, baseUrl.trim())
-        : provider.envKey;
-    const normalizedIds = normalizeModelIds(modelIds);
-    const masked = maskApiKey(apiKey);
-
-    const genConfig: Record<string, unknown> = {};
-    if (thinkingEnabled) {
-      // The review screen states that this exact JSON is what gets saved, so
-      // it has to show the shape provider persistence actually writes.
-      // `extra_body.enable_thinking` is a DashScope/Qwen wire knob with no
-      // meaning on the Responses API, and buildAdvancedGenerationConfig
-      // (core providers/provider-config.ts) normalizes it to the unified
-      // reasoning ladder for that protocol.
-      if (protocol === AuthType.USE_OPENAI_RESPONSES) {
-        genConfig['reasoning'] = { effort: 'medium' };
-      } else {
-        genConfig['extra_body'] = { enable_thinking: true };
-      }
-    }
-    if (modalityEnabled) {
-      const mod: Record<string, boolean> = {};
-      if (modalityImage) mod['image'] = true;
-      if (modalityVideo) mod['video'] = true;
-      if (modalityAudio) mod['audio'] = true;
-      if (modalityPdf) mod['pdf'] = true;
-      if (Object.keys(mod).length > 0) genConfig['modalities'] = mod;
-    }
-    const ctxSize = parseInt(contextWindowSize, 10);
-    if (ctxSize > 0 && !isNaN(ctxSize))
-      genConfig['contextWindowSize'] = ctxSize;
-    const hasGenConfig = Object.keys(genConfig).length > 0;
-
-    const models = normalizedIds.map((id) => {
-      const entry: Record<string, unknown> = {
-        id,
-        name: id,
-        baseUrl: baseUrl.trim(),
-        envKey,
-      };
-      if (hasGenConfig) entry['generationConfig'] = genConfig;
-      return entry;
-    });
-
-    return JSON.stringify(
-      {
-        env: { [envKey]: masked },
-        modelProviders: { [protocol]: models },
-        security: { auth: { selectedType: protocol } },
-        model: { name: normalizedIds[0] },
+  // Display copy only: preserved models come from the env-resolved merged
+  // settings, so a stored `${TOKEN}` reference reaches the hook as the real
+  // secret — in any string field, not just `customHeaders`. Render the form
+  // the writer persists (placeholders restored from the raw file), then mask
+  // whatever header value is still a literal; `submit` builds its own plan
+  // from the raw inputs.
+  const holdsReference = (value: unknown) =>
+    typeof value === 'string' && /\$\{[^}]+\}/.test(value);
+  const maskCustomHeaders = (
+    model: ProviderModelConfig,
+  ): ProviderModelConfig => {
+    const headers = model.generationConfig?.customHeaders;
+    if (!headers) return model;
+    return {
+      ...model,
+      generationConfig: {
+        ...model.generationConfig,
+        customHeaders: Object.fromEntries(
+          Object.entries(headers).map(([name, value]) => [
+            name,
+            holdsReference(value) ? value : '***',
+          ]),
+        ),
       },
-      null,
-      2,
-    );
-  }, [
-    provider,
-    protocol,
-    baseUrl,
-    apiKey,
-    modelIds,
-    thinkingEnabled,
-    modalityEnabled,
-    modalityImage,
-    modalityVideo,
-    modalityAudio,
-    modalityPdf,
-    contextWindowSize,
-  ]);
+    };
+  };
+  const previewModels = (patch: {
+    authType: AuthType;
+    models: ProviderModelConfig[];
+  }): ProviderModelConfig[] =>
+    (rawModelProviders && modelProviders
+      ? preserveModelProviderPlaceholders(
+          patch.models,
+          patch.authType,
+          modelProviders,
+          rawModelProviders,
+          providerProtocol,
+        )
+      : patch.models
+    ).map(maskCustomHeaders);
+
+  // Computed during render on the review step, so it must stay total:
+  // buildInstallPlan refuses reachable inputs (e.g. two same-endpoint models
+  // holding different credential references) and that refusal is surfaced
+  // as `previewError` instead of escaping into React and unmounting the CLI.
+  const buildPreview = (): { json: string; error: string } => {
+    if (!provider) return { json: '', error: '' };
+    try {
+      const inputs = buildCurrentInputs();
+      const plan = buildInstallPlan(
+        provider,
+        { ...inputs, apiKey: maskApiKey(inputs.apiKey) },
+        getModelsForProviderProtocol(
+          modelProviders,
+          inputs.protocol ?? provider.protocol,
+          providerProtocol,
+        ),
+        selection,
+      );
+      return {
+        json: JSON.stringify(
+          {
+            env: plan.env,
+            modelProviders: Object.fromEntries(
+              (plan.modelProviders ?? []).map((patch) => [
+                patch.authType,
+                previewModels(patch),
+              ]),
+            ),
+            security: { auth: { selectedType: plan.authType } },
+            model: {
+              name: plan.modelSelection?.modelId,
+              baseUrl: plan.modelSelection?.baseUrl ?? '',
+            },
+          },
+          null,
+          2,
+        ),
+        error: '',
+      };
+    } catch (error) {
+      return {
+        json: '',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
+
+  const preview =
+    currentStep === 'review' ? buildPreview() : { json: '', error: '' };
 
   // -- State ----------------------------------------------------------------
 
@@ -502,6 +586,7 @@ export function useProviderSetupFlow(
     stepIndex: stepIndex + 1, // 1-based for display
     totalSteps: visibleSteps.length,
     protocol,
+    wireApi,
     baseUrl,
     baseUrlPlaceholder,
     baseUrlOptionIndex,
@@ -518,7 +603,8 @@ export function useProviderSetupFlow(
     modalityPdf,
     contextWindowSize,
     focusedConfigIndex,
-    previewJson: currentStep === 'review' ? getPreviewJson() : '',
+    previewJson: preview.json,
+    previewError: preview.error,
   };
 
   return {
@@ -527,6 +613,7 @@ export function useProviderSetupFlow(
     reset,
     goBack,
     selectProtocol,
+    selectWireApi,
     selectBaseUrl,
     highlightBaseUrl,
     submitBaseUrl,

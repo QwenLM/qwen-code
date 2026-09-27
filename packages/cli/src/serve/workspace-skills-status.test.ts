@@ -441,7 +441,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       }),
     );
     for (const skill of skillNames) {
-      const skillDir = path.join(directory, 'skills', skill);
+      // The author-visible name comes from the SKILL.md frontmatter
+      // (`parseSkillContent`, skill-load.ts) — the directory name is not part
+      // of it. Windows forbids ':' in a path segment, so an authored name like
+      // `audit:detail` (the naming-rule cases below) lives in a colon-free
+      // directory there while the manifest keeps the real name.
+      const skillDir = path.join(directory, 'skills', skill.replace(/:/g, '-'));
       await fsp.mkdir(skillDir, { recursive: true });
       await fsp.writeFile(
         path.join(skillDir, 'SKILL.md'),

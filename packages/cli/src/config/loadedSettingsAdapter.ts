@@ -20,50 +20,49 @@ import type {
 import {
   SettingScope,
   getHomeEnvFallbackVars,
-  type LoadedSettings,
+  LoadedSettings,
 } from './settings.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { preserveModelProviderPlaceholders } from '@qwen-code/qwen-code-core/providers/model-config-serialization.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
 import { getNestedProperty } from './settingsUtils.js';
 
-function preservePlaceholders(
-  value: unknown,
-  resolved: unknown,
-  original: unknown,
-): unknown {
-  if (typeof original === 'string' && value === resolved) return original;
-  if (
-    Array.isArray(value) &&
-    Array.isArray(resolved) &&
-    Array.isArray(original)
-  ) {
-    return value.map((entry, index) =>
-      preservePlaceholders(entry, resolved[index], original[index]),
-    );
-  }
-  if (
-    value &&
-    resolved &&
-    original &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    typeof resolved === 'object' &&
-    !Array.isArray(resolved) &&
-    typeof original === 'object' &&
-    !Array.isArray(original)
-  ) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        preservePlaceholders(
-          entry,
-          (resolved as Record<string, unknown>)[key],
-          (original as Record<string, unknown>)[key],
-        ),
-      ]),
-    );
-  }
-  return value;
+/**
+ * The raw (unresolved) entries behind `settings.merged.modelProviders[id]`:
+ * the first scope in merge precedence that defines the bucket, index-aligned
+ * with the merged bucket so placeholder recovery can pair entries by position.
+ */
+export function findRawModelProviderEntries(
+  settings: LoadedSettings,
+  providerId: string,
+): ModelProvidersConfig[string] | undefined {
+  return [
+    SettingScope.System,
+    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+    SettingScope.User,
+    SettingScope.SystemDefaults,
+  ]
+    .map((source) => settings.forScope(source).originalSettings.modelProviders)
+    .find((providers) => providers && Object.hasOwn(providers, providerId))?.[
+    providerId
+  ];
+}
+
+/**
+ * Raw entries for every merged bucket — the form the writer restores before
+ * persisting, so a review screen can show a saved `${VAR}` as written instead
+ * of the resolved secret.
+ */
+export function getRawModelProviders(
+  settings: LoadedSettings,
+): ModelProvidersConfig {
+  return Object.fromEntries(
+    Object.keys(settings.merged.modelProviders ?? {}).map((providerId) => [
+      providerId,
+      findRawModelProviderEntries(settings, providerId) ?? [],
+    ]),
+  );
 }
 
 export function createLoadedSettingsAdapter(
@@ -108,52 +107,81 @@ export function createLoadedSettingsAdapter(
         settings.setValue(persistScope, key, value);
         return;
       }
-      const previous = settings.merged.modelProviders?.[provider];
-      const source = [
-        SettingScope.System,
-        ...(settings.isTrusted ? [SettingScope.Workspace] : []),
-        SettingScope.User,
-        SettingScope.SystemDefaults,
-      ]
-        .map(
-          (source) => settings.forScope(source).originalSettings.modelProviders,
-        )
-        .find((providers) => providers && Object.hasOwn(providers, provider));
-      const raw = source?.[provider];
-      const models = value as NonNullable<ModelProvidersConfig[string]>;
-      const persisted =
-        !Array.isArray(previous) || !Array.isArray(raw)
-          ? models
-          : (models.map((model) => {
-              if (!model) return model;
-              const matches = previous.flatMap((entry, index) =>
-                entry?.id === model.id && entry.baseUrl === model.baseUrl
-                  ? [index]
-                  : [],
-              );
-              if (
-                matches.length > 1 &&
-                JSON.stringify(previous) !== JSON.stringify(raw)
-              ) {
-                throw new Error(
-                  'Cannot preserve placeholders in an ambiguous model configuration. Remove duplicate model entries first.',
-                );
-              }
-              const index = matches[0];
-              return index === undefined
-                ? model
-                : preservePlaceholders(model, previous[index], raw[index]);
-            }) as typeof models);
+      const sourceFor = (providerId: string) =>
+        findRawModelProviderEntries(settings, providerId);
+      const ownsBucket = Object.hasOwn(
+        settingsFile.settings.modelProviders ?? {},
+        provider,
+      );
+      const previous = ownsBucket
+        ? settingsFile.settings.modelProviders?.[provider]
+        : settings.merged.modelProviders?.[provider];
+      const raw = ownsBucket
+        ? settingsFile.originalSettings.modelProviders?.[provider]
+        : sourceFor(provider);
+      const resolvedProviders =
+        provider === AuthType.USE_OPENAI
+          ? (settings.merged.modelProviders ?? {})
+          : { [provider]: previous ?? [] };
+      const rawProviders =
+        provider === AuthType.USE_OPENAI
+          ? Object.fromEntries(
+              Object.keys(resolvedProviders).map((id) => [
+                id,
+                sourceFor(id) ?? [],
+              ]),
+            )
+          : { [provider]: raw ?? [] };
+      const persisted = preserveModelProviderPlaceholders(
+        value as ModelProvidersConfig[string],
+        provider,
+        resolvedProviders,
+        rawProviders,
+        settings.merged.providerProtocol,
+      );
       settings.setValue(persistScope, key, persisted);
-      settingsFile.settings.modelProviders = {
-        ...settingsFile.settings.modelProviders,
-        [provider]: resolveEnvVarsInObject(persisted, getHomeEnvFallbackVars()),
-      };
+      settingsFile.settings.modelProviders = resolveEnvVarsInObject(
+        settingsFile.originalSettings.modelProviders,
+        getHomeEnvFallbackVars(),
+      );
       settings.recomputeMerged();
     },
 
     getModelProviders(): ModelProvidersConfig {
       return (settings.merged.modelProviders ?? {}) as ModelProvidersConfig;
+    },
+
+    getModelProvidersForWrite() {
+      const ownProviders = settingsFile.settings.modelProviders ?? {};
+      const writeView =
+        persistScope === SettingScope.User
+          ? new LoadedSettings(
+              settings.system,
+              settings.systemDefaults,
+              settings.user,
+              { ...settings.workspace, settings: {}, originalSettings: {} },
+              false,
+              new Set(),
+            ).merged
+          : settings.merged;
+      return {
+        modelProviders: ownProviders,
+        providerProtocol: writeView.providerProtocol,
+        shadowedProviders: Object.keys(ownProviders).filter(
+          (providerId) =>
+            [
+              SettingScope.System,
+              ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+              SettingScope.User,
+              SettingScope.SystemDefaults,
+            ].find((scope) =>
+              Object.hasOwn(
+                settings.forScope(scope).originalSettings.modelProviders ?? {},
+                providerId,
+              ),
+            ) !== persistScope,
+        ),
+      };
     },
 
     persist(): void {

@@ -19,7 +19,7 @@
 
 </div>
 
-![Qwen Code in the terminal, desktop app, browser, editor, and chat, with VS Code, Zed, JetBrains, Telegram, DingTalk, WeChat, and Feishu integrations](https://img.alicdn.com/imgextra/i3/O1CN01l5GyhGuOPGC3XHtt_!!6000000005884-2-tps-1742-903.png)
+![Qwen Code in the terminal, desktop app, browser, editor, and chat, with VS Code, Zed, JetBrains, Telegram, DingTalk, WeChat, and Feishu integrations](https://img.alicdn.com/imgextra/i1/O1CN01DXWdF8BDUdD3XPhl_!!6000000001721-2-tps-1743-902.png)
 
 ## Why Qwen Code?
 
@@ -200,6 +200,10 @@ Then follow the instructions inside to install, authenticate, and use Qwen Code 
 ```
 
 - [**Aliyun Model Studio CLI**](https://github.com/modelstudioai/cli) — Official CLI for Aliyun's AI platform (`bailian-cli`). Extends Qwen Code with image/video generation, knowledge retrieval, app orchestration, and model deployment
+
+## Privacy
+
+See the [Terms of Service and Privacy Notice](./docs/users/support/tos-privacy.md), including [Chrome extension and Browser Use data handling](./docs/users/support/tos-privacy.md#chrome-extension-and-browser-use).
 
 ## Contributing
 

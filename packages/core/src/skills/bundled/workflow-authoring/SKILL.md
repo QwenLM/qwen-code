@@ -309,7 +309,9 @@ not the project tree); any other path is refused. A bare string is always a name
 as an invalid workflow name. At the top level that rejection ends the run;
 inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
-list — so null-check a `workflow()` result too.
+list — so null-check a `workflow()` result too. In a session that runs named
+workflows only (`tools.workflowNameOnly`), `workflow({ scriptPath })` throws the
+same way; nest by name.
 
 Use the `workflow-creator` skill to create or edit saved workflows.
 
@@ -325,10 +327,16 @@ its prompt and opts chained in call order, so calls whose rolling prefix-hash
 still matches are served from cache for the longest unchanged prefix, and the
 first changed or missing call onward runs live. Post-processing after the last
 agent can therefore change freely without losing the cache. Pass the same
-`args` — they seed the chain, so different args re-run everything.
+`args` — they seed the chain, so different args re-run everything. A run whose
+journal is no longer on disk has nothing to resume: the call is refused before
+any agent runs, so start it again without `resumeFromRunId`. A run id that is
+still running, paused, or not yet exited is refused too, since a second start
+would run two copies of its agents against one journal. A run whose process
+exited mid-run is later listed as failed with an `interrupted` error, and
+resumes like any other.
 
-The journal is one JSON line per event: a `started` line when an agent is
-dispatched, then a `result` line when it returns a value or a `failed` line
+The journal is one JSON line per event: a `launched` line when the run starts
+(never on a resume), a `started` line when an agent is dispatched, then a `result` line when it returns a value or a `failed` line
 when it settles without one. Only `result` lines feed the resume cache. A
 `started` line with neither after it means the run was interrupted with that
 agent in flight — not that the agent is broken. Read the journal before
@@ -340,6 +348,13 @@ Runs appear in the background-tasks view and the `/workflows` dialog (live
 phase tree, token usage, cooperative pause/resume, cancel);
 `run_in_background: true` returns a run handle immediately in the interactive
 TUI and delivers completion through the conversation.
+
+Saved `/<name>` commands typed in the interactive TUI's ink renderer stay in the foreground:
+watch the live tool card; `/workflows <runId>` shows the run after it settles.
+Completion displays the result and delivers it to the model through a
+notification, without another user prompt.
+The OpenTUI renderer does not yet run client-scheduled tools; there, ask the
+model to call `Workflow({ name: '<name>' })` instead.
 
 ## Worked example
 

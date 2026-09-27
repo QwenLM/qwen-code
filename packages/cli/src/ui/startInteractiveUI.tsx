@@ -69,6 +69,7 @@ import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import { primeGitBranchName } from './hooks/useGitBranchName.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -91,6 +92,9 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
   options: StartInteractiveUIOptions = {},
 ) {
+  const branchPrimed = primeGitBranchName(config.getTargetDir()).catch(
+    () => {},
+  );
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 
@@ -301,6 +305,7 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  await branchPrimed;
   const appTree = (
     <ErrorBoundary
       recordForExitEcho

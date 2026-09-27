@@ -48,6 +48,10 @@ export default defineConfig({
         __dirname,
         '../core/src/utils/transcript-records.ts',
       ),
+      '@qwen-code/qwen-code-core/telemetryConstants': path.resolve(
+        __dirname,
+        '../core/src/telemetry/constants.ts',
+      ),
       '@qwen-code/qwen-code-core/omni': path.resolve(
         __dirname,
         '../core/src/omni/index.ts',

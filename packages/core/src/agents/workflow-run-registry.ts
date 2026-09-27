@@ -15,8 +15,8 @@
  * State machine: running → pausing → paused → running, with every active
  * state able to settle as completed, failed, or cancelled.
  *
- * Foreground runs return through the normal tool-result channel. Background
- * runs additionally emit one terminal `<task-notification>` through a
+ * Model-started foreground runs return through the tool-result channel.
+ * Background and client-started foreground runs emit `<task-notification>` through a
  * dedicated model-completion callback. That slot is separate from the
  * terminal-bell callback so the CLI can subscribe to both without either
  * consumer replacing the other.
@@ -45,7 +45,15 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  buildFailureLines,
+  reportedFailureLines,
+} from './workflow-failure-lines.js';
+import {
+  sanitizeWorkflowText,
+  stringifyWorkflowResult,
+  truncateWorkflowText,
+} from './workflow-result-format.js';
 import {
   formatWorkflowSizeWarningLog,
   type WorkflowSizeWarning,
@@ -54,13 +62,22 @@ import { parseExtensionWorkflowName } from './runtime/workflow-saved.js';
 import {
   buildResumeCall,
   hasUninlinableResumeArgs,
+  NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
-import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
+import {
+  escapeXml,
+  escapeXmlElementText,
+  escapeXmlWithinBudget,
+} from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+// Match the default tool-output budget without allowing configuration to
+// disable the notification bound. Count XML-escaped characters on the wire.
+const MAX_COMPLETION_RESULT_CHARS = 25_000;
 
 const mutatingWorkflowTasks = new Map<string, symbol>();
 const activeWorkflowRunKeys = new Map<string, number>();
@@ -322,6 +339,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Deliver client-started foreground results through the notification queue. */
+  notifyOnCompletion?: boolean;
   /** Whether a model-visible resume may preserve background execution. */
   resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
@@ -410,6 +429,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /** Snapshot destination; the runner persists it after emitting completion. */
+  snapshotPath?: string;
   /**
    * Failure hint naming where the authoring reference is in this session, for
    * a script the model authored. The foreground tool result carries it in the
@@ -417,6 +438,15 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * it rides here. Process-local, like the notification it feeds.
    */
   authoringHint?: string;
+  /**
+   * The name a name-only session may resume this run by. The runner sets it
+   * only when the run's workflow name resolved, as the run started, to the
+   * script the run executed: a name recorded from a path in a subdirectory,
+   * one a same-named project workflow shadows, or one a retry carried over to
+   * an inline copy would lead a resume to a different script. Process-local,
+   * like the notification it feeds.
+   */
+  resumeName?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -494,6 +524,7 @@ export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
  */
 export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
 export interface WorkflowRunCompletionMeta {
+  isBackgrounded?: boolean;
   runId: string;
   status: Extract<WorkflowStatus, 'completed' | 'failed'>;
   todoWorkChainId?: string;
@@ -526,6 +557,17 @@ interface WorkflowApprovalRuntime {
 }
 
 export class WorkflowRunRegistry {
+  /**
+   * The session runs named workflows only (`tools.workflowNameOnly`). Set by
+   * the owning Config, which holds the lock; read when a notification offers
+   * a resume call.
+   */
+  private nameOnly = false;
+
+  setNameOnly(nameOnly: boolean): void {
+    this.nameOnly = nameOnly;
+  }
+
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
   private readonly starting = new Map<string, AbortController>();
@@ -635,23 +677,58 @@ export class WorkflowRunRegistry {
   }
 
   private emitCompletion(entry: WorkflowTask): void {
-    if (!entry.isBackgrounded || !this.completionCallback) return;
+    if (
+      (!entry.isBackgrounded && !entry.notifyOnCompletion) ||
+      !this.completionCallback
+    )
+      return;
     if (entry.status !== 'completed' && entry.status !== 'failed') return;
 
     const statusText = entry.status === 'completed' ? 'completed' : 'failed';
-    const label = stripAnsiAndControl(entry.description) || entry.runId;
-    const displayText = `Background workflow "${label}" ${statusText}.`;
+    const label =
+      sanitizeWorkflowText(stripAnsiAndControl(entry.description)) ||
+      entry.runId;
+    const prefix = entry.isBackgrounded ? 'Background workflow' : 'Workflow';
+    const summary = `${prefix} "${label}" ${statusText}.`;
+    const resultText =
+      entry.status === 'completed'
+        ? sanitizeWorkflowText(stringifyWorkflowResult(entry.result))
+        : '';
+    const failures = buildFailureLines(entry);
+    const reported = reportedFailureLines(entry.result);
+    const displayText = entry.isBackgrounded
+      ? summary
+      : [
+          `${summary} Run ID: ${entry.runId}`,
+          entry.status === 'failed'
+            ? `Error: ${entry.error ?? ''}`
+            : `Result: ${resultText}`,
+          ...failures,
+          ...reported,
+        ]
+          .map((block) => truncateWorkflowText(block, 4_096))
+          .join('\n');
     const modelParts = [
       '<task-notification>',
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
-      `<summary>Background workflow "${escapeXml(label)}" ${statusText}.</summary>`,
+      `<summary>${prefix} "${escapeXml(label)}" ${statusText}.</summary>`,
     ];
     if (entry.status === 'completed' && entry.result !== undefined) {
-      modelParts.push(
-        `<result>${escapeXml(stringifyCompletionResult(entry.result))}</result>`,
+      const { text: modelResult, truncated } = escapeXmlWithinBudget(
+        resultText,
+        MAX_COMPLETION_RESULT_CHARS,
       );
+      modelParts.push(`<result>${modelResult}</result>`);
+      if (truncated) {
+        const snapshotHint = entry.snapshotPath
+          ? `Aggregate result snapshot after finalization (if persistence succeeds): ${stripAnsiAndControl(entry.snapshotPath)}. Snapshots use plain JSON; Error, Map, and Set contents are not preserved. Result and reported-failure previews may also be truncated.`
+          : `Inspect workflow run ${entry.runId} after it settles.`;
+        modelParts.push(
+          `<result-truncated>Preview truncated. ${escapeXml(snapshotHint)}</result-truncated>`,
+        );
+      }
     }
     if (entry.status === 'failed') {
       modelParts.push(
@@ -667,10 +744,14 @@ export class WorkflowRunRegistry {
     // slots — and the count alone gives the reader no way to judge whether
     // the result is thin because the work was thin or because the agents
     // failed. These are the errors the registry already recorded.
-    const failures = buildFailureLines(entry);
     if (failures.length > 0) {
       modelParts.push(
         `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
+    if (reported.length > 0) {
+      modelParts.push(
+        `<reported-failures>${escapeXmlElementText(reported.join('\n'))}</reported-failures>`,
       );
     }
     // The two recovery routes a backgrounded run needs and cannot reconstruct:
@@ -680,8 +761,8 @@ export class WorkflowRunRegistry {
     // produced none.
     const recovery =
       entry.status === 'failed'
-        ? buildRecoveryLines(entry)
-        : buildDiagnosticsLines(entry);
+        ? buildRecoveryLines(entry, this.nameOnly)
+        : buildDiagnosticsLines(entry, this.nameOnly);
     if (recovery.length > 0) {
       const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
       modelParts.push(
@@ -691,13 +772,18 @@ export class WorkflowRunRegistry {
     modelParts.push('</task-notification>');
 
     const meta: WorkflowRunCompletionMeta = {
+      ...(!entry.isBackgrounded ? { isBackgrounded: false } : {}),
       runId: entry.runId,
       status: entry.status,
       todoWorkChainId: entry.todoWorkChainId,
     };
     try {
       runOutsideAgentContext(() =>
-        this.completionCallback!(displayText, modelParts.join('\n'), meta),
+        this.completionCallback!(
+          sanitizeWorkflowText(displayText),
+          sanitizeWorkflowText(modelParts.join('\n')),
+          meta,
+        ),
       );
     } catch (error) {
       debugLogger.error('Failed to emit workflow completion:', error);
@@ -715,17 +801,40 @@ export class WorkflowRunRegistry {
     runId: string,
     createController: () => AbortController,
   ): AbortController {
-    const existing = this.entries.get(runId);
-    if (
-      (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(runId) ||
-      this.starting.has(runId)
-    ) {
-      throw new Error(`Workflow run ${runId} is already active.`);
-    }
+    const refusal = this.describeLiveRun(runId);
+    if (refusal) throw new Error(refusal);
     const controller = createController();
     this.starting.set(runId, controller);
     return controller;
+  }
+
+  /**
+   * Why a run id cannot be started again yet, or `undefined` when it can. A
+   * second start under a live id would run two copies of its agents against
+   * one journal, so each case says what to do instead of only that it is
+   * taken.
+   */
+  private describeLiveRun(runId: string): string | undefined {
+    const twoCopies =
+      'Starting it again now would run two copies of its agents against the same journal';
+    if (this.starting.has(runId)) {
+      return `Workflow run ${runId} is already starting. Wait for that start to settle before resuming it.`;
+    }
+    const existing = this.entries.get(runId);
+    if (existing && isActiveWorkflowStatus(existing.status)) {
+      // Only a run that has finished pausing can be resumed (`resume()`
+      // wants `paused`), so a run still on its way there is told to wait.
+      if (existing.status === 'pausing') {
+        return `Workflow run ${runId} is pausing, not finished. ${twoCopies}: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.`;
+      }
+      return existing.status === 'paused'
+        ? `Workflow run ${runId} is paused, not finished. ${twoCopies}: resume it from /workflows, or cancel it there and wait for it to exit.`
+        : `Workflow run ${runId} is still running. ${twoCopies}: cancel it from /workflows first, or wait for it to settle.`;
+    }
+    if (this.handles.has(runId)) {
+      return `Workflow run ${runId} is not running but its run has not exited yet. ${twoCopies}: wait for it to exit.`;
+    }
+    return undefined;
   }
 
   releaseStart(runId: string, controller: AbortController): void {
@@ -1488,7 +1597,10 @@ export class WorkflowRunRegistry {
     // Script-derived failure text rides into the snapshot, the /workflows
     // render, and the completion-notification XML: normalize it once at
     // this boundary and persist the same string in both projections.
-    entry.error = stripAnsiAndControl(message).slice(0, 4_096);
+    entry.error = sanitizeWorkflowText(stripAnsiAndControl(message)).slice(
+      0,
+      4_096,
+    );
     this.appendEvent(entry, {
       type: 'workflow-failed',
       at: endTime,
@@ -1823,15 +1935,6 @@ export class WorkflowRunRegistry {
   }
 }
 
-function stringifyCompletionResult(result: unknown): string {
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result) ?? String(result);
-  } catch {
-    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
-  }
-}
-
 function normalizeWorkflowApprovalOutcome(
   outcome: ToolConfirmationOutcome,
 ): ToolConfirmationOutcome {
@@ -1919,10 +2022,14 @@ function buildUsageLine(entry: WorkflowTask): string {
 }
 
 /** `<recovery>` body for a failed run. */
-function buildRecoveryLines(entry: WorkflowTask): string[] {
+function buildRecoveryLines(entry: WorkflowTask, nameOnly: boolean): string[] {
   const lines: string[] = [];
-  const resume = buildResumeCall(entry);
-  if (resume) {
+  const resume = buildResumeCall({ ...entry, nameOnly });
+  // A resume replays the run's journal, so a run that wrote none is not
+  // offered one: the call would be refused.
+  if (resume && !entry.journalPath) {
+    lines.push(NO_JOURNAL_NO_RESUME_NOTE);
+  } else if (resume) {
     // Only an extension workflow's name carries `<extension>:`. Its file is
     // third-party and an extension update replaces it, so the copy has to
     // land somewhere the user owns.
@@ -1934,13 +2041,19 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
       : entry.workflowName
         ? `This reads the saved /${entry.workflowName} workflow; copy it before making a run-specific change.`
         : 'Edit the generated script copy first if the script needs to change.';
-    const journalAdvice = entry.journalPath
-      ? 'The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.'
-      : 'No journal was written for this run, so every agent() call runs live.';
-    lines.push(`Resume: ${resume} — ${pathAdvice} ${journalAdvice}`);
+    lines.push(
+      `Resume: ${resume} — ${pathAdvice} The journal replays the longest unchanged prefix of agent() calls; the first changed call onward runs live.`,
+    );
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  } else if (nameOnly) {
+    // The model may not pass a script here, and this run has no name that
+    // leads back to the one it ran — a host's script, or a name that now
+    // resolves elsewhere — so the resume is not the model's to make.
+    lines.push(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
@@ -1952,14 +2065,20 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
 }
 
 /** `<diagnostics>` body for a completed run. */
-function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+function buildDiagnosticsLines(
+  entry: WorkflowTask,
+  nameOnly: boolean,
+): string[] {
   const lines: string[] = [];
   if (entry.journalPath) {
     lines.push(
       `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
     );
   }
-  const resume = buildResumeCall(entry);
+  // Offered only beside a journal: without one the call would be refused.
+  const resume = entry.journalPath
+    ? buildResumeCall({ ...entry, nameOnly })
+    : null;
   if (resume) {
     lines.push(
       entry.workflowName

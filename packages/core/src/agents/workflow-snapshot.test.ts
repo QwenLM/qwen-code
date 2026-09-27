@@ -12,15 +12,54 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   toSnapshot,
+  readWorkflowSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
+  snapshotArgs,
+  snapshotArgsUnavailable,
   MAX_RETAINED_SNAPSHOTS,
+  MAX_SNAPSHOT_ARGS_CHARS,
 } from './workflow-snapshot.js';
 import {
   markWorkflowRunPersistenceActive,
   type WorkflowTask,
 } from './workflow-run-registry.js';
+
+/**
+ * `atomicFileWrite` imports `node:fs/promises` as a namespace, whose bindings
+ * a spy cannot replace, so the only way to fail a commit is the `_testFs`
+ * seam that module documents. The mock is a pass-through: every call runs the
+ * real temp-and-rename, and only a test that sets the flag diverts its rename.
+ */
+const atomicWrite = vi.hoisted(() => ({ renameFails: false }));
+
+vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/atomicFileWrite.js')>();
+  return {
+    ...actual,
+    atomicWriteFile: (
+      ...args: Parameters<typeof actual.atomicWriteFile>
+    ): Promise<void> =>
+      actual.atomicWriteFile(
+        args[0],
+        args[1],
+        args[2],
+        atomicWrite.renameFails
+          ? {
+              ...args[3],
+              rename: () =>
+                Promise.reject(
+                  Object.assign(new Error('ENOSPC: no space left on device'), {
+                    code: 'ENOSPC',
+                  }),
+                ),
+            }
+          : args[3],
+      ),
+  };
+});
 
 function fakeConfig(projectDir: string): Config {
   return { storage: new Storage(projectDir) } as unknown as Config;
@@ -199,6 +238,161 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ]);
   });
 
+  // A resume after a restart has a run id and no registry entry, and the
+  // snapshot is what still says what the run recorded about itself.
+  it('reads one run back by id, its source reference included', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({
+        runId: 'wf_one',
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      }),
+    );
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_other' }));
+
+    const snapshot = await readWorkflowSnapshot(config, 'wf_one');
+    expect(snapshot?.runId).toBe('wf_one');
+    expect(snapshot?.sourceRef).toEqual({
+      id: 'definition-7',
+      revision: 'rev-3',
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_other'))?.sourceRef,
+    ).toBeUndefined();
+  });
+
+  it('reads nothing for a run with no snapshot, an unparseable one, or a file that is not one', async () => {
+    const config = fakeConfig(projectDir);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+
+    const broken = config.storage.getWorkflowRunSnapshotPath('wf_broken');
+    await fs.mkdir(path.dirname(broken), { recursive: true });
+    await fs.writeFile(broken, '{not json', 'utf8');
+    await expect(
+      readWorkflowSnapshot(config, 'wf_broken'),
+    ).resolves.toBeUndefined();
+
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_other_shape'),
+      JSON.stringify({ sourceRef: { id: 'a', revision: 'b' } }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_other_shape'),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readWorkflowSnapshot({} as Config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+  });
+
+  // A retry keys its journal from a hash of the run's args, so "the run had
+  // none" has to be a recorded fact rather than the absence of a field: a
+  // snapshot from before args were kept looks the same and must be refused.
+  // The daemon refuses a restart on this answer and the task projection
+  // reports it, so the two must never disagree about one snapshot.
+  it.each([
+    [
+      'args it kept',
+      { args: { a: 1 }, argsRecorded: true } as const,
+      undefined,
+    ],
+    ['no args, recorded as none', { argsRecorded: true } as const, undefined],
+    ['args too large to keep', { argsOmitted: true } as const, 'omitted'],
+    ['a snapshot from before args were kept', {}, 'unrecorded'],
+  ])('says of %s why a restart has no args to use', (_case, fields, why) => {
+    expect(snapshotArgsUnavailable(fields)).toBe(why);
+  });
+
+  it('records that a run had no args, and rejects a marker that is not true', async () => {
+    expect(snapshotArgs(undefined)).toEqual({ argsRecorded: true });
+    expect(snapshotArgs({ q: 1 })).toEqual({
+      args: { q: 1 },
+      argsRecorded: true,
+    });
+    expect(snapshotArgs('x'.repeat(MAX_SNAPSHOT_ARGS_CHARS + 1))).toEqual({
+      argsOmitted: true,
+    });
+
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_none' }));
+    expect(await readWorkflowSnapshot(config, 'wf_none')).toMatchObject({
+      argsRecorded: true,
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_none'))?.args,
+    ).toBeUndefined();
+
+    const file = config.storage.getWorkflowRunSnapshotPath('wf_bad_marker');
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        ...JSON.parse(
+          await fs.readFile(
+            config.storage.getWorkflowRunSnapshotPath('wf_none'),
+            'utf8',
+          ),
+        ),
+        runId: 'wf_bad_marker',
+        argsRecorded: 'yes',
+      }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_bad_marker'),
+    ).resolves.toBeUndefined();
+  });
+
+  // What a snapshot holds is started as a run, not only displayed, so the
+  // reader makes the two checks the checkpoint reader makes.
+  it('reads nothing through a symlink, or from a file that names another run', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_real' }));
+    const real = config.storage.getWorkflowRunSnapshotPath('wf_real');
+
+    // The shape that matters: the link points outside the runs directory at
+    // a file that does name this run, so only refusing the link refuses it.
+    const outside = path.join(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-outside-')),
+      'planted.json',
+    );
+    await fs.writeFile(
+      outside,
+      JSON.stringify({
+        ...JSON.parse(await fs.readFile(real, 'utf8')),
+        runId: 'wf_planted',
+      }),
+      'utf8',
+    );
+    const planted = config.storage.getWorkflowRunSnapshotPath('wf_planted');
+    await fs.symlink(outside, planted);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_planted'),
+    ).resolves.toBeUndefined();
+    // Reading it directly is what the link would have delivered.
+    expect(JSON.parse(await fs.readFile(planted, 'utf8')).runId).toBe(
+      'wf_planted',
+    );
+
+    // A file placed under one id that claims to be another run.
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_mismatch'),
+      await fs.readFile(real, 'utf8'),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_mismatch'),
+    ).resolves.toBeUndefined();
+
+    // The run's own snapshot still reads.
+    expect((await readWorkflowSnapshot(config, 'wf_real'))?.runId).toBe(
+      'wf_real',
+    );
+  });
+
   it('loads a legacy snapshot without an event ledger', async () => {
     const config = fakeConfig(projectDir);
     await writeWorkflowSnapshot(config, task({ runId: 'wf_legacy' }));
@@ -323,6 +517,97 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(list).toHaveLength(1);
     // The settlement value, not the post-await drained value.
     expect(list[0].agentsCompleted).toBe(1);
+  });
+
+  // A snapshot carries the run's script and up to 256 KiB of args, so the
+  // write is long enough to be interrupted -- and a torn file fails
+  // validation on read, dropping the run from the history it is there to
+  // preserve.
+  it('keeps the previous snapshot whole when the write cannot be committed', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_torn', agentsCompleted: 3 }),
+    );
+    const file = config.storage.getWorkflowRunSnapshotPath('wf_torn');
+    const before = await fs.readFile(file, 'utf8');
+
+    atomicWrite.renameFails = true;
+    try {
+      await expect(
+        writeWorkflowSnapshot(
+          config,
+          task({ runId: 'wf_torn', agentsCompleted: 99 }),
+        ),
+      ).resolves.toBe(false);
+    } finally {
+      atomicWrite.renameFails = false;
+    }
+
+    // Not half of the new snapshot, and not the new one either: the run is
+    // still in history, exactly as it was.
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_torn'))?.agentsCompleted,
+    ).toBe(3);
+    // And the failure leaves nothing behind for the sweep to find.
+    const dir = config.storage.getWorkflowRunsDir();
+    expect((await fs.readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual(
+      [],
+    );
+  });
+
+  it('writes a snapshot the project owner alone can read', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_mode' }));
+    const stat = await fs.stat(
+      config.storage.getWorkflowRunSnapshotPath('wf_mode'),
+    );
+    // Matches the run's journal, checkpoint and persisted script: it holds
+    // the same script and args they do.
+    if (process.platform !== 'win32') {
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('neither lists nor prunes a temp file from an unfinished write', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_keep' }));
+    const dir = config.storage.getWorkflowRunsDir();
+    // Named exactly as an interrupted write would leave it, and young
+    // enough that the sweep must leave it alone.
+    const temp = path.join(dir, 'wf_bee9.json.0123456789ab.tmp');
+    await fs.writeFile(temp, 'half a snapshot', 'utf8');
+
+    expect((await listWorkflowSnapshots(config)).map((s) => s.runId)).toEqual([
+      'wf_keep',
+    ]);
+
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_keep' }));
+    await expect(fs.readFile(temp, 'utf8')).resolves.toBe('half a snapshot');
+  });
+
+  it('sweeps a snapshot temp file once it is too old to be in flight', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_sweep' }));
+    const dir = config.storage.getWorkflowRunsDir();
+    const stale = path.join(dir, 'wf_dead1.json.abcdef012345.tmp');
+    const inFlight = path.join(dir, 'wf_beef2.json.abcdef012345.tmp');
+    const notOurs = path.join(dir, 'editor-scratch.tmp');
+    for (const file of [stale, inFlight, notOurs]) {
+      await fs.writeFile(file, 'x', 'utf8');
+    }
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await fs.utimes(stale, longAgo, longAgo);
+    await fs.utimes(notOurs, longAgo, longAgo);
+
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_sweep' }));
+
+    await expect(fs.access(stale)).rejects.toThrow();
+    // A write in another process may still be holding this one.
+    await expect(fs.access(inFlight)).resolves.toBeUndefined();
+    // Only this module's own temp naming is swept, however old.
+    await expect(fs.access(notOurs)).resolves.toBeUndefined();
   });
 
   it('lists newest-first by startTime', async () => {
