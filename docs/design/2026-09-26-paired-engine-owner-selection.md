@@ -131,7 +131,9 @@ The direct creators keep their own vocabulary. `LocalManagedRuntimeProvider`
 maps a live-ID rejection to its non-retryable
 `managed_runtime_identity_conflict`. The standalone service maps an undispatched
 live-ID rejection to `standalone_session_conflict` instead of
-`standalone_creation_rolled_back`.
+`standalone_creation_rolled_back`. It does not check that nothing was persisted
+for that ID, because the live owner's own transcript is expected there; finding
+it must not quarantine the runtime.
 
 ## Files and consumers
 

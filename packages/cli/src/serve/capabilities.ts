@@ -32,6 +32,7 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   hosted_harness_private_v1: { since: 'v1' },
