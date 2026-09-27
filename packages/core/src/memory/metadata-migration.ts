@@ -592,6 +592,26 @@ export async function runMemoryMetadataMigration(params: {
       await rebuildIndexes([...committedRoots]);
       throw new DOMException('Metadata migration aborted.', 'AbortError');
     }
+    const parts = splitFrontmatter(candidate.filePath, candidate.content);
+    if (parts.frontmatter.trim()) {
+      const document = parseDocument(parts.frontmatter, { schema: 'core' });
+      const { missingOrInvalidFields } = validateStructuredAutoMemoryDocument(
+        candidate.content,
+      );
+      // These refusals cannot be repaired by generated metadata; do not spend
+      // model calls or starve later candidates on them.
+      if (
+        document.errors.length ||
+        OWNED_FRONTMATTER_KEYS.some((key) => {
+          if (!missingOrInvalidFields.includes(key)) return false;
+          const node = document.get(key, true);
+          return isNode(node) && 'anchor' in node && !!node.anchor;
+        })
+      ) {
+        result.failed += 1;
+        continue;
+      }
+    }
     if (
       result.attempted > 0 &&
       bodyChars + candidate.bodyChars > MAX_BODY_CHARS_PER_RUN

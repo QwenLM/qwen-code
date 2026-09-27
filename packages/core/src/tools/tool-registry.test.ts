@@ -33,6 +33,7 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
+import { ToolMode } from './code-mode.js';
 
 vi.mock('node:fs');
 
@@ -718,6 +719,18 @@ describe('ToolRegistry', () => {
           .getFunctionDeclarations()
           .map((declaration) => declaration.name),
       ).toEqual(['manage_memory', 'read_file', 'search_memory']);
+    });
+
+    it('does not declare exec for an explicitly empty code-mode allowlist', () => {
+      vi.spyOn(config, 'getToolMode').mockReturnValue(ToolMode.CodeModeOnly);
+      toolRegistry.registerTool(new MockTool({ name: 'exec' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      expect(toolRegistry.getFunctionDeclarationsFiltered([])).toEqual([]);
+      expect(
+        toolRegistry
+          .getFunctionDeclarationsFiltered(['read_file'])
+          .map((tool) => tool.name),
+      ).toContain('exec');
     });
 
     it('keeps structured memory tools out of the code-mode bindings in legacy mode', () => {

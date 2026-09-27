@@ -1185,6 +1185,7 @@ export class ToolRegistry {
    * tools that have not yet been loaded will be silently omitted.
    */
   getFunctionDeclarationsFiltered(toolNames: string[]): FunctionDeclaration[] {
+    if (toolNames.length === 0) return [];
     if (this.factories.size > 0) {
       debugLogger.warn(
         `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +

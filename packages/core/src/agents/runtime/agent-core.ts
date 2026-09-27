@@ -1042,7 +1042,9 @@ export class AgentCore {
           ],
           config: {
             abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
+            tools: toolsList.length
+              ? [{ functionDeclarations: toolsList }]
+              : [],
             ...(stickyMaxOutputTokens !== undefined
               ? { maxOutputTokens: stickyMaxOutputTokens }
               : {}),

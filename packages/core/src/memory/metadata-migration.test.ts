@@ -821,6 +821,41 @@ describe('memory metadata migration', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toBe(original);
   });
 
+  it('does not spend model calls or the file budget on anchored refusals', async () => {
+    const original =
+      '---\ncategory: &category invalid_category\ncustom_note: *category\ntype: project\n---\nBody.\n';
+    const refused = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => write(`project/a${i}.md`, original)),
+    );
+    await write('project/z-legacy.md', legacyContent());
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project' as const,
+      generateMetadata,
+    };
+    expect(await runMemoryMetadataMigration(params)).toMatchObject({
+      attempted: 1,
+      committed: 1,
+      failed: 10,
+      remainingLegacyFiles: 10,
+    });
+    expect(await runMemoryMetadataMigration(params)).toMatchObject({
+      attempted: 0,
+      committed: 0,
+      failed: 10,
+      remainingLegacyFiles: 10,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    for (const file of refused)
+      expect(await fs.readFile(file, 'utf-8')).toBe(original);
+  });
+
   it('tells the writer which fields failed validation and retries once', async () => {
     await write('project/legacy.md', legacyContent());
     const prefix = 'x'.repeat(64);
