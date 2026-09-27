@@ -343,6 +343,18 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       'manifest_args=(--allow-missing-platform linux-aarch64)',
     );
+    // Pin the containment, not only the pieces: hoisting the tolerant
+    // assignment into the unconditional declaration above the guard leaves
+    // every string above present and the `if` block merely redundant, yet a
+    // SOURCE=artifact fresh build whose arm64 leg failed to upload then
+    // publishes the mirror feed without linux-aarch64 and exits 0 — #12806
+    // again, with this test green.
+    expect(prepare).toContain(
+      'manifest_args=()\n' +
+        `          if [ "$SOURCE" = 'release' ]; then\n` +
+        '            manifest_args=(--allow-missing-platform linux-aarch64)\n' +
+        '          fi',
+    );
     // Pin the effect, not only the pieces: the declaration and the `if` guard
     // both survive a refactor that drops the expansion, and an unexpanded array
     // is not an error under `set -u` — the mirror would then die with

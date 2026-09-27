@@ -1432,7 +1432,10 @@ function testUpdateManifest(directory) {
   // Re-mirroring an already-published release has to be able to reproduce the
   // feed that release shipped, so a platform it predates can be named as
   // optional -- by name, and only when it is genuinely absent (#12806).
-  const runManifest = (...extra) =>
+  // `spawnOptions`/`outputValue` exist for the relative --output spelling both
+  // production callers use (`cd`, then `--output desktop-latest.json`); every
+  // other run here passes absolute paths and inherits this test's cwd.
+  const spawnManifest = (spawnOptions, outputValue, ...extra) =>
     spawnSync(
       process.execPath,
       [
@@ -1446,11 +1449,12 @@ function testUpdateManifest(directory) {
         '--version',
         '0.1.0',
         '--output',
-        output,
+        outputValue,
         ...extra,
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', ...spawnOptions },
     );
+  const runManifest = (...extra) => spawnManifest({}, output, ...extra);
 
   // Tolerated-and-present, which is the normal case on the only production
   // caller: sync-desktop-to-oss.yml passes --allow-missing-platform
@@ -1494,11 +1498,54 @@ function testUpdateManifest(directory) {
     '0.1.0',
     'a repeated --version must override, not comma-join into the feed',
   );
+  // Read the feed back the way duplicatedVersion does. On the absolute
+  // fixture path a comma-joined --output dies with ENOENT for a parent that
+  // does not exist, so `status === 0` only caught it by accident of the
+  // fixture; deleting the feed first makes the assertion about where the run
+  // wrote rather than about whether the write happened to fail.
+  fs.rmSync(output);
   const duplicatedOutput = runManifest('--output', output);
   assert.equal(
     duplicatedOutput.status,
     0,
     `a repeated --output must override, not write a comma-joined filename: ${duplicatedOutput.stderr}`,
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(output, 'utf8')).version,
+    '0.1.0',
+    'a repeated --output must write the feed to the path that was asked for',
+  );
+
+  // Both production callers spell --output relatively after a `cd`
+  // (sync-desktop-to-oss.yml:135, desktop-release.yml:721), and there the
+  // comma-joined value is a legal filename in the cwd: the run exits 0, writes
+  // `desktop-latest.json,desktop-latest.json`, and the upload step checksums a
+  // path that holds no feed.
+  const relativeDir = path.join(directory, 'relative-output');
+  fs.mkdirSync(relativeDir, { recursive: true });
+  const duplicatedRelativeOutput = spawnManifest(
+    { cwd: relativeDir },
+    'desktop-latest.json',
+    '--output',
+    'desktop-latest.json',
+  );
+  assert.equal(
+    duplicatedRelativeOutput.status,
+    0,
+    duplicatedRelativeOutput.stderr,
+  );
+  assert.equal(
+    JSON.parse(
+      fs.readFileSync(path.join(relativeDir, 'desktop-latest.json'), 'utf8'),
+    ).version,
+    '0.1.0',
+    'a repeated relative --output must override, not comma-join in the cwd',
+  );
+  assert.ok(
+    !fs.existsSync(
+      path.join(relativeDir, 'desktop-latest.json,desktop-latest.json'),
+    ),
+    'a repeated relative --output must not leave a comma-joined feed behind',
   );
 
   fs.rmSync(path.join(assets, artifacts[4]));
