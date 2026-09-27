@@ -25,18 +25,7 @@ import {
   readAgentWorkspace,
   updateAgentWorkspaceCallerGrants,
 } from './store.js';
-import type { A2AGrant, A2AGrantScope } from './types.js';
-
-/**
- * What a grant permits.
- *
- * Deliberately coarse, and deliberately not "everything the agent can do".
- * `analysis` is read-only work — the plan's first opened agent does read-only
- * analysis of a pre-authorised repository, and code writes and open MCP access
- * are explicitly not the default. A grant that cannot express "read-only"
- * would make the safe case unrepresentable and the unsafe one the only option.
- */
-export const A2A_GRANT_SCOPES: readonly A2AGrantScope[] = ['analysis', 'full'];
+import type { A2AGrant } from './types.js';
 
 function hashSecret(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');
@@ -68,23 +57,19 @@ export async function issueA2AGrant(
   input: {
     callerId: string;
     agentId: string;
-    scope: A2AGrantScope;
     expiresAt?: number;
   },
   now = Date.now(),
 ): Promise<IssuedGrant> {
-  const { callerId, agentId, scope } = input;
+  const { callerId, agentId } = input;
   if (!callerId || !agentId) {
     throw new Error('A grant needs a caller and an agent.');
-  }
-  if (!A2A_GRANT_SCOPES.includes(scope)) {
-    throw new Error(`Unknown grant scope "${scope}".`);
   }
   const secret = randomBytes(32).toString('base64url');
   const grant: A2AGrant = {
     callerId,
     agentId,
-    scope,
+    scope: 'analysis',
     secretHash: hashSecret(secret),
     createdAt: now,
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
@@ -129,7 +114,7 @@ export type GrantCheck =
        * or whether its own secret was merely expired, hands it a way to
        * enumerate agents and to distinguish "revoked" from "never had one".
        */
-      reason: 'no_grant' | 'bad_secret' | 'expired' | 'out_of_scope';
+      reason: 'no_grant' | 'bad_secret' | 'expired';
     };
 
 /**
@@ -144,8 +129,6 @@ export async function checkA2AGrant(
     callerId: string;
     agentId: string;
     secret: string;
-    /** The scope this particular call needs. */
-    required: A2AGrantScope;
   },
   now = Date.now(),
 ): Promise<GrantCheck> {
@@ -162,13 +145,6 @@ export async function checkA2AGrant(
   if (grant.expiresAt !== undefined && grant.expiresAt <= now) {
     return { ok: false, reason: 'expired' };
   }
-  // `full` covers `analysis`; `analysis` does not cover `full`. Spelled out
-  // rather than ordered by array index so adding a scope cannot silently widen
-  // an existing one by landing in the wrong position.
-  const permitted =
-    grant.scope === 'full' ||
-    (grant.scope === 'analysis' && input.required === 'analysis');
-  if (!permitted) return { ok: false, reason: 'out_of_scope' };
   const { secretHash: _secretHash, ...view } = grant;
   return { ok: true, grant: view };
 }

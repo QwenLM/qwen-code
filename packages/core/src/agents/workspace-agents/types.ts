@@ -25,7 +25,7 @@ export const AGENTS_SCHEMA_VERSION = 1;
  * is everything that agent can do. Coarse on purpose — a scope nobody can
  * read is a scope nobody enforces correctly.
  */
-export type A2AGrantScope = 'analysis' | 'full';
+export type A2AGrantScope = 'analysis';
 
 /**
  * One external caller's permission to call one agent.

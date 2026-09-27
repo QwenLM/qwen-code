@@ -32,9 +32,10 @@ import {
   getExternalThreadForCaller,
   listExternalThreadsForCaller,
   ExternalIntakeConflictError,
+  ExternalIntakeRefusedError,
 } from './external-intake.js';
 import { isAgentAddressable, readWorkspaceAgents } from './store.js';
-import type { A2AGrantScope, Thread, WorkspaceAgent } from './types.js';
+import type { Thread, WorkspaceAgent } from './types.js';
 
 /**
  * What the transport is told to answer.
@@ -94,13 +95,11 @@ async function authorize(
   projectRoot: string,
   caller: A2ACaller,
   agentId: string,
-  required: A2AGrantScope,
 ): Promise<{ ok: true; agent: WorkspaceAgent } | { ok: false }> {
   const check = await checkA2AGrant(projectRoot, {
     callerId: caller.callerId,
     agentId,
     secret: caller.secret,
-    required,
   });
   if (!check.ok) return { ok: false };
   const agents = await readWorkspaceAgents(projectRoot);
@@ -140,12 +139,7 @@ export async function a2aSendMessage(
   // Submitting work is `analysis` scope: it is the least a caller can be
   // granted and still be useful, so a read-only grant can do it. What the
   // agent is then allowed to *do* is the agent's own tool policy, not this.
-  const auth = await authorize(
-    projectRoot,
-    caller,
-    request.agentId,
-    'analysis',
-  );
+  const auth = await authorize(projectRoot, caller, request.agentId);
   if (!auth.ok) return { ok: false, kind: 'refused' };
   try {
     const accepted = await acceptExternalSubmission(projectRoot, {
@@ -166,6 +160,9 @@ export async function a2aSendMessage(
         kind: 'conflict',
         existingTaskId: error.existingThreadId,
       };
+    }
+    if (error instanceof ExternalIntakeRefusedError) {
+      return { ok: false, kind: 'refused' };
     }
     throw error;
   }
@@ -193,7 +190,6 @@ export async function a2aGetTask(
     projectRoot,
     caller,
     thread.externalIntake.targetAgentId,
-    'analysis',
   );
   // A revoked caller loses its own history too. Otherwise revocation would
   // stop new work while leaving the old readable indefinitely.
@@ -207,7 +203,7 @@ export async function a2aListTasks(
   caller: A2ACaller,
   agentId: string,
 ): Promise<A2AResult<A2ATaskView[]>> {
-  const auth = await authorize(projectRoot, caller, agentId, 'analysis');
+  const auth = await authorize(projectRoot, caller, agentId);
   if (!auth.ok) return { ok: false, kind: 'refused' };
   const threads = await listExternalThreadsForCaller(
     projectRoot,
@@ -245,7 +241,6 @@ export async function a2aCancelTask(
     projectRoot,
     caller,
     existing.externalIntake.targetAgentId,
-    'analysis',
   );
   if (!auth.ok) return { ok: false, kind: 'not_found' };
   const cancelled = await cancelExternalThreadForCaller(
@@ -294,7 +289,7 @@ export async function a2aAgentCardForCaller(
 ): Promise<A2AAgentCard> {
   const skills: A2AAgentCard['skills'] = [];
   for (const agentId of agentIds) {
-    const auth = await authorize(projectRoot, caller, agentId, 'analysis');
+    const auth = await authorize(projectRoot, caller, agentId);
     if (!auth.ok) continue;
     skills.push({
       id: auth.agent.id,

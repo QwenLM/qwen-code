@@ -21,13 +21,17 @@ import { createHash } from 'node:crypto';
 
 import { externalRequestKey } from './a2a-contract.js';
 import {
-  createThreadInTransaction,
+  prepareThreadInTransaction,
   withAgentStoreTransaction,
 } from './store.js';
 import { isThreadTerminal } from './types.js';
-import { postMessageInTransaction } from './thread-actions.js';
-import { HUMAN_AUTHOR_ID } from './types.js';
+import {
+  MessageDispatchRejectedError,
+  postMessageInTransaction,
+} from './thread-actions.js';
 import type { ExternalIntake, Thread } from './types.js';
+
+const EXTERNAL_AUTHOR_ID = 'external';
 
 /**
  * Raised when a caller reuses a key for different content.
@@ -46,6 +50,13 @@ export class ExternalIntakeConflictError extends Error {
       `Request key already accepted for different content (thread ${existingThreadId})`,
     );
     this.name = 'ExternalIntakeConflictError';
+  }
+}
+
+export class ExternalIntakeRefusedError extends Error {
+  constructor() {
+    super('External submission could not be dispatched.');
+    this.name = 'ExternalIntakeRefusedError';
   }
 }
 
@@ -113,7 +124,12 @@ export async function acceptExternalSubmission(
   const contentHash = contentHashOf(submission);
 
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const { threads } = await transaction.listThreads();
+    const { threads, unreadable } = await transaction.listThreads();
+    if (unreadable.length > 0) {
+      throw new Error(
+        `Cannot accept external work while thread records are unreadable: ${unreadable.join(', ')}.`,
+      );
+    }
     const existing = findByKey(threads, key);
     if (existing) {
       if (existing.externalIntake?.contentHash !== contentHash) {
@@ -132,10 +148,10 @@ export async function acceptExternalSubmission(
       contentHash,
       receivedAt: now,
     };
-    const created = await createThreadInTransaction(transaction, {
+    const created = await prepareThreadInTransaction(transaction, {
       title: submission.title,
       body: submission.body,
-      createdBy: HUMAN_AUTHOR_ID,
+      createdBy: EXTERNAL_AUTHOR_ID,
       assigneeAgentId: submission.targetAgentId,
       externalIntake: intake,
       ...(submission.acceptanceCriteria
@@ -145,14 +161,30 @@ export async function acceptExternalSubmission(
     // The message is what books a run, so it lands in the same write as the
     // intake record: a thread accepted but never dispatched would report
     // `SUBMITTED` forever with nothing behind it.
-    const posted = await postMessageInTransaction(
-      transaction,
-      created.id,
-      { from: HUMAN_AUTHOR_ID, text: submission.body },
-      // The grant is for this agent alone; an @name in the text is not.
-      { targets: [submission.targetAgentId] },
-    );
-    return { outcome: 'accepted' as const, thread: posted.thread };
+    try {
+      const posted = await postMessageInTransaction(
+        transaction,
+        created.id,
+        {
+          from: EXTERNAL_AUTHOR_ID,
+          authorKind: 'system',
+          triggerKind: 'external',
+          text: submission.body,
+        },
+        {
+          // The grant is for this agent alone; an @name in the text is not.
+          targets: [submission.targetAgentId],
+          threadOverride: created,
+          requireDispatch: true,
+        },
+      );
+      return { outcome: 'accepted' as const, thread: posted.thread };
+    } catch (error) {
+      if (error instanceof MessageDispatchRejectedError) {
+        throw new ExternalIntakeRefusedError();
+      }
+      throw error;
+    }
   });
 }
 

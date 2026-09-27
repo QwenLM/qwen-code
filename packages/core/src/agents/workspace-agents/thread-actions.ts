@@ -68,6 +68,13 @@ export interface PostMessageResult {
   dispatched: ThreadRun[];
 }
 
+export class MessageDispatchRejectedError extends Error {
+  constructor(readonly outcomes: TargetOutcome[]) {
+    super('Message did not dispatch to any target.');
+    this.name = 'MessageDispatchRejectedError';
+  }
+}
+
 export interface PostMessageOptions {
   agents?: readonly WorkspaceAgent[];
   now?: number;
@@ -79,6 +86,8 @@ export interface PostMessageOptions {
    * the text must not reach another.
    */
   targets?: readonly string[];
+  /** Refuse the write unless at least one target accepts the message. */
+  requireDispatch?: boolean;
 }
 
 export function countQueuedElsewhere(
@@ -330,6 +339,14 @@ export async function postMessageInTransaction(
     }
 
     outcomes.push({ agentId, agentName: target?.name, decision });
+  }
+
+  if (
+    options.requireDispatch &&
+    dispatched.length === 0 &&
+    !outcomes.some((outcome) => outcome.decision.kind === 'coalesce')
+  ) {
+    throw new MessageDispatchRejectedError(outcomes);
   }
 
   const storedMessage = { ...message, outcomes: outcomes.map(storeOutcome) };

@@ -44,10 +44,7 @@ export interface ThreadsApi {
     agents: WorkspaceAgentSummaryView[];
     capabilities?: AgentCapabilitiesView;
   }>;
-  createShare?(
-    agentId: string,
-    scope: 'analysis' | 'full',
-  ): Promise<AgentShare>;
+  createShare?(agentId: string): Promise<AgentShare>;
   listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
   revokeShare?(agentId: string, callerId: string): Promise<unknown>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
@@ -109,8 +106,8 @@ export function createThreadsHttpApi(
 
   return {
     listAgents: () => request('/agents'),
-    createShare: (agentId, scope) =>
-      post(`/agents/${encodeURIComponent(agentId)}/shares`, { scope }),
+    createShare: (agentId) =>
+      post(`/agents/${encodeURIComponent(agentId)}/shares`, {}),
     listShares: (agentId) =>
       request(`/agents/${encodeURIComponent(agentId)}/shares`),
     revokeShare: (agentId, callerId) =>

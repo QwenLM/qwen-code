@@ -10,8 +10,8 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { issueA2AGrant } from './a2a-grants.js';
-import { a2aGetTask, a2aSendMessage } from './a2a-server.js';
-import { updateWorkspaceAgents } from './store.js';
+import { a2aCancelTask, a2aGetTask, a2aSendMessage } from './a2a-server.js';
+import { readThread, updateWorkspaceAgents } from './store.js';
 import { postMessage } from './thread-actions.js';
 
 const PROJECT_ROOT = '/a2a-server-test';
@@ -38,7 +38,6 @@ describe('A2A tasks', () => {
     const { secret } = await issueA2AGrant(PROJECT_ROOT, {
       callerId: 'share_1',
       agentId: 'ag_lead',
-      scope: 'analysis',
     });
     const caller = { callerId: 'share_1', secret };
     const sent = await a2aSendMessage(PROJECT_ROOT, caller, {
@@ -60,6 +59,37 @@ describe('A2A tasks', () => {
     expect(polled).toMatchObject({
       ok: true,
       value: { answer: 'The cache key misses on every run.' },
+    });
+  });
+
+  it('cancels queued external work without leaving a live run', async () => {
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const caller = { callerId: 'share_1', secret };
+    const sent = await a2aSendMessage(PROJECT_ROOT, caller, {
+      agentId: 'ag_lead',
+      messageId: 'msg-1',
+      title: 'Cancel me',
+      body: 'Wait for cancellation.',
+    });
+    if (!sent.ok) throw new Error('send refused');
+
+    await expect(
+      a2aCancelTask(PROJECT_ROOT, caller, sent.value.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        task: { status: { state: 'TASK_STATE_CANCELED' } },
+        runsStillLive: 0,
+      },
+    });
+    await expect(
+      readThread(PROJECT_ROOT, sent.value.id),
+    ).resolves.toMatchObject({
+      status: 'cancelled',
+      runs: [{ status: 'cancelled' }],
     });
   });
 });

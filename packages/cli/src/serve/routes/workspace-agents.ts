@@ -1298,11 +1298,6 @@ export function registerWorkspaceAgentRoutes(
       const runtime = runtimeFor(req, res);
       if (!runtime) return;
       const agentId = String(req.params['id']);
-      const scope = (req.body as { scope?: unknown } | undefined)?.scope;
-      if (scope !== 'analysis' && scope !== 'full') {
-        res.status(400).json({ error: 'share_scope_invalid' });
-        return;
-      }
       try {
         if (!(await knownAgent(runtime, agentId))) {
           res.status(404).json({ error: 'agent_not_found' });
@@ -1313,7 +1308,6 @@ export function registerWorkspaceAgentRoutes(
         const { secret } = await issueA2AGrant(runtime.workspaceCwd, {
           callerId,
           agentId,
-          scope,
           expiresAt,
         });
         res.status(201).json({
@@ -1322,7 +1316,7 @@ export function registerWorkspaceAgentRoutes(
           callerId,
           agentId,
           secret,
-          scope,
+          scope: 'analysis',
           expiresAt,
         });
       } catch (error) {

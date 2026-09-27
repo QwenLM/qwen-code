@@ -448,7 +448,7 @@ function isValidA2AGrant(value: unknown): value is A2AGrant {
     isRecord(value) &&
     isNonEmptyString(value['callerId']) &&
     isValidId(value['agentId']) &&
-    (value['scope'] === 'analysis' || value['scope'] === 'full') &&
+    value['scope'] === 'analysis' &&
     isNonEmptyString(value['secretHash']) &&
     isFiniteTimestamp(value['createdAt']) &&
     (value['expiresAt'] === undefined || isFiniteTimestamp(value['expiresAt']))
@@ -1103,9 +1103,11 @@ export async function updateAgentWorkspaceCallerGrants(
             const { callerGrants: _dropped, ...rest } = workspace;
             return rest;
           })();
-    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
-      noFollow: true,
-    });
+    await atomicWriteJSON(
+      getWorkspaceFilePath(projectRoot),
+      next,
+      STORE_FILE_OPTIONS,
+    );
     return next;
   });
 }

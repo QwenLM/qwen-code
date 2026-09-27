@@ -32,7 +32,7 @@
 
 **A2A `Task` = 本地一个 `Thread`，不是一个 `ThreadRun`。**
 
-Task 会经历 `INPUT_REQUIRED` 再收到后续输入，这正是一个 thread 被回答后继续被推进；而 run 是单次 turn，在协议里没有对应物。相应地 **A2A `contextId` = `rootThreadId`**——规范把它称作“the contextual collection of interactions”，那正是一个父 thread 连同它分裂出的子 thread。`Message` ↔ `ThreadMessage`。
+Task 可以进入 `INPUT_REQUIRED`，但首版传输只接收新任务。携带 `taskId` 或 `contextId` 的消息会被拒绝，直到 thread 续聊被明确实现。run 是单次 turn，在协议里没有对应物。对返回的任务，**A2A `contextId` = `rootThreadId`**——规范把它称作“the contextual collection of interactions”，那正是一个父 thread 连同它分裂出的子 thread。`Message` ↔ `ThreadMessage`。
 
 | 本地 `ThreadStatus` | A2A `TaskState`             | 说明                     |
 | ------------------- | --------------------------- | ------------------------ |

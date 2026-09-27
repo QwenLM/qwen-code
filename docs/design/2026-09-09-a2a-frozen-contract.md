@@ -32,7 +32,7 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
 
 **An A2A `Task` maps to one local `Thread`, not a `ThreadRun`.**
 
-A Task can enter `INPUT_REQUIRED` and then receive further input, just as a thread continues after an answer. A run is a single turn and has no corresponding protocol entity. Likewise, **A2A `contextId` = `rootThreadId`**: the specification describes a contextual collection of interactions, matching a parent thread together with its child threads. `Message` ↔ `ThreadMessage`.
+A Task can enter `INPUT_REQUIRED`, but the first transport accepts new tasks only. Messages carrying `taskId` or `contextId` are refused until thread continuation is implemented explicitly. A run is a single turn and has no corresponding protocol entity. For returned tasks, **A2A `contextId` = `rootThreadId`**: the specification describes a contextual collection of interactions, matching a parent thread together with its child threads. `Message` ↔ `ThreadMessage`.
 
 | Local `ThreadStatus` | A2A `TaskState`             | Explanation                                      |
 | -------------------- | --------------------------- | ------------------------------------------------ |

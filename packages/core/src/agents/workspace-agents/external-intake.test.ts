@@ -11,12 +11,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import {
   ExternalIntakeConflictError,
+  ExternalIntakeRefusedError,
   acceptExternalSubmission,
   getExternalThreadForCaller,
   listExternalThreadsForCaller,
   type ExternalSubmission,
 } from './external-intake.js';
-import { listThreads, updateWorkspaceAgents } from './store.js';
+import { getThreadsDir, listThreads, updateWorkspaceAgents } from './store.js';
 
 const PROJECT_ROOT = '/external-intake-test';
 
@@ -78,6 +79,51 @@ describe('external intake', () => {
     });
 
     expect(thread.runs.map((run) => run.agentId)).toEqual(['ag_lead']);
+  });
+
+  it('does not persist an idempotency key when admission fails', async () => {
+    const threadsDir = getThreadsDir(PROJECT_ROOT);
+    await fs.mkdir(threadsDir, { recursive: true });
+    await fs.writeFile(path.join(threadsDir, 'broken.json'), '{');
+
+    await expect(
+      acceptExternalSubmission(PROJECT_ROOT, submission),
+    ).rejects.toThrow('thread records are unreadable');
+    await fs.rm(path.join(threadsDir, 'broken.json'));
+
+    await expect(
+      acceptExternalSubmission(PROJECT_ROOT, submission),
+    ).resolves.toMatchObject({ outcome: 'accepted' });
+    const { threads } = await listThreads(PROJECT_ROOT);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]?.messages).toHaveLength(1);
+    expect(threads[0]?.runs).toHaveLength(1);
+  });
+
+  it('refuses a full queue without persisting an empty task', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, (agents) =>
+      agents.map((agent) =>
+        agent.id === 'ag_lead' ? { ...agent, queueLimit: 1 } : agent,
+      ),
+    );
+    await acceptExternalSubmission(PROJECT_ROOT, submission);
+
+    const next = { ...submission, callerId: 'share_2', messageId: 'msg-2' };
+    await expect(
+      acceptExternalSubmission(PROJECT_ROOT, next),
+    ).rejects.toBeInstanceOf(ExternalIntakeRefusedError);
+    await expect(listThreads(PROJECT_ROOT)).resolves.toMatchObject({
+      threads: [{ externalIntake: { callerId: 'share_1' } }],
+    });
+
+    await updateWorkspaceAgents(PROJECT_ROOT, (agents) =>
+      agents.map((agent) =>
+        agent.id === 'ag_lead' ? { ...agent, queueLimit: 2 } : agent,
+      ),
+    );
+    await expect(
+      acceptExternalSubmission(PROJECT_ROOT, next),
+    ).resolves.toMatchObject({ outcome: 'accepted' });
   });
 
   it('shows each caller only its own threads', async () => {

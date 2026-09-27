@@ -32,13 +32,12 @@ afterEach(async () => {
   await fs.rm(runtimeDir, { recursive: true, force: true });
 });
 
-const issue = (scope: 'analysis' | 'full', expiresAt?: number) =>
+const issue = (expiresAt?: number) =>
   issueA2AGrant(
     PROJECT_ROOT,
     {
       callerId: 'share_1',
       agentId: 'ag_lead',
-      scope,
       ...(expiresAt !== undefined ? { expiresAt } : {}),
     },
     T0,
@@ -46,7 +45,7 @@ const issue = (scope: 'analysis' | 'full', expiresAt?: number) =>
 
 describe('A2A grants', () => {
   it('keeps only a hash of the secret on disk and never lists it', async () => {
-    const { secret } = await issue('analysis');
+    const { secret } = await issue();
     const onDisk = await fs.readFile(
       getWorkspaceFilePath(PROJECT_ROOT),
       'utf8',
@@ -62,10 +61,9 @@ describe('A2A grants', () => {
   });
 
   it('checks the secret, the agent, the expiry and the scope', async () => {
-    const { secret } = await issue('analysis', T0 + 1000);
+    const { secret } = await issue(T0 + 1000);
     const check = (
       overrides: Partial<{ secret: string; agentId: string }>,
-      required: 'analysis' | 'full' = 'analysis',
       now = T0,
     ) =>
       checkA2AGrant(
@@ -74,7 +72,6 @@ describe('A2A grants', () => {
           callerId: 'share_1',
           agentId: 'ag_lead',
           secret,
-          required,
           ...overrides,
         },
         now,
@@ -89,23 +86,18 @@ describe('A2A grants', () => {
       ok: false,
       reason: 'no_grant',
     });
-    await expect(check({}, 'full')).resolves.toEqual({
-      ok: false,
-      reason: 'out_of_scope',
-    });
-    await expect(check({}, 'analysis', T0 + 1000)).resolves.toEqual({
+    await expect(check({}, T0 + 1000)).resolves.toEqual({
       ok: false,
       reason: 'expired',
     });
   });
 
-  it('lets a full grant cover analysis, and stops working once revoked', async () => {
-    const { secret } = await issue('full');
+  it('stops working once revoked', async () => {
+    const { secret } = await issue();
     const input = {
       callerId: 'share_1',
       agentId: 'ag_lead',
       secret,
-      required: 'analysis' as const,
     };
 
     await expect(checkA2AGrant(PROJECT_ROOT, input, T0)).resolves.toMatchObject(

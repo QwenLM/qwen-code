@@ -703,7 +703,6 @@ describe('releasing the agent host session', () => {
     await issueA2AGrant(PROJECT_ROOT, {
       callerId: 'share_1',
       agentId: ALICE.id,
-      scope: 'analysis',
     });
     await claimAgentHostSession(PROJECT_ROOT, 'session-1');
 

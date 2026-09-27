@@ -74,10 +74,7 @@ export interface ThreadsPageProps {
   onOpenDefinitions?: () => void;
   /** A2A shares of one agent; absent hides Share. */
   shares?: {
-    create: (
-      agentId: string,
-      scope: 'analysis' | 'full',
-    ) => Promise<AgentShare>;
+    create: (agentId: string) => Promise<AgentShare>;
     list: (agentId: string) => Promise<AgentShareSummary[]>;
     revoke: (agentId: string, callerId: string) => Promise<unknown>;
   };
@@ -804,7 +801,7 @@ export function ThreadsPage({
           onOpenChange={(open) => {
             if (!open) setSharing(undefined);
           }}
-          onCreate={(scope) => shares.create(sharing.id, scope)}
+          onCreate={() => shares.create(sharing.id)}
           onList={() => shares.list(sharing.id)}
           onRevoke={(callerId) => shares.revoke(sharing.id, callerId)}
         />

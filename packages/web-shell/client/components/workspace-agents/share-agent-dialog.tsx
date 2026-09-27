@@ -28,13 +28,13 @@ export interface AgentShare {
   callerId: string;
   agentId: string;
   secret: string;
-  scope: 'analysis' | 'full';
+  scope: 'analysis';
   expiresAt?: number;
 }
 
 export interface AgentShareSummary {
   callerId: string;
-  scope: 'analysis' | 'full';
+  scope: 'analysis';
   createdAt: number;
   expiresAt?: number;
 }
@@ -120,12 +120,11 @@ export function ShareAgentDialog({
   agentName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreate: (scope: 'analysis' | 'full') => Promise<AgentShare>;
+  onCreate: () => Promise<AgentShare>;
   onList: () => Promise<AgentShareSummary[]>;
   onRevoke: (callerId: string) => Promise<unknown>;
 }) {
   const { t } = useI18n();
-  const [scope, setScope] = useState<'analysis' | 'full'>('analysis');
   const [share, setShare] = useState<AgentShare>();
   const [shares, setShares] = useState<AgentShareSummary[]>([]);
   const [error, setError] = useState<string>();
@@ -184,32 +183,13 @@ export function ShareAgentDialog({
             )}
           </div>
         ) : (
-          <div
-            role="radiogroup"
-            aria-label={t('collab.share.scope')}
-            className="flex flex-col gap-2 text-sm"
-          >
-            {(['analysis', 'full'] as const).map((value) => (
-              <label
-                key={value}
-                className="flex items-start gap-2 rounded-md border border-border p-3"
-              >
-                <input
-                  type="radio"
-                  name="share-scope"
-                  checked={scope === value}
-                  onChange={() => setScope(value)}
-                />
-                <span>
-                  <span className="block font-medium">
-                    {t(`collab.share.scope.${value}`)}
-                  </span>
-                  <span className="block text-xs text-muted-foreground">
-                    {t(`collab.share.scope.${value}Hint`)}
-                  </span>
-                </span>
-              </label>
-            ))}
+          <div className="rounded-md border border-border p-3 text-sm">
+            <span className="block font-medium">
+              {t('collab.share.scope.analysis')}
+            </span>
+            <span className="block text-xs text-muted-foreground">
+              {t('collab.share.scope.analysisHint')}
+            </span>
           </div>
         )}
 
@@ -260,9 +240,7 @@ export function ShareAgentDialog({
           ) : (
             <Button
               disabled={busy}
-              onClick={() =>
-                void run(async () => setShare(await onCreate(scope)))
-              }
+              onClick={() => void run(async () => setShare(await onCreate()))}
             >
               {t('collab.share.create')}
             </Button>

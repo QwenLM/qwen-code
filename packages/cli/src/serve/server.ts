@@ -2312,7 +2312,7 @@ export function createServeApp(
   }
 
   if (agentCollaborationEnabled) {
-    registerA2ATransportRoutes(app, workspaceRegistry);
+    registerA2ATransportRoutes(app, workspaceRegistry, rateLimiter);
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control

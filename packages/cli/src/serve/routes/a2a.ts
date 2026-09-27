@@ -46,8 +46,16 @@ import {
   a2aSendMessage,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-server.js';
 import { checkA2AGrant } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
-import type { Application, NextFunction, Request, Response } from 'express';
+import type {
+  Application,
+  NextFunction,
+  Request,
+  RequestHandler,
+  Response,
+} from 'express';
+import type { RateLimiterInstance } from '../rate-limit.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 
 const A2A_PATH = '/a2a/v1';
 const REQUEST_REFUSED = -32010;
@@ -72,6 +80,8 @@ class AuthenticatedA2AUser implements User {
   }
 }
 
+type A2ARequest = Request & { a2aUser?: AuthenticatedA2AUser };
+
 function runtimeFor(registry: WorkspaceRegistry, workspaceId: string) {
   return registry
     .listAll()
@@ -82,39 +92,71 @@ function baseUrl(req: Request): string {
   return `${req.protocol}://${req.get('host') ?? '127.0.0.1'}`;
 }
 
-async function buildUser(
-  req: Request,
-  registry: WorkspaceRegistry,
-): Promise<User> {
-  const authorization = /^Bearer ([A-Za-z0-9_-]{32,})$/.exec(
-    req.get('authorization') ?? '',
-  );
-  const workspaceId = req.get(HEADER_WORKSPACE);
-  const callerId = req.get(HEADER_CALLER);
-  const agentId = req.get(HEADER_AGENT);
-  const runtime = workspaceId ? runtimeFor(registry, workspaceId) : undefined;
-  if (
-    !authorization ||
-    !callerId ||
-    !agentId ||
-    !runtime ||
-    (!runtime.primary && !runtime.trusted)
-  ) {
-    return new UnauthenticatedUser();
-  }
-  const caller = { callerId, secret: authorization[1] };
-  const grant = await checkA2AGrant(runtime.workspaceCwd, {
-    ...caller,
-    agentId,
-    required: 'analysis',
+function rateLimitExceeded(res: Response): void {
+  res.status(429).json({
+    error: 'Rate limit exceeded',
+    code: 'rate_limit_exceeded',
+    tier: 'mutation',
   });
-  if (!grant.ok) return new UnauthenticatedUser();
-  return new AuthenticatedA2AUser(
-    runtime.workspaceCwd,
-    caller,
-    agentId,
-    baseUrl(req),
-  );
+}
+
+function authenticateA2A(
+  registry: WorkspaceRegistry,
+  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+): RequestHandler {
+  return async (request, res, next) => {
+    const req = request as A2ARequest;
+    if (
+      rateLimiter &&
+      !rateLimiter.checkRate(
+        `a2a:preauth:${req.ip || req.socket.remoteAddress || 'unknown'}`,
+        'mutation',
+      )
+    ) {
+      rateLimitExceeded(res);
+      return;
+    }
+
+    const authorization = /^Bearer ([A-Za-z0-9_-]{32,})$/.exec(
+      req.get('authorization') ?? '',
+    );
+    const workspaceId = req.get(HEADER_WORKSPACE);
+    const callerId = req.get(HEADER_CALLER);
+    const agentId = req.get(HEADER_AGENT);
+    const runtime = workspaceId ? runtimeFor(registry, workspaceId) : undefined;
+    if (!authorization || !callerId || !agentId || !runtime) {
+      next();
+      return;
+    }
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    const caller = { callerId, secret: authorization[1] };
+    const grant = await checkA2AGrant(runtime.workspaceCwd, {
+      ...caller,
+      agentId,
+    });
+    if (!grant.ok) {
+      next();
+      return;
+    }
+    if (
+      rateLimiter &&
+      !rateLimiter.checkRate(`a2a:caller:${callerId}`, 'mutation')
+    ) {
+      rateLimitExceeded(res);
+      return;
+    }
+    req.a2aUser = new AuthenticatedA2AUser(
+      runtime.workspaceCwd,
+      caller,
+      agentId,
+      baseUrl(req),
+    );
+    next();
+  };
+}
+
+async function buildUser(req: Request): Promise<User> {
+  return (req as A2ARequest).a2aUser ?? new UnauthenticatedUser();
 }
 
 function authenticated(context: ServerCallContext): AuthenticatedA2AUser {
@@ -322,6 +364,12 @@ function messageText(params: Parameters<A2ARequestHandler['sendMessage']>[0]) {
       detail: 'A user message with messageId is required.',
     });
   }
+  if (message.taskId || message.contextId) {
+    fail({
+      kind: 'invalid',
+      detail: 'Continuing an existing task or context is not supported.',
+    });
+  }
   if (
     message.parts.length === 0 ||
     message.parts.some((part) => part.content?.$case !== 'text')
@@ -477,6 +525,7 @@ function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
 export function registerA2ATransportRoutes(
   app: Application,
   workspaceRegistry: WorkspaceRegistry,
+  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
 ): void {
   app.get(`/${A2A_AGENT_CARD_PATH}`, (req: Request, res: Response): void => {
     res.setHeader('A2A-Version', A2A_PROTOCOL_VERSION);
@@ -488,6 +537,7 @@ export function registerA2ATransportRoutes(
 
   app.use(
     A2A_PATH,
+    authenticateA2A(workspaceRegistry, rateLimiter),
     (req: Request, res: Response, next: NextFunction): void => {
       if (req.is(A2A_CONTENT_TYPE)) {
         req.headers['content-type'] = 'application/json';
@@ -498,7 +548,7 @@ export function registerA2ATransportRoutes(
     },
     jsonRpcHandler({
       requestHandler: requestHandler(workspaceRegistry),
-      userBuilder: (req) => buildUser(req, workspaceRegistry),
+      userBuilder: buildUser,
     }),
   );
 }
