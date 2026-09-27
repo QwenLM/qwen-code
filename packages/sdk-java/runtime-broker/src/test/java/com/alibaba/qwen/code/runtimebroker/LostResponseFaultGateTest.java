@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import java.time.Duration;
 import java.util.List;
@@ -58,7 +59,7 @@ class LostResponseFaultGateTest {
                         .plusSeconds(3))
                 : FaultProxy.Fault.of(loss));
         acquire();
-        Map<String, Object> reference = FaultGateRig.shell("call-1",
+        FaultGateRig.ToolCall reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = broker.create(HARNESS, SESSION, "key-1",
                 reference).object().getString("executionCallId");
@@ -77,9 +78,10 @@ class LostResponseFaultGateTest {
         RuntimeLease lease = rig.activeBinding().getLease();
         HttpRuntimeTransport runtime = new HttpRuntimeTransport();
         Map<String, Object> joined = runtime.execute(lease, rig.session(),
-                reference).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                reference.reference(), JSON.parseObject(reference.payloadJson()))
+                .toCompletableFuture().get(30, TimeUnit.SECONDS);
         Map<String, Object> status = runtime.status(lease, rig.session(),
-                reference, 0).toCompletableFuture().get(30,
+                reference.reference(), 0).toCompletableFuture().get(30,
                         TimeUnit.SECONDS);
         assertEquals("settled", status.get("state"));
         assertEquals(joined, status.get("result"));

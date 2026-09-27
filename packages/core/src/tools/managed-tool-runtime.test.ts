@@ -820,6 +820,76 @@ describe('ManagedToolRuntime', () => {
     });
   });
 
+  it('preserves an explicit Shell cancellation even when the tool has no error', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    runtime.cancel(ref);
+    gate.resolve({
+      llmContent: 'Command cancelled by user.',
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command cancelled by user.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: 15,
+        pid: 123,
+        error: null,
+        outcome: 'cancelled',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    expect((await executing).executionStatus).toBe('cancelled');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('releases prepared work without changing completed invocation evidence', async () => {
+    const completed = await prepare();
+    await runtime.preflight(completed);
+    await runtime.execute(completed);
+    const prepared = await prepare(input, { ...identity, callId: 'prepared' });
+    await runtime.releasePrepared();
+    expect(runtime.hasActiveWork()).toBe(false);
+    expect(runtime.status(completed)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+      result: { executionStatus: 'success' },
+    });
+    expect(runtime.status(prepared)).toMatchObject({
+      state: 'settled',
+      cancelRequested: true,
+      result: { executionStatus: 'not_started' },
+    });
+    expect(tool.invocations[1].execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses to release an executing invocation without cancelling it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'executing',
+      cancelRequested: false,
+    });
+    gate.resolve(rawResult);
+    await executing;
+    await runtime.releasePrepared();
+  });
+
   it('keeps a prepared cancellation un-settled until its confirmation callback returns', async () => {
     const gate = deferred<void>();
     tool.setup = (invocation) =>

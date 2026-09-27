@@ -28,8 +28,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
  * by the original call reference. Status and cancel answers are projected to
- * the Broker's closed state and result. Acquire, control, and release are
- * not part of the v2 tool contract and fail closed.
+ * the Broker's closed state and result. Prepared provider invocations use
+ * their separate Session control protocol.
  */
 public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
@@ -262,6 +262,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException(
                     "lease and session are required");
         }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "execute", "reference", reference))
+                    .thenApply(value -> providerResult(value, "execute"));
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
@@ -299,6 +304,12 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException(
                     "afterSequence must be non-negative");
         }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "status", "reference", reference,
+                    "afterSequence", afterSequence))
+                    .thenApply(value -> providerStatus(value, "status"));
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
@@ -315,6 +326,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         if (lease == null || session == null) {
             throw new IllegalArgumentException(
                     "lease and session are required");
+        }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "cancel", "reference", reference))
+                    .thenApply(value -> providerStatus(value, "cancel"));
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
@@ -540,32 +556,134 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return true;
     }
 
-    /**
-     * Session verbs are not on the v2 tool contract. Fail closed instead of
-     * inventing a route the worker does not serve.
-     */
+    /** Session acquisition is Broker-local until the provider is used. */
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session) {
-        return unsupportedSessionVerb();
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+        return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation) {
-        return unsupportedSessionVerb();
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+        Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
+        if ("history".equals(immutable.get("kind"))) {
+            return provider(lease, session, immutable);
+        }
+        return provider(lease, session, Map.of("kind", "acquire"))
+                .thenCompose(value -> {
+                    if (!Boolean.TRUE.equals(value)) {
+                        throw protocol("Managed Runtime acquire response is invalid.");
+                    }
+                    return provider(lease, session, immutable);
+                });
     }
 
     @Override
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session) {
-        return unsupportedSessionVerb();
+        return provider(lease, session, Map.of("kind", "release"))
+                .thenApply(value -> {
+                    if (!Boolean.TRUE.equals(value)) {
+                        throw protocol("Managed Runtime did not confirm Session release.");
+                    }
+                    return true;
+                });
     }
 
-    private static <T> CompletionStage<T> unsupportedSessionVerb() {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "runtime_session_verb_unsupported",
-                "Runtime transport does not support session verbs.", false));
+    private CompletionStage<Object> provider(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> operation) {
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+        Map<String, Object> identity = Map.of("harnessSessionId", session.getHarnessSessionId(),
+                "runtimeSessionId", session.getRuntimeSessionId(), "turnKind", session.getTurnKind());
+        Map<String, Object> body = Map.of("protocolVersion", 1,
+                "providerProtocol", ProviderRuntimeProtocol.NAME, "session", identity,
+                "operation", operation);
+        String kind = (String) operation.get("kind");
+        int limit = ProviderRuntimeProtocol.limit(kind);
+        return post(lease, ProviderRuntimeProtocol.PATH, encodeToolRequest(body, limit), limit)
+                .thenApply(bytes -> {
+                    Map<String, Object> response;
+                    try {
+                        response = BrokerValues.immutableMap(JSON.parseObject(
+                                new String(bytes, StandardCharsets.UTF_8),
+                                JSONReader.Feature.DisableReferenceDetect,
+                                JSONReader.Feature.UseBigDecimalForDoubles,
+                                JSONReader.Feature.UseBigDecimalForFloats));
+                    } catch (RuntimeException exception) {
+                        throw protocol("Managed Runtime provider response is invalid.");
+                    }
+                    if (!response.keySet().equals(Set.of("protocolVersion", "providerProtocol",
+                            "session", "result"))
+                            || !Integer.valueOf(1).equals(response.get("protocolVersion"))
+                            || !ProviderRuntimeProtocol.NAME.equals(response.get("providerProtocol"))
+                            || !identity.equals(response.get("session"))) {
+                        throw protocol("Managed Runtime provider response identity is invalid.");
+                    }
+                    Object result = response.get("result");
+                    if (("begin-turn".equals(kind) || "confirm".equals(kind)) && result != null) {
+                        throw protocol("Managed Runtime provider void response is invalid.");
+                    }
+                    if (!Set.of("acquire", "release", "begin-turn", "confirm").contains(kind)
+                            && !(result instanceof Map)) {
+                        throw protocol("Managed Runtime provider result is invalid.");
+                    }
+                    return result;
+                });
+    }
+
+    private static Map<String, Object> providerResult(Object value, String operation) {
+        if (!(value instanceof Map<?, ?> result)
+                || !Set.of("executionStatus", "result", "error", "postHook", "failureHook")
+                        .containsAll(result.keySet())
+                || !(result.get("executionStatus") instanceof String status)
+                || !EXECUTION_STATUSES.contains(status)
+                || "success".equals(status) && !(result.get("result") instanceof Map)) {
+            throw protocol("Managed Runtime provider " + operation + " result is invalid.");
+        }
+        return ProviderRuntimeProtocol.object(value);
+    }
+
+    private static Map<String, Object> providerStatus(Object value, String operation) {
+        if (!(value instanceof Map<?, ?> status)
+                || !Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq",
+                        "progressGap", "progress", "result").containsAll(status.keySet())) {
+            throw protocol("Managed Runtime provider " + operation + " status is invalid.");
+        }
+        Map<String, Object> result = ProviderRuntimeProtocol.object(value);
+        if ("unknown".equals(result.get("state"))) {
+            if (!result.keySet().equals(Set.of("state"))) {
+                throw protocol("Managed Runtime provider unknown status is invalid.");
+            }
+        } else if (!(result.get("cancelRequested") instanceof Boolean)
+                || !(result.get("progressGap") instanceof Boolean)
+                || !(result.get("progress") instanceof List)
+                || !providerSequence(result.get("lastSeq"))
+                || !providerSequence(result.get("firstAvailableSeq"))) {
+            throw protocol("Managed Runtime provider status cursor is invalid.");
+        }
+        if ("settled".equals(result.get("state"))) {
+            providerResult(result.get("result"), operation);
+        }
+        return projectClosedStatus(result, operation);
+    }
+
+    private static boolean providerSequence(Object value) {
+        if (!(value instanceof Number number)) {
+            return false;
+        }
+        BigDecimal sequence = new BigDecimal(number.toString());
+        return sequence.signum() >= 0 && sequence.stripTrailingZeros().scale() <= 0
+                && sequence.compareTo(BigDecimal.valueOf(9007199254740991L)) <= 0;
     }
 
     /**
@@ -769,8 +887,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                         "managed_runtime_attestation_too_large",
                         "Managed Runtime " + operation
                                 + " response exceeds "
-                                + (responseLimit == TOOL_RESULT_LIMIT_BYTES
-                                        ? "1 MiB." : "16 KiB."), false));
+                                + (responseLimit >= 1024 * 1024
+                                        ? responseLimit / (1024 * 1024) + " MiB."
+                                        : responseLimit / 1024 + " KiB."), false));
                 return;
             }
             if (!"no-store".equals(response.headers()

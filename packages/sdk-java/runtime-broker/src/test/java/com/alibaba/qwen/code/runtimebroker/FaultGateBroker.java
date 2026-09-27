@@ -142,9 +142,10 @@ final class FaultGateBroker {
                             "bindingId", record.getBindingId(),
                             "runtimeGeneration",
                             record.getRuntimeGeneration()));
-            case "create" -> service.createExecution(harness, session,
-                    command.getString("key"),
-                    command.getJSONObject("reference"))
+            case "create" -> service.prepareExecution(harness, session,
+                    command.getString("key"), command.getJSONObject("reference"))
+                    .thenCompose(record -> service.startExecution(harness, session,
+                            record.getExecutionCallId(), command.getString("payloadJson")))
                     .thenApply(FaultGateBroker::execution);
             case "get" -> service.getExecution(harness, session, execution)
                     .thenApply(FaultGateBroker::execution);

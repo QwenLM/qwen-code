@@ -12,6 +12,7 @@ import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
@@ -21,8 +22,8 @@ import java.util.function.Function;
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
  *
- * <p>Immediate and durable deferred dispatch share the original execution
- * journal. Operator resolution remains unavailable.
+ * <p>Immediate raw-tool dispatch and durable raw-tool or provider dispatch
+ * share the original execution journal. Operator resolution is unavailable.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
@@ -194,6 +195,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         String callId = JsonCodec.requiredString(body, "toolCallId", "execution request");
         String digest = JsonCodec.requiredString(body, "requestDigest", "execution request");
         Map<String, Object> reference = requiredObject(body, "reference", "execution request");
+        if (prepare && !body.keySet().equals(Set.of("protocolVersion", "requestId", "idempotencyKey",
+                "harnessSessionId", "runtimeSessionId", "turnId", "toolCallId", "requestDigest", "reference"))) {
+            throw new RuntimeBrokerException(400, "runtime_reference_invalid",
+                    "Prepared execution fields are invalid.", false);
+        }
         if (prepare && (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !callId.equals(reference.get("callId"))
@@ -215,13 +221,23 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String executionCallId = pathId(suffix.substring(0, suffix.length() - ":start".length()));
             Map<String, Object> body = requestBody(exchange, "start request");
             requireProtocol(body);
+            Set<String> fields = body.containsKey("payloadJson")
+                    ? Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "payloadJson")
+                    : Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId");
+            if (!body.keySet().equals(fields)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "Start request fields are invalid.", false);
+            }
             JsonCodec.requiredString(body, "requestId", "start request");
             String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "start request");
             String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "start request");
-            if (!(body.get("payloadJson") instanceof String payload)) {
-                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson is required", false);
+            if (body.containsKey("payloadJson") && !(body.get("payloadJson") instanceof String)) {
+                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson must be a string", false);
             }
-            complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload),
+            complete(exchange, body.containsKey("payloadJson")
+                            ? service.startExecution(harnessSessionId, runtimeSessionId, executionCallId,
+                                    (String) body.get("payloadJson"))
+                            : service.startExecution(harnessSessionId, runtimeSessionId, executionCallId),
                     record -> executionEnvelope(harnessSessionId, runtimeSessionId, record));
             return;
         }

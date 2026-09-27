@@ -17,6 +17,7 @@ import {
 } from '../core/toolHookTriggers.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import {
   ToolConfirmationOutcome,
   type AnyDeclarativeTool,
@@ -645,11 +646,15 @@ export class ManagedToolRuntime {
         this.config.getShellExecutionConfig(),
       );
       result = {
-        executionStatus: raw.error
-          ? signal.aborted
+        executionStatus:
+          isShellResultDisplay(raw.returnDisplay) &&
+          raw.returnDisplay.outcome === 'cancelled'
             ? 'cancelled'
-            : 'error'
-          : 'success',
+            : raw.error
+              ? signal.aborted
+                ? 'cancelled'
+                : 'error'
+              : 'success',
       };
       try {
         result.result = structuredClone({
@@ -783,6 +788,24 @@ export class ManagedToolRuntime {
       this.snapshotPending ||
       this.pendingPreparations > 0 ||
       [...this.entries.values()].some((entry) => !entry.result)
+    );
+  }
+
+  async releasePrepared(): Promise<void> {
+    if (
+      this.snapshotPending ||
+      this.pendingPreparations > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.execution !== undefined && !entry.result,
+      )
+    ) {
+      throw new Error('Managed Runtime still owns unfinished execution.');
+    }
+    for (const entry of this.entries.values()) {
+      if (!entry.result) this.requestCancel(entry);
+    }
+    await Promise.all(
+      [...this.entries.values()].map((entry) => entry.cancellation),
     );
   }
 

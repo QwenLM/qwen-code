@@ -143,6 +143,12 @@ export interface ManagedToolV3View {
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
+  private readonly providerSessions = new Set<string>();
+  private readonly closedSessions = new Set<string>();
+  private provider?: {
+    hasActiveSession(sessionId: string): boolean;
+    close(): Promise<void>;
+  };
   private closing = false;
 
   constructor(
@@ -163,11 +169,47 @@ export class ManagedToolExecutor {
     return ADMITTED_TOOL_NAMES.has(toolName);
   }
 
+  attachProvider(provider: NonNullable<ManagedToolExecutor['provider']>): void {
+    this.provider = provider;
+  }
+
+  claimProviderSession(sessionId: string): void {
+    if (
+      this.closing ||
+      this.closedSessions.has(sessionId) ||
+      [...this.entries.values()].some(
+        (entry) => entry.reference.sessionId === sessionId,
+      )
+    ) {
+      throw new ManagedToolConflictError('Managed Runtime Session conflicts.');
+    }
+    this.providerSessions.add(sessionId);
+  }
+
+  closeSessionAdmission(sessionId: string): void {
+    if (this.hasActiveSession(sessionId)) {
+      throw new ManagedToolConflictError(
+        'Managed Runtime Session still owns unfinished work.',
+      );
+    }
+    this.closedSessions.add(sessionId);
+  }
+
+  private assertLegacySession(sessionId: string): void {
+    if (
+      this.providerSessions.has(sessionId) ||
+      this.closedSessions.has(sessionId)
+    ) {
+      throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
+    }
+  }
+
   async execute(
     reference: ManagedToolReference,
     toolName: string,
     input: Record<string, unknown>,
   ): Promise<ManagedToolResultPayload> {
+    this.assertLegacySession(reference.sessionId);
     if (this.closing) {
       throw new ManagedToolUnavailableError(
         'Managed Runtime worker is closing.',
@@ -191,6 +233,7 @@ export class ManagedToolExecutor {
       return join(existing, reference, toolName, inputJson);
     }
     const tools = await this.toolsFor(reference);
+    this.assertLegacySession(reference.sessionId);
     // A concurrent execute of the same call may have journaled it meanwhile.
     const joined = this.entries.get(reference.callId);
     if (joined) {
@@ -262,6 +305,7 @@ export class ManagedToolExecutor {
       );
     }
     const { reference, capture, toolName, input } = request;
+    this.assertLegacySession(reference.sessionId);
     let inputJson: string;
     let inputDigest: string;
     try {
@@ -298,6 +342,7 @@ export class ManagedToolExecutor {
       );
     }
     const tools = await this.toolsFor(reference);
+    this.assertLegacySession(reference.sessionId);
     const joined = this.entries.get(reference.callId);
     if (joined) return this.executeV3(request);
     if (!tools || tools.isActive?.() === false) {
@@ -326,6 +371,7 @@ export class ManagedToolExecutor {
       );
     }
     if (this.entries.has(reference.callId)) return this.executeV3(request);
+    this.assertLegacySession(reference.sessionId);
     if (this.closing || tools.isActive?.() === false) {
       throw new ManagedToolUnavailableError(
         'Managed Runtime worker is no longer active.',
@@ -430,11 +476,14 @@ export class ManagedToolExecutor {
 
   /** Read-only lookup; never creates or advances an invocation. */
   hasActiveSession(sessionId: string): boolean {
-    return [...this.entries.values()].some(
-      (entry) =>
-        entry.reference.sessionId === sessionId &&
-        entry.state !== 'settled' &&
-        entry.state !== 'unknown',
+    return (
+      this.provider?.hasActiveSession(sessionId) === true ||
+      [...this.entries.values()].some(
+        (entry) =>
+          entry.reference.sessionId === sessionId &&
+          entry.state !== 'settled' &&
+          entry.state !== 'unknown',
+      )
     );
   }
 
@@ -483,11 +532,12 @@ export class ManagedToolExecutor {
         entry.controller.abort();
       }
     }
-    await Promise.allSettled(
-      [...this.entries.values()].flatMap((entry) =>
+    await Promise.allSettled([
+      ...[...this.entries.values()].flatMap((entry) =>
         entry.promise ? [entry.promise] : [],
       ),
-    );
+      this.provider?.close(),
+    ]);
   }
 
   private static isCancelRequested(entry: JournalEntry): boolean {

@@ -794,16 +794,10 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
-    void sessionVerbsFailClosed() {
+    void rawSessionAcquisitionIsBrokerLocal() {
         assertTrue(transport instanceof RuntimeTransport);
-        CompletionException thrown = assertThrows(CompletionException.class,
-                () -> transport.acquire(toolLease(1), toolSession())
-                        .toCompletableFuture().join());
-        RuntimeBrokerException failure =
-                (RuntimeBrokerException) thrown.getCause();
-        assertEquals(501, failure.getStatusCode());
-        assertEquals("runtime_session_verb_unsupported", failure.getCode());
-        assertFalse(failure.isRetryable());
+        transport.acquire(toolLease(1), toolSession()).toCompletableFuture().join();
+        assertNull(captured.get());
     }
 
     @Test

@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ManagedToolInvocationReference } from '@qwen-code/qwen-code-core';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   BrokerManagedRuntimeProvider,
   MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
@@ -202,7 +203,7 @@ describe('BrokerManagedRuntimeProvider', () => {
           envelope({
             result: {
               tools: [],
-              capabilityDigest: 'a'.repeat(64),
+              capabilityDigest: managedToolDigest([]),
               policyRevision: 'policy-1',
             },
           }),
@@ -317,6 +318,99 @@ describe('BrokerManagedRuntimeProvider', () => {
     await expect(
       provider.getToolV2Client(request(), { harnessSessionId }),
     ).rejects.toThrow('response identity changed');
+  });
+
+  it('rejects foreign control identities before contacting the Broker', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json(envelope({ acquired: true })),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    const {
+      invocationId: _invocationId,
+      argsDigest: _argsDigest,
+      ...identity
+    } = reference();
+    await expect(
+      client.beginTurn({ ...identity, sessionId: harnessSessionId }),
+    ).rejects.toThrow('Session identity conflicts');
+    expect(() =>
+      client.confirmation({ ...reference(), sessionId: harnessSessionId }),
+    ).toThrow('Session identity conflicts');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    provider.dispose();
+  });
+
+  it('requires a null acknowledgement for void provider controls', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (url) =>
+      json(
+        envelope(
+          String(url).endsWith('tool-sessions:acquire')
+            ? { acquired: true }
+            : {},
+        ),
+      ),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    const {
+      invocationId: _invocationId,
+      argsDigest: _argsDigest,
+      ...identity
+    } = reference();
+    await expect(client.beginTurn(identity)).rejects.toThrow();
+    provider.dispose();
+  });
+
+  it('reserves replacement prepared invocations independently', async () => {
+    const keys: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      const body = JSON.parse(String(init?.body)) as { idempotencyKey: string };
+      keys.push(body.idempotencyKey);
+      return json(
+        envelope({
+          executionCallId: `execution-${keys.length}`,
+          status: {
+            state: 'prepared',
+            cancelRequested: false,
+            lastSeq: 0,
+            firstAvailableSeq: 1,
+            progressGap: false,
+            progress: [],
+          },
+        }),
+      );
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await client.prepareExecution!(reference());
+    await client.prepareExecution!({
+      ...reference(),
+      invocationId: 'replacement-invocation',
+    });
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
+    provider.dispose();
   });
 
   it('inspects a durable execution without recreating a process-local Runtime entry', async () => {

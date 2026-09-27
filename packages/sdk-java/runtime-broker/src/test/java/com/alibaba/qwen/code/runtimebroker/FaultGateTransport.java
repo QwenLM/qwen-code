@@ -4,23 +4,18 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
- * The Runtime transport a fault-gate Broker runs with. The v2 worker contract
- * has no Session verbs, and {@link HttpRuntimeTransport} fails
- * {@code acquire} and {@code release} with 501 until they exist, so the
- * service could never reach dispatch. These two verbs are answered here;
- * everything that crosses to the worker goes through the production HTTP
- * transport.
+ * The Runtime transport a fault-gate Broker runs with. Session lifecycle
+ * and tool operations use the production HTTP transport.
  *
  * <p>For a MANAGED placement, acquire does what the managed agent server's
  * Workspace transport (W0c-3) does after its authorization and storage
  * ownership checks: it installs the Session's context under an operation ID
  * derived from the Runtime Session ID, then activates the Session's gate.
- * Release closes that gate. Both calls are the production
- * {@link HttpRuntimeTransport} methods, with their receipt checks.
+ * Release closes provider admission before that gate. These calls use
+ * {@link HttpRuntimeTransport}, with its receipt checks.
  */
 final class FaultGateTransport implements RuntimeTransport {
     private final HttpRuntimeTransport runtime;
@@ -51,7 +46,7 @@ final class FaultGateTransport implements RuntimeTransport {
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session) {
         if (context == null) {
-            return CompletableFuture.completedFuture(null);
+            return runtime.acquire(lease, session);
         }
         RuntimeSessionRecord record = sessions.findById(session.getScope(),
                 session.getRuntimeSessionId());
@@ -94,12 +89,13 @@ final class FaultGateTransport implements RuntimeTransport {
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session) {
         if (context == null) {
-            return CompletableFuture.completedFuture(true);
+            return runtime.release(lease, session);
         }
         RuntimeSessionRecord record = sessions.findById(session.getScope(),
                 session.getRuntimeSessionId());
-        return runtime.activateWorkspace(bindings.findById(
-                record.getBindingId()), record, context, false)
+        return runtime.release(lease, session)
+                .thenCompose(ignored -> runtime.activateWorkspace(bindings.findById(
+                        record.getBindingId()), record, context, false))
                 .thenApply(ignored -> true);
     }
 }

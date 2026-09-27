@@ -31,6 +31,7 @@ import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerServiceTest {
+    private static final String PROVIDER_SESSION = "550e8400-e29b-41d4-a716-446655440302";
     private static final Instant START = Instant.parse(
             "2026-09-22T00:00:00Z");
     private static final RuntimeScope WORKSPACE_SCOPE = new RuntimeScope(
@@ -158,6 +159,135 @@ class RuntimeBrokerServiceTest {
             assertEquals(1, fixture.transport.executeCalls.get());
             assertEquals(reference, fixture.transport.lastReference);
         }
+    }
+
+    @Test
+    void reservesProviderReferencesWithoutEffectsAndStartsTheOriginalOnce() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = providerReference();
+            ToolExecutionRecord first = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference));
+            ToolExecutionRecord duplicate = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference));
+            assertEquals(first.getExecutionCallId(), duplicate.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, duplicate.getState());
+            assertEquals(reference, duplicate.getReference());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals("runtime_reference_invalid", failure(fixture.service.createExecution(
+                    "harness", PROVIDER_SESSION, "key", reference)).getCode());
+            ToolExecutionRecord started = join(fixture.service.startExecution(
+                    "harness", PROVIDER_SESSION, first.getExecutionCallId()));
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, first.getExecutionCallId()));
+            join(fixture.service.prepareExecution("harness", PROVIDER_SESSION, "key", reference));
+            assertEquals(ToolExecutionRecord.State.SETTLED, started.getState());
+            assertEquals(1, fixture.transport.executeCalls.get());
+            assertEquals(reference, fixture.transport.lastReference);
+        }
+    }
+
+    @Test
+    void providerStartNeverReplaysAnUnknownExecution() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            fixture.transport.executeResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("lost response"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            ToolExecutionRecord unknown = join(fixture.service.startExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(1, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationClosesWorkerAdmissionBeforeRelease() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = new CompletableFuture<>();
+            CompletionStage<ToolExecutionRecord> cancellation = fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
+            assertEquals("runtime_session_busy", failure(fixture.service.release(
+                    "harness", PROVIDER_SESSION)).getCode());
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(0, fixture.transport.executeCalls.get());
+            fixture.transport.cancelResult.completeExceptionally(new IllegalStateException("lost cancel"));
+            assertEquals("runtime_execution_cancel_failed", failure(cancellation).getCode());
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", Map.of("executionStatus", "cancelled")));
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("cancelled", cancelled.getExecutionStatus());
+            assertEquals(2, fixture.transport.cancelCalls.get());
+            assertTrue(join(fixture.service.release("harness", PROVIDER_SESSION)));
+        }
+    }
+
+    @Test
+    void rejectsForeignOrPayloadBearingProviderReservationsAndControls() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = new HashMap<>(providerReference());
+            reference.put("input", Map.of());
+            assertThrows(RuntimeBrokerException.class, () -> fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference));
+            reference.remove("input");
+            reference.put("sessionId", "other");
+            assertThrows(RuntimeBrokerException.class, () -> fixture.service.control(
+                    "harness", PROVIDER_SESSION, Map.of("kind", "preflight", "reference", reference)));
+            assertNull(fixture.transport.lastControl);
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationWaitsForOriginalNotStartedEvidence() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.statusResult = new CompletableFuture<>();
+            CompletionStage<ToolExecutionRecord> cancellation = fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
+            assertEquals("runtime_session_busy", failure(fixture.service.release(
+                    "harness", PROVIDER_SESSION)).getCode());
+            fixture.transport.statusResult.complete(Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "not_started")));
+            assertEquals("cancelled", cancellation.toCompletableFuture().get(2, TimeUnit.SECONDS).getExecutionStatus());
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            assertEquals(1, fixture.transport.statusCalls.get());
+            assertEquals(providerReference(), fixture.transport.lastReference);
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertTrue(join(fixture.service.release("harness", PROVIDER_SESSION)));
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationHasABoundedObservationDeadline() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, new MutableClock(START),
+                Duration.ofMillis(100), Duration.ofMinutes(1))) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.statusResult = new CompletableFuture<>();
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> assertEquals("runtime_execution_cancel_failed",
+                    failure(fixture.service.cancelExecution("harness", PROVIDER_SESSION,
+                            prepared.getExecutionCallId())).getCode()));
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+        }
+    }
+
+    private static Map<String, Object> providerReference() {
+        return Map.of("sessionId", PROVIDER_SESSION, "promptId", "turn", "callId", "call",
+                "argsDigest", "a".repeat(64), "capabilityDigest", "b".repeat(64),
+                "policyRevision", "policy", "invocationId", "invocation");
     }
 
     @Test
@@ -391,7 +521,7 @@ class RuntimeBrokerServiceTest {
 
             CompletionStage<Object> status = fixture.service.control(
                     "harness", "runtime",
-                    Map.of("kind", "preflight"));
+                    Map.of("kind", "manifest"));
             RuntimeBrokerException busy = failure(
                     fixture.service.release("harness", "runtime"));
 
@@ -1462,7 +1592,7 @@ class RuntimeBrokerServiceTest {
                     new IllegalStateException("connection lost"));
 
             RuntimeBrokerException error = failure(fixture.service.control(
-                    "harness", "runtime", Map.of("kind", "preflight")));
+                    "harness", "runtime", Map.of("kind", "manifest")));
 
             assertEquals("runtime_control_failed", error.getCode());
             assertEquals(503, error.getStatusCode());
@@ -1480,7 +1610,7 @@ class RuntimeBrokerServiceTest {
             fixture.transport.controlError = new AssertionError("boom");
 
             RuntimeBrokerException error = failure(fixture.service.control(
-                    "harness", "runtime", Map.of("kind", "preflight")));
+                    "harness", "runtime", Map.of("kind", "manifest")));
 
             assertEquals("runtime_control_failed", error.getCode());
             assertTrue(join(fixture.service.release(
@@ -1504,7 +1634,7 @@ class RuntimeBrokerServiceTest {
             fixture.transport.continueControl = new CountDownLatch(1);
             CompletableFuture<Object> control = CompletableFuture.supplyAsync(
                     () -> join(fixture.service.control("harness", "runtime",
-                            Map.of("kind", "preflight"))));
+                            Map.of("kind", "manifest"))));
             assertTrue(fixture.transport.controlEntered.await(2,
                     TimeUnit.SECONDS));
 

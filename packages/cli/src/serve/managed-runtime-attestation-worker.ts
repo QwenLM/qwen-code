@@ -24,10 +24,13 @@ import {
 } from './managed-context-envelope.js';
 import {
   MANAGED_CONTEXT_WORKER_ROUTES,
+  ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -153,6 +156,13 @@ export async function startManagedRuntimeAttestationWorker(
       boot.runtimeInstanceId,
     );
     registerManagedRuntimeToolRoutes(app, boot, executor);
+    const mount = new ManagedContextMount(boot.workspaceCwd);
+    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+      const directory = await mount.resolve('');
+      return directory === undefined
+        ? undefined
+        : { directory, workspaceRoot: directory, preapproved: false };
+    });
   }
   const server = createServer(
     ownedManagedRuntimeRouteGate(
@@ -161,7 +171,7 @@ export async function startManagedRuntimeAttestationWorker(
         ? capturePublisher
           ? [...MANAGED_CONTEXT_WORKER_ROUTES, ...MANAGED_TOOL_RESULT_ROUTES]
           : MANAGED_CONTEXT_WORKER_ROUTES
-        : OWNED_MANAGED_RUNTIME_ROUTES,
+        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
     ),
   );
   server.maxHeadersCount = 32;

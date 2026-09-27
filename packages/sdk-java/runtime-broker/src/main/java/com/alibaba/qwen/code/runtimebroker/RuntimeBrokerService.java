@@ -26,10 +26,6 @@ import java.util.function.Supplier;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable {
-    private static final Set<String> CONTROL_OPERATIONS = Set.of(
-            "bind-history", "checkpoint", "history", "manifest",
-            "begin-turn", "prepare", "confirmation", "confirm",
-            "preflight");
     // A cancellation answers with one of these states.
     private static final Set<String> RUNTIME_EXECUTION_STATES = Set.of(
             "prepared", "executing", "cancel_requested", "settled",
@@ -174,12 +170,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
-        Object kind = immutable.get("kind");
-        if (!(kind instanceof String)
-                || !CONTROL_OPERATIONS.contains(kind)) {
-            throw invalid("runtime_control_operation_invalid",
-                    "unsupported Runtime control operation");
-        }
+        ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     synchronized (context) {
@@ -212,9 +203,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (reference == null || reference.containsKey("dispatchMode")) {
             throw invalid("runtime_reference_invalid", "dispatchMode is reserved");
         }
+        Map<String, Object> immutable;
+        try {
+            immutable = immutableMap(reference, "reference");
+        } catch (RuntimeBrokerException invalidReference) {
+            return CompletableFuture.failedFuture(invalidReference);
+        }
+        if (immutable.containsKey("invocationId") || immutable.containsKey("capabilityDigest")
+                || immutable.containsKey("policyRevision")) {
+            return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
+                    "Prepared provider invocations require reserve and start"));
+        }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenApply(context -> createExecution(context, key,
-                        reference, true));
+                        immutable, true));
     }
 
     public CompletionStage<ToolExecutionRecord> prepareExecution(
@@ -222,15 +224,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String idempotencyKey, Map<String, Object> reference) {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
-        if (reference == null || !reference.keySet().equals(Set.of("sessionId", "promptId", "callId", "argsDigest"))
-                || !(reference.get("argsDigest") instanceof String digest)
-                || !digest.matches("sha256:[0-9a-f]{64}")) {
-            throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+        Map<String, Object> immutable = immutableMap(reference, "reference");
+        if (ProviderRuntimeProtocol.isReference(immutable)) {
+            ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
+        } else {
+            if (!immutable.keySet().equals(Set.of("sessionId", "promptId", "callId", "argsDigest"))
+                    || !(immutable.get("argsDigest") instanceof String digest)
+                    || !digest.matches("sha256:[0-9a-f]{64}")) {
+                throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+            }
+            Map<String, Object> deferred = new LinkedHashMap<>(immutable);
+            deferred.put("dispatchMode", "deferred");
+            immutable = Map.copyOf(deferred);
         }
-        Map<String, Object> deferred = new LinkedHashMap<>(reference);
-        deferred.put("dispatchMode", "deferred");
+        Map<String, Object> preparedReference = immutable;
         return requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenApply(context -> createExecution(context, key, deferred, false));
+                .thenApply(context -> createExecution(context, key, preparedReference, false));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -239,36 +248,59 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
         return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
-            ToolExecutionRecord record = requireExecution(context, executionId);
-            if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
-                throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+            synchronized (context) {
+                requireReadySessionRecord(context);
+                ToolExecutionRecord record = requireExecution(context, executionId);
+                if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
+                    throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+                }
+                byte[] bytes = BrokerValues.requireWellFormed(payloadJson, "payloadJson")
+                        .getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > 256 * 1024) {
+                    throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
+                }
+                String digest;
+                try {
+                    digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+                } catch (NoSuchAlgorithmException exception) {
+                    throw new IllegalStateException(exception);
+                }
+                if (!digest.equals(record.getRequestDigest())) {
+                    throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
+                }
+                Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
+                if (!payload.keySet().equals(Set.of("toolName", "input"))
+                        || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
+                        || !(payload.get("input") instanceof Map)) {
+                    throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                }
+                if (shouldDriveDispatch(record)) {
+                    beginDispatch(context, record, payload);
+                }
+                return requireExecution(context, executionId);
             }
-            byte[] bytes = BrokerValues.requireWellFormed(payloadJson, "payloadJson")
-                    .getBytes(StandardCharsets.UTF_8);
-            if (bytes.length > 256 * 1024) {
-                throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
-            }
-            String digest;
-            try {
-                digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            } catch (NoSuchAlgorithmException exception) {
-                throw new IllegalStateException(exception);
-            }
-            if (!digest.equals(record.getRequestDigest())) {
-                throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
-            }
-            Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
-            if (!payload.keySet().equals(Set.of("toolName", "input"))
-                    || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
-                    || !(payload.get("input") instanceof Map)) {
-                throw invalid("runtime_payload_invalid", "Tool payload is invalid");
-            }
-            if (shouldDriveDispatch(record)) {
-                beginDispatch(context, record, payload);
-            }
-            ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-            return latest == null ? record : latest;
         });
+    }
+
+    public CompletionStage<ToolExecutionRecord> startExecution(
+            String harnessSessionId, String runtimeSessionId, String executionCallId) {
+        requireOpen();
+        String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
+        return requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> {
+                    synchronized (context) {
+                        requireReadySessionRecord(context);
+                        ToolExecutionRecord record = requireExecution(context, executionId);
+                        if (!ProviderRuntimeProtocol.isReference(record.getReference())) {
+                            throw invalid("runtime_payload_invalid", "Deferred execution requires payloadJson");
+                        }
+                        ProviderRuntimeProtocol.reference(record.getReference(), runtimeSessionId);
+                        if (shouldDriveDispatch(record)) {
+                            beginDispatch(context, record);
+                        }
+                        return requireExecution(context, executionId);
+                    }
+                });
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -296,6 +328,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         ToolExecutionRecord current = requireExecution(
                                 context, executionId);
                         requested = requestCancel(current);
+                        if (requested.isSettled() && requested.isCancelRequested()
+                                && requested.getDispatchGeneration() == 0
+                                && ProviderRuntimeProtocol.isReference(requested.getReference())) {
+                            context.beginControl();
+                            return cancelPreparedProvider(context, requested);
+                        }
                         // An UNKNOWN record may still have an invocation
                         // running in this process; it gets the physical
                         // cancel below but is never settled from here.
@@ -362,6 +400,57 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 return latest == null ? requested : latest;
                             });
                 });
+    }
+
+    private CompletionStage<ToolExecutionRecord> cancelPreparedProvider(
+            SessionContext context, ToolExecutionRecord requested) {
+        CompletableFuture<ToolExecutionRecord> result = new CompletableFuture<>();
+        result.orTimeout(Math.max(1, operationLeaseDuration.toMillis()), TimeUnit.MILLISECONDS);
+        observePreparedCancellation(context, requested, safeStage(() -> {
+            requireUsableLease(context);
+            return transport.cancel(context.lease(), context.session(), requested.getReference());
+        }), result);
+        return mapFailure(result, "runtime_execution_cancel_failed",
+                "Runtime execution cancellation failed")
+                .whenComplete((ignored, error) -> context.endControl());
+    }
+
+    private void observePreparedCancellation(SessionContext context, ToolExecutionRecord requested,
+            CompletionStage<Map<String, Object>> observation, CompletableFuture<ToolExecutionRecord> completion) {
+        observation.whenComplete((status, error) -> {
+            if (completion.isDone()) {
+                return;
+            }
+            if (error != null) {
+                completion.completeExceptionally(error);
+                return;
+            }
+            try {
+                if (status != null && "settled".equals(status.get("state"))
+                        && status.get("result") instanceof Map<?, ?> result
+                        && ("cancelled".equals(result.get("executionStatus"))
+                                || "not_started".equals(result.get("executionStatus")))) {
+                    completion.complete(requested);
+                } else if (status != null && ("prepared".equals(status.get("state"))
+                        || "executing".equals(status.get("state"))
+                        || "cancel_requested".equals(status.get("state")))) {
+                    scheduler.schedule(() -> {
+                        if (!completion.isDone()) {
+                            observePreparedCancellation(context, requested, safeStage(() -> {
+                                requireUsableLease(context);
+                                return transport.status(context.lease(), context.session(),
+                                        requested.getReference(), requested.getLastSequence());
+                            }), completion);
+                        }
+                    }, 25, TimeUnit.MILLISECONDS);
+                } else {
+                    throw unavailable("runtime_execution_cancel_failed",
+                            "Runtime did not confirm prepared invocation cancellation");
+                }
+            } catch (RuntimeException failure) {
+                completion.completeExceptionally(failure);
+            }
+        });
     }
 
     /**

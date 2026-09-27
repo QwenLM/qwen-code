@@ -43,6 +43,46 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void providerPreparationIsDurableAndVoidControlsKeepTheirNullResult() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String runtime = "550e8400-e29b-41d4-a716-446655440302";
+            fixture.service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            Map<String, Object> identity = Map.of("sessionId", runtime, "promptId", "turn",
+                    "callId", "call", "capabilityDigest", "a".repeat(64), "policyRevision", "policy");
+            Map<String, Object> reference = new java.util.LinkedHashMap<>(identity);
+            reference.put("invocationId", "invocation");
+            reference.put("argsDigest", "b".repeat(64));
+            HttpResponse<String> control = fixture.post("/tool-sessions/" + runtime + "/control", Map.of(
+                    "protocolVersion", 1, "requestId", "begin", "harnessSessionId", "harness",
+                    "operation", Map.of("kind", "begin-turn", "identity", identity)));
+            assertEquals(200, control.statusCode(), control.body());
+            assertTrue(control.body().contains("\"result\":null"), control.body());
+            Map<String, Object> body = Map.of("protocolVersion", 1, "requestId", "prepare",
+                    "idempotencyKey", "key", "harnessSessionId", "harness", "runtimeSessionId", runtime,
+                    "turnId", "turn", "toolCallId", "call", "requestDigest", "b".repeat(64),
+                    "reference", reference);
+            HttpResponse<String> prepared = fixture.post("/executions:prepare", body);
+            assertEquals(200, prepared.statusCode(), prepared.body());
+            String executionId = JSON.parseObject(prepared.body()).getString("executionCallId");
+            assertTrue(prepared.body().contains("\"state\":\"prepared\""));
+            assertEquals(0, fixture.transport.executions.get());
+            assertEquals(400, fixture.post("/executions", body).statusCode());
+            HttpResponse<String> mixed = fixture.post("/executions/" + executionId + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "mixed", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime, "payloadJson", "{\"toolName\":\"write_file\",\"input\":{}}"));
+            assertEquals(409, mixed.statusCode(), mixed.body());
+            assertTrue(mixed.body().contains("runtime_execution_conflict"));
+            assertEquals(0, fixture.transport.executions.get());
+            HttpResponse<String> started = fixture.post("/executions/" + executionId + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "start", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime));
+            assertEquals(409, started.statusCode(), started.body());
+            assertTrue(started.body().contains("runtime_broker_execution_unknown"));
+            assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void unknownExecutionDoesNotBecomeKnownExecuting() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap")
@@ -101,6 +141,12 @@ class RuntimeBrokerHttpServerTest {
                     "protocolVersion", 1, "requestId", "bypass", "idempotencyKey", "key",
                     "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
                     "toolCallId", "call", "requestDigest", digest, "reference", reference)).statusCode());
+            assertEquals(0, fixture.transport.executions.get());
+            HttpResponse<String> noPayload = fixture.post("/executions/" + id + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "mixed", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime"));
+            assertEquals(400, noPayload.statusCode(), noPayload.body());
+            assertTrue(noPayload.body().contains("runtime_payload_invalid"));
             assertEquals(0, fixture.transport.executions.get());
             Map<String, Object> start = Map.of("protocolVersion", 1, "requestId", "start",
                     "harnessSessionId", "harness", "runtimeSessionId", "runtime", "payloadJson", payload);
@@ -211,7 +257,7 @@ class RuntimeBrokerHttpServerTest {
         @Override
         public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> operation) {
-            return CompletableFuture.completedFuture(Map.of());
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override

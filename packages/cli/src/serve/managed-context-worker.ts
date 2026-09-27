@@ -32,10 +32,13 @@ import {
 } from './managed-runtime-tool-executor.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CONTEXT_CONFIG_REF,
 } from './managed-workspace-activation.js';
 
 /**
@@ -45,6 +48,7 @@ import {
 export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
+  MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
 
@@ -193,6 +197,34 @@ export function registerManagedContextRoutes(
       isActive,
     };
   }, capturePublisher);
+  registerManagedRuntimeProviderRoute(
+    app,
+    boot,
+    executor,
+    async (sessionId) => {
+      const binding = installations.installed(sessionId);
+      if (
+        !requiresActivation ||
+        (binding !== undefined &&
+          binding.contextConfigRef !== WORKSPACE_CONTEXT_CONFIG_REF)
+      ) {
+        throw new Error(
+          'Managed Runtime provider configuration is unsupported.',
+        );
+      }
+      const isActive = () => activations.isActive(sessionId);
+      if (!isActive()) return undefined;
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      return directory === undefined
+        ? undefined
+        : {
+            directory,
+            workspaceRoot: boot.mountRoot,
+            preapproved: true,
+            isActive,
+          };
+    },
+  );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
   if (capturePublisher) {
