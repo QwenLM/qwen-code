@@ -35,6 +35,9 @@ final class LegacyEvents {
         insert(jdbc, tenant, session, 8, TURN, "item.tool_call.updated",
                 "{\"toolCallId\":\"tool-1\"}");
         insert(jdbc, tenant, session, 9, TURN, "turn.completed", "{}");
+        // The same tool Item again, separated by an event without identity.
+        insert(jdbc, tenant, session, 10, TURN, "item.tool_call.updated",
+                "{\"toolCallId\":\"tool-1\",\"status\":\"completed\"}");
     }
 
     static void assertBackfilled(JdbcTemplate jdbc, String tenant,
@@ -59,7 +62,8 @@ final class LegacyEvents {
                 row(6, null, null),
                 row(7, ASSISTANT, "part_turn_legacy_output_text_7"),
                 row(8, tool, null),
-                row(9, null, null));
+                row(9, null, null),
+                row(10, tool, null));
     }
 
     private static List<Object> row(long sequence, String itemId,

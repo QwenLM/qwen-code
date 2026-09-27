@@ -27,6 +27,8 @@ public class V15__managed_event_identity extends BaseJavaMigration {
             new TypeReference<>() {
             };
     private static final int BATCH_SIZE = 500;
+    // Rows read per query, so memory does not grow with a Session's length.
+    private static final int PAGE_SIZE = 5000;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
@@ -47,8 +49,8 @@ public class V15__managed_event_identity extends BaseJavaMigration {
                         + " 'item.output_text.delta', 'item.reasoning.delta',"
                         + " 'item.tool_call.updated') THEN data_json END AS"
                         + " data_json FROM managed_agent_event WHERE"
-                        + " tenant_id = ? AND session_id = ? ORDER BY"
-                        + " sequence_id");
+                        + " tenant_id = ? AND session_id = ? AND sequence_id"
+                        + " > ? ORDER BY sequence_id LIMIT ?");
                 PreparedStatement update = connection.prepareStatement(
                         "UPDATE managed_agent_event SET item_id = ?,"
                                 + " content_part_id = ? WHERE tenant_id = ?"
@@ -68,42 +70,50 @@ public class V15__managed_event_identity extends BaseJavaMigration {
         select.setString(2, sessionId);
         update.setString(3, tenantId);
         update.setString(4, sessionId);
+        select.setInt(4, PAGE_SIZE);
         int pending = 0;
         Identity run = null;
         long first = 0;
         long last = 0;
-        try (ResultSet rows = select.executeQuery()) {
-            Identity previous = null;
-            long previousSequence = -1;
-            while (rows.next()) {
-                long sequence = rows.getLong("sequence_id");
-                String data = rows.getString("data_json");
-                Identity identity = EventIdentity.of(
-                        rows.getString("event_type"),
-                        rows.getString("turn_id"), sequence,
-                        data == null ? Map.of()
-                                : objectMapper.readValue(data, MAP_TYPE),
-                        previousSequence == sequence - 1 ? previous : null);
-                previous = identity;
-                previousSequence = sequence;
-                if (identity.itemId() == null) {
-                    continue;
-                }
-                if (run != null && sequence == last + 1
-                        && identity.itemId().equals(run.itemId())
-                        && Objects.equals(identity.contentPartId(),
-                                run.contentPartId())) {
+        Identity previous = null;
+        long previousSequence = -1;
+        int read;
+        do {
+            select.setLong(3, previousSequence < 0 ? 0 : previousSequence);
+            read = 0;
+            try (ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    read++;
+                    long sequence = rows.getLong("sequence_id");
+                    String data = rows.getString("data_json");
+                    Identity identity = EventIdentity.of(
+                            rows.getString("event_type"),
+                            rows.getString("turn_id"), sequence,
+                            data == null ? Map.of()
+                                    : objectMapper.readValue(data, MAP_TYPE),
+                            previousSequence == sequence - 1 ? previous
+                                    : null);
+                    previous = identity;
+                    previousSequence = sequence;
+                    if (identity.itemId() == null) {
+                        continue;
+                    }
+                    if (run != null && sequence == last + 1
+                            && identity.itemId().equals(run.itemId())
+                            && Objects.equals(identity.contentPartId(),
+                                    run.contentPartId())) {
+                        last = sequence;
+                        continue;
+                    }
+                    if (run != null) {
+                        pending = add(update, run, first, last, pending);
+                    }
+                    run = identity;
+                    first = sequence;
                     last = sequence;
-                    continue;
                 }
-                if (run != null) {
-                    pending = add(update, run, first, last, pending);
-                }
-                run = identity;
-                first = sequence;
-                last = sequence;
             }
-        }
+        } while (read == PAGE_SIZE);
         if (run != null) {
             pending = add(update, run, first, last, pending);
         }

@@ -85,6 +85,9 @@ correct `cursor_expired` or resync.
   Session with a Snapshot gets all of its Items, the events up to the Snapshot
   other than input, text-delta and tool-call updates, and every later event;
   `limit` bounds the event pages otherwise.
+- `PublicEvent` and `WebShellEvent` state that events replay with the versions
+  and identity they were accepted with, except after a `stream.reconciled`
+  event, which the contract did not mention before (see 4.2).
 
 ### 4.2 Versions and identity
 
@@ -113,8 +116,10 @@ key; other events need no read. `data.contentPartId` is left as it was, and
 clients should use the top-level field.
 
 Flyway V15 is a Java migration that gives the events written before V14 their
-identity with the same rule, one Session at a time in sequence order. It reads
-`data_json` only for the four event types that have an identity, and it writes
+identity with the same rule, one Session at a time in sequence order and in
+pages of 5,000 events, so its memory does not grow with a Session's length. It
+reads `data_json` only for the four event types that have an identity, and it
+writes
 each run of consecutive events with the same identity, such as one text Part,
 with a single ranged update. A delta whose text a retraction emptied gets no
 identity, which matches the Items that the store rebuilds after a retraction.
@@ -205,8 +210,9 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   - expired cursors on the JSON query and on both streams, and the floor's cap
     and monotonicity.
 
-  The suite polls the store only every 30 seconds, so live events can reach a
-  stream only through the hub.
+  The suite sets both the poll and the heartbeat interval to one minute, so an
+  idle stream does not read the store during a test and live events can reach
+  it only through the hub.
 
 - `EventIdentityTest` pins the rule. Integration tests compare every event's
   identity with the materialized Snapshot after deltas appended in two batches
@@ -224,9 +230,9 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
 - Events gain fields and Sessions report the stored floor; nothing is removed.
 - The WebShell stream's `409` response leaves the contract; the server never
   returned it.
-- V14 adds columns with defaults. V15 reads the event table once during the
-  upgrade, in the migration's transaction, and updates each run of events with
-  one statement. On a local MariaDB it migrated 200,000 events in 100 Sessions
+- V14 adds columns with defaults. V15 lists the Sessions that have events,
+  reads each Session's events once in pages, all in the migration's
+  transaction, and updates each run of events with one statement. On a local MariaDB it migrated 200,000 events in 100 Sessions
   in under three seconds; a table with many short runs takes longer.
 - Upgrade all replicas together. A replica that still runs the previous
   version after V14 writes events without an identity, and a text delta that
@@ -247,11 +253,12 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
 - The packaged Spring Boot jar migrates a MariaDB database to V15, which shows
   that Flyway finds the Java migration inside the jar.
 - Mutations each fail the matching test: ignoring `Last-Event-ID`, skipping the
-  floor check, ignoring an overflowed hub, a hub that never delivers,
+  floor check, a hub that hides its overflow, a hub that never delivers,
   returning no `next_cursor`, reporting `has_more` on a full last page,
   starting a new Part for every delta, ignoring the previous event on a single
-  append, skipping the identity rederivation after a retraction, and skipping
-  the V15 backfill.
+  append, skipping the identity rederivation after a retraction, skipping the
+  V15 backfill, merging V15 ranges across a gap, and losing V15's state at a
+  page boundary.
 - The web-shell typecheck, the managed component tests and the managed-progress
   and managed-workspace-w0d e2e specs pass against the regenerated types.
 

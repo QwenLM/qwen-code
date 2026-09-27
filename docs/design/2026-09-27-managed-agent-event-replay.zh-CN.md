@@ -72,6 +72,8 @@ resync。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
   返回全部 Items、Snapshot 之前除输入、文本增量与工具调用更新以外的事件，以及之后的
   所有事件；其他情况下由 `limit` 限定事件分页。
+- `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
+  是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。
 
 ### 4.2 版本与身份
 
@@ -96,7 +98,8 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 应使用顶层字段。
 
 Flyway V15 是一个 Java 迁移，按同一规则为 V14 之前写入的事件补上身份，逐个
-Session 按 sequence 顺序处理。它只为四种有身份的事件类型读取 `data_json`，并把
+Session 按 sequence 顺序、每页 5000 条读取，因此内存占用不随 Session 的长度增长。
+它只为四种有身份的事件类型读取 `data_json`，并把
 身份相同的连续事件（例如同一个文本 Part）用一条范围更新写入。文本已被撤回清空的
 增量不获得身份，这与存储层撤回后重建的 Items 一致。`EventIdentity` 对存储层与 V15
 而言都是投影版本 1；不同的规则需要新的投影版本，而不是修改它。
@@ -167,7 +170,8 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
   - 下限越过落后的事件流后，事件流在已送达的最后一条事件之后发送一帧 resync；
   - JSON 查询与两个事件流上的过期游标，以及下限的上限与单调性。
 
-  该测试集每 30 秒才轮询一次存储，因此实时事件只能经由 hub 到达事件流。
+  该测试集把轮询间隔与心跳间隔都设为一分钟，因此空闲的事件流在测试期间不会读取
+  存储，实时事件只能经由 hub 到达事件流。
 
 - `EventIdentityTest` 固定该规则。集成测试在以下情形后把每条事件的身份与物化后的
   Snapshot 对照：分两批追加、且有一个 reasoning Part 跨越两批的增量；逐条追加的
@@ -180,8 +184,8 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 
 - 事件只新增字段，Session 报告已存储的下限；没有删除任何内容。
 - WebShell 事件流的 `409` 响应从契约中移除；服务端从未返回过它。
-- V14 新增带默认值的列。V15 在升级时于迁移事务内读取一遍事件表，并对每一段事件
-  执行一条更新。在本地 MariaDB 上，它在三秒内迁移了 100 个 Session 中的 20 万条
+- V14 新增带默认值的列。V15 在迁移事务内先列出有事件的 Session，再分页把每个
+  Session 的事件读取一遍，并对每一段事件执行一条更新。在本地 MariaDB 上，它在三秒内迁移了 100 个 Session 中的 20 万条
   事件；短片段很多的表会更慢。
 - 所有副本需要一起升级。V14 之后仍运行旧版本的副本写入的事件没有身份，新副本在
   其后追加的文本增量会开始一个 Items 中没有的 Part。
@@ -197,9 +201,10 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 - `ManagedAgentMySqlIT` 在 CI 所用的 `mariadb:10.11.18` 以及 `mysql:8.4` 上通过。
 - 打包后的 Spring Boot jar 把 MariaDB 数据库迁移到 V15，说明 Flyway 能在 jar 中
   找到这个 Java 迁移。
-- 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、忽略 hub 溢出、
+- 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、hub 隐瞒溢出、
   hub 从不投递、不返回 `next_cursor`、满页的最后一页报告 `has_more`、每个增量都
-  新建 Part、逐条追加时忽略上一条事件、撤回后跳过身份的重新推导、跳过 V15 回填。
+  新建 Part、逐条追加时忽略上一条事件、撤回后跳过身份的重新推导、跳过 V15 回填、
+  V15 越过缺口合并范围、V15 在分页边界丢失状态。
 - WebShell 的 typecheck、managed 组件测试以及 managed-progress 与
   managed-workspace-w0d e2e 用例在重新生成的类型下通过。
 

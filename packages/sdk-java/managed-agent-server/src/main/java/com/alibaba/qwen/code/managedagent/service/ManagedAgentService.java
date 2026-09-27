@@ -360,9 +360,9 @@ public class ManagedAgentService {
             String actorId, String sessionId, long afterSequence,
             int requestedLimit) {
         requireEventCursor(afterSequence);
-        int limit = eventLimit(requestedLimit);
         SessionRecord session = requireReadableSession(tenantId, actorId,
                 sessionId);
+        int limit = eventLimit(requestedLimit);
         List<EventRecord> rows = replayableEvents(session, afterSequence,
                 limit + 1);
         boolean hasMore = rows.size() > limit;

@@ -301,6 +301,7 @@ export interface components {
             /** Format: int64 */
             updatedAt: number;
         };
+        /** @description A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no itemId or contentPartId, and that later deltas may name other Parts. Reload the transcript and resume after its lastSequence. */
         WebShellEvent: {
             /** @default 1 */
             schemaVersion?: number;

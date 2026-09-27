@@ -52,8 +52,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
         // A stream reads the store only to catch up or after an overflow, so
-        // live events must come through the hub.
-        "qwen.managed-agent.events.poll-interval=30s",
+        // live events must come through the hub. An idle stream also reads
+        // the store after a heartbeat.
+        "qwen.managed-agent.events.poll-interval=60s",
+        "qwen.managed-agent.events.heartbeat-interval=60s",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
 @AutoConfigureMockMvc
