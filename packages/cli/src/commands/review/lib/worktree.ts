@@ -1489,6 +1489,13 @@ export function filterCommandsIn(
           }
         }
       } else if (
+        'value' in discoveredCommon &&
+        isSubpath(pathIdentity(commonDir), pathIdentity(discoveredCommon.value))
+      ) {
+        // Submodule admin state belongs to this project, not an independent
+        // user repository, even when screening another linked worktree.
+        verdict = 'unknown';
+      } else if (
         ('absent' in discoveredCommon && !discoveredCommon.absent) ||
         ('absent' in configuredWorktreeRead && !configuredWorktreeRead.absent)
       ) {
@@ -1613,6 +1620,37 @@ export function filterCommandsIn(
     }
   }
 
+  const activeOrigins = new Set(
+    (trustedOriginRecords ?? []).map(({ file }) => originKey(file)),
+  );
+  const reachedOrigins = new Set<string>();
+  const collectTrustedReach = (file: string, depth: number): void => {
+    const origin = originKey(file);
+    // Only traverse sources Git actually read. Missing user includes remain
+    // ignored, and unrelated global sources are not reached by this walk.
+    if (!activeOrigins.has(origin) || reachedOrigins.has(origin)) return;
+    if (depth > MAX_INCLUDE_DEPTH || reachedOrigins.size >= MAX_INCLUDE_FILES) {
+      unread.add(`${file} (trusted include reach exceeds screening limits)`);
+      return;
+    }
+    reachedOrigins.add(origin);
+    for (const key of trustedFiltersByOrigin.get(origin) ?? []) {
+      reachedExempt.add(key);
+    }
+    const r = read(file);
+    if ('unreadable' in r) {
+      unread.add(
+        `${file} (could not read trusted include reach: ${r.unreadable})`,
+      );
+      return;
+    }
+    for (const [key, value] of r.records) {
+      if (key.startsWith('filter.')) continue;
+      const target = includeTarget(file, value);
+      if (target !== null) collectTrustedReach(target, depth + 1);
+    }
+  };
+
   const xdg = process.env['XDG_CONFIG_HOME'];
   const homeConfigDir = resolve(process.env['HOME'] || homedir(), '.config');
   const relocatedXdgConfig =
@@ -1658,9 +1696,7 @@ export function filterCommandsIn(
     }
     const origin = originKey(file);
     if (via !== null && trustedOrigins.has(origin)) {
-      for (const key of trustedFiltersByOrigin.get(origin) ?? []) {
-        reachedExempt.add(key);
-      }
+      collectTrustedReach(file, depth);
       return;
     }
     if (visited.has(real)) return;

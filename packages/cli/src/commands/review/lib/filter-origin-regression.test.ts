@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -774,6 +775,85 @@ describe('filter origin regressions (real Git)', () => {
         dangling: [],
       });
       expect(checkoutFilterCommands(linked)).toEqual([]);
+    },
+  );
+
+  it.each(['clean', 'smudge'])(
+    'R8-3: refuses submodule-owned %s config when screening the superproject linked tree',
+    (kind) => {
+      const source = join(dir, 'source');
+      const parent = join(dir, 'super');
+      const linked = join(dir, 'linked');
+      const canary = join(dir, 'submodule-filter-ran');
+      const key = `filter.team.${kind}`;
+      const command =
+        kind === 'clean' ? 'cat' : `tee ${shellQuotePath(gitPath(canary))}`;
+      init(source);
+      git(source, 'config', '--file', 'team.cfg', key, command);
+      git(source, 'add', 'team.cfg');
+      git(source, 'commit', '-qm', 'tracked filter');
+      init(parent);
+      git(
+        parent,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        source,
+        'mod',
+      );
+      writeFileSync(
+        join(parent, '.gitattributes'),
+        'payload.txt filter=team\n',
+      );
+      writeFileSync(join(parent, 'payload.txt'), 'reviewed content\n');
+      git(parent, 'add', '-A');
+      git(parent, 'commit', '-qm', 'superproject with filter attributes');
+      git(
+        parent,
+        'worktree',
+        'add',
+        '--detach',
+        '--no-checkout',
+        '-q',
+        linked,
+        'HEAD',
+      );
+      const payload = join(parent, 'mod', 'team.cfg');
+      git(parent, 'config', '--global', 'include.path', gitPath(payload));
+      expect(
+        git(join(parent, 'mod'), 'ls-files', '--error-unmatch', 'team.cfg'),
+      ).toBe('team.cfg');
+      expect(discover(join(parent, 'mod'), '--git-common-dir')).toBe(
+        join(parent, '.git', 'modules', 'mod'),
+      );
+      expect(git(linked, 'config', '--includes', '--get', key)).toBe(command);
+      expect(checkoutFilterCommands(parent)).toEqual([key]);
+      const screen = filterCommandsIn(
+        discover(linked, '--git-common-dir'),
+        discover(linked, '--git-dir'),
+        linked,
+      );
+      const gate = checkoutFilterCommands(linked);
+      expect.soft(screen.filters).toEqual([key]);
+      expect.soft(screen.exempt).toEqual([]);
+      expect.soft(gate).toEqual([key]);
+      expect(existsSync(canary)).toBe(false);
+
+      if (kind === 'smudge') {
+        // Follow the gate only in this disposable fixture; the driver is tee.
+        if (gate.length === 0) {
+          git(linked, 'checkout', '--force', '--detach', 'HEAD');
+          expect(readFileSync(join(linked, 'payload.txt'), 'utf8')).toBe(
+            'reviewed content\n',
+          );
+        }
+        expect.soft(existsSync(canary)).toBe(false);
+        if (existsSync(canary)) {
+          expect(readFileSync(canary, 'utf8')).toBe('reviewed content\n');
+        }
+      }
     },
   );
 

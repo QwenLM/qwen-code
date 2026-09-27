@@ -272,6 +272,41 @@ describe('worktreeResidue', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
+    'R8-2: sees residue normalized by a transitively included global filter without running it',
+    () => {
+      const marker = join(gitIsolation.home, 'transitive-clean-ran');
+      const globalConfig = join(gitIsolation.home, '.gitconfig');
+      const included = join(gitIsolation.home, 'filters.inc');
+      gitRepo(
+        'config',
+        '--file',
+        included,
+        'filter.evil.clean',
+        `touch ${shellQuotePath(marker)} && tr A-Z a-z`,
+      );
+      gitRepo('config', '--file', globalConfig, 'include.path', included);
+      gitRepo('config', 'include.path', globalConfig);
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        'a.ts filter=evil\n',
+      );
+      const head = git('rev-parse', 'HEAD');
+      expect(git('show', `${head}:a.ts`)).toBe('export const x = 1;');
+      writeFileSync(join(tree, 'a.ts'), 'EXPORT CONST X = 1;\n');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree, 'a.ts'), stale, stale);
+      expect(existsSync(marker)).toBe(false);
+
+      const residue = worktreeResidue(tree, 12, head);
+      expect.soft(residue).toEqual({ paths: ['a.ts'], total: 1 });
+      expect.soft(existsSync(marker)).toBe(false);
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'EXPORT CONST X = 1;\n',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'leaves an unrelated transforming global filter active during residue measurement',
     () => {
       const globalConfig = join(gitIsolation.home, '.gitconfig');
@@ -2217,6 +2252,30 @@ describe('filterCommandsIn — the include walk', () => {
     writeFileSync(
       join(dir, 'config'),
       `[include]\n\tpath = ${JSON.stringify(included)}\n`,
+    );
+
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.lfs.clean'],
+      reachedExempt: ['filter.lfs.clean'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
+  });
+
+  it('R8-2: records transitive trusted reach without refusing a missing user include', () => {
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    const included = join(gitIsolation.home, 'filters.inc');
+    writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
+    writeFileSync(
+      globalConfig,
+      `[include]\n\tpath = ${JSON.stringify(included)}\n` +
+        `\tpath = ${JSON.stringify(join(gitIsolation.home, 'missing.cfg'))}\n`,
+    );
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
     );
 
     expect(filterCommandsIn(dir, dir)).toEqual({

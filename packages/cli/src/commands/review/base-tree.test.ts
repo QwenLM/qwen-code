@@ -47,6 +47,8 @@ import {
   runIdentity,
 } from './lib/base-tree-trust.js';
 import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
+import { shellQuotePath } from './lib/shell-quote.js';
+import { filterScreenForTree } from './lib/worktree.js';
 import {
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
@@ -2484,6 +2486,107 @@ describe('runBaseTree', () => {
         );
         expect(existsSync(canary)).toBe(true);
         expect(premise.stdout).toBe('');
+      });
+    },
+  );
+
+  itWhereContainmentExists.each([
+    { round: 'R8-1', delivery: 'direct' },
+    { round: 'R8-2', delivery: 'transitive' },
+  ])(
+    '$round: sees a normalized rewrite with a $delivery repo-local include of global config',
+    ({ delivery }) => {
+      const build = vi.fn(() => okBuild);
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+      const canary = join(home, 'included-clean-ran');
+      const globalConfig = join(home, '.gitconfig');
+      const filterConfig =
+        delivery === 'direct' ? globalConfig : join(home, 'filters.inc');
+      git(
+        repo,
+        'config',
+        '--file',
+        filterConfig,
+        'filter.evil.clean',
+        `touch ${shellQuotePath(canary)} && tr A-Z a-z`,
+      );
+      if (delivery === 'transitive') {
+        git(
+          repo,
+          'config',
+          '--file',
+          globalConfig,
+          'include.path',
+          filterConfig,
+        );
+      }
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), 'a.txt filter=evil\n');
+      writeFileSync(join(tree(), 'a.txt'), 'BEFORE\n');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree(), 'a.txt'), stale, stale);
+
+      withHome(home, () => {
+        expect.soft(filterScreenForTree(tree())).toMatchObject({
+          filters: [],
+          exempt: ['filter.evil.clean'],
+          reachedExempt: ['filter.evil.clean'],
+          unread: [],
+          dangling: [],
+        });
+        expect(existsSync(canary)).toBe(false);
+        const second = run({}, build);
+        expect.soft(second.available).toBe(false);
+        expect
+          .soft(second.note)
+          .toContain('no longer holds exactly what this run recorded');
+        expect.soft(existsSync(canary)).toBe(false);
+        expect(build).toHaveBeenCalledTimes(1);
+        expect(readFileSync(join(tree(), 'a.txt'), 'utf8')).toBe('BEFORE\n');
+      });
+    },
+  );
+
+  itWhereContainmentExists(
+    'R8-1: measures a tree when its included global filter is required but unavailable',
+    () => {
+      const build = vi.fn(() => okBuild);
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+      const globalConfig = join(home, '.gitconfig');
+      git(
+        repo,
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.clean',
+        shellQuotePath(join(home, 'missing-filter-binary')),
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.required',
+        'true',
+      );
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), 'a.txt filter=lfs\n');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree(), 'a.txt'), stale, stale);
+
+      withHome(home, () => {
+        expect(filterScreenForTree(tree())?.reachedExempt).toEqual([
+          'filter.lfs.clean',
+        ]);
+        const second = run({}, build);
+        expect.soft(second.available).toBe(true);
+        expect.soft(second.note).toContain('reusing it');
+        expect
+          .soft(second.note)
+          .not.toContain('its tracked state could not be read');
+        expect(build).toHaveBeenCalledTimes(1);
       });
     },
   );
