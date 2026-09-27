@@ -2489,6 +2489,42 @@ describe('runBaseTree', () => {
   );
 
   itWhereContainmentExists(
+    'blanks a global filter reintroduced by repo-local include during status (R8-1)',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+      const globalConfig = join(home, '.gitconfig');
+      const canary = join(repo, 'reintroduced-global-clean-ran');
+      writeFileSync(
+        globalConfig,
+        `[filter "evil"]\n\tclean = touch ${canary} && tr A-Z a-z\n`,
+      );
+      git(repo, 'config', 'include.path', globalConfig);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+
+      writeFileSync(join(tree(), '.gitattributes'), '* filter=evil\n');
+      writeFileSync(join(tree(), 'a.txt'), 'BEFORE\n');
+      const t = new Date(Date.now() + 5000);
+      utimesSync(join(tree(), 'a.txt'), t, t);
+
+      withHome(home, () => {
+        const result = run({}, build);
+        expect(result.available).toBe(false);
+        expect(result.note).toContain(
+          'no longer holds exactly what this run recorded',
+        );
+        expect(builds).toEqual([tree()]);
+        expect(existsSync(canary)).toBe(false);
+      });
+    },
+  );
+
+  itWhereContainmentExists(
     'settles a tree whose filter lives only in GLOBAL config, so the config-blind measurement can certify it (R7-1)',
     () => {
       // The honest half of cutting the user-config scopes from the

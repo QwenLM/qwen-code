@@ -777,6 +777,45 @@ describe('filter origin regressions (real Git)', () => {
     },
   );
 
+  it('R8-3: refuses a tracked submodule source from a linked superproject worktree', () => {
+    const source = join(dir, 'source');
+    const superRepo = join(dir, 'super');
+    const linked = join(dir, 'linked-super');
+    init(source);
+    git(
+      source,
+      'config',
+      '--file',
+      join(source, 'team-filter.cfg'),
+      TEAM,
+      'cat',
+    );
+    git(source, 'add', 'team-filter.cfg');
+    git(source, 'commit', '-qm', 'tracked filter');
+    init(superRepo);
+    git(superRepo, 'commit', '--allow-empty', '-qm', 'seed');
+    git(
+      superRepo,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      source,
+      'mod',
+    );
+    git(superRepo, 'commit', '-qam', 'add submodule');
+    git(superRepo, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    const payload = join(superRepo, 'mod', 'team-filter.cfg');
+    git(linked, 'config', '--global', 'include.path', gitPath(payload));
+    expect(git(linked, 'config', '--includes', '--get', TEAM)).toBe('cat');
+
+    const common = discover(linked, '--git-common-dir');
+    const gitDir = discover(linked, '--git-dir');
+    expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);
+    expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
+  });
+
   it('R7-3: refuses a partial trusted-list failure while global filter records remain visible', () => {
     const { linked, payload, common, gitDir } = trackedInclude(false);
     expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);

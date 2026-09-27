@@ -2229,6 +2229,29 @@ describe('filterCommandsIn — the include walk', () => {
     });
   });
 
+  it('continues through a trusted global boundary to mark transitive filters reached', () => {
+    const included = join(gitIsolation.home, 'filters.inc');
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
+    writeFileSync(
+      globalConfig,
+      `[include]\n\tpath = ${JSON.stringify(included)}\n`,
+    );
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
+    );
+
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.lfs.clean'],
+      reachedExempt: ['filter.lfs.clean'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
+  });
+
   it('does not trust a source behind an inactive global includeIf', () => {
     const payload = join(gitIsolation.home, 'conditional.cfg');
     writeFileSync(payload, '[filter "conditional"]\n\tclean = cat\n');

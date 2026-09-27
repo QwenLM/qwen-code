@@ -333,7 +333,10 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
   // trade is `settleCheckoutIndex`'s: its trigger covers the full stack, so a
   // filter that lives only in `~/.gitconfig` (git-lfs installed the default
   // way) still gets its stat-fresh index first.
-  return { ...NO_USER_CONFIG_ENV, ...filterBlankEnv(screen.filters) };
+  return {
+    ...NO_USER_CONFIG_ENV,
+    ...filterBlankEnv([...screen.filters, ...screen.reachedExempt]),
+  };
 }
 
 /**

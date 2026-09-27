@@ -1227,8 +1227,8 @@ export function filterCommandsIn(
   const unread = new Set<string>();
   const dangling = new Set<string>();
   const visited = new Set<string>();
+  const trustedVisited = new Set<string>();
   const trustedOrigins = new Set<string>();
-  const trustedFiltersByOrigin = new Map<string, Set<string>>();
   // Keep the spelling Git opens. A repo-controlled symlink may resolve to a
   // user config now and be repointed after this screen; realpath equality
   // would therefore turn that alias into authority it does not own.
@@ -1489,6 +1489,25 @@ export function filterCommandsIn(
           }
         }
       } else if (
+        'value' in discoveredCommon &&
+        isSubpath(pathIdentity(commonDir), pathIdentity(discoveredCommon.value))
+      ) {
+        // A submodule's admin directory lives under the superproject's
+        // common dir (`.git/modules/...`). Its tracked worktree content is
+        // therefore still content delivered by the repository being
+        // screened, even when that screen runs from a linked superproject
+        // worktree whose own top level does not contain the submodule.
+        const discoveredTop = gitOutput(
+          dirname(file),
+          ['rev-parse', '--path-format=absolute', '--show-toplevel'],
+          128,
+        );
+        const tracked =
+          'value' in discoveredTop
+            ? trackedAt(discoveredTop.value, file)
+            : 'unknown';
+        verdict = tracked === 'tracked' ? 'controlled' : 'unknown';
+      } else if (
         ('absent' in discoveredCommon && !discoveredCommon.absent) ||
         ('absent' in configuredWorktreeRead && !configuredWorktreeRead.absent)
       ) {
@@ -1604,9 +1623,6 @@ export function filterCommandsIn(
       const origin = originKey(file);
       if (trustedOrigins.has(origin)) {
         exempt.add(key);
-        const keys = trustedFiltersByOrigin.get(origin) ?? new Set<string>();
-        keys.add(key);
-        trustedFiltersByOrigin.set(origin, keys);
       } else {
         filters.add(key);
       }
@@ -1619,6 +1635,43 @@ export function filterCommandsIn(
     xdg && resolve(xdg) !== homeConfigDir
       ? originKey(join(resolve(xdg), 'git', 'config'))
       : null;
+  const visitTrusted = (file: string, depth: number): void => {
+    let real: string;
+    try {
+      real = realpathSync.native(file);
+      if (!statSync(real).isFile()) return;
+      accessSync(real, constants.R_OK);
+    } catch {
+      // Missing includes inside a user-owned config are ordinary Git state:
+      // Git ignores them, and they must not turn every repository that
+      // re-includes that config into a checkout refusal.
+      return;
+    }
+    if (trustedVisited.has(real)) return;
+    if (depth > MAX_INCLUDE_DEPTH || trustedVisited.size >= MAX_INCLUDE_FILES) {
+      // The status path disables global/system config, so over-blanking the
+      // known trusted names is the safe fallback when reachability itself is
+      // too large to prove precisely.
+      for (const key of exempt) reachedExempt.add(key);
+      return;
+    }
+    trustedVisited.add(real);
+    const origin = originKey(file);
+    const r = read(file);
+    if ('unreadable' in r) {
+      for (const key of exempt) reachedExempt.add(key);
+      return;
+    }
+    for (const [key, value] of r.records) {
+      if (key.startsWith('filter.')) {
+        if (trustedOrigins.has(origin)) reachedExempt.add(key);
+        else filters.add(key);
+        continue;
+      }
+      const target = includeTarget(file, value);
+      if (target !== null) visitTrusted(target, depth + 1);
+    }
+  };
   const visit = (file: string, depth: number, via: string | null): void => {
     let real: string;
     try {
@@ -1658,9 +1711,7 @@ export function filterCommandsIn(
     }
     const origin = originKey(file);
     if (via !== null && trustedOrigins.has(origin)) {
-      for (const key of trustedFiltersByOrigin.get(origin) ?? []) {
-        reachedExempt.add(key);
-      }
+      visitTrusted(file, depth);
       return;
     }
     if (visited.has(real)) return;
