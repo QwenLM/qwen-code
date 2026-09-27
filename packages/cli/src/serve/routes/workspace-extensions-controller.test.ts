@@ -102,7 +102,6 @@ describe('createExtensionsController', () => {
         boundWorkspace: extensionDir,
         bridge: {} as AcpSessionBridge,
         workspace: {} as DaemonWorkspaceService,
-        env: {},
       });
       const loadSettingsSpy = vi.mocked(loadSettings);
       loadSettingsSpy.mockClear();
@@ -127,41 +126,52 @@ describe('createExtensionsController', () => {
     }
   });
 
-  it('ignores an untrusted workspace settings file when resolving telemetry consent and proxy', async () => {
-    const extensionDir = await mkdtemp(
-      join(tmpdir(), 'qwen-ext-controller-untrusted-'),
+  it('resolves telemetry proxy and consent from the workspace settings only', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-telemetry-'));
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', 'settings.json'),
+      JSON.stringify({ proxy: 'http://workspace-settings:8080' }),
     );
-    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
-    vi.stubEnv('QWEN_HOME', emptyHome);
+    // A workspace's own env file must never be written into the daemon's
+    // shared process.env, and the daemon's ambient proxy env must never
+    // become this workspace's telemetry proxy.
+    await writeFile(
+      join(workspaceDir, '.qwen', '.env'),
+      'HTTPS_PROXY=http://workspace-env:8080\n',
+    );
+
+    const savedHttpsProxy = process.env['HTTPS_PROXY'];
+    delete process.env['HTTPS_PROXY'];
     try {
-      await mkdir(join(extensionDir, '.qwen'));
-      await writeFile(
-        join(extensionDir, '.qwen', 'settings.json'),
-        JSON.stringify({
-          privacy: { usageStatisticsEnabled: true },
-          proxy: 'http://evil:8080',
-        }),
-      );
       const controller = createExtensionsController({
-        boundWorkspace: extensionDir,
+        boundWorkspace: workspaceDir,
         bridge: {} as AcpSessionBridge,
         workspace: {} as DaemonWorkspaceService,
-        isWorkspaceTrusted: () => false,
-        env: {},
+        isWorkspaceTrusted: () => true,
       });
+      const readProxy = (manager: unknown): string | undefined =>
+        (manager as { proxy?: string }).proxy;
 
-      const manager = controller.createExtensionManager() as unknown as {
-        usageStatisticsEnabled?: boolean;
-        proxy?: string;
-      };
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, true)),
+      ).toBe('http://workspace-settings:8080');
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
 
-      // skipWorkspaceSettings drops the untrusted workspace file, so its
-      // proxy can never reach the telemetry Config.
-      expect(manager.proxy).toBeUndefined();
+      process.env['HTTPS_PROXY'] = 'http://daemon-ambient:8080';
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, true)),
+      ).toBe('http://workspace-settings:8080');
+
+      // The settings load is trust-gated, so an untrusted workspace's
+      // settings.proxy cannot reach the telemetry Config.
+      expect(
+        readProxy(controller.createExtensionManager(workspaceDir, false)),
+      ).toBeUndefined();
     } finally {
-      vi.unstubAllEnvs();
-      await rm(extensionDir, { recursive: true, force: true });
-      await rm(emptyHome, { recursive: true, force: true });
+      if (savedHttpsProxy === undefined) delete process.env['HTTPS_PROXY'];
+      else process.env['HTTPS_PROXY'] = savedHttpsProxy;
+      await rm(workspaceDir, { recursive: true, force: true });
     }
   });
 

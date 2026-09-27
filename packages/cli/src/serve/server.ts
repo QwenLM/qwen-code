@@ -1415,8 +1415,7 @@ export function createServeApp(
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
-      isChannelLive: () =>
-        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
+      isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -2803,7 +2802,6 @@ export function createServeApp(
     sendBridgeError,
     workspaceRegistry,
     conversationRuntimeActivity,
-    env: primaryRuntimeEffectiveEnv,
     ...(primaryRuntimeTrustAuthoritative
       ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
       : {}),
