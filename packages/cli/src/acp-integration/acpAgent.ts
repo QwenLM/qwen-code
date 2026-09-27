@@ -8260,7 +8260,10 @@ class QwenAgent implements Agent {
 
       const cgConfig = config.getContentGeneratorConfig?.();
       const baseUrl = cgConfig?.baseUrl || undefined;
-      const fastModelId = this.settings.merged?.fastModel || undefined;
+      // Strip the persisted `\0<baseUrl>` endpoint disambiguator: this payload
+      // leaves the process beside a `baseUrl` that is already scrubbed.
+      const fastModelId =
+        this.settings.merged?.fastModel?.split('\0', 1)[0] || undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,

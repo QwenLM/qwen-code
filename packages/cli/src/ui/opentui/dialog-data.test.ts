@@ -597,6 +597,43 @@ describe('applyModelSelection', () => {
       }
     });
 
+    it('drops a credential-bearing endpoint disambiguator when the fast model persists to workspace scope', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:sk-workspace-leak@a.example/v1',
+        }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      // Workspace settings (<project>/.qwen/settings.json) are routinely
+      // committed, so a credential-bearing baseUrl must never be written there.
+      // The disambiguator is dropped, not rewritten: the registry matches the
+      // endpoint by exact compare, so a scrubbed URL would not resolve.
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast',
+      });
+      expect(JSON.stringify(written)).not.toContain('sk-workspace-leak');
+      expect(setFastModel).toHaveBeenCalledWith('openai:shared-fast');
+      expect(outcome.ok).toBe(true);
+    });
+
     it('vision mode writes visionModel and syncs Config.setVisionModel', async () => {
       const setVisionModel = vi.fn();
       const switchModel = vi.fn(async () => {});

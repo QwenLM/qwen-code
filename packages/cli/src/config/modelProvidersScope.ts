@@ -5,6 +5,28 @@
  */
 
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { sanitizeProviderBaseUrl } from '../utils/acpModelUtils.js';
+
+/**
+ * Drops the `\0<baseUrl>` endpoint disambiguator from a persisted aux-model
+ * selector when the value is about to be written to a shareable scope.
+ *
+ * Workspace settings (`<project>/.qwen/settings.json`) are routinely committed,
+ * so a credential-bearing provider baseUrl copied out of the user's private
+ * settings would be published by the next `git add`. The URL must be dropped,
+ * not rewritten: the registry disambiguates by exact compare, so a scrubbed URL
+ * would no longer resolve. A public URL stays byte-identical.
+ */
+export function dropCredentialFromAuxSelector(
+  value: string,
+  scope: SettingScope,
+): string {
+  if (scope !== SettingScope.Workspace) return value;
+  const sep = value.indexOf('\0');
+  if (sep < 0) return value;
+  const url = value.slice(sep + 1);
+  return sanitizeProviderBaseUrl(url) === url ? value : value.slice(0, sep);
+}
 
 export function hasOwnModelProviders(settingsObj: unknown): boolean {
   if (!settingsObj || typeof settingsObj !== 'object') {

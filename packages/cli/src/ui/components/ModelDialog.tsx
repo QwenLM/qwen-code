@@ -30,7 +30,10 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  dropCredentialFromAuxSelector,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -627,16 +630,29 @@ export function ModelDialog({
   // regardless of which provider that turns out to be — otherwise the
   // dialog would default to the current auth's first row and Enter would
   // silently overwrite the user's fast-model setting.
+  // The picker persists `authType:id\0<baseUrl>` so same-id endpoints stay
+  // distinct; the read-back matcher must honour that suffix too, otherwise
+  // reopening the dialog and pressing Enter re-pins the first same-id provider.
+  // Read it from the raw setting: `resolveModelId` strips the suffix by design.
+  // Stay conditional on a baseUrl being present so the bare-id cross-auth
+  // highlight documented above still works.
+  const parsedFastModelEndpoint = parseVisionModelSetting(fastModelSetting);
+  const matchesFastModelBaseUrl = (model: CoreAvailableModel): boolean =>
+    !parsedFastModelEndpoint?.baseUrl ||
+    model.baseUrl === parsedFastModelEndpoint.baseUrl;
   const preferredFastModelEntry =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.authType
         ? availableModelEntries.find(
             ({ authType: t2, model }) =>
               t2 === parsedFastModelSetting.authType &&
-              model.id === parsedFastModelSetting.modelId,
+              model.id === parsedFastModelSetting.modelId &&
+              matchesFastModelBaseUrl(model),
           )
         : availableModelEntries.find(
-            ({ model }) => model.id === parsedFastModelSetting.modelId,
+            ({ model }) =>
+              model.id === parsedFastModelSetting.modelId &&
+              matchesFastModelBaseUrl(model),
           )
       : undefined;
   const advisorEndpointIndex = advisorModelSetting?.indexOf('\0') ?? -1;
@@ -709,16 +725,25 @@ export function ModelDialog({
       return undefined;
     }
   }, [settings?.merged?.compactionModel, isCompactionModelMode]);
+  const parsedCompactionEndpoint = parseVisionModelSetting(
+    settings?.merged?.compactionModel as string | undefined,
+  );
+  const matchesCompactionBaseUrl = (model: CoreAvailableModel): boolean =>
+    !parsedCompactionEndpoint?.baseUrl ||
+    model.baseUrl === parsedCompactionEndpoint.baseUrl;
   const preferredCompactionModelEntry =
     isCompactionModelMode && parsedCompactionSetting
       ? parsedCompactionSetting.authType
         ? availableModelEntries.find(
             ({ authType: t2, model }) =>
               t2 === parsedCompactionSetting.authType &&
-              model.id === parsedCompactionSetting.modelId,
+              model.id === parsedCompactionSetting.modelId &&
+              matchesCompactionBaseUrl(model),
           )
         : availableModelEntries.find(
-            ({ model }) => model.id === parsedCompactionSetting.modelId,
+            ({ model }) =>
+              model.id === parsedCompactionSetting.modelId &&
+              matchesCompactionBaseUrl(model),
           )
       : undefined;
   const preferredKey = activeRuntimeSnapshot
@@ -985,9 +1010,12 @@ export function ModelDialog({
       // disambiguator when the row carries one) so duplicate model ids
       // across providers bind the selected provider's credentials.
       if (isFastModelMode) {
-        const fastModel = encodeAuxModelSelector(selected);
-        const fastModelDisplay = fastModel.split('\0')[0];
         const scope = resolvePersistScope(settings, persistScope);
+        const fastModel = dropCredentialFromAuxSelector(
+          encodeAuxModelSelector(selected),
+          scope,
+        );
+        const fastModelDisplay = fastModel.split('\0')[0];
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
@@ -1055,8 +1083,11 @@ export function ModelDialog({
           setErrorMessage(t('Selected compaction model is unavailable.'));
           return;
         }
-        const compactionModelId = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
+        const compactionModelId = dropCredentialFromAuxSelector(
+          encodeAuxModelSelector(selected),
+          scope,
+        );
         settings.setValue(scope, 'compactionModel', compactionModelId);
         // Sync runtime Config so the compression service picks it up immediately.
         config.setCompactionModel(compactionModelId);

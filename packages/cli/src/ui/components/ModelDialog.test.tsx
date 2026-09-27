@@ -1809,6 +1809,82 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
   });
 
+  it('highlights the matching baseUrl for duplicate fast-model settings', () => {
+    // The fast-model setting persists as `authType:id\0<baseUrl>` so same-id
+    // endpoints stay distinct. The read-back matcher must honour that suffix:
+    // matching on authType+id alone highlights the FIRST same-id row, so
+    // reopening the picker and pressing Enter silently re-pins the other
+    // provider's credentials.
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        fastModel: `openai:shared-fast\0${selectedBaseUrl}`,
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'shared-fast',
+        label: '[Free Quota] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://free-quota.example.com/v1',
+      },
+      {
+        id: 'shared-fast',
+        label: '[Token Plan] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: selectedBaseUrl,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                baseUrl: 'https://free-quota.example.com/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://free-quota.example.com/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isFastModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const fastIndex = items.findIndex(
+      (item) =>
+        String(item.value).includes('shared-fast') &&
+        String(item.value).includes(selectedBaseUrl),
+    );
+    expect(fastIndex).toBeGreaterThan(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(fastIndex);
+  });
+
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();
 
