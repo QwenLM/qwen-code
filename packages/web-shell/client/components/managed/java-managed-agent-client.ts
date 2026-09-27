@@ -24,18 +24,9 @@ export type JavaAgentSession = Omit<
   >;
 };
 
-// The current BFF uses uppercase states (contract-known-gaps.txt).
-export type JavaAgentWorkspace = Omit<Schemas['WebShellWorkspace'], 'state'> & {
-  state: Uppercase<Schemas['WebShellWorkspace']['state']>;
-};
+export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
 
-export type JavaAgentWorkspacePage = Omit<
-  Schemas['WebShellWorkspacePage'],
-  'data' | 'defaultWorkspace'
-> & {
-  data: JavaAgentWorkspace[];
-  defaultWorkspace: JavaAgentWorkspace | null;
-};
+export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
 
 export type JavaAgentSessionPage = Omit<
   Schemas['WebShellSessionPage'],

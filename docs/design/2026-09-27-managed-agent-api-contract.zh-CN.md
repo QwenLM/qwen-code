@@ -96,11 +96,10 @@ schema：limit 默认 50、上限 100，cursor 最长 2048 个字符。
 空会话创建与绑定读回，不启用 Workspace 执行或上下文切换。既有的
 `workspace_context` / `workspaceContext` 能力仍为 false。
 
-目标 schema 保留公共 Workspace 的 `id` 与 `object`、WebShell 的小写状态，以及
-绑定 Session 的上下文 revision 与状态。W0d 当前返回 `workspace_id`、WebShell
-大写状态，且绑定 Session 只有 Workspace 标识与 cwd。新增的真实请求覆盖把这些
-差异记录给 Workspace API 对齐与 W2 后续工作。客户端通过本地覆盖，把生成的
-Workspace 状态与绑定类型适配到服务端当前结构。
+发现接口现已返回目标 schema 要求的公共 Workspace `id` 与 `object`，以及
+WebShell 的小写状态。绑定 Session 仍只有 Workspace 标识与 cwd，因此真实请求
+覆盖把缺少的上下文 revision 与状态记录给 W2。客户端本地覆盖仅用于该 Session
+绑定。
 
 ## 5. Java 契约测试
 
@@ -194,7 +193,6 @@ override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 
 | D3                     | 公共与 WebShell 事件（JSON 与 SSE）缺 `schema_version`、`projection_version`、`item_id` 与 `content_part_id`；事件与 transcript 分页对大于 100 的 `limit` 返回 `400 invalid_limit`。                                                                                                                                                  |
 | 生命周期工作           | `archive` 与 `DELETE` 返回 `200`，而不是带命令 operation 的 `202`；`DeletedSession` 没有 schema；已归档的 Session 读回时 `status` 为 `"archived"`，而契约的状态枚举没有该值（v1.10 用计划中的 `archived_at` 表示归档）。                                                                                                              |
 | Workspace 上下文（W2） | 两个入口上 Session 的 `workspace` 都缺 `context_revision` 与 `state`，通过 record 和已绑定会话响应校验。                                                                                                                                                                                                                              |
-| Workspace API 对齐     | 公共发现接口返回 `workspace_id`，而不是 `id` 与 `object`；WebShell 发现接口（包括默认 Workspace）返回大写状态，而不是小写。                                                                                                                                                                                                           |
 
 输入类型不一致不在 issue 列出的差异中，是 5.3 的请求校验发现的。服务端的
 `input()` 只接受 `text`，WebShell 客户端也发送 `text`，因此两者必须在 D2 中一起
@@ -233,9 +231,6 @@ D2 与 D3 可以并行开始。各自关闭第 7 节中属于自己的差异，�
   覆盖。
 - **绑定 Workspace 的 Session（W2）。** 两个入口的创建与读回现在直接覆盖缺失的
   `context_revision` 与 `state`。W2 补齐字段后，移除相应 record 与响应差异。
-- **Workspace API 对齐。** 后续工作把公共发现接口的标识与 WebShell 状态大小写
-  对齐到保留的目标 schema，再移除差异和本地状态覆盖类型。W0d 合并集成已在 4.5
-  完成；仍有差异时，发现与绑定都不提升为 `implemented`。
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml

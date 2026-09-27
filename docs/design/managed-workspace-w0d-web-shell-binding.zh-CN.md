@@ -14,7 +14,7 @@ W0b 已能在创建 Session 时保存经过授权的 Workspace 绑定，但已�
 
 ## 发现接口契约
 
-公共路由为 `GET /v1/agents/workspaces` 和 `GET /v1/agents/workspaces/{workspaceId}`。WebShell BFF 路由为 `POST /api/agent/web-shell/v1/workspaces/query` 和 `/workspaces/get`。两者共用服务与 Registry。公共字段使用 snake_case，BFF 字段使用 camelCase。列表返回 `data`、`hasMore`/`has_more`、`nextCursor`/`next_cursor`、`defaultWorkspace`/`default_workspace` 和两个能力标志。默认每页 50，允许范围为 1–100。
+公共路由为 `GET /v1/agents/workspaces` 和 `GET /v1/agents/workspaces/{workspaceId}`。WebShell BFF 路由为 `POST /api/agent/web-shell/v1/workspaces/query` 和 `/workspaces/get`。两者共用服务与 Registry。公共 Workspace 资源使用 `id`、`object: "agent.workspace"`、snake_case 字段和小写状态；BFF 字段使用 camelCase，状态同样为小写。列表返回 `data`、`hasMore`/`has_more`、`nextCursor`/`next_cursor`、`defaultWorkspace`/`default_workspace` 和两个能力标志。默认每页 50，允许范围为 1–100。
 
 发现接口要求现有可信 `AuthenticatedTenantActor`；缺少 actor 返回 401，作用域不符返回 403。SQL 先按读取授权过滤再分页，并按 Workspace ID 的精确字节顺序排序。游标绑定 tenant 与 actor 的摘要、有效页大小和末项 ID；每页重新检查授权。单项查询对不可读或不存在的 ID 都返回 404。显式租户默认项独立于当前页返回，但必须可读、可创建且处于 `ACTIVE`。可读但无创建权或非 active 的条目仍可见，但不能选择。创建事务内仍会复查授权与状态。
 

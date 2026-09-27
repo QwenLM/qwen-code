@@ -85,24 +85,3 @@ response getSession 200: /workspace required context_revision
 response getSession 200: /workspace required state
 response webShellGetSession 200: /workspace required contextRevision
 response webShellGetSession 200: /workspace required state
-
-# Workspace API alignment (after W0d, outside Stage D): public discovery uses
-# workspace_id instead of id/object; BFF discovery uses uppercase states.
-# The default-workspace oneOf/type lines come from its unmatched null branch.
-response getWorkspace 200: / additionalProperties workspace_id
-response getWorkspace 200: / required id
-response getWorkspace 200: / required object
-response listWorkspaces 200: /data/* additionalProperties workspace_id
-response listWorkspaces 200: /data/* required id
-response listWorkspaces 200: /data/* required object
-response listWorkspaces 200: /default_workspace additionalProperties workspace_id
-response listWorkspaces 200: /default_workspace oneOf
-response listWorkspaces 200: /default_workspace required id
-response listWorkspaces 200: /default_workspace required object
-response listWorkspaces 200: /default_workspace type
-response webShellGetWorkspace 200: /state enum
-response webShellQueryWorkspaces 200: /data/*/state enum
-response webShellQueryWorkspaces 200: /defaultWorkspace oneOf
-response webShellQueryWorkspaces 200: /defaultWorkspace type
-response webShellQueryWorkspaces 200: /defaultWorkspace/state const
-response webShellQueryWorkspaces 200: /defaultWorkspace/state enum

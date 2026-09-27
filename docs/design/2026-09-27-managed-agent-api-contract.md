@@ -107,12 +107,10 @@ only discovery, empty-session creation and binding readback. It does not enable
 workspace execution or context switching. The existing `workspace_context` /
 `workspaceContext` capability remains false.
 
-The target schemas retain public workspace `id` and `object`, lowercase WebShell
-states, and bound Session context revision and state. W0d currently returns
-`workspace_id`, uppercase WebShell states, and only workspace identity and cwd on
-a bound Session. The new traffic coverage records these differences for the
-Workspace API alignment and W2 follow-ups. Local client overrides adapt generated
-workspace state and binding types to that current server shape.
+Discovery now returns the target public workspace `id` and `object` and lowercase
+WebShell states. Bound Sessions still return only workspace identity and cwd, so
+traffic coverage records the missing context revision and state for W2. The
+local client override remains only for that Session binding.
 
 ## 5. Java contract test
 
@@ -213,13 +211,12 @@ which turns colours off).
 
 ## 7. Gaps recorded by D1
 
-| Slice                   | Gaps                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D2                      | `agent_revision` and `capabilities` missing from every Session response; `replay_floor_sequence`, `snapshot_through_sequence` and `PublicTurn.input_item_id` missing from the records; `agent_revision` missing from `CreateSessionRequest`; no `X-Request-Id` on WebShell commands; `WebShellStreamRequest.limit` still in the record; input blocks accept only `text`, not the contract's `input_text`. |
-| D3                      | `schema_version`, `projection_version`, `item_id` and `content_part_id` missing from public and WebShell events, in JSON and SSE; event and transcript pages reject `limit` above 100 with `400 invalid_limit`.                                                                                                                                                                                           |
-| Lifecycle work          | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema; an archived Session reads back with `status: "archived"`, which the contract's status enum lacks (v1.10 models archiving with the planned `archived_at`).                                                                                                                                  |
-| Workspace context (W2)  | The Session `workspace` lacks `context_revision` and `state` on both surfaces, checked through records and bound-session responses.                                                                                                                                                                                                                                                                       |
-| Workspace API alignment | Public discovery returns `workspace_id` instead of `id` and `object`; WebShell discovery returns uppercase states instead of lowercase, including the default workspace.                                                                                                                                                                                                                                  |
+| Slice                  | Gaps                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D2                     | `agent_revision` and `capabilities` missing from every Session response; `replay_floor_sequence`, `snapshot_through_sequence` and `PublicTurn.input_item_id` missing from the records; `agent_revision` missing from `CreateSessionRequest`; no `X-Request-Id` on WebShell commands; `WebShellStreamRequest.limit` still in the record; input blocks accept only `text`, not the contract's `input_text`. |
+| D3                     | `schema_version`, `projection_version`, `item_id` and `content_part_id` missing from public and WebShell events, in JSON and SSE; event and transcript pages reject `limit` above 100 with `400 invalid_limit`.                                                                                                                                                                                           |
+| Lifecycle work         | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema; an archived Session reads back with `status: "archived"`, which the contract's status enum lacks (v1.10 models archiving with the planned `archived_at`).                                                                                                                                  |
+| Workspace context (W2) | The Session `workspace` lacks `context_revision` and `state` on both surfaces, checked through records and bound-session responses.                                                                                                                                                                                                                                                                       |
 
 The input type mismatch was not in the issue's list; the request validation in
 5.3 found it. The server's `input()` rejects anything but `text`, and the
@@ -264,10 +261,6 @@ hold everything those slices must fix:
 - **Workspace-bound Sessions (W2).** Creation and readback on both surfaces now
   exercise the missing `context_revision` and `state` directly. W2 supplies those
   fields and removes the corresponding record and response gaps.
-- **Workspace API alignment.** A follow-up aligns public discovery identity and
-  WebShell state casing with the retained target schemas, then removes the gaps
-  and local state override. W0d's merge integration is complete in 4.5; neither
-  discovery nor binding is promoted to `implemented` while gaps remain.
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml

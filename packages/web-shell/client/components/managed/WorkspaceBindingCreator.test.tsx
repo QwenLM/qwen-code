@@ -11,7 +11,7 @@ import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 const workspace = {
   workspaceId: 'ws-a',
   displayName: 'A',
-  state: 'ACTIVE',
+  state: 'active',
   canCreateSession: true,
 };
 

@@ -51,20 +51,29 @@ public class WorkspaceDiscoveryController {
             @RequestBody QueryRequest request) {
         WorkspacePage page = service.list(tenant.tenantId(),
                 tenant.requireActorId(), request.cursor(), request.limit());
-        return noStore(new WebShellPage(page.data(),
-                page.defaultWorkspace(), page.hasMore(),
+        return noStore(new WebShellPage(page.data().stream()
+                .map(WorkspaceDiscoveryController::webShellItem).toList(),
+                page.defaultWorkspace() == null ? null
+                        : webShellItem(page.defaultWorkspace()), page.hasMore(),
                 page.nextCursor(), new WebShellCapabilities(true, false)));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/get")
     public ResponseEntity<WorkspaceSummary> webShellGet(TenantContext tenant,
             @Valid @RequestBody GetRequest request) {
-        return noStore(service.get(tenant.tenantId(),
-                tenant.requireActorId(), request.workspaceId()));
+        return noStore(webShellItem(service.get(tenant.tenantId(),
+                tenant.requireActorId(), request.workspaceId())));
     }
 
     private static PublicItem publicItem(WorkspaceSummary item) {
-        return new PublicItem(item.workspaceId(), item.displayName(),
+        return new PublicItem(item.workspaceId(), "agent.workspace",
+                item.displayName(),
+                item.state().toLowerCase(Locale.ROOT),
+                item.canCreateSession());
+    }
+
+    private static WorkspaceSummary webShellItem(WorkspaceSummary item) {
+        return new WorkspaceSummary(item.workspaceId(), item.displayName(),
                 item.state().toLowerCase(Locale.ROOT),
                 item.canCreateSession());
     }
@@ -94,7 +103,7 @@ public class WorkspaceDiscoveryController {
             @JsonProperty("workspace_context") boolean workspaceContext) {
     }
 
-    public record PublicItem(@JsonProperty("workspace_id") String workspaceId,
+    public record PublicItem(String id, String object,
             @JsonProperty("display_name") String displayName,
             String state,
             @JsonProperty("can_create_session") boolean canCreateSession) {

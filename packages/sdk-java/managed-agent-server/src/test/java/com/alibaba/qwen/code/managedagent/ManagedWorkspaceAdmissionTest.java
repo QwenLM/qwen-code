@@ -79,10 +79,15 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "actor-a"))
                         .param("limit", "1"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data[0].workspace_id")
+                .andExpect(jsonPath("$.data[0].id")
                         .value("b-visible"))
-                .andExpect(jsonPath("$.default_workspace.workspace_id")
+                .andExpect(jsonPath("$.data[0].object")
+                        .value("agent.workspace"))
+                .andExpect(jsonPath("$.data[0].state").value("active"))
+                .andExpect(jsonPath("$.default_workspace.id")
                         .value("d-default"))
+                .andExpect(jsonPath("$.default_workspace.object")
+                        .value("agent.workspace"))
                 .andExpect(jsonPath("$.has_more").value(true))
                 .andExpect(jsonPath("$.capabilities.workspace_binding")
                         .value(true))
@@ -101,7 +106,7 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "actor-a"))
                         .param("limit", "1").param("cursor", cursor))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data[0].workspace_id")
+                .andExpect(jsonPath("$.data[0].id")
                         .value("c-readonly"))
                 .andExpect(jsonPath("$.data[0].can_create_session")
                         .value(false));
@@ -142,7 +147,7 @@ class ManagedWorkspaceAdmissionTest {
                         .param("limit", "1")
                         .param("cursor", longActorCursor))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data[0].workspace_id")
+                .andExpect(jsonPath("$.data[0].id")
                         .value("d-default"));
         mvc.perform(get("/v1/agents/workspaces/a-hidden")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -156,15 +161,19 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].workspaceId")
                         .value("b-visible"))
+                .andExpect(jsonPath("$.data[0].state").value("active"))
                 .andExpect(jsonPath("$.defaultWorkspace.workspaceId")
-                        .value("d-default"));
+                        .value("d-default"))
+                .andExpect(jsonPath("$.defaultWorkspace.state")
+                        .value("active"));
         mvc.perform(post("/api/agent/web-shell/v1/workspaces/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"workspaceId\":\"b-visible\"}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.workspaceId").value("b-visible"));
+                .andExpect(jsonPath("$.workspaceId").value("b-visible"))
+                .andExpect(jsonPath("$.state").value("active"));
         mvc.perform(get("/v1/agents/workspaces")
                         .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isUnauthorized());
@@ -179,6 +188,9 @@ class ManagedWorkspaceAdmissionTest {
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("b-visible"))
+                .andExpect(jsonPath("$.object").value("agent.workspace"))
+                .andExpect(jsonPath("$.state").value("draining"))
                 .andExpect(jsonPath("$.can_create_session").value(false));
         jdbc.update("UPDATE managed_workspace_registry SET state = 'REMOVED'"
                 + " WHERE tenant_id = ? AND workspace_id = ?", tenant,
@@ -200,9 +212,9 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(2))
-                .andExpect(jsonPath("$.data[0].workspace_id")
+                .andExpect(jsonPath("$.data[0].id")
                         .value("c-readonly"))
-                .andExpect(jsonPath("$.data[1].workspace_id")
+                .andExpect(jsonPath("$.data[1].id")
                         .value("d-default"));
         mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
                         .header(TenantContextFilter.HEADER, tenant)

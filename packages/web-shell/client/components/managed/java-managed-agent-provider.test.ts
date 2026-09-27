@@ -73,7 +73,7 @@ describe('createJavaManagedAgentProvider', () => {
                 {
                   workspaceId: 'ws-a',
                   displayName: 'A',
-                  state: 'ACTIVE',
+                  state: 'active',
                   canCreateSession: true,
                 },
               ],
