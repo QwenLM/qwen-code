@@ -1,5 +1,19 @@
 # Core test size experiments
 
+## Final task result
+
+Start with the [design](../../docs/design/core-test-size-reduction.md)
+([简体中文](../../docs/design/core-test-size-reduction.zh-CN.md)) and
+[final experiments and results](../../docs/design/core-test-size-reduction-results.md)
+([简体中文](../../docs/design/core-test-size-reduction-results.zh-CN.md)).
+Against main snapshot `9e60263f`, candidate `460151af` removes **223,587 Core
+test lines (33.21%)**, from 673,272 to 449,685, with Core production unchanged.
+[Cumulative machine results](evidence/final/results.json) record both exact
+revisions and size provenance. Capability results retain their stage baselines;
+the final stage's 0.3041-point line loss is relative to `a270907e`.
+
+## Tool scope
+
 These tools measure test size and compare test capability on the **same product implementation**. Historical evidence covers `ab61e04161a30bf825fefede85bcc09ebef7a673` through `e15058c26b86673f18bc22aae67577bc3ddad1e3`. New work uses a newly frozen plan at its integration baseline.
 
 ## Preserved evidence

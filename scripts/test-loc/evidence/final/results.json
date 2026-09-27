@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "kind": "cumulative-size-and-stage-evidence-index",
+  "measuredAtUtc": "2026-09-27T11:55:11.551123+00:00",
+  "scope": "packages/core",
+  "status": "adopted experimental branch candidate; main unchanged",
+  "baseline": {
+    "revision": "9e60263fdeff8cb5bf5fc49287a2d20cef0dbe2e",
+    "coreTree": "34214a63aa2843a2c7915515762dcb1d43999c0c",
+    "cleanCoreWorkingTree": true,
+    "metrics": {
+      "package": "packages/core",
+      "s1_test_loc": 673272,
+      "s2_test_bytes": 23538737,
+      "s3_cases": 25088,
+      "impl_loc": 400027,
+      "impl_files": 859,
+      "test_files": 830,
+      "test_code_files": 812,
+      "snapshot_lines": 2742,
+      "fixture_lines": 526,
+      "cases_single_expect": 9745,
+      "cases_mock_only": 1349,
+      "cases_over_80": 608,
+      "preamble_lines": 57377,
+      "skipped": 7,
+      "files_over_5000": 16,
+      "lines_in_files_over_5000": 164148,
+      "dup_windows": 50431,
+      "total_windows": 598977,
+      "modules_with_multiple_test_files": 24,
+      "s4_test_to_impl": 1.68,
+      "p1_lines_per_case": 26.8,
+      "p2_within_file_dup_pct": 8.4,
+      "p3_single_expect_pct": 38.8,
+      "p4_mock_only_pct": 5.4,
+      "p5_preamble_pct": 8.5,
+      "p6_files_over_5000_pct": 24.4
+    }
+  },
+  "candidate": {
+    "revision": "460151af0c6ec2a19d7a4d736aadda023a696527",
+    "coreTree": "3877feaa49b5b16fe8f6100da6c636ef1fd4e0c8",
+    "cleanCoreWorkingTree": true,
+    "metrics": {
+      "package": "packages/core",
+      "s1_test_loc": 449685,
+      "s2_test_bytes": 16307779,
+      "s3_cases": 20294,
+      "impl_loc": 400027,
+      "impl_files": 859,
+      "test_files": 682,
+      "test_code_files": 662,
+      "snapshot_lines": 2742,
+      "fixture_lines": 526,
+      "cases_single_expect": 7219,
+      "cases_mock_only": 995,
+      "cases_over_80": 296,
+      "preamble_lines": 71066,
+      "skipped": 5,
+      "files_over_5000": 7,
+      "lines_in_files_over_5000": 63811,
+      "dup_windows": 1477,
+      "total_windows": 392614,
+      "modules_with_multiple_test_files": 18,
+      "s4_test_to_impl": 1.12,
+      "p1_lines_per_case": 22.2,
+      "p2_within_file_dup_pct": 0.4,
+      "p3_single_expect_pct": 35.6,
+      "p4_mock_only_pct": 4.9,
+      "p5_preamble_pct": 15.8,
+      "p6_files_over_5000_pct": 14.2
+    }
+  },
+  "metric": {
+    "path": "scripts/test-loc/size.mjs",
+    "sha256": "0ea91b48296d9c3795eee10422425b205ccae8235f81c00d984a8af7fb6faf78",
+    "gitBlob": "e82568c84fae0f8916c8fd19cea6550cc446a9ce",
+    "nodeVersion": "v22.18.0",
+    "command": "node scripts/test-loc/size.mjs <clean-checkout-at-recorded-revision> packages/core --json",
+    "includes": "All test-classified files, including helpers, mocks, snapshots and fixtures; physical lines include blank lines and comments.",
+    "staticCaseCountsAreRuntimeCaseCounts": false
+  },
+  "size": {
+    "S1": {
+      "before": 673272,
+      "after": 449685,
+      "removed": 223587,
+      "removedPercent": 33.20901507860122
+    },
+    "S2": {
+      "before": 23538737,
+      "after": 16307779,
+      "removed": 7230958,
+      "removedPercent": 30.71939671189665
+    }
+  },
+  "coreDiff": {
+    "changedFiles": 555,
+    "addedLines": 147244,
+    "deletedLines": 370831,
+    "nonTestChangedPaths": [],
+    "productionUnchanged": true,
+    "implementationLoc": 400027
+  },
+  "adoptedStages": [
+    {
+      "id": "compression-integration",
+      "baselineRevision": "9e60263fdeff8cb5bf5fc49287a2d20cef0dbe2e",
+      "candidateRevision": "10a29740aeca8197f5dd92d04802437135de7873",
+      "beforeLines": 673272,
+      "afterLines": 491593,
+      "removedLines": 181679
+    },
+    {
+      "id": "behavior-contracts",
+      "baselineRevision": "10a29740aeca8197f5dd92d04802437135de7873",
+      "candidateRevision": "37412a57d473525a81f87e4ca36447981950d9a9",
+      "beforeLines": 491593,
+      "afterLines": 491361,
+      "removedLines": 232
+    },
+    {
+      "id": "schema-hooks-providers",
+      "baselineRevision": "37412a57d473525a81f87e4ca36447981950d9a9",
+      "candidateRevision": "a270907e5f3fd6ebe26ef7d17ea7da3e92c2773a",
+      "beforeLines": 491361,
+      "afterLines": 490301,
+      "removedLines": 1060
+    },
+    {
+      "id": "budgeted-reduction",
+      "baselineRevision": "a270907e5f3fd6ebe26ef7d17ea7da3e92c2773a",
+      "candidateRevision": "460151af0c6ec2a19d7a4d736aadda023a696527",
+      "beforeLines": 490301,
+      "afterLines": 449685,
+      "removedLines": 40616
+    }
+  ],
+  "capabilityScope": {
+    "pairedMainToFinalRunPerformed": false,
+    "finalValidationBaselineRevision": "a270907e5f3fd6ebe26ef7d17ea7da3e92c2773a",
+    "finalValidationCandidateRevision": "460151af0c6ec2a19d7a4d736aadda023a696527",
+    "finalValidationResults": "scripts/test-loc/evidence/round8/results.json",
+    "interpretation": "Capability results retain each stage's baseline and sample. Stage-specific fault detection, mutation and coverage results are not cumulative main-to-final measurements."
+  },
+  "evidenceInputs": [
+    {
+      "path": "scripts/test-loc/evidence/round5/results.json",
+      "sha256": "43f709de6cc1fe1378fda2d695e77f7a973b22e8f803101672049d191789a4a4"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round5/manifest.json",
+      "sha256": "dca33030fb9630bccbe425daf04310d577bbdddef557f161ee1a9e5114d9c8aa"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round6/results.json",
+      "sha256": "2ee3444e8ceb60a5c4143e5ccaa237c4752a3ada1f63b83c1ad01ec309dda740"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round6/manifest.json",
+      "sha256": "4f17d52fb7eaca49fc41bb09d3636463f19972bbda7cd72618f15e71ee4d6ef3"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round7/results.json",
+      "sha256": "f9921ca9dc095f862483451db3a072582770c03cee66b693ada7ec64794b3a17"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round7/manifest.json",
+      "sha256": "6d0b703d04811a5197c1a499a07cad6002ac9dcdaf1e0609c281b49b9c7e27f4"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round8/results.json",
+      "sha256": "d6ba06cbee8501971c5fd39fce38daa125950ba56668643c7d459fe6a1336bb1"
+    },
+    {
+      "path": "scripts/test-loc/evidence/round8/manifest.json",
+      "sha256": "7d9a8f8ad4ba8213aeb6ddb14fc1246dd28d045877c71cfb672575a2638b67ed"
+    }
+  ]
+}
