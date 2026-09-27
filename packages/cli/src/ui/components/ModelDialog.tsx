@@ -640,20 +640,29 @@ export function ModelDialog({
   const matchesFastModelBaseUrl = (model: CoreAvailableModel): boolean =>
     !parsedFastModelEndpoint?.baseUrl ||
     model.baseUrl === parsedFastModelEndpoint.baseUrl;
+  // A pinned endpoint can match no row at all — a project that declares its
+  // own `modelProviders` replaces the user's, so a globally pinned endpoint
+  // has no row here. Keep the same-id highlight documented above instead of
+  // falling through to the current auth's first row, which Enter would then
+  // silently overwrite. The opentui twin keeps the same fallback.
+  const findPreferredModelEntry = (
+    setting: { authType?: AuthType; modelId: string },
+    matchesBaseUrl: (model: CoreAvailableModel) => boolean,
+  ) =>
+    (setting.authType
+      ? availableModelEntries.find(
+          ({ authType: t2, model }) =>
+            t2 === setting.authType &&
+            model.id === setting.modelId &&
+            matchesBaseUrl(model),
+        )
+      : availableModelEntries.find(
+          ({ model }) => model.id === setting.modelId && matchesBaseUrl(model),
+        )) ??
+    availableModelEntries.find(({ model }) => model.id === setting.modelId);
   const preferredFastModelEntry =
     isFastModelMode && parsedFastModelSetting
-      ? parsedFastModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedFastModelSetting.authType &&
-              model.id === parsedFastModelSetting.modelId &&
-              matchesFastModelBaseUrl(model),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedFastModelSetting.modelId &&
-              matchesFastModelBaseUrl(model),
-          )
+      ? findPreferredModelEntry(parsedFastModelSetting, matchesFastModelBaseUrl)
       : undefined;
   const advisorEndpointIndex = advisorModelSetting?.indexOf('\0') ?? -1;
   const advisorRegistryBaseUrl =
@@ -733,18 +742,10 @@ export function ModelDialog({
     model.baseUrl === parsedCompactionEndpoint.baseUrl;
   const preferredCompactionModelEntry =
     isCompactionModelMode && parsedCompactionSetting
-      ? parsedCompactionSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedCompactionSetting.authType &&
-              model.id === parsedCompactionSetting.modelId &&
-              matchesCompactionBaseUrl(model),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedCompactionSetting.modelId &&
-              matchesCompactionBaseUrl(model),
-          )
+      ? findPreferredModelEntry(
+          parsedCompactionSetting,
+          matchesCompactionBaseUrl,
+        )
       : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id

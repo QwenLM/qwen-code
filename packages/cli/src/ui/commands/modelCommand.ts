@@ -281,6 +281,16 @@ function formatUnavailableImageModelMessage(
   );
 }
 
+/**
+ * Registry entries are keyed per auth type, so one endpoint can contribute
+ * several entries for the same id (a gateway publishing it over both wire
+ * APIs, for instance). Ambiguity is about endpoints, not entries: counting
+ * entries would reject a typed selector that binds exactly one credential.
+ */
+function countDistinctEndpoints(models: AvailableModel[]): number {
+  return new Set(models.map((model) => model.baseUrl ?? '')).size;
+}
+
 function formatAmbiguousVisionModelMessage(
   modelName: string,
   matchingModels: AvailableModel[],
@@ -699,7 +709,7 @@ export const modelCommand: SlashCommand = {
         : matchingModels.filter((model) => model.authType === authType);
       const endpointCandidates =
         currentAuthMatches.length > 0 ? currentAuthMatches : matchingModels;
-      if (endpointCandidates.length > 1) {
+      if (countDistinctEndpoints(endpointCandidates) > 1) {
         return {
           type: 'message',
           messageType: 'error',
@@ -926,6 +936,24 @@ export const modelCommand: SlashCommand = {
                 modelName,
                 availableModels,
               ),
+        };
+      }
+
+      // The picker persists `authType:id\0<baseUrl>` for compaction too, so a
+      // typed overwrite across same-id endpoints would silently unpin the
+      // selected one. Refuse it the way --fast/--vision/--image already do.
+      if (
+        countDistinctEndpoints(
+          availableModels.filter((model) => model.id === selector.modelId),
+        ) > 1
+      ) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            "Compaction model '{{modelName}}' matches multiple configured endpoints. Run /model --compaction without an argument and choose the exact endpoint.",
+            { modelName },
+          ),
         };
       }
 

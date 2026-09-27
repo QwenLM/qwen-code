@@ -1885,6 +1885,88 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(fastIndex);
   });
 
+  it('falls back to the same-id row when the pinned endpoint matches none (#12760)', () => {
+    // A project that declares its own `modelProviders` replaces the user's, so
+    // a globally pinned endpoint can match no row here. Without a same-id
+    // fallback the dialog highlights the current auth's first row and Enter
+    // silently overwrites the fast-model setting.
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        fastModel:
+          'openai:shared-fast\0https://removed-provider.example.com/v1',
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'qwen3.7-max',
+        label: 'qwen3.7-max',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://free-quota.example.com/v1',
+      },
+      {
+        id: 'shared-fast',
+        label: '[Free Quota] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://free-quota.example.com/v1',
+      },
+      {
+        id: 'shared-fast',
+        label: '[Token Plan] shared-fast',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://token-plan.example.com/v1',
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'qwen3.7-max'),
+              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_OPENAI,
+                model: 'qwen3.7-max',
+                // The primary's own endpoint owns no same-id row, so the
+                // documented fall-through key cannot resolve either.
+                baseUrl: 'https://primary-endpoint.example.com/v1',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({
+                  baseUrl: 'https://primary-endpoint.example.com/v1',
+                })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isFastModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const sameIdIndex = items.findIndex((item) =>
+      String(item.value).includes('shared-fast'),
+    );
+    expect(sameIdIndex).toBeGreaterThan(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(sameIdIndex);
+  });
+
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();
 

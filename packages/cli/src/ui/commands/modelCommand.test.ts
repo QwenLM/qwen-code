@@ -1016,6 +1016,110 @@ describe('modelCommand', () => {
     expect(setFastModel).not.toHaveBeenCalled();
   });
 
+  it('should accept a fast model id whose registry entries share one endpoint (#12760)', async () => {
+    // One gateway can publish the same id over both wire APIs, which yields
+    // two registry entries at ONE baseUrl and one credential. Counting entries
+    // instead of endpoints rejected a typed selector that was never ambiguous.
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast shared-fast',
+        name: 'model',
+        args: '--fast shared-fast',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (chat)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://gateway.example.com/v1',
+            },
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (responses)',
+              authType: AuthType.USE_OPENAI_RESPONSES,
+              baseUrl: 'https://gateway.example.com/v1',
+            },
+          ]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast shared-fast',
+    );
+
+    expect((result as { content?: string }).content ?? '').not.toContain(
+      'matches multiple configured endpoints',
+    );
+    expect(setValue).toHaveBeenCalled();
+    expect(setFastModel).toHaveBeenCalled();
+  });
+
+  it('should reject a compaction model id matching multiple endpoints (#12760)', async () => {
+    // The picker persists `authType:id\0<baseUrl>` for compaction too, so a
+    // typed overwrite across same-id endpoints would silently unpin the
+    // selected one — the guard --fast/--vision/--image already have.
+    const setValue = vi.fn();
+    const setCompactionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --compaction shared-compact',
+        name: 'model',
+        args: '--compaction shared-compact',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen3.7-max',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'shared-compact',
+              label: 'shared-compact (token plan)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+            },
+            {
+              id: 'shared-compact',
+              label: 'shared-compact (free quota)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://free-quota.example.com/v1',
+            },
+          ]),
+          setCompactionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--compaction shared-compact',
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect((result as { content: string }).content).toContain(
+      'matches multiple configured endpoints',
+    );
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setCompactionModel).not.toHaveBeenCalled();
+  });
+
   it('should reject an authType-qualified fast model matching multiple endpoints (#12760)', async () => {
     const setValue = vi.fn();
     const setFastModel = vi.fn();

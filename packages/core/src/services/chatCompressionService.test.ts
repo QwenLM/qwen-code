@@ -1225,6 +1225,65 @@ describe('ChatCompressionService', () => {
     expect(result.info.warning).toBeUndefined();
   });
 
+  it('sizes the window guard against the pinned endpoint, not the first same-id entry (#12760)', async () => {
+    // The selector pins the second of two same-id endpoints. Resolving the
+    // entry by id alone reads the FIRST entry's window, so a pin to a
+    // large-window endpoint gets discarded as "too small".
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(
+      'openai:shared-compact\0https://free-quota.example.com/v1',
+    );
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      {
+        id: 'shared-compact',
+        baseUrl: 'https://exhausted-plan.example.com/v1',
+        contextWindowSize: 1,
+      },
+      {
+        id: 'shared-compact',
+        baseUrl: 'https://free-quota.example.com/v1',
+        contextWindowSize: 200_000,
+      },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // The side-query forwards the pinned selector verbatim; resolveForModel
+        // consumes the `\0<baseUrl>` suffix downstream.
+        model: 'openai:shared-compact\0https://free-quota.example.com/v1',
+      }),
+    );
+    expect(result.info.warning).toBeUndefined();
+  });
+
   it('coalesces to the main model (not fastModel) when getCompactionModel returns undefined', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },

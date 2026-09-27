@@ -9251,6 +9251,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('getCompactionModel', () => {
+      it('keeps the endpoint disambiguator on a persisted compaction model selector (#12760)', async () => {
+        // Twin of the getFastModel case: the picker pins the second of two
+        // same-id endpoints and runSideQuery's resolveForModel consumes the
+        // suffix. Dropping it would rebind compaction to the first registered
+        // endpoint (registry first-match fallback).
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          compactionModel:
+            'openai:shared-compact\0https://free-quota.example.com/v1',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (token plan)',
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+                envKey: 'TOKEN_PLAN_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (free quota)',
+                baseUrl: 'https://free-quota.example.com/v1',
+                envKey: 'FREE_QUOTA_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe(
+          'openai:shared-compact\0https://free-quota.example.com/v1',
+        );
+      });
+
       it('returns the compaction model when set', async () => {
         const config = new Config({
           ...baseParams,
