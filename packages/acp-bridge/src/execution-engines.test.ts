@@ -4419,6 +4419,80 @@ describe('workspace change propagation', () => {
     },
   );
 
+  it.each([
+    ['fences', 'tightens permissions', 'qwen/permissions/setRules', denyRule],
+    [
+      'does not fence',
+      'does not',
+      SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+      { cwd: WS_A, reason: 'content' },
+    ],
+  ] as const)(
+    '%s a session restored after its engine missed a change that %s',
+    async (verdict, _change, method, params) => {
+      const loaded = deferred<Record<string, unknown>>();
+      const p = paired(
+        {},
+        legacySavingRules(),
+        engineChannel('managed', {
+          loadSessionImpl: () => loaded.promise,
+          extMethodImpl: (extMethod) => refuse(extMethod),
+        }),
+      );
+      await p.bridge.preheat();
+      const restore = p.bridge.loadSession({
+        workspaceCwd: WS_A,
+        sessionId: 'persisted',
+      });
+      await vi.waitFor(() =>
+        expect(p.managed.agent.loadSessionCalls).toHaveLength(1),
+      );
+      await expect(
+        p.bridge.invokeWorkspaceCommand(method, params),
+      ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+
+      // The restore lands after the change and reports a running job, so the
+      // drain keeps the session.
+      loaded.resolve({
+        _meta: { ...receipt('managed')._meta, hasRunningBackgroundTasks: true },
+      });
+      await expect(restore).resolves.toMatchObject({ sessionId: 'persisted' });
+      await expect(
+        p.managed.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: 'persisted',
+          source: 'background_notification',
+          turnId: 'notification-1',
+          taskId: 'shell-1',
+          kind: 'shell',
+          sourceTurnId: 'user-1',
+          startedAt: Date.now(),
+        }),
+      ).resolves.toEqual({ accepted: verdict === 'does not fence' });
+      await p.managed.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: 'persisted',
+        reason: 'end_turn',
+        source: 'background_notification',
+        turnId: 'notification-1',
+      });
+
+      // A Goal turn the child starts there is cancelled only under the fence.
+      await p.managed.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId: 'persisted',
+        source: 'goal',
+      });
+      if (verdict === 'fences') {
+        await vi.waitFor(() =>
+          expect(p.managed.agent.cancelCalls).toEqual([
+            { sessionId: 'persisted' },
+          ]),
+        );
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(p.managed.agent.cancelCalls).toEqual([]);
+      }
+    },
+  );
+
   it('refuses a prompt the quarantine overtakes while its attachments resolve', async () => {
     const resolving = deferred<void>();
     const p = paired(
@@ -4835,11 +4909,15 @@ describe('workspace change propagation', () => {
     ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
     answer({ v: 1, revision: 1, acknowledged: true });
     await vi.waitFor(() => expect(quarantine.named('cleared')).toHaveLength(1));
+    // A session created on the channel afterwards is not fenced either.
+    const fresh = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-    await p.managed.agentConnection.extNotification('_qwencode/start_turn', {
-      sessionId: managed.sessionId,
-      source: 'goal',
-    });
+    for (const sessionId of [managed.sessionId, fresh.sessionId]) {
+      await p.managed.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+      });
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(p.managed.agent.cancelCalls).toEqual([]);
     side.resolve({ sessionId: managed.sessionId, answer: 'done' });

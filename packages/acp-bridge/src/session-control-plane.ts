@@ -678,6 +678,11 @@ interface ChannelInfo {
   /** Revisions of workspace changes this channel did not acknowledge. */
   workspaceChangesMissing?: Set<number>;
   /**
+   * Revision of a missing change that tightened permissions. A session whose
+   * restore or creation lands on this channel afterwards is fenced too.
+   */
+  workspaceChangeFence?: number;
+  /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
    * sending it again.
@@ -4124,7 +4129,8 @@ export function createSessionControlPlane(
    * sessions take no new work, settled ones are closed, and it retires by the
    * drain deadline unless a late acknowledgement ends the quarantine first. A
    * change that tightens permissions also cancels running turns now, refuses
-   * permission requests, and cancels Goal turns the child reports later.
+   * permission requests and background turns, and cancels Goal turns the child
+   * reports later, including on sessions that register on the channel later.
    */
   function refuseUnacknowledgedChannel(
     ci: ChannelInfo,
@@ -4137,6 +4143,7 @@ export function createSessionControlPlane(
         (tightening ? '; cancelling its running turns' : ''),
     );
     if (tightening) {
+      ci.workspaceChangeFence = revision;
       for (const sessionId of Array.from(ci.sessionIds)) {
         const entry = byId.get(sessionId);
         if (!entry || entry.channel !== ci.channel) continue;
@@ -4179,6 +4186,7 @@ export function createSessionControlPlane(
     }
     clearTimeout(episode.drainTimer);
     ci.quarantine = undefined;
+    ci.workspaceChangeFence = undefined;
     for (const sessionId of ci.sessionIds) {
       const entry = byId.get(sessionId);
       if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
@@ -7349,6 +7357,11 @@ export function createSessionControlPlane(
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,
+      // A restore or creation already in flight when the channel missed a
+      // tightening change lands under the same fence as the sessions it found.
+      ...(ci.workspaceChangeFence !== undefined
+        ? { workspaceChangeFence: ci.workspaceChangeFence }
+        : {}),
     };
     if (isReservedStandaloneSessionSourceType(options.sourceType)) {
       entry.prepareArtifactWorkspace = () =>

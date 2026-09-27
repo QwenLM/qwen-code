@@ -73,8 +73,9 @@ While the episode lasts:
   for work that such an admitted turn started is new work; both are refused.
   Goal turns are started by the child itself and cannot be refused; they settle
   or are cancelled at the deadline. On a session fenced by a change that
-  tightens permissions, every background turn is refused and a Goal turn is
-  cancelled as soon as it is reported, as
+  tightens permissions, including one whose restore or creation lands after
+  the change, every background turn is refused and a Goal turn is cancelled as
+  soon as it is reported, as
   [workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md)
   describes.
 - The Bridge closes the channel's settled sessions at the start and again
