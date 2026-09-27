@@ -23,6 +23,7 @@ import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import { CANCELLED_TOOL_ERROR_PREFIX } from '../core/coreToolScheduler.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
+import { DEFERRED_TOOL_CALL_CANCELLATION_PREFIX } from '../tools/tool-call.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   PREVIEW_SIZE_CHARS,
@@ -458,14 +459,20 @@ export class LoopDetectionService {
     { fingerprint: string; count: number }
   >();
 
-  // Consecutive identical tool-error signatures (issue #10887): fingerprint
-  // of the most recent error payload and how many consecutive rounds carried
-  // it. A round advances the streak at most once per distinct signature
-  // (sibling calls of one parallel batch collapse); successful results
-  // neither advance nor reset the streak (an interleaved read must not mask
-  // a dead end); a different error signature restarts it at one.
-  private toolErrorStreakSignature: string | null = null;
-  private toolErrorStreakCount = 0;
+  // Consecutive identical tool-error signatures (issue #10887): per-signature
+  // count of the rounds that carried it. One slot PER SIGNATURE rather than
+  // one slot for the whole round — a batch that retries several distinct
+  // failing calls together must advance every one of them, or each distinct
+  // signature would overwrite the shared slot and pin the count at one
+  // forever on exactly the mixed-error shape this guard exists for. A round
+  // advances a given signature at most once (sibling calls of one parallel
+  // batch collapse into a single piece of evidence); successful results are
+  // not evidence, and a round carrying none leaves every streak untouched.
+  // Decay: a signature absent from a round that DID carry errors is dropped,
+  // so the threshold means that many rounds carrying it with no intervening
+  // different error. That also bounds the map by the distinct-signature count
+  // of the latest error-bearing round, so no cap or eviction is needed.
+  private toolErrorStreakCounts = new Map<string, number>();
 
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
@@ -483,7 +490,7 @@ export class LoopDetectionService {
   // instead, so a headless reasoning-channel halt (empty stdout, label-only
   // stderr) leaves an artifact that tells a true repetition from a misfire.
   // (REPEATED_TOOL_ERROR is the exception: its guard carries the error
-  // signature + excerpt on the event itself, see checkRepeatedToolError.)
+  // signature on the event itself, see checkRepeatedToolError.)
   private lastChantExcerpt = '';
 
   constructor(config: Config) {
@@ -697,7 +704,14 @@ export class LoopDetectionService {
   private static isSyntheticToolError(error: string): boolean {
     return (
       error === ORPHAN_TOOL_USE_REPAIR_REASON ||
-      error.startsWith(CANCELLED_TOOL_ERROR_PREFIX)
+      error.startsWith(CANCELLED_TOOL_ERROR_PREFIX) ||
+      // A cancelled deferred `tool_call` bridge carries the bridge prefix
+      // AHEAD of the cancellation text (coreToolScheduler's
+      // createCancelledResponse), so the bare prefix check above misses it
+      // and a user's cancellation would be counted as a tool failure.
+      error.startsWith(
+        `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${CANCELLED_TOOL_ERROR_PREFIX}`,
+      )
     );
   }
 
@@ -790,31 +804,27 @@ export class LoopDetectionService {
   }
 
   /**
-   * Extracts the per-result error payloads of failed tool results (empty
-   * when the parts carry none). Failed calls surface their failure as a
-   * `functionResponse.response.error` string across every runtime
-   * (scheduler error responses, timeouts). Synthetic non-failure payloads
-   * (orphan repairs, user cancellations) are skipped; each remaining error
-   * is reduced to its stable fingerprint text (normalizeToolErrorText) —
+   * Extracts the stable fingerprint text of each failed tool result's error
+   * payload (empty when the parts carry none). Failed calls surface their
+   * failure as a `functionResponse.response.error` string across every
+   * runtime (scheduler error responses, timeouts). Synthetic non-failure
+   * payloads (orphan repairs, user cancellations) are skipped; each remaining
+   * error is reduced to its stable fingerprint text (normalizeToolErrorText) —
    * identical underlying errors fingerprint identically no matter how they
-   * were produced (issue #10887). The raw payload is retained alongside for
-   * the telemetry excerpt: the signature identifies the failure, the raw
-   * text tells oncall what it is.
+   * were produced (issue #10887). Only the normalized text is returned: the
+   * raw payload is never carried past this point, because the guard's
+   * telemetry ships a digest of it and not the text itself (the raw payload
+   * embeds the command line and cwd, which routinely carry secrets).
    */
-  private static extractToolErrors(
-    responseParts: readonly Part[],
-  ): Array<{ raw: string; normalized: string }> {
-    const errors: Array<{ raw: string; normalized: string }> = [];
+  private static extractToolErrors(responseParts: readonly Part[]): string[] {
+    const errors: string[] = [];
     for (const part of responseParts) {
       const response = part.functionResponse?.response;
       if (!response) continue;
       const error = response['error'];
       if (typeof error !== 'string' || error.trim().length === 0) continue;
       if (LoopDetectionService.isSyntheticToolError(error)) continue;
-      errors.push({
-        raw: error,
-        normalized: LoopDetectionService.normalizeToolErrorText(error),
-      });
+      errors.push(LoopDetectionService.normalizeToolErrorText(error));
     }
     return errors;
   }
@@ -830,43 +840,58 @@ export class LoopDetectionService {
    * ship disabled by default in the CLI).
    *
    * Batch counting: responseParts carries every result of ONE round.
-   * Sibling calls collapse — the streak advances at most once per distinct
-   * signature per round, in first-occurrence order — because N
-   * simultaneous calls are emitted from one model state and are not N
-   * retries; the repeat is the same signature returning on the NEXT round.
-   * Successful results are neither evidence of the dead end nor a reset:
-   * interleaved reads between failing calls must not mask the streak.
+   * Sibling calls collapse — each distinct signature advances at most once
+   * per round, in first-occurrence order — because N simultaneous calls are
+   * emitted from one model state and are not N retries; the repeat is the
+   * same signature returning on the NEXT round. Distinct signatures within
+   * one round each keep their own counter, so a batch retrying several
+   * different failing calls still accumulates. Successful results are not
+   * evidence and are skipped; a round carrying no error at all leaves every
+   * streak untouched, while a signature missing from a round that did carry
+   * errors is dropped — which is what makes the threshold mean consecutive
+   * failing rounds rather than merely repeated ones.
    *
    * @returns true when the streak trips the threshold (loopDetected is set);
    * callers halt the turn exactly as for an event-detected loop.
    */
   private checkRepeatedToolError(responseParts: readonly Part[]): boolean {
     const errors = LoopDetectionService.extractToolErrors(responseParts);
+    // Collapse sibling calls of this round into one piece of evidence, and
+    // record which signatures this round carried so the absent ones decay.
     const seen = new Set<string>();
-    for (const { raw, normalized } of errors) {
+    for (const normalized of errors) {
       const signature = createHash('sha256').update(normalized).digest('hex');
-      // Collapse sibling calls of this round into one piece of evidence.
       if (seen.has(signature)) continue;
       seen.add(signature);
-      if (this.toolErrorStreakSignature === signature) {
-        this.toolErrorStreakCount++;
-      } else {
-        this.toolErrorStreakSignature = signature;
-        this.toolErrorStreakCount = 1;
-      }
-      if (this.toolErrorStreakCount >= REPEATED_TOOL_ERROR_THRESHOLD) {
+      const count = (this.toolErrorStreakCounts.get(signature) ?? 0) + 1;
+      this.toolErrorStreakCounts.set(signature, count);
+      if (count >= REPEATED_TOOL_ERROR_THRESHOLD) {
         this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
-        // Carry the failure evidence: the signature identifies the repeated
-        // payload and the (truncated) raw excerpt tells oncall what it is.
+        // Carry the failure identity only. A sha256 of the normalized payload
+        // tells oncall which failure repeated without shipping the payload:
+        // the raw text leads with the full command line and cwd, and this
+        // event reaches default-on telemetry sinks that scrub a fixed list of
+        // attribute names (telemetry/log-to-span-processor.ts) which cannot
+        // cover a field this guard invents.
         logLoopDetected(
           this.config,
           new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId, {
             errorSignature: signature,
-            errorExcerpt: raw,
           }),
         );
         this.loopDetected = true;
         return true;
+      }
+    }
+    // A signature is only "broken" by a round that carried different errors:
+    // a fully successful round is not counter-evidence (an interleaved read
+    // must not mask a dead end), so it leaves every streak untouched. Pruning
+    // on error-bearing rounds alone is also what bounds the map by the
+    // distinct-signature count of the latest such round, so no cap or
+    // eviction is needed.
+    if (seen.size > 0) {
+      for (const signature of this.toolErrorStreakCounts.keys()) {
+        if (!seen.has(signature)) this.toolErrorStreakCounts.delete(signature);
       }
     }
     return false;
@@ -1988,8 +2013,7 @@ export class LoopDetectionService {
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
     this.statefulConsecutiveResults.clear();
-    this.toolErrorStreakSignature = null;
-    this.toolErrorStreakCount = 0;
+    this.toolErrorStreakCounts.clear();
     this.requestByCallId.clear();
   }
 

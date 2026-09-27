@@ -597,32 +597,36 @@ describe('loggers', () => {
     });
   });
 
-  describe('LoopDetectedEvent error_excerpt truncation', () => {
-    it('truncates error_excerpt to 200 chars', () => {
+  describe('LoopDetectedEvent repeated-tool-error details', () => {
+    it('carries the error signature for REPEATED_TOOL_ERROR', () => {
       const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
         errorSignature: 'sig',
-        errorExcerpt: 'a'.repeat(250),
       });
-      expect(event.error_excerpt).toBe('a'.repeat(200));
+      expect(event.error_signature).toBe('sig');
+      expect(event.loop_type).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
-    it('does not end error_excerpt on a lone high surrogate', () => {
-      // The astral character straddles code-unit indices 199/200: a plain
-      // slice(0, 200) would leave an unpaired high surrogate that strict
-      // UTF-8/JSON consumers reject (issue #10887 telemetry fields).
+    it('ships no tool-error payload text on the event', () => {
+      // The guard's telemetry is a digest only. Raw tool-error payloads lead
+      // with the command line and the working directory, and this event is
+      // emitted on a default-on path into sinks that scrub a fixed list of
+      // attribute names, so the field must not exist to leak (issue #10887).
       const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
         errorSignature: 'sig',
-        errorExcerpt: 'a'.repeat(199) + '🙂',
       });
-      expect(event.error_excerpt).toBe('a'.repeat(199));
+      expect(Object.keys(event)).not.toContain('error_excerpt');
+      expect(JSON.stringify(event)).not.toContain('excerpt');
     });
 
-    it('keeps a complete astral character that fits the 200-char cut', () => {
-      const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
-        errorSignature: 'sig',
-        errorExcerpt: 'a'.repeat(198) + '🙂',
-      });
-      expect(event.error_excerpt).toBe('a'.repeat(198) + '🙂');
+    it('omits the signature for loop types that have none', () => {
+      const event = new LoopDetectedEvent(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        'p',
+      );
+      // Declared-but-unset: es2022 class fields exist as own properties with
+      // value undefined, so assert the value rather than key absence.
+      expect(event.error_signature).toBeUndefined();
+      expect(JSON.stringify(event)).not.toContain('error_signature');
     });
   });
 

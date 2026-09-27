@@ -4261,6 +4261,21 @@ export class LlmClient {
           loopHalt = this.loopDetector.recordToolErrorBatch(toolResultParts);
         }
         if (loopHalt) {
+          // This round's calls already executed — files were written,
+          // commands ran — but returning below skips the send that would
+          // push requestToSend into history. Record the results here so the
+          // model's functionCall turn stays paired: left dangling, the next
+          // send's orphan repair tells the model those results were lost to
+          // a crash, which is false and can throw away work that succeeded
+          // in this very batch (the error-repetition guard halts on the
+          // strength of the FAILING calls, so the same round can contain
+          // successes). requestToSend still holds exactly the tool-result
+          // parts at this point — the memory-recall and todo-reminder
+          // appends happen below — so this is the same content the normal
+          // path pushes. The pending tool-result memory recall is
+          // deliberately left unconsumed: there is no send to deliver it on,
+          // and consuming it here would drop it instead of deferring it.
+          this.getChat().addHistory(createUserContent(requestToSend));
           for (const goalEvent of await finalizeInterruptedGoalTurn(
             undefined,
             'loop detected',

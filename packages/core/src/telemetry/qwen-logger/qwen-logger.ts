@@ -792,12 +792,11 @@ export class QwenLogger {
         prompt_id: event.prompt_id,
         error_type: event.loop_type,
         // Repeated-tool-error evidence (issue #10887): only present when the
-        // REPEATED_TOOL_ERROR guard fired.
+        // REPEATED_TOOL_ERROR guard fired. A sha256 of the normalized error
+        // payload — never the payload text, which carries the command line
+        // and cwd.
         ...(event.error_signature !== undefined && {
           error_signature: event.error_signature,
-        }),
-        ...(event.error_excerpt !== undefined && {
-          error_excerpt: event.error_excerpt,
         }),
       },
     });

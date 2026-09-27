@@ -34,6 +34,7 @@ import {
   type ToolResponseBudgetEntry,
 } from '../tools/tool-response-finalizer.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { DEFERRED_TOOL_CALL_CANCELLATION_PREFIX } from '../tools/tool-call.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -3494,6 +3495,66 @@ ${boardState}
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
+    it('accumulates distinct signatures carried by the SAME round', () => {
+      // The stuck shape this guard exists for is a model retrying a small set
+      // of failing calls together, so one round routinely carries several
+      // DISTINCT errors. A single shared streak slot would let each distinct
+      // signature overwrite the previous one and pin the count at 1 forever;
+      // every signature needs its own counter.
+      const errA = 'fatal: not a git repository';
+      const errB = 'npm ERR! code E404';
+      const mixedRound = (i: number): Part[] => [
+        ...errorResult(errA, `a-${i}`),
+        ...errorResult(errB, `b-${i}`),
+      ];
+      for (let i = 1; i < REPEATED_TOOL_ERROR_THRESHOLD; i++) {
+        expect(service.recordToolErrorBatch(mixedRound(i))).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(mixedRound(REPEATED_TOOL_ERROR_THRESHOLD)),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('emits the signature only, never the raw error payload', () => {
+      // The raw payload leads with the command line and the working
+      // directory, and this event is emitted on a default-on path into
+      // telemetry sinks that scrub a fixed list of attribute names. Only the
+      // sha256 identity may leave the process (issue #10887).
+      const secret = 'ghp_SuperSecretToken';
+      const err = [
+        `Command: curl -H "Authorization: Bearer ${secret}" https://api.internal`,
+        'Directory: /home/dev/private-repo',
+        'Process Group PGID: 4242',
+        'Exit Code: 1',
+      ].join('\n');
+      for (let i = 1; i < REPEATED_TOOL_ERROR_THRESHOLD; i++) {
+        expect(service.recordToolErrorBatch(errorResult(err, `s-${i}`))).toBe(
+          false,
+        );
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(err, `s-${REPEATED_TOOL_ERROR_THRESHOLD}`),
+        ),
+      ).toBe(true);
+
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'repeated_tool_error',
+          error_signature: expect.stringMatching(/^[0-9a-f]{64}$/),
+        }),
+      );
+      const serialized = JSON.stringify(
+        vi.mocked(loggers.logLoopDetected).mock.calls[0]?.[1],
+      );
+      expect(serialized).not.toContain(secret);
+      expect(serialized).not.toContain('private-repo');
+      expect(serialized).not.toContain('error_excerpt');
+    });
+
     it('still fires for unknown-callId errors fed through the round batch', () => {
       // client.ts records every functionResponse by callId, including calls
       // the service never paired at request time; those skip the
@@ -3611,6 +3672,21 @@ ${boardState}
             ...errorResult(cancelled, 'cancelled-1'),
             ...errorResult(cancelled, 'cancelled-2'),
             ...errorResult(cancelled, 'cancelled-3'),
+          ]),
+        ).toBe(false);
+      }
+      // A cancelled deferred `tool_call` bridge carries the bridge prefix
+      // AHEAD of the cancellation text (coreToolScheduler's
+      // createCancelledResponse), so it must be recognized as synthetic too —
+      // otherwise the user's own Esc on bridged calls would be counted as
+      // three tool failures and halt the turn.
+      const bridgeCancelled = `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${cancelled}`;
+      for (let round = 0; round <= REPEATED_TOOL_ERROR_THRESHOLD; round++) {
+        expect(
+          service.recordToolErrorBatch([
+            ...errorResult(bridgeCancelled, 'bridge-1'),
+            ...errorResult(bridgeCancelled, 'bridge-2'),
+            ...errorResult(bridgeCancelled, 'bridge-3'),
           ]),
         ).toBe(false);
       }

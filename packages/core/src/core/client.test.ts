@@ -9592,6 +9592,36 @@ hello
       );
     });
 
+    it("records the halted round's tool results in history so the functionCall stays paired (#10887)", async () => {
+      // The batch already executed by the time the guard halts — commands
+      // ran, files were written — and the halt returns before the send that
+      // would push this round's functionResponse parts into history. Left
+      // unpaired, the next send's orphan repair tells the model those results
+      // were lost to a crash, which is false and can discard work that
+      // succeeded in the very batch the guard halted on.
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      const events = await runFailingToolTurns(
+        () =>
+          'fatal: not a git repository (or any of the parent directories): .git',
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        true,
+      );
+
+      const recordedResponses = addHistorySpy.mock.calls
+        .flatMap(([content]) => (content as Content).parts ?? [])
+        .filter((part) => part && 'functionResponse' in part);
+      // The halting round is the third error round, whose result carries the
+      // id `fail-2` (see runFailingToolTurns' contents).
+      expect(
+        recordedResponses.some(
+          (part) =>
+            part.functionResponse?.id === 'fail-2' &&
+            typeof part.functionResponse?.response?.['error'] === 'string',
+        ),
+      ).toBe(true);
+    });
+
     it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
       let abortHandlerInvoked = false;
       mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
