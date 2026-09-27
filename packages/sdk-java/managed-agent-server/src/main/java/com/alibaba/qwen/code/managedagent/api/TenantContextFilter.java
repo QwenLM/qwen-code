@@ -42,7 +42,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         if (request.getRequestURI()
-                .startsWith(MANAGED_SESSION_STORE_PREFIX)) {
+                .startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || request.getRequestURI().startsWith("/v1/agents/workspaces")
+                || request.getRequestURI().startsWith(
+                        "/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);

@@ -57,8 +57,7 @@ an existing schema (`PublicCommandOperation`, `WebShellCommandOperation`,
 `SessionCapabilities` and `WebShellSession.capabilities`). The properties of
 the new schemas and the two new parameters need no marker of their own: only
 planned operations reach them. The generator drops all of it, and the Java
-contract test fails if the server maps any of the routes. The version becomes
-`1.14.0` because routes are added.
+contract test fails if the server maps any of the routes. The version becomes `1.15.0`: routes are added, and W0d (#12797) already took `1.14.0`.
 
 An enum value cannot carry the marker, and cancel reuses the command
 operation (section 4.4). The new `task_cancel` command type is therefore
@@ -334,8 +333,9 @@ cancel and event query requests are checked as well.
 
 ## 7. Follow-up
 
-- **Version order.** #12822 (D2) and #12797 (W0d) also move the spec to
-  `1.14.0`. Whichever of the three lands later takes the next minor version.
+- **Version order.** W0d (#12797) landed first as `1.14.0`, so this change is
+  `1.15.0`. D2 (#12822) also moves the spec; whichever of the two lands later
+  takes the next minor version.
 - **H0b.** The shared record schema, including `monitor_run`, the three state
   lines and `OperationGrant`. It depends on issue question 1 (whether
   `monitor_run` joins the closed v1 domain index).

@@ -44,7 +44,7 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
 （`PublicCommandOperation`、`WebShellCommandOperation`、`SessionCapabilities` 和
 `WebShellSession.capabilities`）的每个属性也带。新 schema 内部的属性和两个新参数不需要单独标记：
 只有 planned 的 operation 会引用它们。生成器会去掉这些内容；服务端若映射其中任何路由，
-Java 契约测试就会失败。因为新增了路由，版本升为 `1.14.0`。
+Java 契约测试就会失败。版本升为 `1.15.0`：新增了路由，而 W0d（#12797）已经使用了 `1.14.0`。
 
 枚举值无法携带这个标记，而取消复用了命令 operation（见第 4.4 节）。因此新增的 `task_cancel`
 命令类型在公共规范中已经可见，因为 `partial` 的归档与删除路由声明以 `PublicCommandOperation`
@@ -257,7 +257,7 @@ WebShell 的取消请求和事件查询请求也在校验之列。
 
 ## 7. 后续工作
 
-- **版本顺序。** #12822（D2）和 #12797（W0d）也把规范升为 `1.14.0`。三者中后合入的取下一个 minor 版本。
+- **版本顺序。** W0d（#12797）已先以 `1.14.0` 合入，因此本变更为 `1.15.0`。D2（#12822）也会修改规范；两者中后合入的取下一个 minor 版本。
 - **H0b。** 共用记录 schema，包括 `monitor_run`、三条状态线和 `OperationGrant`。它取决于 issue
   中的问题 1（`monitor_run` 是否加入封闭的 v1 领域索引）。
 - **H0c。** 实现任务投影，把这些路由标为 `partial`，并定义宣告任务变化的 Session 事件。
