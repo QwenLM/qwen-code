@@ -48,6 +48,61 @@ final class JdbcRepositoryContract {
         verifyExecution(dataSource, prefix);
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
+        verifyLeaseDeadlines(dataSource, prefix);
+    }
+
+    // Every claim and renewal must persist a whole-second deadline that is
+    // at least the configured duration after the precise database clock.
+    private static void verifyLeaseDeadlines(DataSource dataSource,
+            String prefix) throws Exception {
+        Duration lease = Duration.ofMinutes(30);
+        JdbcRuntimeBindingRepository bindings =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector(prefix), () -> prefix + "-deadline-binding");
+        String bindingId = bindings.findOrCreate(new RuntimeProvisionRequest(
+                scope(prefix + "-deadline-tenant"), prefix + "-isolation",
+                "local-process")).getBindingId();
+        Instant before = preciseNow(dataSource);
+        RuntimeBindingRecord claimed = bindings.claimOperation(bindingId,
+                prefix + "-deadline-owner", lease);
+        assertLeaseDeadline(before, lease, claimed.getOperationLeaseUntil());
+        before = preciseNow(dataSource);
+        RuntimeBindingRecord renewed = bindings.renewOperation(bindingId,
+                prefix + "-deadline-owner",
+                claimed.getOperationGeneration(), lease);
+        assertLeaseDeadline(before, lease, renewed.getOperationLeaseUntil());
+
+        JdbcToolExecutionRepository executions =
+                new JdbcToolExecutionRepository(dataSource);
+        String executionId = executions.findOrCreate(execution(
+                prefix + "-deadline-execution",
+                prefix + "-deadline-idempotency",
+                prefix + "-deadline-digest")).getExecutionCallId();
+        before = preciseNow(dataSource);
+        ToolExecutionRecord dispatched = executions.claimDispatch(
+                executionId, prefix + "-deadline-dispatcher", lease);
+        assertLeaseDeadline(before, lease, dispatched.getDispatchLeaseUntil());
+        before = preciseNow(dataSource);
+        ToolExecutionRecord renewedDispatch = executions.renewDispatch(
+                executionId, prefix + "-deadline-dispatcher",
+                dispatched.getDispatchGeneration(), lease);
+        assertLeaseDeadline(before, lease,
+                renewedDispatch.getDispatchLeaseUntil());
+    }
+
+    private static Instant preciseNow(DataSource dataSource)
+            throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            return JdbcRepositorySupport.databaseNowPrecise(connection);
+        }
+    }
+
+    private static void assertLeaseDeadline(Instant before, Duration lease,
+            Instant deadline) {
+        assertEquals(0, deadline.getNano(), () -> deadline
+                + " is not a whole second");
+        assertFalse(deadline.isBefore(before.plus(lease)), () -> deadline
+                + " is shorter than " + lease + " after " + before);
     }
 
     private static void verifySchema(DataSource dataSource)
