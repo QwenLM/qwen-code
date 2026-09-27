@@ -13,7 +13,13 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
-import { loadSettings } from '../../config/settings.js';
+import {
+  CORRUPTED_SUFFIX,
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+  getUserSettingsPath,
+  loadSettings,
+} from '../../config/settings.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -260,6 +266,49 @@ describe('createExtensionsController', () => {
       vi.unstubAllEnvs();
       await rm(optedOutDir, { recursive: true, force: true });
       await rm(optedInDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('does not spend the one-shot settings-corruption markers on the status poll', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-corruption-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    // The env pair is only read when the user settings file exists, so give it
+    // one, and derive the marker from the same helper `loadSettings` uses.
+    await writeFile(join(emptyHome, 'settings.json'), '{}');
+    const marker = `${getUserSettingsPath()}${CORRUPTED_SUFFIX}`;
+    const saved = [ENV_CORRUPTED_PATH, ENV_WAS_RECOVERED].map(
+      (key) => [key, process.env[key]] as [string, string | undefined],
+    );
+    process.env[ENV_CORRUPTED_PATH] = marker;
+    process.env[ENV_WAS_RECOVERED] = '1';
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    try {
+      // The status poll is the most frequently hit load in the daemon and it
+      // surfaces neither the corruption marker nor the recovery notice, so it
+      // must not spend the one-shot pair that `acpAgent.ts` reports from.
+      await createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      }).buildLocalExtensionsStatus();
+
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(marker);
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });
     }
   });

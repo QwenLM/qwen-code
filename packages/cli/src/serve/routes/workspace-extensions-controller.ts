@@ -322,14 +322,20 @@ export function createExtensionsController(
     // one repo's values into every other workspace's resolution. The trust
     // options are what `resolveExtensionLocale` used to resolve on its own,
     // so both now read one consistent view of the same workspace file.
+    // `consumeCorruptionEnvVars: false` because this load surfaces neither the
+    // corruption marker nor the recovery notice, and the pair is one-shot: the
+    // default (`?? true`) would delete it here and leave the load that does
+    // surface it nothing to report for the rest of the daemon's life. The
+    // extensions routes already read it this way (`workspace-extensions.ts`).
     const settings = loadSettings(
       workspaceDir,
       workspaceTrusted === undefined
-        ? { skipLoadEnvironment: true }
+        ? { skipLoadEnvironment: true, consumeCorruptionEnvVars: false }
         : {
             skipLoadEnvironment: true,
             skipWorkspaceSettings: !workspaceTrusted,
             workspaceTrusted,
+            consumeCorruptionEnvVars: false,
           },
     ).merged;
     return new ExtensionManager({
@@ -1156,13 +1162,33 @@ export function createExtensionsController(
       // a single GET, so writing the bound workspace's `.env` / `settings.env`
       // into the daemon's shared `process.env` would publish one repo's values
       // to every other workspace the daemon hosts for the process lifetime.
-      const mergedSettings = loadSettings(boundWorkspace, {
+      // `consumeCorruptionEnvVars: false` for the reason stated there too:
+      // this poll is the most frequently hit load in the daemon, so letting it
+      // spend the one-shot marker it never surfaces would drop the signal for
+      // every hosted workspace.
+      const probeSettings = loadSettings(boundWorkspace, {
         skipLoadEnvironment: true,
+        consumeCorruptionEnvVars: false,
       }).merged;
       const trusted =
         deps.isWorkspaceTrusted?.() ??
-        getWorkspaceTrustStatus(mergedSettings, boundWorkspace).effective
+        getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
           .state === 'trusted';
+      // An untrusted workspace must not select the locale through its own
+      // `general.language`: `loadSettings` merges the workspace scope for any
+      // directory unless told otherwise, while the entries behind this key are
+      // built by `createExtensionManager(boundWorkspace, trusted)`, which does
+      // gate it. Re-resolving on the gated merge keeps the cache key and the
+      // cached payload on one view of the same file. A trusted workspace
+      // reuses the probe, so the common path is still a single load.
+      const mergedSettings = trusted
+        ? probeSettings
+        : loadSettings(boundWorkspace, {
+            skipLoadEnvironment: true,
+            consumeCorruptionEnvVars: false,
+            skipWorkspaceSettings: true,
+            workspaceTrusted: false,
+          }).merged;
       const locale = resolveExtensionLocale(mergedSettings);
       if (
         extensionsStatusCache?.locale === locale &&

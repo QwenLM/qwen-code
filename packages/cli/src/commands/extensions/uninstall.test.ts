@@ -116,4 +116,44 @@ describe('extensions uninstall command', () => {
       }
     }
   });
+
+  it('resolves consent from the env term and the proxy from the env fallback at this call site', async () => {
+    const { ExtensionManager } = await import('@qwen-code/qwen-code-core');
+    // Settings alone would opt out and declare no proxy, so only the env terms
+    // can produce the expected values: replacing the two resolver calls in
+    // `uninstall.ts` with raw `settings.privacy?.usageStatisticsEnabled ??
+    // true` / `settings.proxy` reads reds this case. The winners are opposite
+    // on purpose — consent is env-then-settings, proxy settings-then-env.
+    mockLoadSettings.mockReturnValue({
+      merged: { privacy: { usageStatisticsEnabled: false } },
+    });
+    const envKeys = [
+      'QWEN_USAGE_STATISTICS_ENABLED',
+      'HTTPS_PROXY',
+      'https_proxy',
+      'HTTP_PROXY',
+      'http_proxy',
+    ];
+    const saved = envKeys.map(
+      (key) => [key, process.env[key]] as [string, string | undefined],
+    );
+    for (const key of envKeys) delete process.env[key];
+    process.env['QWEN_USAGE_STATISTICS_ENABLED'] = 'true';
+    process.env['HTTPS_PROXY'] = 'http://env-proxy:3128';
+    try {
+      await handleUninstall({ name: 'test-extension' });
+
+      expect(ExtensionManager).toHaveBeenCalledWith(
+        expect.objectContaining({
+          usageStatisticsEnabled: true,
+          proxy: 'http://env-proxy:3128',
+        }),
+      );
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });

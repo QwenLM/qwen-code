@@ -18,6 +18,15 @@ const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 const mockLoadSettings = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+// Recording pass-throughs rather than inline arrows: the stub keeps the
+// settings term as the whole story for this file, so the assertions below pin
+// that `install.ts` still routes through the resolvers at all.
+const mockResolveUsageStatisticsEnabled = vi.hoisted(() =>
+  vi.fn((settingsValue?: boolean) => settingsValue ?? true),
+);
+const mockResolveExtensionTelemetryProxy = vi.hoisted(() =>
+  vi.fn((settingsProxy?: string) => settingsProxy),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi.fn().mockImplementation(() => ({
@@ -26,9 +35,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     setExtensionScope: mockSetExtensionScope,
   })),
   parseInstallSource: mockParseInstallSource,
-  resolveUsageStatisticsEnabled: (settingsValue?: boolean) =>
-    settingsValue ?? true,
-  resolveExtensionTelemetryProxy: (settingsProxy?: string) => settingsProxy,
+  resolveUsageStatisticsEnabled: mockResolveUsageStatisticsEnabled,
+  resolveExtensionTelemetryProxy: mockResolveExtensionTelemetryProxy,
   isExtensionCommittedWithWarningsError: (error: unknown) =>
     error instanceof Error &&
     (error as Error & { code?: string; committed?: boolean }).code ===
@@ -137,6 +145,16 @@ describe('handleInstall', () => {
         usageStatisticsEnabled: false,
         proxy: 'http://settings-proxy:8080',
       }),
+    );
+    // The stubbed resolvers make the settings term the whole story above, so
+    // pin the routing itself: replacing the two calls in `install.ts` with raw
+    // `settings.privacy?.usageStatisticsEnabled ?? true` / `settings.proxy`
+    // reads must red here. The env-vs-settings precedence each resolver
+    // implements is pinned where the real ones run (core's `config.test.ts`,
+    // and `uninstall.test.ts` / `utils.test.ts` for the call-site env term).
+    expect(mockResolveUsageStatisticsEnabled).toHaveBeenCalledWith(false);
+    expect(mockResolveExtensionTelemetryProxy).toHaveBeenCalledWith(
+      'http://settings-proxy:8080',
     );
 
     processSpy.mockRestore();

@@ -88,6 +88,30 @@ describe('telemetry/config helpers', () => {
           http_proxy: 'http://lower-http:4',
         }),
       ).toBe('http://upper-https:1');
+      // Each adjacent pair of the remaining terms is pinned on its own: this
+      // chain mirrors the session's (`packages/cli/src/config/config.ts`), so
+      // dropping or swapping a middle term has to red here instead of only
+      // changing which hosts reach the sanctioned egress.
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          https_proxy: 'http://lower-https:2',
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://lower-https:2');
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://upper-http:3');
+      // `HTTP_PROXY` alone is the corporate/CI shape that exports no
+      // `HTTPS_PROXY`: dropping that term sends the upload direct.
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTP_PROXY: 'http://upper-http:3',
+        }),
+      ).toBe('http://upper-http:3');
       expect(
         resolveExtensionTelemetryProxy(undefined, {
           http_proxy: 'http://lower-http:4',
