@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
@@ -64,6 +65,7 @@ export interface ManagedToolSet {
    * QWEN_CODE_SESSION_ID, with that session's project directory.
    */
   readonly sessionId: string;
+  readonly directory?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
   readonly isActive?: () => boolean;
 }
@@ -179,7 +181,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools.sessionId);
+    entry.promise = this.run(entry, tool, tools.sessionId, tools.directory);
     await entry.promise;
     return entry.result!;
   }
@@ -242,15 +244,26 @@ export class ManagedToolExecutor {
     entry: JournalEntry,
     tool: AnyDeclarativeTool,
     sessionId: string,
+    directory?: string,
   ): Promise<void> {
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
     try {
+      const params = structuredClone(entry.input);
+      if (
+        directory &&
+        entry.toolName !== ShellTool.Name &&
+        typeof params['file_path'] === 'string' &&
+        !path.isAbsolute(params['file_path'].trim())
+      ) {
+        params['file_path'] = path.resolve(
+          directory,
+          params['file_path'].trim(),
+        );
+      }
       const result: ToolResult = await sessionIdContext.run(sessionId, () =>
-        tool
-          .build(structuredClone(entry.input))
-          .execute(entry.controller.signal),
+        tool.build(params).execute(entry.controller.signal),
       );
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
@@ -309,6 +322,7 @@ export function createManagedToolSet(
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {
     sessionId,
+    directory,
     tools: new Map(
       [
         new ReadFileTool(config),

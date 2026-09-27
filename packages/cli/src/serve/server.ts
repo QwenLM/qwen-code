@@ -2305,6 +2305,12 @@ export function createServeApp(
       app,
       hostedHarness,
       primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();

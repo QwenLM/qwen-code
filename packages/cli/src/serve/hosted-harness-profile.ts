@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveManagedRuntimeBrokerBaseUrl } from './broker-managed-runtime-provider.js';
 import type { ServeOptions } from './types.js';
 import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
@@ -63,9 +64,13 @@ export function validateHostedHarnessProfile(
     opts.managedRuntimeBrokerUrl !== undefined ||
     opts.managedRuntimeBrokerToken !== undefined
   ) {
-    throw new Error(
-      '--profile hosted-harness does not enable Runtime Broker tools in this slice.',
-    );
+    if (
+      !opts.managedRuntimeBrokerUrl ||
+      !opts.managedRuntimeBrokerToken?.trim()
+    ) {
+      throw new Error('Hosted Runtime Broker requires both URL and token.');
+    }
+    resolveManagedRuntimeBrokerBaseUrl(opts.managedRuntimeBrokerUrl);
   }
   if (
     !opts.hostedHarnessCapabilityDigest ||

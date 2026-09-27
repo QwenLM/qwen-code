@@ -367,7 +367,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException("reference is required");
         }
         for (Object key : reference.keySet()) {
-            if (!CALLER_REFERENCE_FIELDS.contains(key)) {
+            if (!CALLER_REFERENCE_FIELDS.contains(key) && !"dispatchMode".equals(key)) {
                 throw new IllegalArgumentException(
                         "reference " + key + " is not allowed");
             }

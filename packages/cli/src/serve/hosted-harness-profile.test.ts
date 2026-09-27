@@ -40,7 +40,7 @@ describe('Hosted Harness profile', () => {
     { allowOrigins: ['https://example.com'], error: 'browser origins' },
     {
       managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
-      error: 'does not enable',
+      error: 'both URL and token',
     },
     { hostedHarnessCapabilityDigest: 'invalid', error: 'sha256' },
   ])('rejects invalid hosted configuration: %j', ({ error, ...option }) => {
