@@ -17,10 +17,31 @@ export function useProjectConversations(cwds: readonly string[]) {
     sessions: DaemonSessionSummary[];
     error?: string;
   }>();
-  const sessionsByCwd = useRef(new Map<string, DaemonSessionSummary[]>());
-  const scope = `${workspace.baseUrl}:${key}`;
+  const cache = useRef<
+    | {
+        baseUrl: string;
+        token: string | undefined;
+        generation: number;
+        sessionsByCwd: Map<string, DaemonSessionSummary[]>;
+      }
+    | undefined
+  >(undefined);
+  if (
+    !cache.current ||
+    cache.current.baseUrl !== workspace.baseUrl ||
+    cache.current.token !== workspace.token
+  ) {
+    cache.current = {
+      baseUrl: workspace.baseUrl,
+      token: workspace.token,
+      generation: (cache.current?.generation ?? 0) + 1,
+      sessionsByCwd: new Map(),
+    };
+  }
+  const scope = `${cache.current.generation}:${workspace.baseUrl}:${key}`;
   useEffect(() => {
     if (!enabled) return;
+    const sessionsByCwd = cache.current!.sessionsByCwd;
     let disposed = false;
     let busy = false;
     let again = false;
@@ -50,11 +71,11 @@ export function useProjectConversations(cwds: readonly string[]) {
                 updatedAt: new Date(t.updatedAt).toISOString(),
                 hasActivePrompt: t.liveRunCount > 0,
               }));
-            sessionsByCwd.current.set(cwd, sessions);
+            if (!disposed) sessionsByCwd.set(cwd, sessions);
             return { sessions };
           } catch {
             return {
-              sessions: sessionsByCwd.current.get(cwd) ?? [],
+              sessions: sessionsByCwd.get(cwd) ?? [],
               // The project's name; the sidebar words the failure.
               error: cwd.split(/[\\/]/).at(-1),
             };

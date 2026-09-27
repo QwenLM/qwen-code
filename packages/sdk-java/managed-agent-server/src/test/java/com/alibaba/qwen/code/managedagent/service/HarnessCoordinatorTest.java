@@ -46,7 +46,7 @@ class HarnessCoordinatorTest {
         ContextBinding binding = new ContextBinding(tenantId, "ws-a", 1,
                 "storage-a", ".", "config-a", 1);
         SessionRecord session = new SessionRecord(tenantId, sessionId,
-                "qwen-code", null, "ACTIVE", null, null, 0,
+                "qwen-code", null, null, "ACTIVE", null, null, 0,
                 0, 1, 1, null, 1, binding);
         for (String status : List.of("ACCEPTED", "CANCELLING")) {
             AgentStateStore store = mock(AgentStateStore.class);
@@ -85,7 +85,7 @@ class HarnessCoordinatorTest {
                         "CANCELLING")));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1,
+                        null, "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
                                 "storage-a", ".", "config-a", 1)));
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
