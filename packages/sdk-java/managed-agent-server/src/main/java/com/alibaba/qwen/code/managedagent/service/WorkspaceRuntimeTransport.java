@@ -59,15 +59,27 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
-        return delegate.installContext(context.runtime(), context.session(),
-                UUID.nameUUIDFromBytes(session.getRuntimeSessionId().getBytes(StandardCharsets.UTF_8))
-                        .toString(), context.binding())
-                .thenCompose(ignored -> delegate.activateWorkspace(context.runtime(), context.session(),
-                        context.binding(), true))
-                .thenAccept(ignored -> {
-                    context(lease, session, true);
-                    ownership.assertHeld(context.binding(), context.session());
-                });
+        try {
+            return delegate.installContext(context.runtime(), context.session(),
+                    UUID.nameUUIDFromBytes(session.getRuntimeSessionId().getBytes(StandardCharsets.UTF_8))
+                            .toString(), context.binding())
+                    .thenCompose(ignored -> delegate.activateWorkspace(context.runtime(), context.session(),
+                            context.binding(), true))
+                    .thenAccept(ignored -> {
+                        context(lease, session, true);
+                        ownership.assertHeld(context.binding(), context.session());
+                    })
+                    .exceptionally(error -> {
+                        throw acquireUncertain(error);
+                    });
+        } catch (RuntimeException error) {
+            throw acquireUncertain(error);
+        }
+    }
+
+    private static RuntimeBrokerException acquireUncertain(Throwable cause) {
+        return new RuntimeBrokerException(503, "runtime_session_acquire_failed",
+                "Workspace acquisition failed after storage was claimed.", false, cause);
     }
 
     @Override

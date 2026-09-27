@@ -44,6 +44,7 @@ export class HostedHarnessProcess {
       hostname?: string;
       startupTimeout?: number;
       args?: string[];
+      extraArgs?: string[];
     } = {},
   ) {
     await access(HOSTED_CLI).catch(() => {
@@ -100,6 +101,7 @@ export class HostedHarnessProcess {
           HOSTED_DIGEST,
           '--workspace',
           this.root,
+          ...(options.extraArgs ?? []),
         ],
         {
           cwd: this.root,

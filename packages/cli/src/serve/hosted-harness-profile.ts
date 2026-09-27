@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import type { ServeOptions } from './types.js';
-import { resolveManagedRuntimeBrokerBaseUrl } from './broker-managed-runtime-provider.js';
 import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
