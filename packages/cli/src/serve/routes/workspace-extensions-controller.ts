@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
   redactUrlCredentials,
+  resolveExtensionTelemetryProxy,
   resolveUsageStatisticsEnabled,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
@@ -206,6 +207,16 @@ export interface CreateExtensionsControllerDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /**
+   * The owning runtime's resolved environment — `buildRuntimeEnvironment`'s
+   * `effectiveEnv` for this workspace, the same value
+   * `resolveSetupGithubProxy(boundWorkspace, deps.env, ...)` receives. It is
+   * never the daemon's ambient `process.env`: one daemon hosts every
+   * workspace, so an ambient value is not attributable to this one. Absent
+   * for a non-primary workspace controller, whose runtime env the extensions
+   * route cannot see; telemetry resolution then falls back per read site.
+   */
+  env?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -328,16 +339,21 @@ export function createExtensionsController(
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
           'trusted',
+      // Consent and proxy resolve against `deps.env` — the owning runtime's
+      // environment — never the daemon's ambient `process.env`, which every
+      // hosted workspace shares and which no workspace's settings load may
+      // write to (see `skipLoadEnvironment` above). The fallbacks differ on
+      // purpose: a consent read with no injected env keeps the ambient
+      // `QWEN_USAGE_STATISTICS_ENABLED` term, because dropping it would
+      // silently re-open telemetry an operator switched off daemon-wide,
+      // while a proxy read with no injected env stays settings-only, because
+      // an ambient proxy is not this workspace's and would route its RUM
+      // uploads through an egress path it never configured.
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
+        deps.env,
       ),
-      // Only this workspace's own resolved settings may pick the telemetry
-      // proxy. The daemon's ambient proxy env is process-global and shared by
-      // every workspace it hosts, so falling back to it here would route this
-      // workspace's RUM uploads through a proxy it never configured. A
-      // runtime-resolved env would have to be injected the way
-      // `resolveSetupGithubProxy(boundWorkspace, deps.env, ...)` does.
-      proxy: settings.proxy,
+      proxy: resolveExtensionTelemetryProxy(settings.proxy, deps.env ?? {}),
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??
@@ -1135,7 +1151,14 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const mergedSettings = loadSettings(boundWorkspace).merged;
+      // `skipLoadEnvironment` for the same reason as the load in
+      // `createExtensionManager`: this route is trust-free and reachable with
+      // a single GET, so writing the bound workspace's `.env` / `settings.env`
+      // into the daemon's shared `process.env` would publish one repo's values
+      // to every other workspace the daemon hosts for the process lifetime.
+      const mergedSettings = loadSettings(boundWorkspace, {
+        skipLoadEnvironment: true,
+      }).merged;
       const trusted =
         deps.isWorkspaceTrusted?.() ??
         getWorkspaceTrustStatus(mergedSettings, boundWorkspace).effective

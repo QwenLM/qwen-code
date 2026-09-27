@@ -508,6 +508,12 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /**
+   * The primary runtime's resolved environment, forwarded to the primary
+   * workspace's controller so its telemetry consent and proxy reads resolve
+   * against that runtime instead of the daemon's shared `process.env`.
+   */
+  env?: Readonly<NodeJS.ProcessEnv>;
   // Enables V2 workspace projection and targeted reconciliation routes.
   workspaceRegistry?: WorkspaceRegistry;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
@@ -557,6 +563,11 @@ export function registerWorkspaceExtensionRoutes(
       ...(ws === boundWorkspace && deps.captureGenerationAssertion
         ? { captureGenerationAssertion: deps.captureGenerationAssertion }
         : {}),
+      // `deps.env` is the PRIMARY runtime's environment, so it may only be
+      // attributed to the primary workspace's controller. A secondary
+      // workspace's runtime env is not visible here; handing it the primary's
+      // would resolve one repo's consent and proxy values for another.
+      ...(ws === boundWorkspace && deps.env ? { env: deps.env } : {}),
       ...(maxExtensionOperationHistory === undefined
         ? {}
         : { maxExtensionOperationHistory }),

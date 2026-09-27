@@ -58,6 +58,29 @@ describe('redactExtensionDisplaySource', () => {
 });
 
 describe('createExtensionsController', () => {
+  // The consent and proxy resolvers consult the ambient env; pin it out of the
+  // assertions so the test decides the outcome, not the runner's env (same
+  // convention as uninstall.test.ts / utils.test.ts).
+  const TELEMETRY_ENV_KEYS = [
+    'QWEN_USAGE_STATISTICS_ENABLED',
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+  ];
+  const pinTelemetryEnv = (): (() => void) => {
+    const saved = TELEMETRY_ENV_KEYS.map(
+      (key) => [key, process.env[key]] as [string, string | undefined],
+    );
+    for (const key of TELEMETRY_ENV_KEYS) delete process.env[key];
+    return () => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+  };
+
   beforeEach(() => {
     vi.mocked(resolveLanguageSetting).mockReturnValue('en');
     vi.mocked(loadSettings).mockImplementation(actualLoadSettings.fn);
@@ -89,6 +112,7 @@ describe('createExtensionsController', () => {
     );
     const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
     vi.stubEnv('QWEN_HOME', emptyHome);
+    const restoreEnv = pinTelemetryEnv();
     try {
       await mkdir(join(extensionDir, '.qwen'));
       await writeFile(
@@ -120,6 +144,7 @@ describe('createExtensionsController', () => {
       expect(manager.usageStatisticsEnabled).toBe(false);
       expect(manager.proxy).toBe('http://workspace-settings:8080');
     } finally {
+      restoreEnv();
       vi.unstubAllEnvs();
       await rm(extensionDir, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });
@@ -128,6 +153,12 @@ describe('createExtensionsController', () => {
 
   it('resolves telemetry proxy and consent from the workspace settings only', async () => {
     const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-telemetry-'));
+    // The untrusted branch loads with `skipWorkspaceSettings`, so its merged
+    // proxy comes from the SystemDefaults → User → System scopes of the home
+    // directory: point QWEN_HOME at an empty one or a developer's real
+    // `~/.qwen/settings.json` proxy decides this assertion.
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
     await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
     await writeFile(
       join(workspaceDir, '.qwen', 'settings.json'),
@@ -141,8 +172,7 @@ describe('createExtensionsController', () => {
       'HTTPS_PROXY=http://workspace-env:8080\n',
     );
 
-    const savedHttpsProxy = process.env['HTTPS_PROXY'];
-    delete process.env['HTTPS_PROXY'];
+    const restoreEnv = pinTelemetryEnv();
     try {
       const controller = createExtensionsController({
         boundWorkspace: workspaceDir,
@@ -169,9 +199,148 @@ describe('createExtensionsController', () => {
         readProxy(controller.createExtensionManager(workspaceDir, false)),
       ).toBeUndefined();
     } finally {
-      if (savedHttpsProxy === undefined) delete process.env['HTTPS_PROXY'];
-      else process.env['HTTPS_PROXY'] = savedHttpsProxy;
+      restoreEnv();
+      vi.unstubAllEnvs();
       await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves telemetry consent from the owning runtime env, not the ambient one', async () => {
+    const optedOutDir = await mkdtemp(join(tmpdir(), 'qwen-ext-consent-off-'));
+    const optedInDir = await mkdtemp(join(tmpdir(), 'qwen-ext-consent-on-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    for (const [dir, usageStatisticsEnabled] of [
+      [optedOutDir, false],
+      [optedInDir, true],
+    ] as const) {
+      await mkdir(join(dir, '.qwen'), { recursive: true });
+      await writeFile(
+        join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ privacy: { usageStatisticsEnabled } }),
+      );
+    }
+    const restoreEnv = pinTelemetryEnv();
+    const readConsent = (
+      dir: string,
+      env?: Readonly<NodeJS.ProcessEnv>,
+    ): boolean | undefined =>
+      (
+        createExtensionsController({
+          boundWorkspace: dir,
+          bridge: {} as AcpSessionBridge,
+          workspace: {} as DaemonWorkspaceService,
+          ...(env ? { env } : {}),
+        }).createExtensionManager(dir, true) as unknown as {
+          usageStatisticsEnabled?: boolean;
+        }
+      ).usageStatisticsEnabled;
+    try {
+      // A value some other workspace published process-wide: the ambient env
+      // is shared by every workspace the daemon hosts, so it is not this one's.
+      process.env['QWEN_USAGE_STATISTICS_ENABLED'] = '1';
+
+      // This workspace's own opt-out survives the ambient `1` because the
+      // consent read resolves against the injected runtime env (#12770).
+      expect(readConsent(optedOutDir, {})).toBe(false);
+      // The runtime's own env still outranks its settings, exactly as it does
+      // for a session Config, so an operator opt-out reaches this path too.
+      expect(
+        readConsent(optedInDir, { QWEN_USAGE_STATISTICS_ENABLED: '0' }),
+      ).toBe(false);
+      expect(readConsent(optedInDir, {})).toBe(true);
+      // With no injected env (a non-primary workspace controller) the ambient
+      // term still applies: dropping it would re-open telemetry an operator
+      // switched off daemon-wide.
+      process.env['QWEN_USAGE_STATISTICS_ENABLED'] = '0';
+      expect(readConsent(optedInDir)).toBe(false);
+    } finally {
+      restoreEnv();
+      vi.unstubAllEnvs();
+      await rm(optedOutDir, { recursive: true, force: true });
+      await rm(optedInDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves the telemetry proxy from the owning runtime env when settings declare none', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-proxy-env-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', 'settings.json'),
+      JSON.stringify({ privacy: { usageStatisticsEnabled: false } }),
+    );
+    const restoreEnv = pinTelemetryEnv();
+    const readProxy = (env?: Readonly<NodeJS.ProcessEnv>): string | undefined =>
+      (
+        createExtensionsController({
+          boundWorkspace: workspaceDir,
+          bridge: {} as AcpSessionBridge,
+          workspace: {} as DaemonWorkspaceService,
+          ...(env ? { env } : {}),
+        }).createExtensionManager(workspaceDir, true) as unknown as {
+          proxy?: string;
+        }
+      ).proxy;
+    try {
+      process.env['HTTPS_PROXY'] = 'http://daemon-ambient:8080';
+
+      // The runtime's own resolved proxy reaches the upload, so lifecycle
+      // events honour the same egress control the session telemetry does.
+      expect(readProxy({ HTTPS_PROXY: 'http://runtime:3128' })).toBe(
+        'http://runtime:3128',
+      );
+      // The ambient value is still never attributed to this workspace.
+      expect(readProxy({})).toBeUndefined();
+      expect(readProxy()).toBeUndefined();
+    } finally {
+      restoreEnv();
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('does not publish the workspace env to the daemon while building status', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-status-env-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    // The status route is trust-free and answers a single GET, so any repo can
+    // ship these values. Loading them without `skipLoadEnvironment` writes
+    // them into the process.env every other hosted workspace resolves against,
+    // for the process lifetime — nothing restores them.
+    await writeFile(
+      join(workspaceDir, '.qwen', '.env'),
+      'HTTPS_PROXY=http://workspace-env:8080\nQWEN_USAGE_STATISTICS_ENABLED=1\n',
+    );
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const restoreEnv = pinTelemetryEnv();
+    try {
+      const controller = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+
+      await controller.buildLocalExtensionsStatus();
+
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
+      expect(process.env['QWEN_USAGE_STATISTICS_ENABLED']).toBeUndefined();
+    } finally {
+      restoreEnv();
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
     }
   });
 
