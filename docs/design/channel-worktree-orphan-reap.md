@@ -1,5 +1,7 @@
 # Orphan-reap worktree cleanup (#11024 item 1)
 
+[English](channel-worktree-orphan-reap.md) | [简体中文](channel-worktree-orphan-reap.zh-CN.md)
+
 ## Status
 
 Implemented and verified (2026-09-07). Two real-daemon A/B rounds: the
