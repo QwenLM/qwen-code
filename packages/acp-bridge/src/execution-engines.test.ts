@@ -12,10 +12,17 @@ import {
   PROTOCOL_VERSION,
   RequestError,
   type NewSessionResponse,
+  type PromptResponse,
 } from '@agentclientprotocol/sdk';
-import type { BridgeExecutionEngine, BridgeOptions } from './bridgeOptions.js';
+import type {
+  BridgeExecutionEngine,
+  BridgeOptions,
+  BridgeTelemetry,
+} from './bridgeOptions.js';
 import { SESSION_EXECUTION_ENGINE_META_KEY } from './bridgeOptions.js';
 import {
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  MID_TURN_QUEUE_DRAIN_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   type AcpSessionBridge,
   type BridgeRuntimeStopRequest,
@@ -31,11 +38,16 @@ import {
   RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionLimitExceededError,
+  SessionNotFoundError,
+  WorkspaceChangePartiallyAppliedError,
+  WorkspaceDrainingError,
 } from './bridgeErrors.js';
 import {
+  BridgeTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
+import { SessionAttachmentStore } from './sessionAttachments.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -69,6 +81,35 @@ function engineChannel(
       method === SERVE_CONTROL_EXT_METHODS.sessionClose ? { closed: true } : {},
     ...opts,
   });
+}
+
+/** The error a call throws synchronously, if any. */
+function refusal(call: () => unknown): unknown {
+  try {
+    call();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+/** The synchronous admission refusal of a new prompt, if any. */
+function promptRefusal(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+  text: string,
+): unknown {
+  try {
+    void bridge
+      .sendPrompt(sessionId, {
+        sessionId,
+        prompt: [{ type: 'text', text }],
+      })
+      .catch(() => undefined);
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 const bridges: AcpSessionBridge[] = [];
@@ -481,6 +522,7 @@ describe('ACP Bridge execution engines', () => {
       async (maxSessions) => {
         vi.useFakeTimers();
         const response = deferred<NewSessionResponse>();
+        const running = deferred<PromptResponse>();
         const released = vi.fn();
         const managed = engineChannel('managed', {
           newSessionImpl: (_request, agent) =>
@@ -490,6 +532,7 @@ describe('ACP Bridge execution engines', () => {
                   sessionId: `managed-${agent.newSessionCalls.length}`,
                   ...receipt('managed'),
                 },
+          promptImpl: () => running.promise,
         });
         const p = paired(
           {
@@ -502,6 +545,14 @@ describe('ACP Bridge execution engines', () => {
         );
         await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
         expect(released).toHaveBeenCalledTimes(1);
+        // A running turn keeps the live session, and so the quarantined
+        // channel, in place until it settles.
+        const turn = p.bridge.sendPrompt('managed-1', {
+          sessionId: 'managed-1',
+          prompt: [{ type: 'text', text: 'still live' }],
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(managed.agent.promptCalls).toHaveLength(1);
         const spawn = Promise.allSettled([
           p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
         ]);
@@ -534,15 +585,15 @@ describe('ACP Bridge execution engines', () => {
         expect(managed.agent.newSessionCalls).toHaveLength(2);
         expect(managed.killed).toBe(false);
         expect(managed.agent.extMethodCalls).toHaveLength(0);
-        await p.bridge.sendPrompt('managed-1', {
-          sessionId: 'managed-1',
-          prompt: [{ type: 'text', text: 'still live' }],
+        expect(promptRefusal(p.bridge, 'managed-1', 'refused')).toMatchObject({
+          reason: 'new_session_cleanup_failed',
         });
         expect(managed.agent.promptCalls).toHaveLength(1);
         // A rejected third attempt can reserve and release at capacity 3.
         expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 1 : 2);
-        await p.bridge.closeSession('managed-1');
-        await vi.advanceTimersByTimeAsync(0);
+        running.resolve({ stopReason: 'end_turn' });
+        await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+        await flushWithoutTime();
         expect(managed.killed).toBe(true);
         expect(released).toHaveBeenCalledTimes(maxSessions === 2 ? 2 : 3);
       },
@@ -1167,6 +1218,7 @@ describe('ACP Bridge execution engines', () => {
 
   it('retains a rejected restore reservation until its quarantined channel exits', async () => {
     const release = vi.fn();
+    const running = deferred<PromptResponse>();
     const managed = engineChannel('managed', {
       loadSessionImpl: () => ({}),
       extMethodImpl: (method, params) => ({
@@ -1174,6 +1226,7 @@ describe('ACP Bridge execution engines', () => {
           method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
           params['sessionId'] === 'managed-1',
       }),
+      promptImpl: () => running.promise,
     });
     const p = paired(
       { freshSessionAdmission: () => ({ release }) },
@@ -1181,6 +1234,11 @@ describe('ACP Bridge execution engines', () => {
       managed,
     );
     const live = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = p.bridge.sendPrompt(live.sessionId, {
+      sessionId: live.sessionId,
+      prompt: [{ type: 'text', text: 'keep the channel busy' }],
+    });
+    await vi.waitFor(() => expect(managed.agent.promptCalls).toHaveLength(1));
     release.mockClear();
     const request = { workspaceCwd: WS_A, sessionId: 'rejected-restore' };
     await expect(p.bridge.loadSession(request)).rejects.toThrow('receipt');
@@ -1195,21 +1253,33 @@ describe('ACP Bridge execution engines', () => {
     await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(release).toHaveBeenCalledTimes(1);
     expect(managed.killed).toBe(false);
-    await p.bridge.closeSession(live.sessionId);
+    // The settled session is closed and the drained channel retires.
+    running.resolve({ stopReason: 'end_turn' });
+    await turn;
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2));
     expect(managed.killed).toBe(true);
+    expect(() => p.bridge.getSessionSummary(live.sessionId)).toThrow(
+      'No session',
+    );
     expect(p.legacy.killed).toBe(false);
   });
 
   it('quarantines an unaddressable success without closing another live session', async () => {
+    const running = deferred<PromptResponse>();
     const managed = engineChannel('managed', {
       newSessionImpl: (_request, agent) => ({
         sessionId: agent.newSessionCalls.length === 1 ? 'valid' : '',
         ...receipt('managed'),
       }),
+      promptImpl: () => running.promise,
     });
     const p = paired({}, engineChannel('legacy'), managed);
     const valid = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = p.bridge.sendPrompt(valid.sessionId, {
+      sessionId: valid.sessionId,
+      prompt: [{ type: 'text', text: 'running' }],
+    });
+    await vi.waitFor(() => expect(managed.agent.promptCalls).toHaveLength(1));
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).rejects.toThrow('invalid');
@@ -1219,7 +1289,8 @@ describe('ACP Bridge execution engines', () => {
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).resolves.toMatchObject({ sessionId: 'legacy-1' });
-    await p.bridge.closeSession(valid.sessionId);
+    running.resolve({ stopReason: 'end_turn' });
+    await turn;
     await vi.waitFor(() => expect(managed.killed).toBe(true));
     expect(p.legacy.killed).toBe(false);
   });
@@ -1701,6 +1772,7 @@ describe('ACP Bridge execution engines', () => {
   );
 
   it('rejects branching on a quarantined Legacy channel before mutating history', async () => {
+    const delivered = deferred<Record<string, unknown>>();
     const legacy = engineChannel('legacy', {
       newSessionImpl: (_request, agent) => ({
         sessionId: agent.newSessionCalls.length === 1 ? 'legacy-source' : '',
@@ -1709,11 +1781,26 @@ describe('ACP Bridge execution engines', () => {
       extMethodImpl: (method) =>
         method === SERVE_CONTROL_EXT_METHODS.sessionBranch
           ? { newSessionId: 'legacy-branch' }
-          : { closed: true },
+          : method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+            ? delivered.promise
+            : { closed: true },
     });
     const p = paired({}, legacy);
     p.choose('legacy');
     const source = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    // A notification still being delivered keeps the source out of the
+    // quarantine drain without making it a running turn.
+    const notification = p.bridge.enqueueBackgroundNotification(
+      source.sessionId,
+      {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      },
+    );
+    await vi.waitFor(() => expect(legacy.agent.extMethodCalls).toHaveLength(1));
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).rejects.toThrow('invalid');
@@ -1722,8 +1809,12 @@ describe('ACP Bridge execution engines', () => {
     ).rejects.toMatchObject({
       reason: 'new_session_cleanup_failed',
     });
-    expect(legacy.agent.extMethodCalls).toHaveLength(0);
+    expect(legacy.agent.extMethodCalls.map((call) => call.method)).toEqual([
+      SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+    ]);
     expect(p.managedFactory).not.toHaveBeenCalled();
+    delivered.resolve({ sessionId: source.sessionId, accepted: true });
+    await notification;
   });
 
   it('refuses to restore a Legacy branch through the Managed engine', async () => {
@@ -2320,11 +2411,13 @@ describe('ACP Bridge execution engines', () => {
 
   it('quarantines a late unaddressable Managed response while Legacy stays usable', async () => {
     const late = deferred<NewSessionResponse>();
+    const running = deferred<PromptResponse>();
     const managed = engineChannel('managed', {
       newSessionImpl: (_request, agent) =>
         agent.newSessionCalls.length === 1
           ? { sessionId: 'managed-live', ...receipt('managed') }
           : late.promise,
+      promptImpl: () => running.promise,
     });
     const p = paired(
       { initializeTimeoutMs: 30 },
@@ -2335,6 +2428,10 @@ describe('ACP Bridge execution engines', () => {
     const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
     p.choose('managed');
     const managedLive = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = p.bridge.sendPrompt(managedLive.sessionId, {
+      sessionId: managedLive.sessionId,
+      prompt: [{ type: 'text', text: 'still owned' }],
+    });
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).rejects.toThrow('timed out');
@@ -2348,15 +2445,13 @@ describe('ACP Bridge execution engines', () => {
     });
     expect(managed.agent.newSessionCalls).toHaveLength(2);
     expect(managed.agent.extMethodCalls).toHaveLength(0);
-    await p.bridge.sendPrompt(managedLive.sessionId, {
-      sessionId: managedLive.sessionId,
-      prompt: [{ type: 'text', text: 'still owned' }],
-    });
+    expect(managed.agent.promptCalls).toHaveLength(1);
     p.choose('legacy');
     await expect(
       p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
     ).resolves.toMatchObject({ sessionId: 'legacy-2' });
-    await p.bridge.closeSession(managedLive.sessionId);
+    running.resolve({ stopReason: 'end_turn' });
+    await turn;
     await vi.waitFor(() => expect(managed.killed).toBe(true));
     expect(p.legacy.killed).toBe(false);
     expect(p.bridge.getSessionSummary(legacy.sessionId)).toBeDefined();
@@ -2427,5 +2522,2161 @@ describe('ACP Bridge execution engines', () => {
     ]);
     expect(p.bridge.sessionCount).toBe(2);
     expect(p.managedFactory).not.toHaveBeenCalled();
+  });
+});
+
+function recordQuarantineEvents(): {
+  telemetry: BridgeTelemetry;
+  named: (suffix: string) => Array<Record<string, unknown>>;
+} {
+  const events: Array<{ name: string; attributes: Record<string, unknown> }> =
+    [];
+  return {
+    named: (suffix) =>
+      events
+        .filter((event) => event.name === `channel.quarantine.${suffix}`)
+        .map((event) => event.attributes),
+    telemetry: {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event: (name, attributes) => {
+        if (name.startsWith('channel.quarantine.')) {
+          events.push({ name, attributes: { ...attributes } });
+        }
+      },
+      injectPromptContext: (request) => request,
+    },
+  };
+}
+
+/**
+ * Let pending work run without moving fake time; `vi.waitFor` would advance
+ * it and could reach an idle timeout that hides a missing retirement.
+ */
+async function flushWithoutTime(): Promise<void> {
+  for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
+}
+
+/** Times out the next creation and lets it outlive its settlement grace. */
+async function abandonCreationPastGrace(
+  bridge: AcpSessionBridge,
+  initializeTimeoutMs: number,
+): Promise<void> {
+  await Promise.all([
+    expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      'timed out',
+    ),
+    vi.advanceTimersByTimeAsync(initializeTimeoutMs),
+  ]);
+  await vi.advanceTimersByTimeAsync(initializeTimeoutMs);
+}
+
+const prompt = (sessionId: string, text: string) => ({
+  sessionId,
+  prompt: [{ type: 'text' as const, text }],
+});
+
+describe('paired quarantine recovery', () => {
+  it('refuses new turns on a quarantined channel while its running turn settles', async () => {
+    vi.useFakeTimers();
+    const abandoned = deferred<NewSessionResponse>();
+    const running = deferred<PromptResponse>();
+    const answer = deferred<Record<string, unknown>>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 3
+          ? abandoned.promise
+          : {
+              sessionId: `managed-${agent.newSessionCalls.length}`,
+              ...receipt('managed'),
+            },
+      promptImpl: () => running.promise,
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBtw
+          ? answer.promise
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { initializeTimeoutMs: 30, telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      managed,
+    );
+    const waiting = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    // Answering a side question, so not settled, but not running a turn.
+    const side = p.bridge.generateSessionBtw(waiting.sessionId, 'side');
+    const turn = p.bridge.sendPrompt(
+      busy.sessionId,
+      prompt(busy.sessionId, 'running'),
+    );
+    const queued = p.bridge
+      .sendPrompt(busy.sessionId, prompt(busy.sessionId, 'queued'))
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(managed.agent.promptCalls).toHaveLength(1);
+
+    await abandonCreationPastGrace(p.bridge, 30);
+
+    expect(quarantine.named('started')).toEqual([
+      expect.objectContaining({
+        'qwen-code.daemon.acp_channel.execution_engine': 'managed',
+        'qwen-code.daemon.acp_channel.quarantine_reason':
+          'new_session_settlement_overdue',
+      }),
+    ]);
+    expect(promptRefusal(p.bridge, waiting.sessionId, 'refused')).toMatchObject(
+      {
+        name: 'BridgeChannelQuarantinedError',
+        reason: 'new_session_settlement_overdue',
+        message: expect.stringContaining('new prompts'),
+      },
+    );
+    await expect(
+      managed.agentConnection.extMethod('_qwencode/start_turn', {
+        sessionId: waiting.sessionId,
+        source: 'background_notification',
+        turnId: 'notification-1',
+        taskId: 'Explore-1',
+        kind: 'agent',
+        startedAt: 1000,
+      }),
+    ).resolves.toEqual({ accepted: false });
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_settlement_overdue' });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      p.bridge.sendPrompt(legacy.sessionId, prompt(legacy.sessionId, 'hi')),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    running.resolve({ stopReason: 'end_turn' });
+    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+    // Queued before the quarantine, but still a new turn when it comes up.
+    expect(await queued).toMatchObject({
+      reason: 'new_session_settlement_overdue',
+    });
+    expect(managed.agent.promptCalls).toHaveLength(1);
+    // Once settled the session is closed; the other one waits for its side
+    // question, and the channel retires when both are gone.
+    await flushWithoutTime();
+    expect(() => p.bridge.getSessionSummary(busy.sessionId)).toThrow(
+      SessionNotFoundError,
+    );
+    expect(p.bridge.getSessionSummary(waiting.sessionId)).toBeDefined();
+    expect(managed.killed).toBe(false);
+    answer.resolve({ sessionId: waiting.sessionId, answer: 'done' });
+    await expect(side).resolves.toMatchObject({ answer: 'done' });
+    await flushWithoutTime();
+    expect(managed.killed).toBe(true);
+    expect(p.legacy.killed).toBe(false);
+  });
+
+  it.each([true, false])(
+    'retires the channel for an overdue settlement even after it clears (close answered: %s)',
+    async (answersClose) => {
+      vi.useFakeTimers();
+      const lateRestore = deferred<ReturnType<typeof receipt>>();
+      const running = deferred<PromptResponse>();
+      // Without an answer to the drain's close of the busy session, only the
+      // bounded close can retire the channel.
+      const managed = engineChannel('managed', {
+        loadSessionImpl: () => lateRestore.promise,
+        promptImpl: () => running.promise,
+        extMethodImpl: (method, params) =>
+          !answersClose &&
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+          params['sessionId'] === 'managed-2'
+            ? new Promise(() => {})
+            : { closed: true },
+      });
+      const replacement = engineChannel('managed');
+      const quarantine = recordQuarantineEvents();
+      const p = paired(
+        {
+          sessionRestoreTimeoutMs: 40,
+          quarantineDrainTimeoutMs: 60_000,
+          telemetry: quarantine.telemetry,
+        },
+        engineChannel('legacy'),
+        managed,
+      );
+      p.managedFactory
+        .mockResolvedValueOnce(managed.channel)
+        .mockResolvedValue(replacement.channel);
+      const idle = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const turn = p.bridge.sendPrompt(
+        busy.sessionId,
+        prompt(busy.sessionId, 'running'),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const restore = p.bridge
+        .loadSession({ workspaceCwd: WS_A, sessionId: 'slow' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(40);
+      expect(await restore).toMatchObject({
+        name: 'SessionRestoreTimeoutError',
+      });
+      await vi.advanceTimersByTimeAsync(40);
+      await flushWithoutTime();
+
+      expect(quarantine.named('started')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.acp_channel.quarantine_reason':
+            'restore_settlement_overdue',
+        }),
+      ]);
+      // Only an acknowledged workspace change (B2b) may end a quarantine early,
+      // so the idle session is closed at once...
+      expect(() => p.bridge.getSessionSummary(idle.sessionId)).toThrow(
+        SessionNotFoundError,
+      );
+      // ...and when the late restore settles and is cleaned up, the channel
+      // stays quarantined.
+      lateRestore.resolve(receipt('managed'));
+      await flushWithoutTime();
+      expect(managed.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: expect.objectContaining({ sessionId: 'slow' }),
+      });
+      expect(promptRefusal(p.bridge, busy.sessionId, 'more')).toMatchObject({
+        reason: 'restore_settlement_overdue',
+        message: expect.stringContaining('did not settle in time'),
+      });
+      expect(managed.killed).toBe(false);
+      // A workspace runtime stop waits for the retiring channel.
+      expect(p.bridge.getRuntimeStopSnapshot!().blockedReasons).toContain(
+        'stopping',
+      );
+
+      // Once the last session settles, the drained channel retires at once;
+      // its close is still bounded, so a child that never answers it is
+      // retired within the close budget rather than at the deadline.
+      running.resolve({ stopReason: 'end_turn' });
+      await turn;
+      await flushWithoutTime();
+      if (!answersClose) {
+        expect(managed.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS);
+        await flushWithoutTime();
+      }
+      expect(managed.killed).toBe(true);
+      expect(quarantine.named('deadline')).toEqual([]);
+      expect(quarantine.named('ended')).toHaveLength(1);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'managed-1' });
+      expect(p.managedFactory).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(['legacy', 'managed'] as const)(
+    'closes settled %s sessions and retires the drained channel before its deadline',
+    async (engine) => {
+      const other = engine === 'legacy' ? 'managed' : 'legacy';
+      const running = deferred<PromptResponse>();
+      const released = deferred<void>();
+      const quarantined = engineChannel(engine, {
+        newSessionImpl: (_request, agent) => ({
+          sessionId:
+            agent.newSessionCalls.length === 3
+              ? ''
+              : `${engine}-${agent.newSessionCalls.length}`,
+          ...receipt(engine),
+        }),
+        promptImpl: () => running.promise,
+      });
+      const replacement = engineChannel(engine);
+      const p =
+        engine === 'legacy'
+          ? paired({}, quarantined, engineChannel('managed'))
+          : paired({}, engineChannel('legacy'), quarantined);
+      const factory = engine === 'legacy' ? p.legacyFactory : p.managedFactory;
+      factory
+        .mockResolvedValueOnce({
+          ...quarantined.channel,
+          registryReleased: released.promise,
+        })
+        .mockResolvedValue(replacement.channel);
+      p.choose(engine);
+      const idle = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const idleEvents: string[] = [];
+      const collecting = (async () => {
+        for await (const event of p.bridge.subscribeEvents(idle.sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'session_closed') {
+            idleEvents.push((event.data as { reason: string }).reason);
+          }
+        }
+      })();
+      const turn = p.bridge.sendPrompt(
+        busy.sessionId,
+        prompt(busy.sessionId, 'running'),
+      );
+      await vi.waitFor(() =>
+        expect(quarantined.agent.promptCalls).toHaveLength(1),
+      );
+
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+
+      // The settled session closes although a client is attached; the
+      // running one is left to settle.
+      await vi.waitFor(() =>
+        expect(idleEvents).toEqual(['channel_quarantined']),
+      );
+      expect(() => p.bridge.getSessionSummary(idle.sessionId)).toThrow(
+        SessionNotFoundError,
+      );
+      expect(p.bridge.getSessionSummary(busy.sessionId)).toBeDefined();
+      expect(quarantined.killed).toBe(false);
+      // The closed session cannot come back while its channel still runs,
+      // and the other engine keeps working.
+      await expect(
+        p.bridge.loadSession({ workspaceCwd: WS_A, sessionId: idle.sessionId }),
+      ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+      p.choose(other);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: `${other}-1` });
+      p.choose(engine);
+
+      running.resolve({ stopReason: 'end_turn' });
+      await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+      await vi.waitFor(() => expect(quarantined.killed).toBe(true));
+      await vi.waitFor(() =>
+        expect(() => p.bridge.getSessionSummary(busy.sessionId)).toThrow(
+          SessionNotFoundError,
+        ),
+      );
+      abort.abort();
+      await collecting;
+      // The root exited, but the engine opens only once the process tree is
+      // released, and a runtime stop waits for it too.
+      await expect(
+        p.bridge.loadSession({ workspaceCwd: WS_A, sessionId: idle.sessionId }),
+      ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(p.bridge.getRuntimeStopSnapshot!().blockedReasons).toContain(
+        'stopping',
+      );
+
+      released.resolve();
+      await vi.waitFor(async () =>
+        expect(
+          await p.bridge.loadSession({
+            workspaceCwd: WS_A,
+            sessionId: idle.sessionId,
+          }),
+        ).toMatchObject({ sessionId: idle.sessionId }),
+      );
+      expect(p.select).toHaveBeenLastCalledWith(
+        expect.objectContaining({ operation: 'load' }),
+      );
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(replacement.agent.loadSessionCalls).toEqual([
+        expect.objectContaining({ sessionId: idle.sessionId }),
+      ]);
+    },
+  );
+
+  it('terminates at the deadline and holds the engine until the process is gone', async () => {
+    vi.useFakeTimers();
+    const running = deferred<PromptResponse>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      promptImpl: () => running.promise,
+    });
+    // A child that survives both termination steps; only `crash()` ends it,
+    // and its process tree is released later still.
+    const kill = vi.fn(() => new Promise<void>(() => {}));
+    const killSync = vi.fn();
+    const released = deferred<void>();
+    const replacement = engineChannel('managed');
+    const quarantine = recordQuarantineEvents();
+    // One release per admitted creation; the creation whose cleanup failed
+    // keeps its admission until its channel is gone.
+    const reservations: Array<ReturnType<typeof vi.fn>> = [];
+    const removed: string[] = [];
+    const p = paired(
+      {
+        initializeTimeoutMs: 100,
+        quarantineDrainTimeoutMs: 1_000,
+        telemetry: quarantine.telemetry,
+        freshSessionAdmission: () => {
+          const release = vi.fn();
+          reservations.push(release);
+          return { release };
+        },
+        sessionLifecycle: (event) => {
+          if (event.type === 'removed') removed.push(event.sessionId);
+        },
+      },
+      engineChannel('legacy'),
+      managed,
+    );
+    p.managedFactory
+      .mockResolvedValueOnce({
+        ...managed.channel,
+        kill,
+        killSync,
+        registryReleased: released.promise,
+      })
+      .mockResolvedValue(replacement.channel);
+    try {
+      const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const turn = p.bridge
+        .sendPrompt(busy.sessionId, prompt(busy.sessionId, 'long'))
+        .then(
+          () => 'settled',
+          () => 'failed',
+        );
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+      expect(reservations).toHaveLength(2);
+      const cleanupAdmission = reservations[1]!;
+
+      // Activity on the channel does not move the deadline.
+      await vi.advanceTimersByTimeAsync(900);
+      await managed.agentConnection.sessionUpdate({
+        sessionId: busy.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'still working' },
+        },
+      });
+      expect(promptRefusal(p.bridge, busy.sessionId, 'more')).toMatchObject({
+        reason: 'new_session_cleanup_failed',
+      });
+      expect(kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(quarantine.named('deadline')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.acp_channel.unsettled_session_count': 1,
+        }),
+      ]);
+      expect(managed.agent.cancelCalls).toContainEqual(
+        expect.objectContaining({ sessionId: busy.sessionId }),
+      );
+      expect(kill).toHaveBeenCalledTimes(1);
+      // The deadline is not an exit: the session, its ID and the engine stay
+      // held, and nothing is released.
+      expect(p.bridge.getSessionSummary(busy.sessionId)).toBeDefined();
+      expect(cleanupAdmission).not.toHaveBeenCalled();
+      expect(removed).toEqual([]);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(killSync).toHaveBeenCalled();
+      // Not reported before the registry had its own termination window,
+      // however short the initialize budget.
+      await vi.advanceTimersByTimeAsync(14_900);
+      expect(quarantine.named('exit_unverified')).toEqual([]);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(quarantine.named('exit_unverified')).toHaveLength(1);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({
+        reason: 'channel_exit_unverified',
+        message: expect.stringContaining('operator action may be required'),
+      });
+      expect(p.managedFactory).toHaveBeenCalledTimes(1);
+      expect(p.bridge.getSessionSummary(busy.sessionId)).toBeDefined();
+      expect(cleanupAdmission).not.toHaveBeenCalled();
+      expect(removed).toEqual([]);
+      p.choose('legacy');
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'legacy-1' });
+      p.choose('managed');
+
+      // The root's exit ends the channel and its sessions...
+      managed.crash();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await turn).toBe('failed');
+      expect(() => p.bridge.getSessionSummary(busy.sessionId)).toThrow(
+        SessionNotFoundError,
+      );
+      expect(cleanupAdmission).toHaveBeenCalledTimes(1);
+      expect(removed).toEqual([busy.sessionId]);
+      // ...but only the released process tree frees the engine.
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'channel_exit_unverified' });
+      expect(quarantine.named('ended')).toEqual([]);
+      released.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(quarantine.named('ended')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.acp_channel.quarantine_exit_unverified': true,
+        }),
+      ]);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'managed-1' });
+      expect(p.managedFactory).toHaveBeenCalledTimes(2);
+    } finally {
+      managed.crash();
+      released.resolve();
+    }
+  });
+
+  it('refuses mid-turn input on a quarantined channel and clears what can no longer run', async () => {
+    const running = deferred<PromptResponse>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      promptImpl: () => running.promise,
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const removedFromQueue: string[] = [];
+    const collecting = (async () => {
+      for await (const event of p.bridge.subscribeEvents(busy.sessionId, {
+        signal: abort.signal,
+      })) {
+        const data = event.data as { promptId?: string; state?: string };
+        if (event.type === 'pending_prompt_completed' && data.promptId) {
+          removedFromQueue.push(`${data.promptId}:${data.state}`);
+        }
+      }
+    })();
+    const turn = p.bridge.sendPrompt(
+      busy.sessionId,
+      prompt(busy.sessionId, 'running'),
+    );
+    await vi.waitFor(() => expect(managed.agent.promptCalls).toHaveLength(1));
+    // Queued before the quarantine; the running turn never drains it.
+    expect(
+      p.bridge.enqueueMidTurnMessage(
+        busy.sessionId,
+        'follow up',
+        { clientId: busy.clientId },
+        'queued-early',
+      ),
+    ).toEqual({ accepted: true, messageId: 'queued-early' });
+
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+
+    expect(
+      refusal(() =>
+        p.bridge.enqueueMidTurnMessage(busy.sessionId, 'more', {
+          clientId: busy.clientId,
+        }),
+      ),
+    ).toMatchObject({
+      name: 'BridgeChannelQuarantinedError',
+      reason: 'new_session_cleanup_failed',
+    });
+    running.resolve({ stopReason: 'end_turn' });
+    await turn;
+    // The undrained message cannot start a turn, so it leaves the queue view
+    // instead of being dropped silently.
+    await vi.waitFor(() =>
+      expect(removedFromQueue).toEqual(['queued-early:removed']),
+    );
+    expect(managed.agent.promptCalls).toHaveLength(1);
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+    abort.abort();
+    await collecting;
+  });
+
+  it('waits for side requests before closing a session and refuses new ones', async () => {
+    const answer = deferred<Record<string, unknown>>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBtw
+          ? answer.promise
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const btw = p.bridge.generateSessionBtw(session.sessionId, 'side question');
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls.map((call) => call.method)).toEqual([
+        SERVE_CONTROL_EXT_METHODS.sessionBtw,
+      ]),
+    );
+
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+
+    const refused = { reason: 'new_session_cleanup_failed' };
+    await expect(
+      p.bridge.generateSessionRecap(session.sessionId),
+    ).rejects.toMatchObject(refused);
+    await expect(
+      p.bridge.generateSessionBtw(session.sessionId, 'another'),
+    ).rejects.toMatchObject(refused);
+    expect(
+      refusal(() =>
+        p.bridge.generateSessionContent!(
+          session.sessionId,
+          'generate',
+          new AbortController().signal,
+        ),
+      ),
+    ).toMatchObject(refused);
+    await expect(
+      p.bridge.launchSessionForkAgent(session.sessionId, 'fork'),
+    ).rejects.toMatchObject(refused);
+    await expect(
+      p.bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', 'rerun'),
+    ).rejects.toMatchObject(refused);
+    await expect(
+      p.bridge.controlSessionGoal(session.sessionId, {
+        action: 'resume',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      }),
+    ).rejects.toMatchObject(refused);
+    // Stopping work is still allowed.
+    await expect(
+      p.bridge.controlSessionWorkflowTask(session.sessionId, 'wf-1', 'pause'),
+    ).resolves.toBeDefined();
+    await expect(
+      p.bridge.controlSessionGoal(session.sessionId, {
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      }),
+    ).resolves.toBeDefined();
+    expect(managed.agent.extMethodCalls.map((call) => call.method)).toEqual([
+      SERVE_CONTROL_EXT_METHODS.sessionBtw,
+      SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+      SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+    ]);
+    expect(p.bridge.getSessionSummary(session.sessionId)).toBeDefined();
+    expect(managed.killed).toBe(false);
+    answer.resolve({ sessionId: session.sessionId, answer: 'yes' });
+    await expect(btw).resolves.toMatchObject({ answer: 'yes' });
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('keeps a session while its content generation runs', async () => {
+    const generated = deferred<Record<string, unknown>>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart
+          ? generated.promise
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const stream = p.bridge.generateSessionContent!(
+      session.sessionId,
+      'generate',
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls).toHaveLength(1),
+    );
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    expect(p.bridge.getSessionSummary(session.sessionId)).toBeDefined();
+
+    generated.resolve({ model: 'test', modelSource: 'main' });
+    const events: string[] = [];
+    for await (const event of stream) events.push(event.type);
+    expect(events).toEqual(['done']);
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+  });
+
+  it('drains a session whose creation lands during the quarantine', async () => {
+    const created = deferred<NewSessionResponse>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 1
+          ? created.promise
+          : { sessionId: '', ...receipt('managed') },
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const spawn = p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await vi.waitFor(() =>
+      expect(managed.agent.newSessionCalls).toHaveLength(1),
+    );
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    expect(managed.killed).toBe(false);
+
+    created.resolve({ sessionId: 'managed-late', ...receipt('managed') });
+    await expect(spawn).resolves.toMatchObject({ sessionId: 'managed-late' });
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+    expect(p.bridge.sessionCount).toBe(0);
+  });
+
+  it('drains a session once its worktree reset barrier is cleared', async () => {
+    const managed = engineChannel('managed', {
+      newSessionImpl: (_request, agent) => ({
+        sessionId:
+          agent.newSessionCalls.length === 2
+            ? ''
+            : `managed-${agent.newSessionCalls.length}`,
+        ...receipt('managed'),
+      }),
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.bridge.setSessionResetPending!(session.sessionId);
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    // A transfer owns the session's worktree, so the drain leaves it alone.
+    expect(p.bridge.getSessionSummary(session.sessionId)).toBeDefined();
+    expect(managed.killed).toBe(false);
+
+    p.bridge.clearSessionResetPending!(session.sessionId);
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+    expect(p.bridge.sessionCount).toBe(0);
+  });
+
+  it('drains a session whose restore lands during the quarantine', async () => {
+    const loaded = deferred<ReturnType<typeof receipt>>();
+    const managed = engineChannel('managed', {
+      newSessionImpl: () => ({ sessionId: '', ...receipt('managed') }),
+      loadSessionImpl: () => loaded.promise,
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const restore = p.bridge.loadSession({
+      workspaceCwd: WS_A,
+      sessionId: 'persisted',
+    });
+    await vi.waitFor(() =>
+      expect(managed.agent.loadSessionCalls).toHaveLength(1),
+    );
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    expect(managed.killed).toBe(false);
+
+    loaded.resolve(receipt('managed'));
+    await expect(restore).resolves.toMatchObject({ sessionId: 'persisted' });
+    await vi.waitFor(() => expect(managed.killed).toBe(true));
+    expect(p.bridge.sessionCount).toBe(0);
+  });
+
+  it('keeps single-factory quarantine without a drain deadline', async () => {
+    vi.useFakeTimers();
+    const late = deferred<NewSessionResponse>();
+    const channel = makeChannel({
+      newSessionImpl: (_request, agent) =>
+        agent.newSessionCalls.length === 2
+          ? late.promise
+          : { sessionId: `legacy-${agent.newSessionCalls.length}` },
+      // The late session's cleanup is refused, which requires retirement.
+      extMethodImpl: (method, params) => ({
+        closed:
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+          params['sessionId'] !== 'late',
+      }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => channel.channel,
+      sessionScope: 'thread',
+      initializeTimeoutMs: 30,
+      quarantineDrainTimeoutMs: 1_000,
+    });
+    bridges.push(bridge);
+    const idle = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await Promise.all([
+      expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+        'timed out',
+      ),
+      vi.advanceTimersByTimeAsync(30),
+    ]);
+    late.resolve({ sessionId: 'late' });
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+    // Existing sessions keep prompting and are neither closed nor terminated.
+    await expect(
+      bridge.sendPrompt(idle.sessionId, prompt(idle.sessionId, 'still here')),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(bridge.getSessionSummary(idle.sessionId)).toBeDefined();
+    expect(channel.killed).toBe(false);
+    expect(channel.agent.cancelCalls).toHaveLength(0);
+  });
+
+  it('rejects an invalid drain deadline', () => {
+    for (const quarantineDrainTimeoutMs of [0, -1, 1.5, 2 ** 31, NaN]) {
+      expect(() => paired({ quarantineDrainTimeoutMs })).toThrow(
+        'quarantineDrainTimeoutMs',
+      );
+    }
+  });
+});
+
+describe('paired per-engine operations', () => {
+  const heap = (peak: number, names: string[]) => ({
+    peakOldGenerationBytes: peak,
+    peakLiveSetBytes: peak / 2,
+    peakTotalHeapBytes: peak * 2,
+    majorGcCount: peak / 100,
+    majorGcMs: peak / 10,
+    unclassifiedSpaceNames: names,
+  });
+  const reporting = (
+    engine: BridgeExecutionEngine,
+    report: () => Record<string, unknown> | Promise<Record<string, unknown>>,
+  ) =>
+    engineChannel(engine, {
+      extMethodImpl: (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? report()
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+  async function bothEngines(p: ReturnType<typeof paired>) {
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('managed');
+    return { managed, legacy };
+  }
+
+  it('combines the readings of both engines in the child resource snapshot', async () => {
+    const legacyReport = {
+      rssBytes: 100,
+      cpuPercent: 30,
+      heap: heap(1_000, ['code_space']),
+    };
+    let managedReport: Record<string, unknown> = {
+      rssBytes: 50,
+      cpuPercent: 80,
+    };
+    const p = paired(
+      {},
+      reporting('legacy', () => legacyReport),
+      reporting('managed', () => managedReport),
+    );
+    await bothEngines(p);
+    expect(p.bridge.liveChannelCount).toBe(2);
+
+    await p.bridge.refreshChildResource!();
+    expect(p.bridge.getChildResourceSnapshot!()).toMatchObject({
+      rssBytes: 150,
+      // Each child's share of the machine adds up, within the machine.
+      cpuPercent: 100,
+      children: 2,
+      heapReported: 1,
+      heap: heap(1_000, ['code_space']),
+    });
+
+    managedReport = {
+      rssBytes: 70,
+      cpuPercent: 5,
+      heap: heap(2_000, ['shared_space']),
+    };
+    await p.bridge.refreshChildResource!();
+    expect(p.bridge.getChildResourceSnapshot!()).toMatchObject({
+      rssBytes: 170,
+      cpuPercent: 35,
+      children: 2,
+      heapReported: 2,
+      heap: {
+        ...heap(2_000, []),
+        unclassifiedSpaceNames: expect.arrayContaining([
+          'code_space',
+          'shared_space',
+        ]),
+      },
+    });
+    expect(
+      p.bridge.getChildResourceSnapshot!()!.heap!.unclassifiedSpaceNames,
+    ).toHaveLength(2);
+  });
+
+  it('keeps sampling one engine while the other child is wedged', async () => {
+    const wedged = deferred<Record<string, unknown>>();
+    const p = paired(
+      {},
+      reporting('legacy', () => ({ rssBytes: 100, cpuPercent: 1 })),
+      reporting('managed', () => wedged.promise),
+    );
+    await bothEngines(p);
+    const first = p.bridge.refreshChildResource!();
+    await vi.waitFor(() =>
+      expect(
+        p.managed.agent.extMethodCalls.filter(
+          (call) => call.method === SERVE_STATUS_EXT_METHODS.workspaceResource,
+        ),
+      ).toHaveLength(1),
+    );
+    await p.bridge.refreshChildResource!();
+    expect(
+      p.legacy.agent.extMethodCalls.filter(
+        (call) => call.method === SERVE_STATUS_EXT_METHODS.workspaceResource,
+      ),
+    ).toHaveLength(2);
+    expect(
+      p.managed.agent.extMethodCalls.filter(
+        (call) => call.method === SERVE_STATUS_EXT_METHODS.workspaceResource,
+      ),
+    ).toHaveLength(1);
+    expect(p.bridge.getChildResourceSnapshot!()).toMatchObject({
+      rssBytes: 100,
+      children: 1,
+    });
+    wedged.resolve({ rssBytes: 1, cpuPercent: 1 });
+    await first;
+  });
+
+  it('does not keep an idle Managed channel alive by sampling it', async () => {
+    vi.useFakeTimers();
+    const p = paired(
+      { channelIdleTimeoutMs: 100 },
+      reporting('legacy', () => ({ rssBytes: 1, cpuPercent: 1 })),
+      reporting('managed', () => ({ rssBytes: 1, cpuPercent: 1 })),
+    );
+    await p.bridge.preheat({ keepAliveMs: 10_000 });
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(session.sessionId);
+    await vi.advanceTimersByTimeAsync(60);
+    await p.bridge.refreshChildResource!();
+    expect(
+      p.managed.agent.extMethodCalls.filter(
+        (call) => call.method === SERVE_STATUS_EXT_METHODS.workspaceResource,
+      ),
+    ).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(p.managed.killed).toBe(true);
+    expect(p.legacy.killed).toBe(false);
+  });
+
+  it('keeps preheat and keepalive on Legacy while Managed follows its idle timeout', async () => {
+    vi.useFakeTimers();
+    const p = paired({ channelIdleTimeoutMs: 100 });
+    await p.bridge.preheat({ keepAliveMs: 1_000 });
+    expect(p.legacyFactory).toHaveBeenCalledTimes(1);
+    expect(p.managedFactory).not.toHaveBeenCalled();
+    const first = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.closeSession(first.sessionId);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(p.managed.killed).toBe(true);
+    expect(p.legacy.killed).toBe(false);
+    // Managed work does not stretch the Legacy keepalive either.
+    const second = engineChannel('managed');
+    p.managedFactory.mockResolvedValue(second.channel);
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(p.legacy.killed).toBe(true);
+    expect(second.killed).toBe(false);
+  });
+
+  describe('user language', () => {
+    const answering = (
+      engine: BridgeExecutionEngine,
+      log: string[],
+      answer: (params: Record<string, unknown>) => Record<string, unknown>,
+    ) =>
+      engineChannel(engine, {
+        newSessionImpl: (_request, agent) => {
+          log.push(`${engine}:newSession`);
+          return {
+            sessionId: `${engine}-${agent.newSessionCalls.length}`,
+            ...receipt(engine),
+          };
+        },
+        loadSessionImpl: (request) => {
+          log.push(`${engine}:loadSession:${request.sessionId}`);
+          return receipt(engine);
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.userLanguage) {
+            return method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {};
+          }
+          log.push(`${engine}:userLanguage:${String(params['language'])}`);
+          return answer(params);
+        },
+      });
+    const refreshed =
+      (sessions: number) => (params: Record<string, unknown>) => ({
+        language: params['language'],
+        sessions,
+        failed: 0,
+      });
+    const request = { language: 'zh', syncOutputLanguage: true };
+
+    it('reaches both engines and adds up their counts', async () => {
+      const log: string[] = [];
+      const p = paired(
+        {},
+        answering('legacy', log, refreshed(2)),
+        answering('managed', log, refreshed(3)),
+      );
+      await bothEngines(p);
+      await expect(p.bridge.setUserLanguage(request)).resolves.toEqual({
+        language: 'zh',
+        sessions: 5,
+        failed: 0,
+      });
+      expect(log.filter((line) => line.includes('userLanguage'))).toEqual(
+        expect.arrayContaining([
+          'legacy:userLanguage:zh',
+          'managed:userLanguage:zh',
+        ]),
+      );
+    });
+
+    it('counts a failing engine as one failure and rejects only when every engine fails', async () => {
+      const log: string[] = [];
+      let legacyFails = false;
+      const p = paired(
+        {},
+        answering('legacy', log, (params) => {
+          if (legacyFails) throw new RequestError(-32000, 'legacy unavailable');
+          return refreshed(2)(params);
+        }),
+        answering('managed', log, () => {
+          throw new RequestError(-32000, 'managed unavailable');
+        }),
+      );
+      await bothEngines(p);
+      await expect(p.bridge.setUserLanguage(request)).resolves.toEqual({
+        language: 'zh',
+        sessions: 2,
+        failed: 1,
+      });
+      legacyFails = true;
+      await expect(p.bridge.setUserLanguage(request)).rejects.toThrow(
+        'unavailable',
+      );
+    });
+
+    it('sends the remembered language to a Managed channel before its first session', async () => {
+      const log: string[] = [];
+      const p = paired(
+        {},
+        answering('legacy', log, refreshed(0)),
+        answering('managed', log, refreshed(0)),
+      );
+      await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
+        SessionNotFoundError,
+      );
+      await p.bridge.preheat();
+      await expect(p.bridge.setUserLanguage(request)).resolves.toMatchObject({
+        sessions: 0,
+      });
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(log).toEqual([
+        'legacy:userLanguage:zh',
+        'managed:userLanguage:zh',
+        'managed:newSession',
+        'managed:newSession',
+      ]);
+      // A channel that was live for the change is not sent it twice.
+      await p.bridge.setUserLanguage({
+        language: 'en',
+        syncOutputLanguage: false,
+      });
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(log.slice(4)).toEqual([
+        expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
+        expect.stringMatching(/^(legacy|managed):userLanguage:en$/),
+        'managed:newSession',
+      ]);
+    });
+
+    it('sends the remembered language before a Managed restore and its deadline', async () => {
+      vi.useFakeTimers();
+      const log: string[] = [];
+      const language = deferred<Record<string, unknown>>();
+      const managed = engineChannel('managed', {
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.userLanguage) return {};
+          log.push(`managed:userLanguage:${String(params['language'])}`);
+          await language.promise;
+          return refreshed(0)(params);
+        },
+        loadSessionImpl: async (restore) => {
+          log.push(`managed:loadSession:${restore.sessionId}`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return receipt('managed');
+        },
+      });
+      const p = paired(
+        { initializeTimeoutMs: 1_000, sessionRestoreTimeoutMs: 1_000 },
+        engineChannel('legacy'),
+        managed,
+      );
+      await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
+        SessionNotFoundError,
+      );
+      const restore = p.bridge.loadSession({
+        workspaceCwd: WS_A,
+        sessionId: 'persisted',
+      });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(log).toEqual(['managed:userLanguage:zh']);
+      language.resolve({});
+      // The slow language answer does not eat into the restore deadline.
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(restore).resolves.toMatchObject({ sessionId: 'persisted' });
+      expect(log).toEqual([
+        'managed:userLanguage:zh',
+        'managed:loadSession:persisted',
+      ]);
+    });
+
+    it('does not block a Managed session when the remembered language fails', async () => {
+      const log: string[] = [];
+      const p = paired(
+        {},
+        answering('legacy', log, refreshed(0)),
+        answering('managed', log, () => {
+          throw new Error('language unsupported');
+        }),
+      );
+      await p.bridge.preheat();
+      await p.bridge.setUserLanguage(request);
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'managed-1' });
+      expect(log).toEqual([
+        'legacy:userLanguage:zh',
+        'managed:userLanguage:zh',
+        'managed:newSession',
+      ]);
+    });
+  });
+});
+
+describe('workspace change propagation', () => {
+  const acknowledge = (
+    method: string,
+    params: Record<string, unknown>,
+  ): Record<string, unknown> =>
+    method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+      ? { v: 1, revision: params['revision'], acknowledged: true }
+      : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+        ? { closed: true }
+        : {};
+  const refuse = (method: string): Record<string, unknown> => {
+    if (method === SERVE_CONTROL_EXT_METHODS.workspaceChange) {
+      throw new RequestError(-32603, 'not applied');
+    }
+    return method === SERVE_CONTROL_EXT_METHODS.sessionClose
+      ? { closed: true }
+      : {};
+  };
+  const legacySavingRules = () =>
+    engineChannel('legacy', {
+      extMethodImpl: (method) =>
+        method === 'qwen/permissions/setRules'
+          ? { deny: ['Bash'] }
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+  const denyRule = {
+    cwd: WS_A,
+    scope: 'workspace',
+    ruleType: 'deny',
+    rules: ['Bash'],
+  };
+  const changes = (handle: ReturnType<typeof engineChannel>) =>
+    handle.agent.extMethodCalls
+      .filter(
+        (call) => call.method === SERVE_CONTROL_EXT_METHODS.workspaceChange,
+      )
+      .map((call) => call.params['kind']);
+  const collect = async (events: AsyncIterable<{ type: string }>) => {
+    const seen: Array<Record<string, unknown>> = [];
+    for await (const event of events) {
+      seen.push(event as unknown as Record<string, unknown>);
+    }
+    return seen;
+  };
+
+  it('delivers a permission change to every other live engine after workspace control', async () => {
+    const calls: string[] = [];
+    const p = paired(
+      {},
+      engineChannel('legacy', {
+        extMethodImpl: (method) => {
+          calls.push(`legacy ${method}`);
+          return method === 'qwen/permissions/setRules'
+            ? { deny: ['Bash'] }
+            : {};
+        },
+      }),
+      engineChannel('managed', {
+        extMethodImpl: (method, params) => {
+          calls.push(`managed ${method}`);
+          return acknowledge(method, params);
+        },
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    calls.length = 0;
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+    ).resolves.toEqual({ deny: ['Bash'] });
+    expect(calls).toEqual([
+      'legacy qwen/permissions/setRules',
+      `managed ${SERVE_CONTROL_EXT_METHODS.workspaceChange}`,
+    ]);
+    expect(p.managed.agent.extMethodCalls.at(-1)?.params).toEqual({
+      v: 1,
+      revision: 1,
+      kind: 'permissions',
+      tightening: true,
+      cwd: WS_A,
+    });
+    await p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'hi'),
+    );
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: 'managed-2' });
+  });
+
+  it('quarantines an engine that does not acknowledge a permission change and cancels its turn', async () => {
+    const running = deferred<void>();
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { telemetry: quarantine.telemetry },
+      legacySavingRules(),
+      engineChannel('managed', {
+        extMethodImpl: (method) => refuse(method),
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'cancelled' };
+        },
+        cancelImpl: () => running.resolve(),
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const events = collect(p.bridge.subscribeEvents(managed.sessionId));
+    const first = p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'first'),
+    );
+    const queued = p.bridge
+      .sendPrompt(
+        managed.sessionId,
+        prompt(managed.sessionId, 'queued'),
+        undefined,
+        { promptId: 'queued-1' },
+      )
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+
+    const error = await p.bridge
+      .invokeWorkspaceCommand('qwen/permissions/setRules', denyRule)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    expect(error).toMatchObject({
+      revision: 1,
+      kind: 'permissions',
+      result: { deny: ['Bash'] },
+      unacknowledgedChannelIds: [expect.any(String)],
+    });
+    expect(quarantine.named('started')).toEqual([
+      expect.objectContaining({
+        'qwen-code.daemon.acp_channel.execution_engine': 'managed',
+        'qwen-code.daemon.acp_channel.quarantine_reason':
+          'workspace_change_unacknowledged',
+      }),
+    ]);
+
+    // The running turn is cancelled rather than left to settle.
+    await expect(first).resolves.toMatchObject({ stopReason: 'cancelled' });
+    expect(p.managed.agent.cancelCalls).toHaveLength(1);
+    expect(await queued).toMatchObject({
+      reason: 'workspace_change_unacknowledged',
+    });
+    expect(p.managed.agent.promptCalls).toHaveLength(1);
+    p.choose('managed');
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'workspace_change_unacknowledged' });
+
+    // The settled session is closed, and the queued prompt never started.
+    const seen = await events;
+    expect(seen).toContainEqual(
+      expect.objectContaining({
+        type: 'session_closed',
+        data: expect.objectContaining({ reason: 'channel_quarantined' }),
+      }),
+    );
+    expect(
+      seen.filter(
+        (event) =>
+          event['type'] === 'pending_prompt_started' &&
+          event['promptId'] === 'queued-1',
+      ),
+    ).toEqual([]);
+    await vi.waitFor(() => expect(p.managed.killed).toBe(true));
+
+    await p.bridge.sendPrompt(legacy.sessionId, prompt(legacy.sessionId, 'hi'));
+    p.choose('legacy');
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: 'legacy-2' });
+  });
+
+  it('refuses a fenced turn that ignores its cancel any permission or mid-turn input', async () => {
+    const running = deferred<void>();
+    const p = paired(
+      {},
+      legacySavingRules(),
+      engineChannel('managed', {
+        extMethodImpl: (method) => refuse(method),
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'end_turn' };
+        },
+        // This engine ignores the cancel and keeps its turn running.
+        cancelImpl: () => undefined,
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    const turn = p.bridge
+      .sendPrompt(managed.sessionId, prompt(managed.sessionId, 'running'))
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+    expect(
+      p.bridge.enqueueMidTurnMessage(managed.sessionId, 'also this'),
+    ).toMatchObject({ accepted: true });
+
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    try {
+      await vi.waitFor(() =>
+        expect(p.managed.agent.cancelCalls).toHaveLength(1),
+      );
+      await expect(
+        p.managed.agentConnection.requestPermission({
+          sessionId: managed.sessionId,
+          toolCall: { toolCallId: 'tool-1', title: 'run' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        }),
+      ).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+      await expect(
+        p.managed.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+          sessionId: managed.sessionId,
+        }),
+      ).resolves.toMatchObject({ messages: [], items: [] });
+    } finally {
+      running.resolve();
+      await turn;
+    }
+  });
+
+  it('cancels a Goal turn the child starts on a fenced session', async () => {
+    const answer = deferred<Record<string, unknown>>();
+    const p = paired(
+      {},
+      legacySavingRules(),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionBtw
+            ? answer.promise
+            : refuse(method),
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    // Answering a side question, so not settled and kept by the drain.
+    const side = p.bridge.generateSessionBtw(managed.sessionId, 'first');
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    expect(p.managed.agent.cancelCalls).toEqual([]);
+
+    for (const [channel, sessionId] of [
+      [p.legacy, legacy.sessionId],
+      [p.managed, managed.sessionId],
+    ] as const) {
+      await channel.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+      });
+    }
+    await vi.waitFor(() =>
+      expect(p.managed.agent.cancelCalls).toEqual([
+        { sessionId: managed.sessionId },
+      ]),
+    );
+    expect(p.legacy.agent.cancelCalls).toEqual([]);
+    answer.resolve({ sessionId: managed.sessionId, answer: 'done' });
+    await side;
+  });
+
+  it('refuses a prompt the quarantine overtakes while its attachments resolve', async () => {
+    const resolving = deferred<void>();
+    const p = paired(
+      {},
+      legacySavingRules(),
+      engineChannel('managed', { extMethodImpl: (method) => refuse(method) }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    const resolveContent = SessionAttachmentStore.prototype.resolveContent;
+    const spy = vi
+      .spyOn(SessionAttachmentStore.prototype, 'resolveContent')
+      .mockImplementation(async function (
+        this: SessionAttachmentStore,
+        content,
+        memo,
+      ) {
+        await resolving.promise;
+        return resolveContent.call(this, content, memo);
+      });
+    const pending = p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'hi'),
+    );
+    await vi.waitFor(() => expect(spy).toHaveBeenCalled());
+
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    resolving.resolve();
+
+    await expect(pending).rejects.toMatchObject({
+      reason: 'workspace_change_unacknowledged',
+    });
+    expect(p.managed.agent.promptCalls).toEqual([]);
+  });
+
+  it('refuses every other way to start work on a quarantined session', async () => {
+    const answer = deferred<Record<string, unknown>>();
+    const p = paired(
+      { sessionShellCommandEnabled: true },
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionBtw
+            ? answer.promise
+            : refuse(method),
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const { sessionId } = managed;
+    const context = { clientId: managed.clientId };
+    await p.bridge.preheat();
+    // Answering a side question, so not settled and kept by the drain.
+    const side = p.bridge.generateSessionBtw(
+      sessionId,
+      'first',
+      undefined,
+      context,
+    );
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+        { cwd: WS_A },
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+
+    const goal = { expectedGoalId: 'goal-1', expectedRevision: 1 };
+    const starts: Array<[string, () => unknown]> = [
+      ['prompt', () => p.bridge.sendPrompt(sessionId, prompt(sessionId, 'x'))],
+      [
+        'side question',
+        () =>
+          p.bridge.generateSessionBtw(sessionId, 'why?', undefined, context),
+      ],
+      ['recap', () => p.bridge.generateSessionRecap(sessionId, context)],
+      ['continue', () => p.bridge.continueSession(sessionId, context)],
+      [
+        'generation',
+        () =>
+          p.bridge.generateSessionContent!(
+            sessionId,
+            'summarize',
+            new AbortController().signal,
+            context,
+          ),
+      ],
+      [
+        'fork agent',
+        () =>
+          p.bridge.launchSessionForkAgent(sessionId, 'look around', context),
+      ],
+      [
+        'shell command',
+        () => p.bridge.executeShellCommand(sessionId, 'ls', undefined, context),
+      ],
+      [
+        'mid-turn message',
+        () => p.bridge.enqueueMidTurnMessage(sessionId, 'also this', context),
+      ],
+      [
+        'Goal resume',
+        () =>
+          p.bridge.controlSessionGoal(
+            sessionId,
+            { action: 'resume', ...goal },
+            context,
+          ),
+      ],
+      [
+        'workflow run',
+        () =>
+          p.bridge.controlSessionWorkflowTask(
+            sessionId,
+            'saved-flow',
+            'run-saved',
+            context,
+          ),
+      ],
+    ];
+    const refusals: Record<string, unknown> = {};
+    for (const [name, start] of starts) {
+      refusals[name] = await (async () => start())().then(
+        () => 'started',
+        (error: unknown) =>
+          (error as { reason?: unknown }).reason ?? String(error),
+      );
+    }
+    expect(refusals).toEqual(
+      Object.fromEntries(
+        starts.map(([name]) => [name, 'workspace_change_unacknowledged']),
+      ),
+    );
+
+    // Stopping work still reaches the engine.
+    await p.bridge.controlSessionGoal(
+      sessionId,
+      { action: 'pause', ...goal },
+      context,
+    );
+    await p.bridge.controlSessionWorkflowTask(
+      sessionId,
+      'saved-flow',
+      'pause',
+      context,
+    );
+    const workMethods: string[] = [
+      SERVE_CONTROL_EXT_METHODS.sessionBtw,
+      SERVE_CONTROL_EXT_METHODS.sessionRecap,
+      SERVE_CONTROL_EXT_METHODS.sessionContinue,
+      SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+      SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+      SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+    ];
+    expect(
+      p.managed.agent.extMethodCalls
+        .map((call) => call.method)
+        .filter((method) => workMethods.includes(method)),
+    ).toEqual([
+      SERVE_CONTROL_EXT_METHODS.sessionBtw,
+      SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+      SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+    ]);
+    expect(p.managed.agent.promptCalls).toEqual([]);
+    answer.resolve({ sessionId, answer: 'done' });
+    await expect(side).resolves.toMatchObject({ answer: 'done' });
+  });
+
+  it('lets a running turn settle when a change that keeps permissions is not acknowledged', async () => {
+    const running = deferred<void>();
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method, params) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? {
+                v: 1,
+                revision: Number(params['revision']) + 1,
+                acknowledged: true,
+              }
+            : acknowledge(method, params),
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'end_turn' };
+        },
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    const turn = p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'running'),
+    );
+    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+
+    // An answer carrying another revision is not an acknowledgement.
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: WS_A, reason: 'content' },
+      ),
+    ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
+    expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
+      kind: 'skills',
+      tightening: false,
+      reason: 'content',
+    });
+    expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
+      reason: 'workspace_change_unacknowledged',
+    });
+    expect(p.managed.agent.cancelCalls).toEqual([]);
+    running.resolve();
+    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+  });
+
+  it.each([
+    [true, 'cancels'],
+    [false, 'keeps'],
+  ])(
+    'treats a Session Workflow gate of %s as a change that %s running turns',
+    async (enabled) => {
+      const running = deferred<void>();
+      const p = paired(
+        {},
+        engineChannel('legacy'),
+        engineChannel('managed', {
+          extMethodImpl: (method) => refuse(method),
+          promptImpl: async () => {
+            await running.promise;
+            return { stopReason: 'end_turn' };
+          },
+          cancelImpl: () => running.resolve(),
+        }),
+      );
+      const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.preheat();
+      const turn = p.bridge.sendPrompt(
+        managed.sessionId,
+        prompt(managed.sessionId, 'running'),
+      );
+      await vi.waitFor(() =>
+        expect(p.managed.agent.promptCalls).toHaveLength(1),
+      );
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+          { enabled },
+        ),
+      ).rejects.toMatchObject({ kind: 'sessionWorkflow' });
+      expect(
+        p.managed.agent.extMethodCalls.find(
+          (call) => call.method === SERVE_CONTROL_EXT_METHODS.workspaceChange,
+        )?.params,
+      ).toMatchObject({
+        kind: 'sessionWorkflow',
+        tightening: enabled,
+        enabled,
+      });
+      expect(p.managed.agent.cancelCalls).toHaveLength(enabled ? 1 : 0);
+      running.resolve();
+      await turn;
+    },
+  );
+
+  it('ends the quarantine early when every missing change is acknowledged late', async () => {
+    const answers: Array<(value: Record<string, unknown>) => void> = [];
+    const running = deferred<void>();
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? new Promise<Record<string, unknown>>((resolve) =>
+                answers.push(resolve),
+              )
+            : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {},
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'end_turn' };
+        },
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    // A running turn keeps the channel from draining meanwhile.
+    const turn = p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'running'),
+    );
+    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+    for (const reason of ['content', 'settings']) {
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { cwd: WS_A, reason },
+          { timeoutMs: 20 },
+        ),
+      ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    }
+    expect(answers).toHaveLength(2);
+
+    // Revision 1 alone still leaves revision 2 missing.
+    answers[0]({ v: 1, revision: 1, acknowledged: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'workspace_change_unacknowledged' });
+
+    // An answer for another revision does not count.
+    answers[1]({ v: 1, revision: 1, acknowledged: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(quarantine.named('cleared')).toEqual([]);
+    expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
+      reason: 'workspace_change_unacknowledged',
+    });
+    running.resolve();
+    await turn;
+  });
+
+  it('clears the quarantine when the only missing change is acknowledged late', async () => {
+    let answer!: (value: Record<string, unknown>) => void;
+    const running = deferred<void>();
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? new Promise<Record<string, unknown>>((resolve) => {
+                answer = resolve;
+              })
+            : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {},
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'end_turn' };
+        },
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    const turn = p.bridge.sendPrompt(
+      managed.sessionId,
+      prompt(managed.sessionId, 'running'),
+    );
+    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: WS_A, reason: 'content' },
+        { timeoutMs: 20 },
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'workspace_change_unacknowledged' });
+
+    answer({ v: 1, revision: 1, acknowledged: true });
+    await vi.waitFor(() =>
+      expect(quarantine.named('cleared')).toEqual([
+        expect.objectContaining({
+          'qwen-code.daemon.acp_channel.quarantine_reason':
+            'workspace_change_unacknowledged',
+        }),
+      ]),
+    );
+    running.resolve();
+    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await expect(
+      p.bridge.sendPrompt(managed.sessionId, prompt(managed.sessionId, 'next')),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: 'managed-2' });
+    expect(p.managedFactory).toHaveBeenCalledTimes(1);
+  });
+
+  it('lifts the permission fence when the quarantine ends early', async () => {
+    const side = deferred<Record<string, unknown>>();
+    let answer!: (value: Record<string, unknown>) => void;
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { telemetry: quarantine.telemetry },
+      legacySavingRules(),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? new Promise<Record<string, unknown>>((resolve) => {
+                answer = resolve;
+              })
+            : method === SERVE_CONTROL_EXT_METHODS.sessionBtw
+              ? side.promise
+              : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+                ? { closed: true }
+                : {},
+      }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    // Answering a side question, so not settled and kept by the drain.
+    const question = p.bridge.generateSessionBtw(managed.sessionId, 'first');
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule, {
+        timeoutMs: 20,
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    answer({ v: 1, revision: 1, acknowledged: true });
+    await vi.waitFor(() => expect(quarantine.named('cleared')).toHaveLength(1));
+
+    await p.managed.agentConnection.extNotification('_qwencode/start_turn', {
+      sessionId: managed.sessionId,
+      source: 'goal',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(p.managed.agent.cancelCalls).toEqual([]);
+    side.resolve({ sessionId: managed.sessionId, answer: 'done' });
+    await question;
+  });
+
+  it('never ends a quarantine that began for another cause', async () => {
+    vi.useFakeTimers();
+    const abandoned = deferred<NewSessionResponse>();
+    const running = deferred<void>();
+    let answer!: (value: Record<string, unknown>) => void;
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { initializeTimeoutMs: 30, telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        newSessionImpl: (_request, agent) =>
+          agent.newSessionCalls.length === 2
+            ? abandoned.promise
+            : {
+                sessionId: `managed-${agent.newSessionCalls.length}`,
+                ...receipt('managed'),
+              },
+        promptImpl: async () => {
+          await running.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? new Promise<Record<string, unknown>>((resolve) => {
+                answer = resolve;
+              })
+            : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {},
+      }),
+    );
+    const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = p.bridge.sendPrompt(
+      busy.sessionId,
+      prompt(busy.sessionId, 'running'),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await abandonCreationPastGrace(p.bridge, 30);
+    // The late creation settles, so only the episode still holds the channel.
+    abandoned.resolve({ sessionId: 'managed-late', ...receipt('managed') });
+    await flushWithoutTime();
+
+    const change = p.bridge
+      .invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: WS_A, reason: 'content' },
+        { timeoutMs: 20 },
+      )
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await change).toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    answer({ v: 1, revision: 1, acknowledged: true });
+    await flushWithoutTime();
+
+    expect(quarantine.named('cleared')).toEqual([]);
+    expect(promptRefusal(p.bridge, busy.sessionId, 'x')).toMatchObject({
+      reason: 'new_session_settlement_overdue',
+    });
+    running.resolve();
+    await turn;
+  });
+
+  it('never ends the quarantine of a channel that is already terminating', async () => {
+    const running = deferred<void>();
+    const exiting = deferred<void>();
+    let answer!: (value: Record<string, unknown>) => void;
+    const quarantine = recordQuarantineEvents();
+    const managed = engineChannel('managed', {
+      promptImpl: async () => {
+        await running.promise;
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+          ? new Promise<Record<string, unknown>>((resolve) => {
+              answer = resolve;
+            })
+          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+    });
+    const kill = managed.channel.kill;
+    managed.channel.kill = async () => {
+      await exiting.promise;
+      await kill();
+    };
+    const p = paired(
+      { quarantineDrainTimeoutMs: 50, telemetry: quarantine.telemetry },
+      engineChannel('legacy'),
+      managed,
+    );
+    const busy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = p.bridge
+      .sendPrompt(busy.sessionId, prompt(busy.sessionId, 'running'))
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(managed.agent.promptCalls).toHaveLength(1));
+    try {
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { cwd: WS_A, reason: 'content' },
+          { timeoutMs: 20 },
+        ),
+      ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+      // The deadline starts termination; the child is slow to exit.
+      await vi.waitFor(() =>
+        expect(quarantine.named('deadline')).toHaveLength(1),
+      );
+      answer({ v: 1, revision: 1, acknowledged: true });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(quarantine.named('cleared')).toEqual([]);
+    } finally {
+      exiting.resolve();
+      running.resolve();
+      await turn;
+    }
+  });
+
+  it('never sends the change to a Legacy channel that replaced workspace control', async () => {
+    const hung = deferred<void>();
+    const exiting = deferred<void>();
+    const p = restartable(
+      {},
+      {
+        legacy: {
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.workspaceReload) {
+              await hung.promise;
+            }
+            return {};
+          },
+        },
+        managed: { extMethodImpl: acknowledge },
+      },
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    const first = p.channels.legacy[0];
+    const kill = first.channel.kill;
+    first.channel.kill = async () => {
+      await exiting.promise;
+      await kill();
+    };
+    try {
+      const reload = p.bridge
+        .invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          { cwd: WS_A },
+          { timeoutMs: 20 },
+        )
+        .catch((error: unknown) => error);
+      // The timed-out Legacy child is exiting; a replacement starts meanwhile.
+      await vi.waitFor(() =>
+        expect(p.bridge.isWorkspaceControlLive?.()).toBe(false),
+      );
+      await p.bridge.preheat();
+      exiting.resolve();
+
+      // Managed acknowledged, so the Legacy timeout comes back unchanged.
+      expect(await reload).toBeInstanceOf(BridgeTimeoutError);
+      expect(p.channels.legacy).toHaveLength(2);
+      expect(changes(p.channels.legacy[1])).toEqual([]);
+      expect(changes(p.channels.managed[0])).toEqual(['settings']);
+      p.choose('legacy');
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toBeDefined();
+    } finally {
+      hung.resolve();
+      exiting.resolve();
+    }
+  });
+
+  it('counts an engine that exits during delivery as settled', async () => {
+    const p: ReturnType<typeof restartable> = restartable(
+      {},
+      {
+        managed: {
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.workspaceChange) {
+              p.channels.managed[0].crash();
+              return new Promise<Record<string, unknown>>(() => {});
+            }
+            return method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {};
+          },
+        },
+      },
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: WS_A, reason: 'content' },
+      ),
+    ).resolves.toEqual({});
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toBeDefined();
+    expect(p.channels.managed).toHaveLength(2);
+  });
+
+  it('retires an unacknowledged channel once its sessions settle', async () => {
+    const p = restartable(
+      {},
+      { managed: { extMethodImpl: (method) => refuse(method) } },
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+        { cwd: WS_A },
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    await vi.waitFor(() => expect(p.channels.managed[0].killed).toBe(true));
+    expect(() => p.bridge.getSessionSummary(managed.sessionId)).toThrow(
+      SessionNotFoundError,
+    );
+    await vi.waitFor(() =>
+      expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toBeDefined(),
+    );
+    expect(p.channels.managed).toHaveLength(2);
+  });
+
+  it('sends a change already on disk to other engines when workspace control is not live', async () => {
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', { extMethodImpl: acknowledge }),
+    );
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceReload,
+        {
+          cwd: WS_A,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(changes(p.managed)).toEqual(['settings']);
+    expect(p.legacyFactory).not.toHaveBeenCalled();
+  });
+
+  it('leaves every engine alone when a workspace stop is in progress', async () => {
+    const closing = deferred<void>();
+    const p = restartable(
+      {},
+      {
+        managed: {
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              await closing.promise;
+            }
+            return refuse(method);
+          },
+        },
+      },
+    );
+    await p.bridge.preheat();
+    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const managed = p.channels.managed[0];
+    const stop = p.bridge.stopWorkspaceRuntime!(stopConfirmation(p.bridge));
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls.at(-1)?.method).toBe(
+        SERVE_CONTROL_EXT_METHODS.sessionClose,
+      ),
+    );
+    try {
+      await expect(
+        p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
+      ).rejects.toBeInstanceOf(WorkspaceDrainingError);
+      expect(changes(managed)).toEqual([]);
+      expect(managed.agent.cancelCalls).toEqual([]);
+    } finally {
+      closing.resolve();
+      await stop;
+    }
   });
 });

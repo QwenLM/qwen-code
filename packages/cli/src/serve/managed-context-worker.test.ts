@@ -1296,7 +1296,10 @@ describe('Managed Workspace execution activation', () => {
     ).toBe('success');
   });
 
-  it('refuses release while an invocation is active, and retains status/cancel after directory loss', async () => {
+  // Starts a shell call in the Session's `child` directory that runs for 30
+  // seconds unless it is cancelled. The call reports `executing` before its
+  // shell starts; the shell writes `started.txt` once it runs in the directory.
+  async function startSlowCall() {
     const root = workspace();
     fs.mkdirSync(path.join(root, 'child'));
     const origin = await startWorker({
@@ -1312,41 +1315,76 @@ describe('Managed Workspace execution activation', () => {
     const call = shell(
       request.sessionId,
       'slow',
-      'sleep 30 # intentional-sleep: in-flight release test',
+      'echo started > started.txt && sleep 30 # intentional-sleep: in-flight release test',
     );
     const running = post(origin, EXECUTE, call);
+    // A test that fails before cancel() must not leave this unobserved.
+    running.catch(() => undefined);
     const lookup = {
       protocolVersion: 2,
       reference: call.reference,
       afterSequence: 0,
     };
+    const status = async () =>
+      (await (await post(origin, STATUS, lookup)).json()).state;
     await vi.waitFor(async () => {
-      expect((await (await post(origin, STATUS, lookup)).json()).state).toBe(
-        'executing',
-      );
+      expect(await status()).toBe('executing');
     });
-    expect(
-      (await post(origin, ACTIVATION, activation(request, 'release'))).status,
-    ).toBe(409);
-    fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
-    expect(
-      (
-        await post(origin, CANCEL, {
-          protocolVersion: 2,
-          reference: call.reference,
-        })
-      ).status,
-    ).toBe(200);
-    expect((await (await running).json()).result.executionStatus).toBe(
-      'cancelled',
-    );
-    expect((await (await post(origin, STATUS, lookup)).json()).state).toBe(
-      'settled',
-    );
-    expect(
-      (await post(origin, ACTIVATION, activation(request, 'release'))).status,
-    ).toBe(200);
+    const cancel = async () => {
+      const cancelled = await post(origin, CANCEL, {
+        protocolVersion: 2,
+        reference: call.reference,
+      });
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toMatchObject({
+        state: 'cancel_requested',
+      });
+      // A cancel that does not stop the shell would still settle as cancelled
+      // once `sleep 30` ends, so the call must settle well before that.
+      await vi.waitFor(
+        async () => {
+          expect(await status()).toBe('settled');
+        },
+        { timeout: 10_000 },
+      );
+      expect((await (await running).json()).result.executionStatus).toBe(
+        'cancelled',
+      );
+    };
+    const release = async () =>
+      (await post(origin, ACTIVATION, activation(request, 'release'))).status;
+    return { root, status, cancel, release };
+  }
+
+  it('refuses release while an invocation is active, and allows it once the invocation settles', async () => {
+    const { cancel, release } = await startSlowCall();
+
+    expect(await release()).toBe(409);
+    await cancel();
+    expect(await release()).toBe(200);
   });
+
+  // Windows refuses to rename a directory that a running process works in, and
+  // the call's shell works in this one, so there it cannot be lost this way.
+  it.skipIf(process.platform === 'win32')(
+    'retains status and cancel for an active invocation after its directory is lost',
+    async () => {
+      const { root, status, cancel, release } = await startSlowCall();
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(root, 'child', 'started.txt'))).toBe(
+            true,
+          );
+        },
+        { timeout: 10_000 },
+      );
+
+      fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
+      expect(await status()).toBe('executing');
+      await cancel();
+      expect(await release()).toBe(200);
+    },
+  );
 
   it('rechecks a closed gate after an asynchronous tool resolver returns', async () => {
     const root = workspace();
