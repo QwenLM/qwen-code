@@ -159,8 +159,14 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
 
 /**
  * Disposable build output at the root (`node_modules/`) or as a workspace
- * package's own ignored directory (`packages/app/node_modules/`), which is
- * how git lists the output of an install or build in a monorepo.
+ * package's own ignored directory (`packages/app/node_modules/`). That nested
+ * rendering depends on how the ignore rule is spelled rather than holding for
+ * every monorepo: git collapses the entry to `!! <dir>/` only when a rule
+ * matches the *directory* itself (`node_modules/`, or a bare `node_modules`).
+ * A rule matching the directory's *contents* instead (a package-local
+ * `node_modules/**`) makes git list them individually
+ * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
+ * so such a tree still counts as work and the checkout is preserved.
  */
 function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
