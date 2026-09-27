@@ -15,19 +15,19 @@ On Windows, commands are executed with `cmd.exe /c`. On other platforms, they ar
 - `command` (string, required): The exact shell command to execute.
 - `description` (string, optional): A brief description of the command's purpose, which will be shown to the user.
 - `directory` (string, optional): The directory (relative to the project root) in which to execute the command. If not provided, the command runs in the project root.
-- `is_background` (boolean, required): Whether to run the command in background. This parameter is required to ensure explicit decision-making about command execution mode. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands. Set to false for one-time commands that should complete before proceeding.
+- `is_background` (boolean, optional): Whether to run the command in background. If not specified, defaults to `false` (foreground execution). Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.
 
 ## How to use `run_shell_command` with Qwen Code
 
-When using `run_shell_command`, the command is executed as a subprocess. You can control whether commands run in background or foreground using the `is_background` parameter, or by explicitly adding `&` to commands. The tool returns detailed information about the execution, including:
+When using `run_shell_command`, the command is executed as a subprocess. Whether it runs in the background or in the foreground is controlled by the `is_background` parameter; on the managed background path a bare trailing `&` is stripped as redundant, because that path is itself the backgrounding mechanism. The tool returns detailed information about the execution, including:
 
-### Required Background Parameter
+### The `is_background` Parameter
 
-The `is_background` parameter is **required** for all command executions. This design ensures that the LLM (and users) must explicitly decide whether each command should run in the background or foreground, promoting intentional and predictable command execution behavior. By making this parameter mandatory, we avoid unintended fallback to foreground execution, which could block subsequent operations when dealing with long-running processes.
+`is_background` is optional — the tool's schema requires only `command` — and when it is omitted the command runs in the foreground. The decision that has to be explicit is therefore the other one: a command that will not stop on its own must be marked `is_background: true`, because leaving it in the foreground blocks the turn until it times out.
 
 ### Background vs Foreground Execution
 
-The tool intelligently handles background and foreground execution based on your explicit choice:
+The tool handles background and foreground execution based on that parameter:
 
 **Use background execution (`is_background: true`) for:**
 
@@ -37,13 +37,9 @@ The tool intelligently handles background and foreground execution based on your
 - Web servers: `python -m http.server`, `php -S localhost:8000`
 - Any command expected to run indefinitely until manually stopped
 
-**Use foreground execution (`is_background: false`) for:**
+**Use foreground execution (the default) for** commands that finish on their own, such as builds, installs, git operations, and test runs.
 
-- One-time commands: `ls`, `cat`, `grep`
-- Build commands: `npm run build`, `make`
-- Installation commands: `npm install`, `pip install`
-- Git operations: `git commit`, `git push`
-- Test runs: `npm test`, `pytest`
+Reading and searching files are not foreground candidates for this tool at all: use the dedicated tools (`read_file`, `grep_search`, `glob`) instead of `cat`, `grep`, or `find`, which the tool's own description rules out.
 
 ### Execution Information
 
@@ -64,7 +60,7 @@ Usage:
 run_shell_command(command="Your commands.", description="Your description of the command.", directory="Your execution directory.", is_background=false)
 ```
 
-**Note:** The `is_background` parameter is required and must be explicitly specified for every command execution.
+**Note:** `is_background` is optional. Omitting it runs the command in the foreground, so the case that needs an explicit `true` is a command that will not stop on its own.
 
 ## `run_shell_command` examples
 
