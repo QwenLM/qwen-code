@@ -1,0 +1,58 @@
+# 用于 TUI 回退映射的稳定 prompt 身份
+
+[English](rewind-stable-prompt-identity.md) | [简体中文](rewind-stable-prompt-identity.zh-CN.md)
+
+## 问题
+
+TUI 回退（rewind）此前通过统计两套互相独立的表示，来对齐可见的用户轮次与面向模型的历史。
+被清除的媒体等不可见条目会让这两个计数不一致，从而选中错误的截断边界。
+
+## 决策
+
+使用 `promptId` 作为可见用户轮次与其面向模型的 prompt 所共享的权威身份。
+
+- 把该 id 持久化在用户 `ChatRecord` 上。
+- 以 Symbol 元数据的形式挂到对应的内存态 API `Content` 上，因此不会被发送给模型提供方。
+- 在记录、压缩、resume 与 branch 各条路径上保留该元数据。
+- 当恰好只有一条模型历史条目携带该 id 时，通过精确的 id 查找来解析被标识的回退目标。
+- 当任意一侧出现重复 id 时返回 `-1`：存在两个声明者意味着位置映射只能在它们之间靠猜。
+- 当没有任何模型历史条目携带该 id 时，回落到位置映射。只有第一方用户 prompt 会被打标记——
+  retry、continuation、tool result 与 cron 发送都刻意不打——因此"没有标记"是预期状态，而不是歧义。
+- 对没有 id 的历史轮次，以及 id 仅为 file-history key 的已恢复 checkpoint 条目，保留既有的位置映射。
+
+第一个可见轮次仍然解析到已知的 startup-context 边界。
+既有的压缩守卫继续拒绝那些已被无标记压缩前缀吸收的轮次。
+
+## 身份生命周期
+
+交互式、headless 与 ACP 三类入口都会铸造形如 `sessionId########<counter>` 的 id。
+resume 与 fork 路径会把计数器播种（seed）到该 transcript 的记录所声明的身份之上，
+使新轮次不会复用已有的 key。所有被播种的入口都以同一种方式推导该值，
+只依据已记录的 prompt id（`computeResumedPromptCountSeed`），因此不存在某个入口比别的入口播得更远的情况。
+
+重复 id 仍然可能出现：本次改动之前写下的 transcript 不带记录级 id；
+而当一次"仅回退对话"的操作把某个轮次从 transcript 中丢掉时，
+file-history snapshot 的 key 可能比声明它的轮次活得更久。
+因此两侧都选择显式失败而不是靠猜——对话截断要求恰好只有一条匹配的 API 条目，
+而 `FileHistoryService.rewind` 会拒绝被多个 snapshot 同时穿戴的 key，
+否则它会把共享 key 解析到最后一次出现的位置，然后裁剪掉更新的备份。
+该拒绝是文件侧唯一的守卫；TUI 通过既有的 restore 错误路径把它呈现给用户，
+而不是自己先跑一遍统计（census）。
+
+压缩记录会把 prompt id 持久化为一个与其历史快照平行的数组。
+恢复某个压缩 checkpoint 时，会把每个 id 重新挂回同一条目。
+
+## 范围
+
+本次改动为 TUI 回退提供稳定的轮次身份，以及维持该身份稳定所需的持久化路径。
+它不引入文本归属（text ownership）、通知来源（notification provenance）、
+序号对账（ordinal reconciliation）或其他对齐启发式；
+那些做法会重新造出本设计意图消除的"双权威"问题。
+
+以下内容也是刻意排除在外的：
+
+- 为 OpenTUI 后端自己的 prompt 计数器播种。OpenTUI 是一个 opt-in 的渲染器，
+  自身没有回退界面，而它的计数器也不是 TUI 回退路径所读取的那一个。
+- 把播种范围扩大到已保留的 file-history snapshot key 之上。
+  只对一个入口这么做、而其他入口不做，正是当年那个下限（floor）变得不完整的原因；
+  改为由上面那处显式拒绝来统一覆盖该隐患。

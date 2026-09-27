@@ -1420,12 +1420,8 @@ export const useLlmStream = (
     // lives — tools get cancelled and handleCompletedTools returns early.
     config.getArenaAgentClient()?.reportCancelled();
 
-    // Log API cancellation. Prefer the id the in-flight interaction already
-    // minted: a fresh mint inside a session-swap window names the incoming
-    // session and no longer identifies the turn being cancelled.
-    const prompt_id =
-      activeInteractionPromptId ??
-      config.getSessionId() + '########' + getPromptCount();
+    // Log API cancellation
+    const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
       modelOverrideRef.current ?? config.getModel(),
       prompt_id,

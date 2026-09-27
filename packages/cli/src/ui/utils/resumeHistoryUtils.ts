@@ -15,7 +15,6 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
-  FileHistorySnapshotRecordPayload,
   GoalSnapshotV2,
   GoalStateCause,
   HistoryGap,
@@ -741,59 +740,16 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
 }
 
 /**
- * The highest turn ordinal a retained file-history snapshot key claims, or -1.
- * A conversation-only rewind drops the target turn from the transcript but
- * re-records the surviving snapshots — the dropped turn's included — on the
- * active branch, so the id space the seed must clear is wider than the
- * surviving user turns: the first post-resume submit must not re-mint a key
- * a retained snapshot still wears, or the shared-key refusal blocks that
- * turn's file restore (R48-1).
- */
-function computeRetainedFileSnapshotTurn(
-  records: readonly ChatRecord[],
-  sessionId: string,
-): number {
-  const prefix = `${sessionId}########`;
-  let maxTurn = -1;
-  for (const record of records) {
-    if (
-      record.type !== 'system' ||
-      record.subtype !== 'file_history_snapshot'
-    ) {
-      continue;
-    }
-    const payload = record.systemPayload as
-      | FileHistorySnapshotRecordPayload
-      | undefined;
-    if (!payload || !Array.isArray(payload.snapshots)) continue;
-    for (const snapshot of payload.snapshots) {
-      const promptId = snapshot?.promptId;
-      if (typeof promptId !== 'string' || !promptId.startsWith(prefix)) {
-        continue;
-      }
-      const suffix = promptId.slice(prefix.length);
-      if (/^\d+$/.test(suffix)) {
-        maxTurn = Math.max(maxTurn, Number(suffix));
-      }
-    }
-  }
-  return maxTurn;
-}
-
-/**
  * Prompt-counter seed for an entrance that just loaded resumed or restored
- * history (startup --resume, in-session /resume, /branch, session switch).
- * The counter must restart past every identity the transcript claims —
- * re-minting an id a surviving resumed turn still wears collapses the
- * rewind identity resolution to a duplicate. ACP and headless mint
- * `sessionId########<n>` 1-based and skip turns that write no record, so the
- * highest claimed turn sits above the record count; the TUI mints
- * pre-increment, hence the +1. Never below the user-turn count, for
- * transcripts whose records predate claims, and past every retained
- * file-history snapshot key (see computeRetainedFileSnapshotTurn). Returns 0
- * when the transcript holds no user turns and no retained snapshots — a
- * no-op for the monotonic seed consumers, so callers pass the result
- * through unconditionally.
+ * history (startup --resume, in-session /resume, /branch). The counter must
+ * restart past every identity the transcript claims — re-minting an id a
+ * surviving resumed turn still wears collapses the rewind identity resolution
+ * to a duplicate. ACP and headless mint `sessionId########<n>` 1-based and
+ * skip turns that write no record, so the highest claimed turn sits above the
+ * record count; the TUI mints pre-increment, hence the +1. Never below the
+ * user-turn count, for transcripts whose records predate claims. Returns 0
+ * when the transcript holds no user turns — a no-op for the monotonic seed
+ * consumers, so callers pass the result through unconditionally.
  */
 export function computeResumedPromptCountSeed(
   records: readonly ChatRecord[],
@@ -805,17 +761,12 @@ export function computeResumedPromptCountSeed(
       m.subtype !== 'mid_turn_user_message' &&
       m.subtype !== 'realtime_message',
   ).length;
-  const retainedSnapshotTurn = computeRetainedFileSnapshotTurn(
-    records,
-    sessionId,
-  );
   if (userTurnCount === 0) {
-    return retainedSnapshotTurn + 1;
+    return 0;
   }
   return Math.max(
     userTurnCount,
     computeInitialTurnFromHistory(records, sessionId) + 1,
-    retainedSnapshotTurn + 1,
   );
 }
 

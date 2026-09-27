@@ -4256,36 +4256,6 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // A session whose counter restarted on resume can hold TWO file
-        // snapshots wearing the same promptId. The file consumer resolves a
-        // shared key by last occurrence — the wrong turn's snapshot — then
-        // prunes the newer snapshots and permanently deletes their backups.
-        // Refuse before validating the conversation cut: that check fails for
-        // its own reasons on the same ambiguous turn and would report
-        // "compressed" instead. The census reads the snapshot array, not the
-        // UI items: a conversation-only rewind drops the twin's UI item while
-        // both snapshots survive.
-        const promptId = (userItem as HistoryItemUser).promptId;
-        const promptIdIsShared =
-          option !== 'conversation' && promptId
-            ? config
-                .getFileHistoryService()
-                .getSnapshots()
-                .filter((s) => s.promptId === promptId).length > 1
-            : false;
-        if (promptIdIsShared) {
-          historyManager.addItem(
-            {
-              type: 'error',
-              text: t(
-                'Cannot restore files: this turn shares its checkpoint identity with another turn.',
-              ),
-            },
-            Date.now(),
-          );
-          return;
-        }
-
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4343,6 +4313,7 @@ export const AppContainer = (props: AppContainerProps) => {
         let fileRestoreError: string | undefined;
         let hasRestoreFailure = false;
         if (option === 'code' || option === 'both') {
+          const promptId = (userItem as HistoryItemUser).promptId;
           if (promptId) {
             try {
               const truncateHistory =

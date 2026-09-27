@@ -2304,58 +2304,7 @@ describe('resumed promptId attachment', () => {
 });
 
 describe('computeResumedPromptCountSeed', () => {
-  const rec = (over: Record<string, unknown>) =>
-    ({
-      sessionId: 's',
-      timestamp: new Date().toISOString(),
-      version: '1',
-      ...over,
-    }) as unknown as ChatRecord;
-
-  it('seeds past a file-history snapshot key a dropped turn retained', () => {
-    // A conversation-only rewind drops the target turn from the transcript
-    // but re-records the surviving file-history snapshots — the dropped
-    // turn's included — on the active branch. A seed derived only from the
-    // surviving user turns re-mints that key on the first post-resume
-    // submit, and the shared-key refusal then blocks that turn's file
-    // restore (R48-1).
-    const records = [
-      rec({
-        type: 'user',
-        promptId: 's########0',
-        message: { role: 'user', parts: [{ text: 'first prompt' }] },
-      }),
-      rec({
-        type: 'assistant',
-        message: { role: 'model', parts: [{ text: 'r0' }] },
-      }),
-      rec({
-        type: 'user',
-        promptId: 's########1',
-        message: { role: 'user', parts: [{ text: 'second prompt' }] },
-      }),
-      rec({
-        type: 'assistant',
-        message: { role: 'model', parts: [{ text: 'r1' }] },
-      }),
-      rec({
-        type: 'system',
-        subtype: 'file_history_snapshot',
-        systemPayload: {
-          snapshots: [
-            {
-              promptId: 's########2',
-              trackedFileBackups: {},
-              timestamp: new Date().toISOString(),
-            },
-          ],
-        },
-      }),
-    ];
-    expect(computeResumedPromptCountSeed(records, 's')).toBe(3);
-  });
-
-  it('keeps seeding from zero when no turn or snapshot claims an id', () => {
+  it('keeps seeding from zero when no turn claims an id', () => {
     expect(computeResumedPromptCountSeed([], 's')).toBe(0);
   });
 });
