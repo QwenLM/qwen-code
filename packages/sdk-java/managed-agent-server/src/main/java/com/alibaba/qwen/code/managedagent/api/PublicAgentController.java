@@ -61,12 +61,12 @@ public class PublicAgentController {
         }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), idempotencyKey,
-                        request.agentId(), null, request.metadata(),
-                        request.input())
+                        request.agentId(), request.agentRevision(), null,
+                        request.metadata(), request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
-                        request.agentId(), null, request.metadata(),
-                        request.input(), selection);
+                        request.agentId(), request.agentRevision(), null,
+                        request.metadata(), request.input(), selection);
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
