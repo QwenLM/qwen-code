@@ -13,6 +13,8 @@ import type { BridgeExecutionEngine } from './bridgeOptions.js';
 export interface HarnessChannel {
   readonly id: string;
   readonly executionEngine?: BridgeExecutionEngine;
+  /** Epoch allocated when the handshake completed; 0 until then. */
+  runtimeEpoch: number;
   lastUsedAt: number;
   readonly channel: AcpChannel;
   readonly connection: ClientSideConnection;

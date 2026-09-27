@@ -100,6 +100,8 @@ export interface WorkflowRunnerOptions {
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /** Client-started tools have no model tool-result continuation. */
+  notifyOnCompletion?: boolean;
   /**
    * Where this session's authoring reference is, sent with a failed background
    * run's completion notification. Omitted for a script the model did not
@@ -550,6 +552,7 @@ export class WorkflowRunner {
         script,
         scriptPath,
         ...(journalPath ? { journalPath } : {}),
+        snapshotPath: storage?.getWorkflowRunSnapshotPath?.(runId),
         // A saved workflow is the user's file, and the recovery advice says to
         // copy it first. The name is resolved here — from the resumed run
         // too, which a caller re-running a saved workflow's inline source
@@ -566,6 +569,7 @@ export class WorkflowRunner {
             }
           : {}),
         isBackgrounded: runInBackground,
+        notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
           runInBackground &&
           config.isInteractive?.() === true &&
@@ -842,6 +846,7 @@ export class WorkflowRunner {
           return { ok: false, message, details };
         } finally {
           controller.abort();
+          emitUpdate();
           if (entry && isTerminalWorkflowStatus(entry.status)) {
             // Capture the telemetry projection before the first await:
             // the finally path from complete()/fail() up to here has no

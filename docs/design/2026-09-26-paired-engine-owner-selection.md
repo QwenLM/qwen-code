@@ -180,4 +180,5 @@ classification changes.
 - The selector is not wired. B2d must construct it with the runtime's session
   base directory and decide new-session selection. The questions in #12737
   about selector inputs, propagation failure, quarantine recovery and the
-  Hosted boundary are not decided by this slice.
+  Hosted boundary are not decided by this slice. B2d is designed in
+  [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
