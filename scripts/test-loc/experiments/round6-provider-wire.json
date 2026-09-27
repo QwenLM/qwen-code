@@ -1,0 +1,216 @@
+{
+  "baselineCommit": "37412a57d4",
+  "hypothesis": "Three strict-endpoint provider suites duplicate one fixed reasoning-history contract and the same two-turn HTTP lifecycle. Share that complete contract while retaining named provider-local routing inputs, explicit handwritten expected assistants, distinct-reasoning and declared-profile exceptions; include the new test-utils helper in size accounting.",
+  "testFiles": [
+    "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+    "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+    "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts"
+  ],
+  "helperFiles": [
+    "packages/core/src/core/openaiContentGenerator/provider/test-utils/reasoning-wire-contract.ts"
+  ],
+  "mappings": [
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+      "before": "Cerebras provider outbound compatibility filtering strips reasoning_content from outgoing requests for api.cerebras.ai without mutating the source history",
+      "after": "Cerebras provider outbound compatibility filtering strips reasoning_content from outgoing requests for api.cerebras.ai without mutating the source history",
+      "reason": "Exact api.cerebras.ai, qwen-3.8-27b request/config model, all three original messages and prompt-123 remain. Complete outbound messages preserve the two user messages and require the stripped assistant; whole source-request equality retains and extends the original reasoning_content nonmutation assertion.",
+      "assertionExecutionsBefore": 2,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+      "before": "Cerebras provider outbound compatibility filtering strips reasoning_content for Cerebras subdomains",
+      "after": "Cerebras provider outbound compatibility filtering strips reasoning_content for Cerebras subdomains",
+      "reason": "proxy.api.cerebras.ai and provider model gpt-oss-120b remain separate from the unchanged qwen-3.8-27b request model. Complete messages retain the original exact stripped-assistant check and add surrounding-message/source-history preservation.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+      "before": "Cerebras provider outbound compatibility filtering does not treat hostile hostnames containing api.cerebras.ai as Cerebras",
+      "after": "Cerebras provider outbound compatibility filtering does not treat hostile hostnames containing api.cerebras.ai as Cerebras",
+      "reason": "The hostile api.cerebras.ai.evil.example hostname and gpt-4o provider config remain a distinct named case. Complete assistant equality retains reasoning_content and pins its role/content; the original qwen-3.8-27b request and surrounding messages remain unchanged.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+      "before": "Cerebras provider outbound compatibility filtering preserves reasoning_content for non-Cerebras OpenAI-compatible providers",
+      "after": "Cerebras provider outbound compatibility filtering preserves reasoning_content for non-Cerebras OpenAI-compatible providers",
+      "reason": "The api.openai.com/gpt-4o provider configuration remains a distinct named case with the original qwen-3.8-27b request model. Complete output and source equality include the former reasoning_content assertion.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+      "before": "multi-turn against a Cerebras-like strict endpoint (issue #11045) replays reasoning history on follow-up turns without shipping reasoning_content",
+      "after": "multi-turn against a Cerebras-like strict endpoint (issue #11045) replays reasoning history on follow-up turns without shipping reasoning_content",
+      "reason": "The same real Cerebras provider is explicitly wired to 127.0.0.1/v1, with the original two requests, prompt-1/prompt-2, responses, raw reasoning_content rejection predicate and HTTP 400 payload. Two response checks remain; one exact two-request messages oracle replaces follow-up messages-defined, partial assistant and forbidden-field assertions and also checks first-turn shape, ordering and exactly two requests.",
+      "assertionExecutionsBefore": 5,
+      "expectedAssertionExecutionsAfter": 3
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "Fireworks provider reasoning-mirror suppression (issue #11657) drops the mirrored reasoning field for api.fireworks.ai while preserving reasoning_content, without mutating the source history",
+      "after": "Fireworks provider reasoning-mirror suppression (issue #11657) drops the mirrored reasoning field for api.fireworks.ai while preserving reasoning_content, without mutating the source history",
+      "reason": "Exact api.fireworks.ai/inference/v1 and accounts/fireworks/models/qwen3p8-max remain. Complete outbound messages require reasoning_content without its reasoning mirror, and whole source equality retains the former absent source reasoning check while protecting every original field.",
+      "assertionExecutionsBefore": 2,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "Fireworks provider reasoning-mirror suppression (issue #11657) drops the mirrored reasoning field for Fireworks subdomains",
+      "after": "Fireworks provider reasoning-mirror suppression (issue #11657) drops the mirrored reasoning field for Fireworks subdomains",
+      "reason": "inference.api.fireworks.ai/v1 and the original Qwen3 model remain. Handwritten complete assistant equality preserves reasoning_content and excludes reasoning; whole source and surrounding-message equality are added.",
+      "assertionExecutionsBefore": 2,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "Fireworks provider reasoning-mirror suppression (issue #11657) does not treat hostile hostnames containing api.fireworks.ai as Fireworks",
+      "after": "Fireworks provider reasoning-mirror suppression (issue #11657) does not treat hostile hostnames containing api.fireworks.ai as Fireworks",
+      "reason": "The hostile api.fireworks.ai.evil.example hostname remains a distinct named case with the original Qwen3 request/config models. The manually specified assistant includes both reasoning_content and its default-provider reasoning mirror, retaining the original mirror check.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "Fireworks provider reasoning-mirror suppression (issue #11657) keeps an explicit reasoning field that differs from reasoning_content",
+      "after": "Fireworks provider reasoning-mirror suppression (issue #11657) keeps an explicit reasoning field that differs from reasoning_content",
+      "reason": "The original explicit reasoning value Canonical reasoning field remains different from The user said test. in reasoning_content. Complete expected assistant preserves both values and surrounding messages; source equality also checks nonmutation. The input assistant is copied before dispatch, so the handwritten expected object cannot be mutated through the request.",
+      "assertionExecutionsBefore": 2,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "Fireworks provider reasoning-mirror suppression (issue #11657) leaves non-Fireworks qwen3 endpoints mirroring as before",
+      "after": "Fireworks provider reasoning-mirror suppression (issue #11657) leaves non-Fireworks qwen3 endpoints mirroring as before",
+      "reason": "The non-Fireworks api.openai.com endpoint and accounts/other-vendor/models/qwen3-something provider model remain, while the request retains accounts/fireworks/models/qwen3p8-max. The complete manually specified assistant retains the former mirror assertion and pins reasoning_content/role/content.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+      "before": "tool-call continuation against a Fireworks-like strict endpoint (issue #11657) continues a qwen3 tool-call conversation without shipping the mirrored reasoning field",
+      "after": "tool-call continuation against a Fireworks-like strict endpoint (issue #11657) continues a qwen3 tool-call conversation without shipping the mirrored reasoning field",
+      "reason": "The same real Fireworks provider is explicitly wired to 127.0.0.1/inference/v1. The original two text-history inputs, prompts, responses, assistant-only reasoning-property rejection predicate and HTTP 400 detail payload remain. Two response checks remain; exact messages for both requests replace the former three partial follow-up checks. The legacy case name mentions tool-call continuation, but its existing fixture contains text and thought parts, not an actual function call; this experiment preserves that scope.",
+      "assertionExecutionsBefore": 5,
+      "expectedAssertionExecutionsAfter": 3
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+      "before": "Mistral provider outbound compatibility filtering strips reasoning_content from outgoing requests for api.mistral.ai without mutating the source history",
+      "after": "Mistral provider outbound compatibility filtering strips reasoning_content from outgoing requests for api.mistral.ai without mutating the source history",
+      "reason": "Exact api.mistral.ai with strict-chat-alias provider model remains independent of the mistral-large-latest request model. Say OK / OK / User asked for a short response. / Say OK again remain literal inputs. Exact messages retain the stripped-assistant check; whole source equality retains and strengthens the original reasoning-content preservation check.",
+      "assertionExecutionsBefore": 2,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+      "before": "Mistral provider outbound compatibility filtering preserves declared DeepSeek history on a Mistral-named gateway alias",
+      "after": "Mistral provider outbound compatibility filtering preserves declared DeepSeek history on a Mistral-named gateway alias",
+      "reason": "The gateway.example/v1 Mistral-named model and explicit openai auth retain the deepseek-openai profile, high/max efforts, high default effort and original prompt identifier prompt. The expected preserved assistant is now handwritten fixture data rather than the possibly mutated production input; complete output/source equality guards both preservation and nonmutation.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+      "before": "Mistral provider outbound compatibility filtering also strips reasoning_content when a Mistral model is served behind a custom base URL",
+      "after": "Mistral provider outbound compatibility filtering also strips reasoning_content when a Mistral model is served behind a custom base URL",
+      "reason": "The custom strict-proxy.example.com URL and mixed-case Mistral-Large-Latest provider model remain, with the original lower-case request model and Say OK history. Exact outbound messages include the original stripped assistant; source equality is added.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+      "before": "Mistral provider outbound compatibility filtering preserves reasoning_content for non-Mistral OpenAI-compatible providers",
+      "after": "Mistral provider outbound compatibility filtering preserves reasoning_content for non-Mistral OpenAI-compatible providers",
+      "reason": "The api.openai.com/gpt-4o configuration remains separate from the Mistral request model. The manually specified complete assistant retains reasoning_content and pins the original role/content; source and surrounding messages are checked.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    },
+    {
+      "testFile": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+      "before": "Mistral provider outbound compatibility filtering does not treat hostile hostnames containing api.mistral.ai as Mistral",
+      "after": "Mistral provider outbound compatibility filtering does not treat hostile hostnames containing api.mistral.ai as Mistral",
+      "reason": "The hostile api.mistral.ai.evil.example/gpt-4o configuration remains a separate case with the original Mistral request model. Complete assistant equality retains the original reasoning_content check, with surrounding-message and source-history preservation added.",
+      "assertionExecutionsBefore": 1,
+      "expectedAssertionExecutionsAfter": 2
+    }
+  ],
+  "removed": [],
+  "omittedInputBoundaries": [],
+  "preservedBoundaries": [
+    "All 16 original full names remain independently registered: 5 Cerebras, 6 Fireworks, 5 Mistral. Tuple tables use %s with the original title as the first scalar argument.",
+    "All original endpoint URLs, provider/request model distinctions, history strings, max_tokens=1000, API key, CLI version/proxy defaults and prompt identifiers remain.",
+    "Exact hostname, accepted subdomain, hostile suffix and non-provider routing cases remain provider-local. Mistral custom URL/mixed-case model fallback and declared DeepSeek profile remain independent inputs.",
+    "Fireworks removes only the mirrored reasoning value while keeping reasoning_content; distinct Canonical reasoning field is independently preserved. Cerebras/Mistral stripping cannot mutate the original history.",
+    "The HTTP stand-in retains each original rejection predicate and error payload, exact success payload, ephemeral IPv4 loopback binding, endpoint path, explicit provider constructor and two real generator calls.",
+    "Expected assistants and wire user messages are handwritten test data. No provider or converter generates expected output. Only a pre-call structuredClone of the input supplies the unchanged surrounding-message/source-history oracle."
+  ],
+  "structuralChanges": [
+    "The two one-case HTTP suites now acquire and close their server inside the case helper using try/finally instead of beforeAll/afterAll; setup and teardown therefore fall inside the case timeout.",
+    "Four ordinary route cases in each file use a tuple table with exact original scalar titles. The Fireworks distinct-reasoning case and Mistral declared-profile case remain separate it calls and run after their local routing table.",
+    "Two complete response checks plus exact first/follow-up wire messages replace five assertions in each HTTP case. Fourteen direct cases each use complete messages plus complete input nonmutation; expected total runtime assertion executions change from 29 to 34, pending execution."
+  ],
+  "size": {
+    "beforeLines": 683,
+    "afterLines": 441,
+    "beforeBytes": 23035,
+    "afterBytes": 13099,
+    "savedLines": 242,
+    "savedBytes": 9936,
+    "files": [
+      {
+        "path": "packages/core/src/core/openaiContentGenerator/provider/cerebras.test.ts",
+        "beforeLines": 268,
+        "afterLines": 70,
+        "beforeBytes": 8877,
+        "afterBytes": 1934,
+        "beforeSha256": "4d4011b90281fdf836f3443956bb39358d1fdc5fa4cdcbbc6e88652c1be1c121",
+        "afterSha256": "8e519d424adbb19cc3150ebb31105814a6149ea573579d002a464ad555125a03"
+      },
+      {
+        "path": "packages/core/src/core/openaiContentGenerator/provider/fireworks.test.ts",
+        "beforeLines": 265,
+        "afterLines": 80,
+        "beforeBytes": 9641,
+        "afterBytes": 2532,
+        "beforeSha256": "0dde95d2cbca7a9423b52dd8f7c608b749a8be5a89b47e1d720efbae8493ab12",
+        "afterSha256": "aa660c479d0cb085fb15fa9ce716d4f9b814ccc5d2e06642fab5683cf6301d4f"
+      },
+      {
+        "path": "packages/core/src/core/openaiContentGenerator/provider/mistral.test.ts",
+        "beforeLines": 150,
+        "afterLines": 85,
+        "beforeBytes": 4517,
+        "afterBytes": 2362,
+        "beforeSha256": "36b822df5d77abe15f6c8e50e5827a7798515ffd5b682633def46facb934a41c",
+        "afterSha256": "877e9499dd687dc8869fe0979a2be970a30dc85086b66a63d95285081dda74b5"
+      },
+      {
+        "path": "packages/core/src/core/openaiContentGenerator/provider/test-utils/reasoning-wire-contract.ts",
+        "beforeLines": 0,
+        "afterLines": 206,
+        "beforeBytes": 0,
+        "afterBytes": 6271,
+        "beforeSha256": null,
+        "afterSha256": "bb990a20248994b3bfa300b89645146af8a65bc54c5ea16fd02f643ce9d053d4"
+      }
+    ]
+  },
+  "validation": {
+    "status": "pending-runtime-validation",
+    "local": "Node 22.18.0 Prettier and TypeScript AST parse checks passed; static expansion matches all 16 original full names. No build, typecheck, unit, coverage, fault or mutation run was launched by the implementer.",
+    "required": "Parent will compare separate baseline/candidate VM checkouts including the new helper. Ordinary single-test-file replacement cannot represent this change.",
+    "historicalFaultCandidates": ["3ba01990e1", "87270610a7", "7910a5bd4b"],
+    "mutationScope": "Include the three provider implementations and relevant provider utils/default/factory dependencies, with identical source identity and operator configuration on both sides.",
+    "limits": [
+      "C1/C2/C3, actual collected names and assertion execution counts remain unverified until the parent gates run.",
+      "A failing response assertion still prevents the later turn/wire assertions in that case; the shared helper does not remove that pre-existing short-circuit.",
+      "Complete messages equality is intentionally stricter than former partial field checks; gained fault/mutant detections must be distinguished from simple preservation.",
+      "The Fireworks legacy tool-call-named case still exercises reasoning text replay, not an actual function call. No new behavioral boundary is claimed."
+    ]
+  }
+}
