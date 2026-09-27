@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { AnyDeclarativeTool } from './tools.js';
 import { ToolNames } from './tool-names.js';
+import { AdvisorTool } from './advisor.js';
 import { ArtifactTool } from './artifact/artifact-tool.js';
 import type { ArtifactPublisher } from './artifact/publisher.js';
 import { AskUserQuestionTool } from './askUserQuestion.js';
@@ -171,6 +172,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
 
 /** Tools that stay out of the first request until `tool_search` loads them. */
 const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
+  ['advisor', (c) => new AdvisorTool(c)],
   ['create_sub_session', (c) => new CreateSubSessionTool(c)],
   ['cron_create', (c) => new CronCreateTool(c)],
   ['cron_delete', (c) => new CronDeleteTool(c)],
