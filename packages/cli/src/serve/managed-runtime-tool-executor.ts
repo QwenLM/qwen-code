@@ -58,7 +58,14 @@ export interface ManagedToolInvocationView {
 
 /** The reference identifies a different call than the recorded invocation. */
 export class ManagedToolConflictError extends Error {
-  readonly code = 'managed_runtime_identity_conflict';
+  constructor(
+    message: string,
+    readonly code:
+      | 'managed_runtime_identity_conflict'
+      | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
+  ) {
+    super(message);
+  }
 }
 
 export class ManagedToolInvalidError extends Error {}
@@ -381,7 +388,10 @@ export class ManagedToolExecutor {
       throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
     }
     if (!entry.v3Result || entry.state !== 'settled') {
-      throw new ManagedToolConflictError('Tool result has not settled.');
+      throw new ManagedToolConflictError(
+        'Tool result has not settled.',
+        'managed_tool_result_conflict',
+      );
     }
     const actual = entry.v3Result.capture;
     if (
@@ -394,7 +404,10 @@ export class ManagedToolExecutor {
           (receipt.historyRevision ?? 0) < 1)) ||
       (receipt.deliveryStatus === 'blocked' && receipt.historyRevision !== null)
     ) {
-      throw new ManagedToolConflictError('Tool result receipt conflicts.');
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
     }
     if (
       entry.acknowledgement &&
@@ -402,6 +415,7 @@ export class ManagedToolExecutor {
     ) {
       throw new ManagedToolConflictError(
         'Tool result was acknowledged differently.',
+        'managed_tool_result_conflict',
       );
     }
     entry.acknowledgement = receipt;
@@ -416,7 +430,9 @@ export class ManagedToolExecutor {
   hasActiveSession(sessionId: string): boolean {
     return [...this.entries.values()].some(
       (entry) =>
-        entry.reference.sessionId === sessionId && entry.state !== 'settled',
+        entry.reference.sessionId === sessionId &&
+        entry.state !== 'settled' &&
+        entry.state !== 'unknown',
     );
   }
 

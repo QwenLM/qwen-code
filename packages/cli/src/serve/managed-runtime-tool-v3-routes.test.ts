@@ -37,6 +37,7 @@ import {
   createManagedToolSet,
   ManagedToolExecutor,
 } from './managed-runtime-tool-executor.js';
+import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 
 const sessionKey = {
@@ -247,6 +248,11 @@ describe('Tool v3 local worker routes', () => {
       { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
       executor,
     );
+    registerManagedRuntimeToolRoutes(
+      app,
+      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      executor,
+    );
     server = createServer(app);
     await new Promise<void>((resolve) =>
       server!.listen(0, '127.0.0.1', resolve),
@@ -289,6 +295,9 @@ describe('Tool v3 local worker routes', () => {
         },
       );
       expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        code: 'managed_runtime_attestation_invalid',
+      });
     }
     const marker = path.join(root, 'wrong-args-ran');
     expect(
@@ -347,6 +356,20 @@ describe('Tool v3 local worker routes', () => {
       state: 'settled',
       result: { capture: { deliveryStatus: 'committed' } },
     });
+    for (const operation of ['status', 'cancel']) {
+      const v2 = await fetch(
+        `${origin}/internal/managed-runtime/v2/${operation}`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(v2.status).toBe(409);
+      expect(await v2.json()).toMatchObject({
+        code: 'managed_runtime_identity_conflict',
+      });
+    }
     const receipt = {
       executionCallId: identity.executionCallId,
       manifest: settled.result.capture.manifest,
@@ -354,13 +377,13 @@ describe('Tool v3 local worker routes', () => {
       historyRevision: receiptEvent!.sequence,
     };
     expect((await post('acknowledge', { receipt })).status).toBe(200);
-    expect(
-      (
-        await post('acknowledge', {
-          receipt: { ...receipt, historyRevision: receipt.historyRevision + 1 },
-        })
-      ).status,
-    ).toBe(409);
+    const changedAck = await post('acknowledge', {
+      receipt: { ...receipt, historyRevision: receipt.historyRevision + 1 },
+    });
+    expect(changedAck.status).toBe(409);
+    expect(await changedAck.json()).toMatchObject({
+      code: 'managed_tool_result_conflict',
+    });
     expect(
       (
         await post('execute', {
@@ -432,23 +455,37 @@ describe('Tool v3 local worker routes', () => {
       'managed-tool-outcome',
       Buffer.from('{}'),
     );
+    let receiptFails = false;
     executor = new ManagedToolExecutor(
       async () => createManagedToolSet(root!, 'runtime-session-a'),
       {
-        prepare: async () => ({
-          identity: { ...identity, invocationDigest: digest },
-          sink: new LocalShellResultCapture(failingStore, resources, {
+        prepare: async ({ reference: call, capture }) => {
+          const captureIdentity = {
             ...identity,
+            callId: call.callId,
+            executionCallId: capture.executionCallId,
+            captureId: `capture-${call.callId}`,
             invocationDigest: digest,
-          }),
-        }),
-        accept: async (_identity, envelope) => ({
-          executionCallId: identity.executionCallId,
-          manifest: envelope.capture?.manifest ?? null,
-          deliveryStatus: 'blocked',
-          historyRevision: null,
-          outcomeRef,
-        }),
+          };
+          return {
+            identity: captureIdentity,
+            sink: new LocalShellResultCapture(
+              failingStore,
+              resources,
+              captureIdentity,
+            ),
+          };
+        },
+        accept: async (_identity, envelope) => {
+          if (receiptFails) throw new Error('receipt unavailable');
+          return {
+            executionCallId: identity.executionCallId,
+            manifest: envelope.capture?.manifest ?? null,
+            deliveryStatus: 'blocked',
+            historyRevision: null,
+            outcomeRef,
+          };
+        },
       },
     );
     const [first, concurrent] = await Promise.all([
@@ -478,6 +515,17 @@ describe('Tool v3 local worker routes', () => {
     expect(await executor.executeV3(request)).toEqual(first);
     expect(executor.statusV3(originalReference)).toEqual(first);
     expect(await fs.readFile(marker, 'utf8')).toBe('x');
+    receiptFails = true;
+    const receiptFailure = {
+      ...request,
+      reference: { ...originalReference, callId: 'call-b' },
+      capture: { ...request.capture, executionCallId: 'execution-b' },
+    };
+    const unknown = await executor.executeV3(receiptFailure);
+    expect(unknown.state).toBe('unknown');
+    expect(executor.hasActiveSession(originalReference.sessionId)).toBe(false);
+    expect(await executor.executeV3(receiptFailure)).toEqual(unknown);
+    expect(await fs.readFile(marker, 'utf8')).toBe('xx');
   }, 30_000);
 
   it('reopens the committed 100 MiB after the real worker host exits', async () => {

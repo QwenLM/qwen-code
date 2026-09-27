@@ -171,7 +171,7 @@ function receipt(value: unknown): ToolResultAcknowledgement | null {
 
 function invalid(res: express.Response): void {
   res.status(400).json({
-    code: 'managed_tool_result_invalid',
+    code: 'managed_runtime_attestation_invalid',
     error: 'Managed Tool v3 request is invalid.',
   });
 }

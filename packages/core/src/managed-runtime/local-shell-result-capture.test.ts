@@ -309,6 +309,98 @@ describe('foreground Shell local result capture', () => {
     }
   }, 10_000);
 
+  it('serializes overlapping writes that reach a segment boundary', async () => {
+    const { lease, store, resources } = await createStore();
+    try {
+      const published: string[] = [];
+      const observedStore: ToolResultSegmentStore = {
+        publish: async (request) => {
+          const { streamId, ordinal } = request as {
+            streamId: string;
+            ordinal: number;
+          };
+          published.push(`${streamId}#${ordinal}`);
+          return store.publish(request);
+        },
+        seal: (request) => store.seal(request),
+        prefix: (request) => store.prefix(request),
+        readRange: (request) => store.readRange(request),
+        close: () => store.close(),
+      };
+      const capture = new LocalShellResultCapture(
+        observedStore,
+        resources,
+        identity,
+      );
+      capture.setStarted(42);
+      // Node resumes a paused pipe when the child exits, so a second chunk
+      // can arrive while the boundary publication is still in flight.
+      const first = Buffer.alloc(1024 * 1024, 0x41);
+      const second = Buffer.alloc(9, 0x42);
+      await Promise.all([
+        capture.write('stdout', first),
+        capture.write('stdout', second),
+      ]);
+      await capture.finish('stdout', true);
+      await capture.finish('stderr', true);
+      capture.setProcessResult({
+        rawOutput: Buffer.alloc(0),
+        output: '',
+        exitCode: 0,
+        signal: null,
+        error: null,
+        aborted: false,
+        pid: 42,
+        executionMethod: 'child_process',
+      });
+      const envelope = await capture.finalize('success', []);
+      expect(published).toEqual(['stdout#0', 'stdout#1']);
+      expect(envelope.capture?.captureStatus).toBe('complete');
+      const stdout = parseToolResultManifestBytes(
+        await resources.read(envelope.capture!.manifest!),
+      ).contents.find((item) => item.streamId === 'stdout')!;
+      expect(stdout.byteLength).toBe(first.byteLength + second.byteLength);
+      expect(stdout.digest).toBe(
+        createHash('sha256').update(first).update(second).digest('hex'),
+      );
+    } finally {
+      await store.close();
+      await lease.release();
+    }
+  });
+
+  it('seals a real pipe that ends just past a segment boundary', async () => {
+    const { root, lease, store, resources } = await createStore();
+    try {
+      const capture = new LocalShellResultCapture(store, resources, identity);
+      const size = 1024 * 1024 + 64 * 1024;
+      const handle = await ShellExecutionService.executeLaunch(
+        {
+          executable: process.execPath,
+          args: ['-e', `process.stdout.write(Buffer.alloc(${size}, 0x61))`],
+          cwd: root,
+          env: {},
+        },
+        () => {},
+        new AbortController().signal,
+        false,
+        { maxBufferedOutputBytes: 64 * 1024 },
+        { rawCapture: capture },
+      );
+      capture.setStarted(handle.pid!);
+      capture.setProcessResult(await handle.result);
+      const envelope = await capture.finalize('success', []);
+      expect(envelope.capture?.captureStatus).toBe('complete');
+      const stdout = parseToolResultManifestBytes(
+        await resources.read(envelope.capture!.manifest!),
+      ).contents.find((item) => item.streamId === 'stdout')!;
+      expect(stdout.byteLength).toBe(size);
+    } finally {
+      await store.close();
+      await lease.release();
+    }
+  }, 30_000);
+
   it('stops publishing after the Session writer lease is lost', async () => {
     const { root, lease, store, resources } = await createStore();
     try {

@@ -34,7 +34,7 @@ type StreamId = 'stdout' | 'stderr';
 
 interface StreamState {
   readonly id: StreamId;
-  readonly buffer: Buffer;
+  buffer: Buffer;
   readonly hash: ReturnType<typeof createHash>;
   readonly pages: ToolResultPageReference[];
   readonly pendingSegments: ToolResultSegment[];
@@ -46,6 +46,8 @@ interface StreamState {
   observed: number;
   ended: boolean;
   sealed: boolean;
+  /** Serializes buffer use: the pipe pause is advisory, and Node resumes it on exit. */
+  queue: Promise<void>;
 }
 
 function stream(id: StreamId): StreamState {
@@ -63,6 +65,7 @@ function stream(id: StreamId): StreamState {
     observed: 0,
     ended: false,
     sealed: false,
+    queue: Promise.resolve(),
   };
 }
 
@@ -106,9 +109,13 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     this.processResult = result;
   }
 
-  async write(id: StreamId, chunk: Buffer): Promise<void> {
+  write(id: StreamId, chunk: Buffer): Promise<void> {
     const state = this.streams[id];
     state.observed += chunk.byteLength;
+    return (state.queue = state.queue.then(() => this.append(state, chunk)));
+  }
+
+  private async append(state: StreamState, chunk: Buffer): Promise<void> {
     if (this.failed || state.ended) return;
     try {
       for (let offset = 0; offset < chunk.byteLength; ) {
@@ -126,8 +133,13 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     }
   }
 
-  async finish(id: StreamId, complete: boolean): Promise<void> {
+  finish(id: StreamId, complete: boolean): Promise<void> {
     const state = this.streams[id];
+    return (state.queue = state.queue.then(() => this.end(state, complete)));
+  }
+
+  private async end(state: StreamState, complete: boolean): Promise<void> {
+    const id = state.id;
     if (state.ended) return;
     state.ended = true;
     try {
@@ -145,6 +157,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
       }
     } catch (cause) {
       this.fail(cause);
+    } finally {
+      // Later writes are ignored; the retained bytes live in the store.
+      state.buffer = Buffer.alloc(0);
+      state.used = 0;
     }
   }
 
