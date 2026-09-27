@@ -201,6 +201,8 @@ to the primary runtime.
 - A confirmation can survive the exit, after the preview, of a channel without
   sessions. This never widens a stop, but the receipt then lists fewer channels
   than the preview.
-- Session-affecting change propagation, resource aggregation, language
-  propagation, Managed preheat/keepalive and quarantine recovery remain open, as
-  listed in Scope.
+- Session-affecting change propagation remains open (B2b part two). Resource
+  aggregation, language propagation, Managed preheat/keepalive and quarantine
+  recovery are specified in
+  [paired engine per-engine operations](./2026-09-26-paired-engine-per-engine-operations.md)
+  (B2c).
