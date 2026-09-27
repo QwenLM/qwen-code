@@ -1,14 +1,10 @@
+import type { components } from './generated/managed-agent-api';
+
+type Schemas = components['schemas'];
+
 export type JavaAgentDate = number | string;
 
-export interface JavaAgentTurn {
-  turnId: string;
-  sessionId: string;
-  status: string;
-  submittedAt: JavaAgentDate;
-  completedAt?: JavaAgentDate;
-  errorCode?: string;
-  usage?: Record<string, unknown>;
-}
+export type JavaAgentTurn = Schemas['WebShellTurn'];
 
 export interface JavaAgentEnvironment {
   environmentId?: string;
@@ -16,88 +12,53 @@ export interface JavaAgentEnvironment {
   errorCode?: string;
 }
 
-export interface JavaAgentSession {
-  sessionId: string;
-  title?: string;
-  agentId?: string;
-  status: string;
-  createdAt: JavaAgentDate;
-  updatedAt: JavaAgentDate;
-  activeTurn?: JavaAgentTurn;
-  environment?: JavaAgentEnvironment;
-  lastSequence: number;
-  workspace?: { workspaceId: string; cwdRelative: string };
-}
+export type JavaAgentSession = Omit<
+  Schemas['WebShellSession'],
+  'environment' | 'workspace'
+> & {
+  environment?: JavaAgentEnvironment | null;
+  // W0d saves the binding; context revision/state remain a recorded W2 gap.
+  workspace?: Pick<
+    Schemas['WebShellWorkspaceContext'],
+    'workspaceId' | 'cwdRelative'
+  >;
+};
 
-export interface JavaAgentWorkspace {
-  workspaceId: string;
-  displayName: string;
-  state: string;
-  canCreateSession: boolean;
-}
+// The current BFF uses uppercase states (contract-known-gaps.txt).
+export type JavaAgentWorkspace = Omit<Schemas['WebShellWorkspace'], 'state'> & {
+  state: Uppercase<Schemas['WebShellWorkspace']['state']>;
+};
 
-export interface JavaAgentWorkspacePage
-  extends JavaAgentCursorPage<JavaAgentWorkspace> {
-  defaultWorkspace?: JavaAgentWorkspace | null;
-  capabilities?: { workspaceBinding?: boolean; workspaceContext?: boolean };
-}
+export type JavaAgentWorkspacePage = Omit<
+  Schemas['WebShellWorkspacePage'],
+  'data' | 'defaultWorkspace'
+> & {
+  data: JavaAgentWorkspace[];
+  defaultWorkspace: JavaAgentWorkspace | null;
+};
 
-export interface JavaAgentEvent {
-  sequence: number;
-  eventId: string;
-  sessionId: string;
-  turnId: string;
-  itemId?: string;
-  type: string;
-  createdAt: JavaAgentDate;
-  data?: Record<string, unknown>;
-  terminal: boolean;
-}
+export type JavaAgentSessionPage = Omit<
+  Schemas['WebShellSessionPage'],
+  'data'
+> & {
+  data: JavaAgentSession[];
+};
 
-export interface JavaAgentContentPart {
-  partId: string;
-  type: 'input_text' | 'output_text' | 'reasoning' | string;
-  text: string;
-  firstSequence: number;
-  lastSequence: number;
-}
+export type JavaAgentEvent = Schemas['WebShellEvent'];
 
-export interface JavaAgentItem {
-  itemId: string;
-  sessionId: string;
-  turnId: string;
-  type: 'message' | 'tool_call' | string;
-  role?: string;
-  status: string;
-  content: JavaAgentContentPart[];
-  attributes: Record<string, unknown>;
-  firstSequence: number;
-  lastSequence: number;
-  createdAt: JavaAgentDate;
-  updatedAt: JavaAgentDate;
-}
+export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 
-export interface JavaAgentCommandAdmission {
-  sessionId: string;
-  turnId?: string;
-  status: string;
-  replayed: boolean;
-}
+export type JavaAgentItem = Schemas['WebShellItem'];
 
-export interface JavaAgentCursorPage<T> {
-  data: T[];
-  nextCursor?: string;
-  hasMore: boolean;
-}
+export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
 
-export interface JavaAgentTranscript {
-  items?: JavaAgentItem[];
-  events: JavaAgentEvent[];
-  coveredSequence?: number;
-  olderCursor?: string;
-  hasMore: boolean;
-  lastSequence: number;
-}
+export type JavaAgentTranscript = Schemas['WebShellTranscript'];
+
+// The server still accepts only "text" blocks, not the contract's "input_text"
+// (contract-known-gaps.txt in packages/sdk-java/managed-agent-server).
+type JavaAgentInput<T> = Omit<T, 'input'> & {
+  input: Array<{ type: 'text'; text: string }>;
+};
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -139,9 +100,9 @@ export class JavaManagedAgentClient {
   }
 
   listSessions(
-    request: { cursor?: string; limit?: number },
+    request: Schemas['WebShellListRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCursorPage<JavaAgentSession>> {
+  ): Promise<JavaAgentSessionPage> {
     return this.post('/sessions/query', request, signal);
   }
 
@@ -150,7 +111,7 @@ export class JavaManagedAgentClient {
   }
 
   listWorkspaces(
-    request: { cursor?: string; limit?: number },
+    request: Schemas['WebShellWorkspaceQueryRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspacePage> {
     return this.post('/workspaces/query', request, signal);
@@ -165,55 +126,35 @@ export class JavaManagedAgentClient {
   }
 
   getTranscript(
-    request: { sessionId: string; cursor?: string; limit?: number },
+    request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentTranscript> {
     return this.post('/transcript/query', request, signal);
   }
 
   createSession(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      agentId: string;
-      environmentId?: string;
-      title?: string;
-      input: Array<{ type: 'text'; text: string }>;
-      metadata?: Record<string, unknown>;
-      workspace?: { workspaceId: string; cwdRelative: string };
-    },
+    request: JavaAgentInput<Schemas['WebShellCreateRequest']>,
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
   }
 
   submitTurn(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      sessionId: string;
-      input: Array<{ type: 'text'; text: string }>;
-      metadata?: Record<string, unknown>;
-    },
+    request: JavaAgentInput<Schemas['WebShellSubmitRequest']>,
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/submit', request, signal);
   }
 
   cancelTurn(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      sessionId: string;
-      turnId: string;
-    },
+    request: Schemas['WebShellCancelRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/cancel', request, signal);
   }
 
   async *streamEvents(
-    request: { sessionId: string; afterSequence?: number; limit?: number },
+    request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
   ): AsyncGenerator<JavaAgentEvent> {
     const response = await this.request(

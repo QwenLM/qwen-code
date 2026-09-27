@@ -79,6 +79,7 @@ describe('createJavaManagedAgentProvider', () => {
               ],
               defaultWorkspace: null,
               hasMore: false,
+              nextCursor: null,
               capabilities: {
                 workspaceBinding: true,
                 workspaceContext: false,
@@ -98,6 +99,7 @@ describe('createJavaManagedAgentProvider', () => {
       clientId: 'client',
     });
     expect(listed.supported).toBe(true);
+    expect(listed.nextCursor).toBeUndefined();
     expect(
       await provider.workspaceBinding!.createEmpty(
         {
@@ -272,7 +274,6 @@ describe('createJavaManagedAgentProvider', () => {
     expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
       sessionId: 'session-1',
       afterSequence: 8,
-      limit: 100,
     });
   });
 
