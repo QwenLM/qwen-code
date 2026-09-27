@@ -5062,6 +5062,78 @@ describe('workspace change propagation', () => {
     await turn;
   });
 
+  it('lifts the permission fence when another cause keeps the quarantine', async () => {
+    let answer!: (value: Record<string, unknown>) => void;
+    const quarantine = recordQuarantineEvents();
+    const p = paired(
+      { telemetry: quarantine.telemetry },
+      legacySavingRules(),
+      engineChannel('managed', {
+        initializeImpl: () => activeWorkInitialize(),
+        newSessionImpl: (_request, agent) => ({
+          sessionId:
+            agent.newSessionCalls.length === 2
+              ? ''
+              : `managed-${agent.newSessionCalls.length}`,
+          ...receipt('managed'),
+        }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+            ? new Promise<Record<string, unknown>>((resolve) => {
+                answer = resolve;
+              })
+            : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {},
+      }),
+    );
+    const { sessionId } = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await p.bridge.preheat();
+    // A running background shell keeps the session from settling.
+    await reportActiveWork(p.managed, 1, [
+      {
+        sessionId,
+        holds: [{ category: 'shell', id: 'background-shells' }],
+        hasRunningBackgroundTasks: true,
+      },
+    ]);
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toThrow('invalid');
+    await expect(
+      p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule, {
+        timeoutMs: 20,
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceChangePartiallyAppliedError);
+    const report = (turnId: string) =>
+      p.managed.agentConnection.extMethod('_qwencode/start_turn', {
+        sessionId,
+        source: 'background_notification',
+        turnId,
+        taskId: 'shell-1',
+        kind: 'shell',
+        startedAt: Date.now(),
+      });
+    await expect(report('notification-1')).resolves.toEqual({
+      accepted: false,
+    });
+
+    // The engine applies the rule late: its report may settle, while the
+    // failed cleanup still holds the channel.
+    answer({ v: 1, revision: 1, acknowledged: true });
+    await settleRealTime();
+    await expect(report('notification-2')).resolves.toEqual({
+      accepted: true,
+    });
+    expect(quarantine.named('cleared')).toEqual([]);
+    await expect(
+      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toMatchObject({ reason: 'new_session_cleanup_failed' });
+    expect(promptRefusal(p.bridge, sessionId, 'more')).toMatchObject({
+      reason: 'new_session_cleanup_failed',
+    });
+  });
+
   it('never ends the quarantine of a channel that is already terminating', async () => {
     const running = deferred<void>();
     const exiting = deferred<void>();

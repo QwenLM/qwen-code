@@ -188,6 +188,10 @@ The quarantine is kept in these cases:
 - the episode began for another reason;
 - the deadline has passed or termination began.
 
+The permission fence lifts in these cases too: once no revision is missing, the
+engine holds every change it missed, so a background report may settle while
+the kept quarantine still refuses fresh sessions and new work.
+
 An error or a wrong answer cannot be acknowledged later, so that channel
 retires.
 
@@ -262,7 +266,10 @@ field.
 6. A late exact acknowledgement ends the quarantine once no revision is
    missing: a fresh session of that engine starts on the same channel, and the
    session takes prompts again. One revision still missing, or an answer for
-   another revision, keeps the quarantine.
+   another revision, keeps the quarantine. When another cause keeps the
+   quarantine, the acknowledgement still lifts the permission fence: a held
+   background report is admitted, while fresh sessions and prompts stay
+   refused.
 7. With workspace control not live, a settings reload still reaches Managed,
    while permission rules do not. During a workspace stop, a permission change
    is refused with the existing draining error, and Managed gets no

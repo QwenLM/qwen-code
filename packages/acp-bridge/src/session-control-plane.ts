@@ -4157,11 +4157,12 @@ export function createSessionControlPlane(
   }
 
   /**
-   * A late, exact acknowledgement of every change a channel missed ends its
+   * A late, exact acknowledgement of every change a channel missed lifts its
+   * permission fence, because the engine now holds those changes, and ends its
    * quarantine before the drain deadline, as #12737 Q3 allows. It never ends
    * an episode that began for another cause or that another cause has joined,
    * nor one whose channel is already terminating (the deadline starts that);
-   * sessions already closed stay closed.
+   * the fence lifts even then. Sessions already closed stay closed.
    */
   function acknowledgeMissingWorkspaceChange(
     ci: ChannelInfo,
@@ -4170,6 +4171,12 @@ export function createSessionControlPlane(
     const missing = ci.workspaceChangesMissing;
     if (!missing?.delete(revision) || missing.size > 0) return;
     ci.workspaceChangesMissing = undefined;
+    const fenced = ci.workspaceChangeFence !== undefined;
+    ci.workspaceChangeFence = undefined;
+    for (const sessionId of ci.sessionIds) {
+      const entry = byId.get(sessionId);
+      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
+    }
     const episode = ci.quarantine;
     // With this cause gone, any other one, or the one the episode began with,
     // is what the channel reports now.
@@ -4178,15 +4185,16 @@ export function createSessionControlPlane(
       ci.harness.isDying ||
       channelUnavailableReason(ci) !== 'workspace_change_unacknowledged'
     ) {
+      if (episode && fenced) {
+        writeStderrLine(
+          `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
+            `its permission fence is lifted, and its quarantine continues`,
+        );
+      }
       return;
     }
     clearTimeout(episode.drainTimer);
     ci.quarantine = undefined;
-    ci.workspaceChangeFence = undefined;
-    for (const sessionId of ci.sessionIds) {
-      const entry = byId.get(sessionId);
-      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
-    }
     writeStderrLine(
       `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
         `its quarantine ended after ${Date.now() - episode.startedAt}ms`,
