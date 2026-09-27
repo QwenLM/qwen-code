@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "kind": "relaxed-budget-experiment-archive",
+  "baselineRevision": "a270907e5f3fd6ebe26ef7d17ea7da3e92c2773a",
+  "bundlePrerequisite": "37412a57d473525a81f87e4ca36447981950d9a9",
+  "adoptedTestDeletions": false,
+  "actualC1ReplayPerformed": false,
+  "actualC2ReplayPerformed": false,
+  "rawArchive": {
+    "path": ".qwen/testloc-evidence/round7-raw.tar.gz",
+    "bytes": 160492847,
+    "sha256": "a7b251c6761c51088e98357a76a66d0be15c2cc93b1536d77c4b55dd5a0d399f"
+  },
+  "externalFileIndex": {
+    "path": ".qwen/testloc-evidence/round7-files.json",
+    "bytes": 1682741,
+    "sha256": "75223156d549fb9104b7de930266f5979e3458eb941dacd39b424a9e10bad298"
+  },
+  "archiveMemberIndex": {
+    "archiveMember": "raw-files.json",
+    "sha256": "87300bad230b5d35917c29716b7789d7c97d6182ed83fba6a775833baeb62d58",
+    "indexedSourceFiles": 2612,
+    "totalArchiveMembers": 2613
+  },
+  "collection": {
+    "complete": true,
+    "meaning": "Source bytes copied and stable; no inference about test or capability success.",
+    "collector": {
+      "archiveMember": "local/collect-round7.py",
+      "bytes": 11988,
+      "sha256": "5d3ff30e1b543d5bafb5092661e92f5ecd9398dbd0c6bb3ee1e6431ffa54e7bc"
+    },
+    "selection": "All non-checkout VM evidence and local round7 files, plus actual baseline capture tools and suite runner; no outcome filtering. Excludes dependencies, build/Git directories, lcov-report HTML, and local __pycache__. Symlinks rejected.",
+    "excludedVmPaths": [
+      "/tmp/qwen-testloc-round7/baseline",
+      "/tmp/qwen-testloc-round7/candidate-100000",
+      "/tmp/qwen-testloc-round7/candidate-150000",
+      "/tmp/qwen-testloc-round7/candidate-45000",
+      "/tmp/qwen-testloc-round7/candidate-50000",
+      "/tmp/qwen-testloc-round7/full-baseline/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/run-100000/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/run-150000/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/run-45000/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/run-50000/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/smoke-final/coverage/lcov-report",
+      "/tmp/qwen-testloc-round7/smoke/coverage/lcov-report"
+    ],
+    "independentDependencies": ["round5-raw.tar.gz", "round6-raw.tar.gz"],
+    "dependencyMeaning": "Earlier rounds and repository/dependency reconstruction are supplied separately. External references are retained in raw records and are not traversed."
+  },
+  "results": {
+    "file": "results.json",
+    "sha256": "f9921ca9dc095f862483451db3a072582770c03cee66b693ada7ec64794b3a17",
+    "archiveMember": "local/results.json"
+  },
+  "candidates": [
+    {
+      "targetRemovedLines": 45000,
+      "file": "tier-45000.json.gz",
+      "bytes": 17854,
+      "sha256": "bcba36051c9b49b78017352eaf850abb6852060cf570800fbea4af99fb25c1e2",
+      "uncompressedBytes": 66958,
+      "uncompressedSha256": "6b931105dddca221a34f0c8f1a89c06c4da2a4c7f9b4dd4096220c1717a7f01c",
+      "sourceArchiveMember": "local/budget-selection/tier-45000.json",
+      "patch": {
+        "archiveMember": "vm/tier-45000.patch",
+        "bytes": 1708007,
+        "sha256": "75232a02544ae04f5c424c3134de5c426665f29352782c330bb38250da1522c2"
+      }
+    },
+    {
+      "targetRemovedLines": 50000,
+      "file": "tier-50000.json.gz",
+      "bytes": 20788,
+      "sha256": "c57228df62fc30827f3f4bf9f125326a796fe1b40eac0f82e198015a52570736",
+      "uncompressedBytes": 83833,
+      "uncompressedSha256": "9d89ee3bddc458f79a284b99c7cebac45f027fb4d058007a4b9257db8121f675",
+      "sourceArchiveMember": "local/selection/tier-50000.json",
+      "patch": {
+        "archiveMember": "vm/tier-50000.patch",
+        "bytes": 1897593,
+        "sha256": "f07f374d7339219ba62b4eaf4575b3c0cc181fb1784b77e2ef1754c0e0b96c96"
+      }
+    },
+    {
+      "targetRemovedLines": 100000,
+      "file": "tier-100000.json.gz",
+      "bytes": 36567,
+      "sha256": "7f378a2dc3b57ee4da759765fb22216ff4d3ba1387f2086914f1cd88ffc3b200",
+      "uncompressedBytes": 180677,
+      "uncompressedSha256": "f21f8ff4bea5ea95831e4093a319e5a9937911b32abbf5c7d48d3d0d8d86c793",
+      "sourceArchiveMember": "local/selection/tier-100000.json",
+      "patch": {
+        "archiveMember": "vm/tier-100000.patch",
+        "bytes": 3734045,
+        "sha256": "9250a06360c5b89a5f18269173c8cb32ceeff9435faa6efcdcbf6e24845aab22"
+      }
+    },
+    {
+      "targetRemovedLines": 150000,
+      "file": "tier-150000.json.gz",
+      "bytes": 61487,
+      "sha256": "8e855e2ede50ec58719bc8f32d9943e31632a34735fbf8339a76d39d48a594f8",
+      "uncompressedBytes": 413233,
+      "uncompressedSha256": "2ca35e627ef77b301ce014c558a2bbd809a61f4020ae6053e010a81377c46d83",
+      "sourceArchiveMember": "local/selection/tier-150000.json",
+      "patch": {
+        "archiveMember": "vm/tier-150000.patch",
+        "bytes": 5565747,
+        "sha256": "07cff4f48203d1e62a23c8556e0ebb2b9ed13f340249b103d25420e43040b82c"
+      }
+    }
+  ],
+  "keyInputs": [
+    {
+      "archiveMember": "local/baseline.bundle",
+      "bytes": 591039,
+      "sha256": "43e3fb888b1c703958727593bd9b96248aaf02f5aced53f2f1e5623deac72b8e"
+    },
+    {
+      "archiveMember": "local/plan.json",
+      "bytes": 1559,
+      "sha256": "3979599cc8cad282b916e0d5809e426a527ed5c057dc29106caa0caab2f0de11"
+    },
+    {
+      "archiveMember": "local/inventory.json",
+      "bytes": 8362768,
+      "sha256": "228460edbc4c8374f9ac1877cb221eb8a2d97e6fc440005ea35d23a485e288d1"
+    },
+    {
+      "archiveMember": "local/results.json",
+      "bytes": 30110,
+      "sha256": "f9921ca9dc095f862483451db3a072582770c03cee66b693ada7ec64794b3a17"
+    },
+    {
+      "archiveMember": "local/attribution-union-check.json",
+      "bytes": 503,
+      "sha256": "f0c3f89108d18a028983135e9de1d78c7622ef7d33ab5371f5bc2124898833ba"
+    },
+    {
+      "archiveMember": "local/capability-attribution.json",
+      "bytes": 9520437,
+      "sha256": "f1ecd606237e3de6edecdeedd254e1f26e4adb72834e97fdff9b36de8719a841"
+    },
+    {
+      "archiveMember": "local/capability-frontier.json",
+      "bytes": 6437473,
+      "sha256": "66aa63b5fb4f5f13e737931e8025b7b643a9d5e941e559e7bb94a2ce2ba6e738"
+    },
+    {
+      "archiveMember": "local/budget-candidate-recheck.json",
+      "bytes": 2209871,
+      "sha256": "b848e2503ed4215d1a991290466e2c068faab7208e6a6194d7f99667d1310ddc"
+    },
+    {
+      "archiveMember": "local/protected-hooks-core.json",
+      "bytes": 302313,
+      "sha256": "7a53a756bd4b6cffddf8dc8ff37a8131336172ebd49755f8860acc19afb6de48"
+    },
+    {
+      "archiveMember": "local/protected-utils-services.json",
+      "bytes": 186793,
+      "sha256": "cdd9e79a6514ba6706fef630d5930c5d8cf30be98c562cc8694311b3c2623957"
+    },
+    {
+      "archiveMember": "local/protected-other-boundaries.json",
+      "bytes": 51102,
+      "sha256": "0e91b7def3e994ad8f0d4535d5879f89983b66294eb07497e05e8e47ca73ff96"
+    },
+    {
+      "archiveMember": "local/select-frontier.py",
+      "bytes": 5553,
+      "sha256": "88048bb1d5f9594a5a8f2d92e5c5e563c0123cd49715c9b6f6caa069cbd49743"
+    },
+    {
+      "archiveMember": "local/repair-frontier.py",
+      "bytes": 12550,
+      "sha256": "0d1e235d0d7ff4a325902eaab18bb60051ae4902e30804836ccc08cc858b435a"
+    },
+    {
+      "archiveMember": "local/score-frontier.py",
+      "bytes": 7278,
+      "sha256": "969b7458d6f1a7517b487fb489989ea5623b1d5a864167aee5fc3f024e5c233c"
+    },
+    {
+      "archiveMember": "local/summarize-coverage.py",
+      "bytes": 5983,
+      "sha256": "9ee14845d19622b4dda281b929d38765b632e3e59153d5110834a78b49077da1"
+    },
+    {
+      "archiveMember": "local/summarize-health.py",
+      "bytes": 20324,
+      "sha256": "200ac81cd4d6db2840990c6ef13063136d337110416aea3321e8a006cadd8ae4"
+    },
+    {
+      "archiveMember": "local/summarize-results.py",
+      "bytes": 5043,
+      "sha256": "c919b9f6fb830155066667d438509c05baa17d43f7d4dc8d959ffe810051e482"
+    },
+    {
+      "archiveMember": "vm/baseline/.qwen/test-loc-round7/file-coverage-provider.mjs",
+      "bytes": 8719,
+      "sha256": "f48b1905d521effd6a992beffec41cf00ee236dc9d0446a30f0b0fbe61a1dfd6"
+    },
+    {
+      "archiveMember": "vm/baseline/.qwen/test-loc-round7/file-coverage.config.ts",
+      "bytes": 849,
+      "sha256": "73e05e6447f1f264387b572f8f0a5977048e72a799298e4ff7a0e8420eff49d7"
+    },
+    {
+      "archiveMember": "vm/run-suite.py",
+      "bytes": 3169,
+      "sha256": "90455191861fc4518c122235ff26694553f39d9260be4fad306d23c38d03fb04"
+    },
+    {
+      "archiveMember": "vm/health-frontier.json",
+      "bytes": 33286421,
+      "sha256": "5825d53fbb3e6741cf02442f2bbdd1d1d495625796a1107b6f1c218f9cf14090"
+    },
+    {
+      "archiveMember": "vm/health-frontier-v2.json",
+      "bytes": 33287507,
+      "sha256": "49da1d4a301b6f4ecff76af12e214374325a32be3bb7faced8c42b2ea846c6e7"
+    },
+    {
+      "archiveMember": "vm/health-budget.json",
+      "bytes": 16463790,
+      "sha256": "898694ff3b4b665d0a173fedeb9217bed2058b963d7af2b84ac716544f9893a4"
+    },
+    {
+      "archiveMember": "vm/full-baseline/command.json",
+      "bytes": 813201,
+      "sha256": "ac33e30e69ff56036cad7566f417c827e93f146b10d11857837d3a4246316a6b"
+    },
+    {
+      "archiveMember": "vm/full-baseline/tests.json",
+      "bytes": 48852156,
+      "sha256": "01740662f6c375eb16994a464925a1b2cd273502f4cdc60d0d5b8dcd46a9eb88"
+    },
+    {
+      "archiveMember": "vm/full-baseline/output.log",
+      "bytes": 10459,
+      "sha256": "100a30fcb5009feadf9d8ce642a16658950763dfe1a12710bb547f4f1e7f56da"
+    },
+    {
+      "archiveMember": "vm/full-baseline/coverage/coverage-final.json",
+      "bytes": 38930283,
+      "sha256": "3be959c77c58358bd799dbfbeda372bb7be4037dc416dc47dfbc2eaec78f8c4e"
+    },
+    {
+      "archiveMember": "vm/run-45000/command.json",
+      "bytes": 565818,
+      "sha256": "5ac9db3fd88835733da537458c6e0be9cce60cd13456325cd82924da7b650e9b"
+    },
+    {
+      "archiveMember": "vm/run-45000/tests.json",
+      "bytes": 47671249,
+      "sha256": "1944306604a19f7dd66c1d1fa07922850c97db2fe8689eb6f749e11e17b5553f"
+    },
+    {
+      "archiveMember": "vm/run-45000/output.log",
+      "bytes": 10455,
+      "sha256": "0d7c89dcaea01ae951f06b6984fc918387167e9e30d82ac70aa6b30d56ed5f2d"
+    },
+    {
+      "archiveMember": "vm/run-45000/coverage/coverage-final.json",
+      "bytes": 38732782,
+      "sha256": "3112bf32bd7115c8b30307c9bdf495ca1fe31ac5ac73d3305d9af4368b4efbc9"
+    },
+    {
+      "archiveMember": "vm/run-50000/command.json",
+      "bytes": 565741,
+      "sha256": "4a4275c77246632bea653f5e18a27b912f8967449197ce75ec3c1dc47b00667c"
+    },
+    {
+      "archiveMember": "vm/run-50000/tests.json",
+      "bytes": 47553908,
+      "sha256": "55b780a5f8a15465fd0e2ff0426a0bbd24429ceab234639a14bb580c8b4dff60"
+    },
+    {
+      "archiveMember": "vm/run-50000/output.log",
+      "bytes": 10455,
+      "sha256": "478e7131265cb68977c6f6deb691bea3138f85a51bc4fff821cba122a53e5f49"
+    },
+    {
+      "archiveMember": "vm/run-50000/coverage/coverage-final.json",
+      "bytes": 38713961,
+      "sha256": "c1517865fad457fce66de6dfa7d98c29743c035e557661b70aaa2e27754f20f8"
+    },
+    {
+      "archiveMember": "vm/run-100000/command.json",
+      "bytes": 564986,
+      "sha256": "613c1592465174d1c99c63136e8c1433e7fe7be6b433d21ab88120cf8e6aca8d"
+    },
+    {
+      "archiveMember": "vm/run-100000/tests.json",
+      "bytes": 45859460,
+      "sha256": "d7990b84f93e7beea873d1989d546067011d84f13e16435f2cbc337a1fb3b607"
+    },
+    {
+      "archiveMember": "vm/run-100000/output.log",
+      "bytes": 10456,
+      "sha256": "433803f31a63e302ab59836d52963a084383c73ff5ec6b1bbc618531cdec3d1f"
+    },
+    {
+      "archiveMember": "vm/run-100000/coverage/coverage-final.json",
+      "bytes": 38071553,
+      "sha256": "bbe755e143e7b48f619cd8c4ab4e55942b86be3db37f740026fad7c133e2c7d5"
+    },
+    {
+      "archiveMember": "vm/run-150000/command.json",
+      "bytes": 563679,
+      "sha256": "6b4a62307591fc127c47631e5ddaed432eae0179ab17a212ba8deec08e1e1040"
+    },
+    {
+      "archiveMember": "vm/run-150000/tests.json",
+      "bytes": 43403069,
+      "sha256": "bd6964c85f1b14ab5e4463a649eaadc538b774e7f837f9d4d367c819b260354f"
+    },
+    {
+      "archiveMember": "vm/run-150000/output.log",
+      "bytes": 10456,
+      "sha256": "d7c7c048b9d7817b621872ca12b9d2159b834dfd0b72d8fe2480bd9b422e7b96"
+    },
+    {
+      "archiveMember": "vm/run-150000/coverage/coverage-final.json",
+      "bytes": 36581153,
+      "sha256": "b67be99ed68cabc9dc69dd6731d938b465bd7d0f3198380aa95642b8f2bc17e9"
+    },
+    {
+      "archiveMember": "vm/coverage-45000.json",
+      "bytes": 1455584,
+      "sha256": "c9b03d0be9cf590ec71760eaeae4eecbc32502b689ec91202b9c27010f9cbbc2"
+    },
+    {
+      "archiveMember": "vm/coverage-50000.json",
+      "bytes": 1562199,
+      "sha256": "c304045929ac9cc539934b8a541c6b33df7be3b1f0a2e30c321484262fdfe53a"
+    },
+    {
+      "archiveMember": "vm/coverage-100000.json",
+      "bytes": 4538524,
+      "sha256": "73c00704a01a03dbd55b4b78d47b9553c7ce48678cd91ee4b4f51003af998d10"
+    },
+    {
+      "archiveMember": "vm/coverage-150000.json",
+      "bytes": 10653038,
+      "sha256": "bbc76d54bf57f0828414b8b79a53436c91fc572b1bbe8dc6ac244666ae0c7ac6"
+    }
+  ],
+  "limits": [
+    "Fault/mutation observer graphs are historical predictions, not fresh replay results. The 45k point was fitted to this same graph.",
+    "Mutation graph covers only 19 production modules, includes sampled/bail/static differences and does not cover every deletion.",
+    "Original suite health remains false; 50k has two additional unresolved extension failures.",
+    "Branch denominators change; exact identities, shapes and duplicate-location ambiguity are reported separately.",
+    "Baseline uses additional file-attribution capture while candidates use native V8. One run per point does not establish speedup.",
+    "No A/A coverage noise floor was measured in round7; coverage differences are not automatically dismissed as noise.",
+    "Old baseline runner omitted ignored capture tools from execution-period snapshots; pre-recorded and current hashes match, with this limitation retained."
+  ]
+}
