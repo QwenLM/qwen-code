@@ -99,9 +99,12 @@ merely because a malformed response returned its ID.
 
 Quarantine recovery follows the #12737 decision and is specified in
 [paired engine per-engine operations](./2026-09-26-paired-engine-per-engine-operations.md)
-(B2c). A quarantined channel admits no new prompt, background turn or side
-request, closes its settled sessions, retires once it drains, and is terminated
-at a drain deadline measured once from the start of the quarantine. Admission,
+(B2c). A quarantined channel admits no new prompt, message from another
+session or side request. Until its termination begins it admits background
+notification turns, which report work that already exists, except on a
+session that a tightening workspace change has fenced. It closes its settled
+sessions, retires once it drains, and is terminated at a drain deadline
+measured once from the start of the quarantine. Admission,
 IDs and owners stay held until the channel's exit is observed, and the engine
 stays closed to fresh sessions until the child's process tree is released.
 

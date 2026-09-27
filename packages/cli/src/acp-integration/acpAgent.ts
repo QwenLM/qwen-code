@@ -91,6 +91,7 @@ import {
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
   BranchPointInvalidError,
+  SessionForkSourceUnavailableError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
@@ -338,6 +339,7 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
@@ -1513,6 +1515,8 @@ type QwenMcpServerConfig = {
   headers?: Record<string, string>;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -2250,6 +2254,12 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   return numberValue;
 }
 
+function toMcpAppResourceLimit(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   const input = toRecord(value);
   const transport = input['transport'];
@@ -2282,6 +2292,12 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
     );
   }
   server.versionNegotiation = versionNegotiation;
+  server.appResourceMaxBytes = toMcpAppResourceLimit(
+    input['appResourceMaxBytes'],
+  );
+  server.appResourceTimeoutMs = toMcpAppResourceLimit(
+    input['appResourceTimeoutMs'],
+  );
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -2321,6 +2337,8 @@ function toStoredMcpServerConfig(
   for (const key of [
     'timeout',
     'versionNegotiation',
+    'appResourceMaxBytes',
+    'appResourceTimeoutMs',
     'trust',
     'description',
     'includeTools',
@@ -2352,6 +2370,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2372,6 +2394,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2394,6 +2420,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -4050,6 +4080,7 @@ class QwenAgent implements Agent {
           }`,
         );
       }
+      session.cancelMcpAppCalls();
       void session.cancelPendingPrompt().catch((error) => {
         debugLogger.debug(
           `Session ${session.getId()} cancel during managed shutdown failed: ${
@@ -4784,6 +4815,7 @@ class QwenAgent implements Agent {
       await waitForSessionDrain(
         (async () => {
           try {
+            session.cancelMcpAppCalls();
             await session.cancelPendingPrompt();
           } catch (err) {
             debugLogger.debug(
@@ -5896,6 +5928,9 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
+            if (enforceLimits) {
+              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            }
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
@@ -6069,6 +6104,12 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
+                if (restoreOptions.replay.kind === 'recent') {
+                  degradeReplayEnvelopeAppHtml(
+                    replayEnvelope,
+                    LOAD_REPLAY_MAX_BYTES,
+                  );
+                }
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,
@@ -6482,7 +6523,11 @@ class QwenAgent implements Agent {
       const sessionPath = config
         .getSessionService()
         .getWorktreeSessionPath(config.getSessionId());
-      const restored = await restoreWorktreeContext(sessionPath);
+      const restored = await restoreWorktreeContext(
+        sessionPath,
+        (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
+        config.getSessionId(),
+      );
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
@@ -9446,6 +9491,9 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
+    const UUID_V4_RE =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
@@ -11206,6 +11254,51 @@ class QwenAgent implements Agent {
           this.workspaceGenerationControllers.delete(requestId);
         }
         return { requestId, cancelled };
+      }
+      case 'qwen/session/mcp-app/call':
+      case 'qwen/session/mcp-app/cancel': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP App calls require a trusted private ACP parent',
+          );
+        }
+        const { sessionId, callId } = params;
+        if (
+          typeof sessionId !== 'string' ||
+          typeof callId !== 'string' ||
+          !callId.startsWith('mcp-app-')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App session or call id',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (method === 'qwen/session/mcp-app/cancel') {
+          session.cancelMcpAppCall(callId);
+          return {};
+        }
+        const { serverName, resourceUri, name, arguments: args } = params;
+        if (
+          typeof serverName !== 'string' ||
+          typeof resourceUri !== 'string' ||
+          typeof name !== 'string' ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App tool call',
+          );
+        }
+        return session.callMcpAppTool(callId, {
+          serverName,
+          resourceUri,
+          name,
+          arguments: args as Record<string, unknown>,
+        });
       }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':
@@ -13904,13 +13997,30 @@ class QwenAgent implements Agent {
         }
         const name = params['name'];
         const atRecordId = params['atRecordId'];
+        const targetSessionId = params['targetSessionId'];
         if (atRecordId !== undefined && typeof atRecordId !== 'string') {
           throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
+        }
+        if (
+          targetSessionId !== undefined &&
+          (typeof targetSessionId !== 'string' ||
+            !UUID_V4_RE.test(targetSessionId))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid targetSessionId',
+          );
         }
         if (isSideTask && atRecordId !== undefined) {
           throw RequestError.invalidParams(
             undefined,
             'atRecordId is not supported for side tasks',
+          );
+        }
+        if (isSideTask && targetSessionId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'targetSessionId is not supported for side tasks',
           );
         }
 
@@ -13972,7 +14082,7 @@ class QwenAgent implements Agent {
                     baseName,
                     sessionService,
                   );
-                  const newSessionId = randomUUID();
+                  const newSessionId = targetSessionId ?? randomUUID();
                   const fork = () =>
                     sessionService.forkSession(sessionId, newSessionId, {
                       title,
@@ -13994,6 +14104,12 @@ class QwenAgent implements Agent {
               throw new RequestError(-32009, error.message, {
                 errorKind: 'branch_point_invalid',
                 recordId: error.recordId,
+              });
+            }
+            if (error instanceof SessionForkSourceUnavailableError) {
+              throw new RequestError(-32004, error.message, {
+                errorKind: 'session_not_found',
+                sessionId: error.sessionId,
               });
             }
             throw error;
