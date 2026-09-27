@@ -672,10 +672,21 @@ export async function resolveSessionManagedGitCwd(
     return null;
   }
 
-  const parsedSessionId = parseCallerSuppliedSessionId(req.query['sessionId']);
-  if (parsedSessionId.kind !== 'valid') return null;
-  const sessionId = parsedSessionId.sessionId;
   try {
+    let rawSessionId: unknown = req.query['sessionId'];
+    if (rawSessionId === undefined) {
+      const [slug] = path.relative(managedRoot, requested).split(path.sep);
+      if (!slug) return null;
+      rawSessionId = (
+        await readBoundedRegularFile(
+          path.join(managedRoot, slug, WORKTREE_SESSION_FILE),
+          256,
+        )
+      )?.trim();
+    }
+    const parsedSessionId = parseCallerSuppliedSessionId(rawSessionId);
+    if (parsedSessionId.kind !== 'valid') return null;
+    const sessionId = parsedSessionId.sessionId;
     let snapshot: ReturnType<typeof runtime.bridge.getSessionExecutionSnapshot>;
     try {
       snapshot = runtime.bridge.getSessionExecutionSnapshot(sessionId);

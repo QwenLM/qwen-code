@@ -5594,6 +5594,29 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['branch_worktree_activation_failed', 0],
+    ['branch_worktree_outcome_unknown', 1],
+    ['worktree_create_failed', 1],
+  ] as const)('handles %s with %i generic notices', async (code, count) => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(500, { code }, 'Worktree failed');
+    session.client.branchSession.mockRejectedValueOnce(error);
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(
+      actions.branchSession({ atRecordId: 'a1', worktree: {} }),
+    ).rejects.toBe(error);
+    expect(error).toMatchObject({ _alreadyDispatched: true });
+    expect(addNotice).toHaveBeenCalledTimes(count);
+    if (count) {
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'branch_session' }),
+      );
+    }
+  });
+
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {

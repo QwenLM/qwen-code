@@ -247,6 +247,37 @@ describe('resolveSessionManagedGitCwd', () => {
     expect(await resolveSessionManagedGitCwd(owned, runtime)).toBe(
       fs.realpathSync(worktree),
     );
+    const legacy = fakeReq(worktree);
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBe(
+      fs.realpathSync(worktree),
+    );
+
+    const getSnapshot = vi.spyOn(runtime.bridge, 'getSessionExecutionSnapshot');
+    for (const invalidSessionId of [
+      '',
+      'not-a-session',
+      [sessionId, sessionId],
+      '22222222-2222-4222-8222-222222222222',
+    ]) {
+      expect(
+        await resolveSessionManagedGitCwd(
+          {
+            query: { cwd: worktree, sessionId: invalidSessionId },
+          } as unknown as Request,
+          runtime,
+        ),
+      ).toBeNull();
+    }
+    getSnapshot.mockImplementationOnce(() => {
+      throw new Error('Session not live');
+    });
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
+    const snapshot = runtime.bridge.getSessionExecutionSnapshot(sessionId);
+    getSnapshot.mockReturnValueOnce({
+      ...snapshot,
+      workspaceCwd: runtimeBase,
+    });
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
 
     const nested = path.join(worktree, 'packages', 'app');
     fs.mkdirSync(nested, { recursive: true });
@@ -254,6 +285,9 @@ describe('resolveSessionManagedGitCwd', () => {
       query: { cwd: nested, sessionId },
     } as unknown as Request;
     expect(await resolveSessionManagedGitCwd(nestedOwned, runtime)).toBe(
+      fs.realpathSync(nested),
+    );
+    expect(await resolveSessionManagedGitCwd(fakeReq(nested), runtime)).toBe(
       fs.realpathSync(nested),
     );
 
@@ -272,7 +306,7 @@ describe('resolveSessionManagedGitCwd', () => {
           { query: { cwd: worktree } } as unknown as Request,
           runtime,
         ),
-      ).toBeNull();
+      ).toBe(fs.realpathSync(worktree));
     } finally {
       if (previousGitDir === undefined) delete process.env['GIT_DIR'];
       else process.env['GIT_DIR'] = previousGitDir;
@@ -286,10 +320,12 @@ describe('resolveSessionManagedGitCwd', () => {
 
     fs.writeFileSync(path.join(worktree, '.qwen-session'), 'x'.repeat(257));
     expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
     fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
 
     const validSidecar = fs.readFileSync(sidecarPath, 'utf8');
     fs.writeFileSync(sidecarPath, '{ malformed');
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
     const response = makeResponse();
     const sendBridgeError = vi.fn();
     expect(
@@ -308,11 +344,16 @@ describe('resolveSessionManagedGitCwd', () => {
     );
     fs.writeFileSync(sidecarPath, validSidecar);
 
-    const unbound = { query: { cwd: worktree } } as unknown as Request;
-    expect(await resolveSessionManagedGitCwd(unbound, runtime)).toBeNull();
-
     fs.writeFileSync(path.join(worktree, '.qwen-session'), 'another-session');
     expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
+    fs.rmSync(path.join(worktree, '.qwen-session'));
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
+    fs.writeFileSync(
+      path.join(worktree, '.qwen-session'),
+      '22222222-2222-4222-8222-222222222222',
+    );
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
 
     if (process.platform !== 'win32') {
       const target = path.join(worktree, 'marker-target');
@@ -320,6 +361,7 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.rmSync(path.join(worktree, '.qwen-session'));
       fs.symlinkSync(target, path.join(worktree, '.qwen-session'));
       expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+      expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
     }
 
     fs.rmSync(path.join(worktree, '.qwen-session'));
@@ -343,6 +385,7 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.readFileSync(path.join(otherWorktree, '.git'), 'utf8'),
     );
     expect(await resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    expect(await resolveSessionManagedGitCwd(legacy, runtime)).toBeNull();
   });
 
   it('accepts an existing sidecar whose original cwd is a repo subdirectory', async () => {

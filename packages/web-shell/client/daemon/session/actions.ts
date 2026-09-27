@@ -3403,7 +3403,12 @@ export function createDaemonSessionActions({
             : {}),
         };
       } catch (error) {
-        if (isStaleBranchPointError(error)) {
+        if (
+          isStaleBranchPointError(error) ||
+          (error instanceof DaemonHttpError &&
+            (error.body as { code?: unknown } | null)?.code ===
+              'branch_worktree_activation_failed')
+        ) {
           throw markNoticeDispatched(error);
         }
         throw dispatchActionError(
