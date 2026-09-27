@@ -612,9 +612,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Experimental: build each workspace runtime with paired Legacy and ' +
-          'Managed engines. No Managed engine is available yet, so sessions ' +
-          'run on Legacy with a durable owner.',
+          'Experimental: build workspace runtimes, other than the private ' +
+          'Conversations one, with paired Legacy and Managed engines. No ' +
+          'Managed engine is available yet, so sessions run on Legacy with a ' +
+          'durable owner.',
       })
       .option('experimental-managed-agents', {
         type: 'boolean',

@@ -549,6 +549,38 @@ describe('validateTranscriptRecord', () => {
     },
   );
 
+  // Likewise for record types.
+  const RECORDED_TYPES: Record<ChatRecord['type'], true> = {
+    user: true,
+    assistant: true,
+    tool_result: true,
+    system: true,
+  };
+
+  it.each(Object.keys(RECORDED_TYPES))('knows the recorded type %s', (type) => {
+    const { diagnostics } = validateTranscriptRecord(
+      record(`${type}-record`, null, { type }),
+    );
+    expect(
+      diagnostics.filter((diagnostic) =>
+        diagnostic.message.includes('unknown record type'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('still flags a record type nothing records', () => {
+    const { diagnostics } = validateTranscriptRecord(
+      record('unknown-record', null, { type: 'not_recorded' }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        message: expect.stringContaining('unknown record type'),
+        affectsCompleteness: true,
+      }),
+    );
+  });
+
   it('still flags a subtype nothing records', () => {
     const { diagnostics } = validateTranscriptRecord(
       record('system-record', null, {

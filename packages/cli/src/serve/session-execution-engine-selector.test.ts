@@ -128,11 +128,12 @@ function restore(
   operation: 'load' | 'resume',
   managed?: ManagedExecutionEngine,
   sessionId = SESSION_ID,
+  daemonOwnedStandalone = false,
 ): Promise<BridgeExecutionEngine> {
   return createSessionExecutionEngineSelector({ runtimeBaseDir, managed })({
     operation,
     request: { workspaceCwd, sessionId },
-    daemonOwnedStandalone: false,
+    daemonOwnedStandalone,
   });
 }
 
@@ -277,6 +278,16 @@ describe('createSessionExecutionEngineSelector: cold restore', () => {
       expect(await readFile(transcriptPath(), 'utf8')).toBe(before);
     },
   );
+
+  it('restores a daemon-owned session by its owner, not by its purpose', async () => {
+    await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);
+    await expect(
+      restore('load', undefined, SESSION_ID, true),
+    ).rejects.toBeInstanceOf(SessionExecutionEngineError);
+    await expect(
+      restore('load', managedEngine(COMPATIBLE), SESSION_ID, true),
+    ).resolves.toBe('managed');
+  });
 
   it('restores a Managed owner on a compatible Managed engine', async () => {
     await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);

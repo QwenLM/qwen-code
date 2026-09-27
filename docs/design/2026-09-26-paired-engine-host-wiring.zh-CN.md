@@ -90,6 +90,11 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
   Managed factory。
 - 通过 `deps.bridge` 注入的 Bridge 或注入的工作区 registry 仍由调用方控制；开关既不
   包装也不替换它们。
+- 嵌入式默认 Bridge 从嵌入进程的 runtime 目录读取 owner，与它读取 artifact 快照和
+  附件的位置相同；而它的子进程根据自身环境与工作区 settings 解析 runtime 目录。如果
+  嵌入方的工作区 settings 改变了 runtime 目录，嵌入方需为自身进程设置
+  `QWEN_RUNTIME_DIR`，使两者一致；否则双引擎嵌入式宿主会到错误的目录读取 owner，冷
+  恢复返回 404。daemon 的各 runtime 会为其子进程设置该变量。
 - Channels 没有自己的 Bridge。Channel worker 通过 daemon 创建会话，并带上
   `sourceType: 'channel'`，用途规则会让这些会话保持 Legacy。
 
@@ -160,7 +165,8 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
   不会启动 Managed 通道，所以不会出现这种情况；
 - 有界的评估：Bridge 以其 initialize 超时限制每次选择（包括 owner 读取），超时的
   选择会使创建或恢复失败，而不是选择 Legacy。因此评估必须在该预算内充分提前完成。
-  抛出异常或 reject 的评估按 `unknown` 处理；
+  抛出异常或 reject 的评估按 `unknown` 处理；选择器不保留失败细节，因此由引擎按兼容
+  契约中的日志规则自行记录其失败；
 - 用途标记：在注册引擎之前，每个延期用途的内部创建方都要标记其会话，或以其他方式
   保持 Legacy。worktree 重置产生的替代会话目前没有标记：它创建时不带 `worktree`，
   之后才移入 checkout。Live 对话在项目中启动的任务也以无来源的方式创建线程，由引擎
@@ -270,9 +276,15 @@ runtime 的作用域，其错误分类沿用 B2a。
   在它后面继续追加。原地升级的 daemon 在重启之前一直使用旧的记录类型列表，而它新启动
   的子进程可能已经写入更新的类型。目前没有任何机制修复这类 transcript；B2c 恢复的是
   通道，不是 transcript。B2d 仍允许在 lease 关闭时配对：该开关是实验性的且默认关闭，
-  拒绝是准确的且不改动字节，关闭开关即可在 Legacy 上恢复该会话。已知记录类型列表现在
-  覆盖 CLI 记录的所有类型，新增类型未加入列表时会有测试失败；在此之前，记录过 text
+  拒绝是准确的且不改动字节，关闭开关即可在 Legacy 上恢复该会话。已知记录类型与子类型
+  列表现在覆盖 chat 记录类型的全部成员；该类型新增列表缺少的成员时，一个经过 typecheck
+  的测试会失败；不以该类型构造记录的写入方不在其覆盖范围内。在此之前，记录过 text
   elements 的 Legacy 会话无法在双引擎宿主上恢复。
+- owner 读取在选择预算（initialize 超时，默认 10 秒）内进行，而不是在恢复预算（默认
+  60 秒）内。transcript 过大或存储过慢、无法在该预算内读完时，双引擎宿主上的恢复会
+  失败。测试中读取 100 MB 的 transcript 远少于 1 秒。
+- daemon 不清理旧 transcript，因此从未使用的会话留下的纯 owner transcript 会在双引擎
+  宿主上累积（B2a）。默认启用之前需要给出处理方案。
 - 用途规则依赖创建方标注的来源，而这些来源只能让会话失去资格。不标记其会话的延期
   用途内部创建方，在引擎出现后其会话就会变得有资格；Managed 引擎接口的用途标记一项
   列出了已知情况，引擎切片还要重新审计其余创建方。

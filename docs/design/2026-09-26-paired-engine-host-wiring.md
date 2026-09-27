@@ -113,6 +113,13 @@ B2d adds no operator setting for them.
   paired Bridge would extend to a Managed factory it can never use.
 - A Bridge injected through `deps.bridge` or an injected workspace registry
   stays under its caller's control; the opt-in neither wraps nor replaces it.
+- The embedded default reads owners from the embedding process's runtime
+  directory, where it already reads artifact snapshots and attachments, while
+  its children resolve theirs from their environment and the workspace
+  settings. An embedder whose workspace settings move the runtime directory
+  sets `QWEN_RUNTIME_DIR` for its process so that both agree; otherwise a
+  paired embedded host looks for owners in the wrong directory and a cold
+  restore answers 404. The daemon's runtimes set it for their children.
 - Channels have no Bridge of their own. Channel workers create sessions through
   the daemon with `sourceType: 'channel'`, which the purpose rules keep on
   Legacy.
@@ -201,7 +208,9 @@ To be paired, a Managed engine supplies, per workspace runtime:
 - a bounded evaluation: the Bridge bounds each selection, owner read included,
   by its initialize timeout, and a selection that exceeds it fails the creation
   or restore instead of selecting Legacy. The evaluation therefore settles well
-  within that budget. A thrown or rejected evaluation counts as `unknown`;
+  within that budget. A thrown or rejected evaluation counts as `unknown`; the
+  selector keeps no detail of the failure, so the engine logs its own under the
+  logging rule of the compatibility contract;
 - purpose marking: every internal creator of a deferred purpose marks its
   sessions, or is otherwise kept on Legacy, before the engine is registered.
   The replacement session of a worktree reset does not today: it is created
@@ -342,10 +351,19 @@ classification is B2a's.
   transcripts; B2c recovers channels, not transcripts. B2d still allows pairing
   with the lease off: the opt-in is experimental and off by default, the
   refusal is precise and leaves the bytes unchanged, and turning the opt-in off
-  restores the session on Legacy. The list of known record types now covers
-  every type the CLI records, and a test fails when a new one is recorded
-  without it; before that, a Legacy session that recorded text elements could
-  not be restored on a paired host.
+  restores the session on Legacy. The lists of known record types and
+  subtypes now cover every member of the chat record type, and a typechecked
+  test fails when that type gains one the lists lack; writers that build
+  records outside that type are not covered by it. Before this, a Legacy
+  session that recorded text elements could not be restored on a paired host.
+- The owner read runs within the selection budget, the initialize timeout
+  (10 seconds by default), instead of the restore budget (60 seconds by
+  default). A transcript too large, or storage too slow, to read within it
+  fails the restore on a paired host. Reading a 100 MB transcript took well
+  under a second in testing.
+- The daemon does not sweep old transcripts, so the owner-only transcripts of
+  sessions that are never used accumulate on a paired host (B2a). Default
+  enablement needs an answer for them.
 - The purpose rules rely on creator-attributed sources, which can only make a
   session ineligible. An internal creator of a deferred purpose that does not
   mark its sessions becomes eligible once an engine exists; the purpose marking

@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
+import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -18,6 +19,9 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
 const WS_BOUND = path.resolve('/work/bound');
 
@@ -229,11 +233,14 @@ describe('createServeApp default bridge wiring', () => {
       factory: vi.fn(),
       evaluate: vi.fn(() => ({ status: 'compatible' as const })),
     };
+    // The spawn factories each build created.
+    const spawnedBy = new Map<BridgeOptions, unknown[]>();
     const build = (
       extra: Record<string, unknown>,
       deps: Parameters<typeof createServeApp>[2] = {},
     ): BridgeOptions => {
       const before = bridgeOptions.length;
+      const spawnedBefore = spawnFactories.length;
       createServeApp(
         {
           port: 0,
@@ -245,7 +252,19 @@ describe('createServeApp default bridge wiring', () => {
         deps,
       );
       expect(bridgeOptions).toHaveLength(before + 1);
-      return bridgeOptions[before]!;
+      const built = bridgeOptions[before]!;
+      spawnedBy.set(
+        built,
+        spawnFactories.slice(spawnedBefore).map((created) => created.factory),
+      );
+      return built;
+    };
+    const managedChildProcesses = {
+      registry: new ProcessRegistry(),
+      policy: createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      }),
     };
     const plain = build({});
     const plainWithArgs = build({ experimentalLsp: true });
@@ -259,33 +278,62 @@ describe('createServeApp default bridge wiring', () => {
       { experimentalPairedEngines: true },
       { managedExecutionEngine: managed },
     );
+    const plainWithChildren = build({}, { managedChildProcesses });
+    const pairedWithChildren = build(
+      { experimentalPairedEngines: true },
+      { managedChildProcesses },
+    );
     const withArgs = spawnFactories.filter((created) =>
       created.extraArgs?.includes('--experimental-lsp'),
     );
     expect(withArgs).toHaveLength(2);
+    for (const options of [plainWithChildren, pairedWithChildren]) {
+      expect(spawnedBy.get(options)).toHaveLength(1);
+    }
 
     // Without the opt-in the Bridge is built as before, even with an engine.
-    for (const options of [plain, plainWithArgs, engineOnly]) {
+    for (const options of [
+      plain,
+      plainWithArgs,
+      engineOnly,
+      plainWithChildren,
+    ]) {
       expect(options.executionEngines).toBeUndefined();
     }
     expect(plain.channelFactory).toBeUndefined();
     expect(engineOnly.channelFactory).toBeUndefined();
     expect(plainWithArgs.channelFactory).toBe(withArgs[0]!.factory);
+    expect(plainWithChildren.channelFactory).toBe(
+      spawnedBy.get(plainWithChildren)![0],
+    );
     expect(managed.evaluate).not.toHaveBeenCalled();
 
     // With it, only the channel factory is replaced by the pair.
-    const otherKeys = (options: BridgeOptions) =>
-      Object.keys(options)
-        .filter((key) => key !== 'channelFactory' && key !== 'executionEngines')
-        .sort();
-    expect(otherKeys(paired)).toEqual(otherKeys(plain));
-    expect(otherKeys(pairedWithArgs)).toEqual(otherKeys(plainWithArgs));
-    expect(otherKeys(pairedWithEngine)).toEqual(otherKeys(plain));
-    for (const options of [paired, pairedWithArgs, pairedWithEngine]) {
+    expect(comparableBridgeOptions(paired)).toEqual(
+      comparableBridgeOptions(plain),
+    );
+    expect(comparableBridgeOptions(pairedWithArgs)).toEqual(
+      comparableBridgeOptions(plainWithArgs),
+    );
+    expect(comparableBridgeOptions(pairedWithEngine)).toEqual(
+      comparableBridgeOptions(engineOnly),
+    );
+    expect(comparableBridgeOptions(pairedWithChildren)).toEqual(
+      comparableBridgeOptions(plainWithChildren),
+    );
+    for (const options of [
+      paired,
+      pairedWithArgs,
+      pairedWithEngine,
+      pairedWithChildren,
+    ]) {
       expect(options.channelFactory).toBeUndefined();
     }
     expect(paired.executionEngines!.legacy).toBe(defaultSpawnChannelFactory);
     expect(pairedWithArgs.executionEngines!.legacy).toBe(withArgs[1]!.factory);
+    expect(pairedWithChildren.executionEngines!.legacy).toBe(
+      spawnedBy.get(pairedWithChildren)![0],
+    );
     await expect(paired.executionEngines!.managed(WS_BOUND)).rejects.toThrow(
       'No Managed execution engine is available in this host.',
     );

@@ -97,6 +97,7 @@ import type {
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
+import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
 import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
@@ -5962,8 +5963,6 @@ describe('runQwenServe paired execution engines', () => {
     tmpDir = undefined;
   });
 
-  type BuiltBridge = Parameters<typeof acpBridge.createAcpSessionBridge>[0];
-
   // Boots a daemon over two startup workspaces, adds a registered and a
   // scratch workspace, and reports what each Bridge was built with.
   async function bootWorkspaceRuntimes(
@@ -6101,16 +6100,20 @@ describe('runQwenServe paired execution engines', () => {
         path.join(tmpDir, 'qwen-home'),
       ]);
     }
-    const otherKeys = (options: BuiltBridge) =>
-      Object.keys(options)
-        .filter((key) => key !== 'channelFactory' && key !== 'executionEngines')
-        .sort();
     for (const [index, option] of plain.options.entries()) {
       expect(option.executionEngines).toBeUndefined();
       expect(plain.factoryStorage.get(option.channelFactory)).toBe(
         option.artifactSnapshotRuntimeBaseDir,
       );
-      expect(otherKeys(paired.options[index]!)).toEqual(otherKeys(option));
+      // Each boot creates a new scratch directory, and the scratch runtime's
+      // attachments root is derived from it.
+      const ignored =
+        option.boundWorkspace === canonicalizeWorkspace(plain.scratchCwd)
+          ? ['boundWorkspace', 'sessionAttachmentsRoot']
+          : [];
+      expect(comparableBridgeOptions(paired.options[index]!, ignored)).toEqual(
+        comparableBridgeOptions(option, ignored),
+      );
     }
     for (const option of paired.options) {
       expect(option.channelFactory).toBeUndefined();
@@ -6157,10 +6160,14 @@ describe('runQwenServe paired execution engines', () => {
     }
   });
 
-  it('builds a fresh pair for the runtime that replaces the primary', async () => {
+  it('builds a fresh pair for each runtime that a trust change replaces', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-replacement-')),
     );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
     vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
       .mockResolvedValueOnce({
         revision: 'boot-untrusted',
@@ -6191,7 +6198,7 @@ describe('runQwenServe paired execution engines', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
-        workspace: tmpDir,
+        workspace: [primary, secondary],
         maxSessions: 1,
         serveWebShell: false,
         experimentalPairedEngines: true,
@@ -6200,20 +6207,27 @@ describe('runQwenServe paired execution engines', () => {
     );
     try {
       await handle.runtimeReady;
-      expect(createBridge).toHaveBeenCalledTimes(2);
-      const [boot, replacement] = createBridge.mock.calls.map(
-        ([options]) => options,
+      const built = (cwd: string) =>
+        createBridge.mock.calls
+          .map(([options]) => options)
+          .filter((options) => options.boundWorkspace === cwd);
+      const factories = createFactory.mock.results.map(
+        (result) => result.value,
       );
-      expect(boot!.executionEngines).toBeDefined();
-      expect(replacement!.channelFactory).toBeUndefined();
-      expect(replacement!.executionEngines).toBeDefined();
-      expect(replacement!.executionEngines).not.toBe(boot!.executionEngines);
-      expect(replacement!.executionEngines!.legacy).toBe(
-        createFactory.mock.results.at(-1)?.value,
-      );
-      expect(replacement!.executionEngines!.legacy).not.toBe(
-        boot!.executionEngines!.legacy,
-      );
+      for (const cwd of [primary, secondary].map(canonicalizeWorkspace)) {
+        await vi.waitFor(() => expect(built(cwd)).toHaveLength(2), {
+          timeout: 10_000,
+        });
+        const [boot, replacement] = built(cwd);
+        expect(boot!.executionEngines).toBeDefined();
+        expect(replacement!.channelFactory).toBeUndefined();
+        expect(replacement!.executionEngines).toBeDefined();
+        expect(replacement!.executionEngines).not.toBe(boot!.executionEngines);
+        expect(factories).toContain(replacement!.executionEngines!.legacy);
+        expect(replacement!.executionEngines!.legacy).not.toBe(
+          boot!.executionEngines!.legacy,
+        );
+      }
     } finally {
       await handle.close();
     }
@@ -6280,9 +6294,9 @@ describe('runQwenServe paired execution engines', () => {
       createBridge.mock.calls.find(
         ([options]) => options.boundWorkspace === cwd,
       )?.[0];
-    let handle: RunHandle | undefined;
-    try {
-      handle = await runQwenServe(
+    const boot = async (paired: boolean) => {
+      createBridge.mockClear();
+      const handle = await runQwenServe(
         {
           port: 0,
           hostname: '127.0.0.1',
@@ -6290,33 +6304,46 @@ describe('runQwenServe paired execution engines', () => {
           workspace: [workspace, secondary],
           maxSessions: 1,
           serveWebShell: false,
-          experimentalPairedEngines: true,
+          ...(paired ? { experimentalPairedEngines: true } : {}),
         },
         {
           liveConversationWorkspace,
-          liveDiscoveryStableBaseDir: path.join(tmpDir, 'stable'),
-          daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          liveDiscoveryStableBaseDir: path.join(tmpDir!, 'stable'),
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
           resolveOnListen: true,
         },
       );
-      await handle.runtimeReady;
-      await vi.waitFor(
-        () => {
-          expect(optionsFor(canonicalRoot)).toBeDefined();
-        },
-        { timeout: 10_000 },
-      );
-      const conversations = optionsFor(canonicalRoot)!;
-      expect(conversations.channelFactory).toBeTypeOf('function');
-      expect(conversations.executionEngines).toBeUndefined();
-      // The ordinary runtimes of the same daemon are paired.
-      for (const cwd of [workspace, secondary]) {
-        const ordinary = optionsFor(canonicalizeWorkspace(cwd));
-        expect(ordinary?.channelFactory).toBeUndefined();
-        expect(ordinary?.executionEngines).toBeDefined();
+      try {
+        await handle.runtimeReady;
+        await vi.waitFor(
+          () => {
+            expect(optionsFor(canonicalRoot)).toBeDefined();
+          },
+          { timeout: 10_000 },
+        );
+        return {
+          conversations: optionsFor(canonicalRoot)!,
+          ordinary: [workspace, secondary].map(
+            (cwd) => optionsFor(canonicalizeWorkspace(cwd))!,
+          ),
+        };
+      } finally {
+        await handle.close();
       }
-    } finally {
-      await handle?.close();
+    };
+
+    const plain = await boot(false);
+    const paired = await boot(true);
+    expect(paired.conversations.channelFactory).toBeTypeOf('function');
+    expect(paired.conversations.executionEngines).toBeUndefined();
+    // Nothing else about it changes either, including its lease marker.
+    expect(comparableBridgeOptions(paired.conversations)).toEqual(
+      comparableBridgeOptions(plain.conversations),
+    );
+    // The ordinary runtimes of the same daemon are paired.
+    for (const ordinary of paired.ordinary) {
+      expect(ordinary.channelFactory).toBeUndefined();
+      expect(ordinary.executionEngines).toBeDefined();
     }
   });
 });

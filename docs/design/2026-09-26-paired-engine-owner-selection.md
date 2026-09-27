@@ -85,11 +85,13 @@ and its ID stays occupied. Single-factory sessions keep today's behavior.
 
 ### Host selector
 
-`createSessionExecutionEngineSelector({ newSessionEngine, runtimeBaseDir })`
-builds the paired Bridge `select` callback in the CLI serve layer.
+`createSessionExecutionEngineSelector` builds the paired Bridge `select`
+callback in the CLI serve layer from the runtime's session base directory
+(`runtimeBaseDir`).
 
-- Spawn returns `newSessionEngine`. B2d replaces this input with the
-  configuration-compatibility policy.
+- In this slice, spawn returned a fixed `newSessionEngine`. B2d replaced that
+  input with its purpose rules and a registered Managed engine's compatibility
+  check; see [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
 - Load and resume resolve the persisted spelling that the ACP child restores
   (case-insensitive lookup), then read the whole active transcript with the
   strict owner accumulator and return the verified owner. A complete history
@@ -177,8 +179,9 @@ classification changes.
   keep their IDs occupied, as described above.
 - The selector reads the whole transcript before a cold restore, as the restore
   itself does, so its cost grows with the transcript.
-- The selector is not wired. B2d must construct it with the runtime's session
-  base directory and decide new-session selection. The questions in #12737
-  about selector inputs, propagation failure, quarantine recovery and the
-  Hosted boundary are not decided by this slice. B2d is designed in
-  [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
+- This slice did not wire the selector. B2d constructs it with each runtime's
+  session base directory and decides new-session selection, behind
+  `--experimental-paired-engines`; see
+  [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md). The
+  questions in #12737 about selector inputs, propagation failure, quarantine
+  recovery and the Hosted boundary are not decided by this slice.
