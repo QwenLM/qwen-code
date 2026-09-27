@@ -1476,7 +1476,7 @@ It fires when the session starts, when context files are reloaded during the ses
 
 **Purpose**: Runs after a managed-memory document is created, updated, or deleted, and when managed auto-memory is turned on or off. Use it to mirror those documents somewhere else. The change is already on disk. Hook output and a hook failure do not roll it back. Read the file at `paths` yourself; the event does not include the file body. On `delete`, the file is already gone, so use `relative_paths` as the stable identity.
 
-It covers `write_file` and `edit` inside a managed memory root, `/forget`, and `MEMORY.md` index rebuilds. It does not cover scheduling files outside `memory/` (`meta.json`, `extract-cursor.json`, `consolidation.lock`).
+It covers `write_file` and `edit` of Markdown documents inside a managed memory root, `/forget`, and `MEMORY.md` index rebuilds. It does not cover scheduling files outside `memory/` (`meta.json`, `extract-cursor.json`, `consolidation.lock`).
 
 **Matcher**: Matches against each `relative_paths` entry. For example, `"matcher": "MEMORY\\.md$"` fires for index rebuilds. The on/off toggle has no path, so every `MemoryChanged` hook receives it. Ignore that event unless `enabled` is present.
 
@@ -1513,7 +1513,7 @@ It covers `write_file` and `edit` inside a managed memory root, `/forget`, and `
 - `paths`: absolute paths of the documents in this change. One file is `[path]`. Files changed together are one array. `paths` is `[]` when memory is toggled.
 - `relative_paths`: the same documents, relative to the memory root and using `/`. This is the stable name of the document. It stays aligned with `paths`.
 - `memory_scope`: `user`, `project`, or `team`. Present for document changes. Omitted when memory is toggled.
-- `operation`: `create`, `update`, or `delete`. Present for document changes. Omitted when memory is toggled.
+- `operation`: `create`, `update`, or `delete`, based on filesystem existence. Writing an existing empty index is an `update`, including its first contentful write. Present for document changes. Omitted when memory is toggled. The hook does not replay earlier creations; mirrors should initialize from existing documents and accept updates to documents they have not seen before.
 - `workspace`: absolute workspace directory. Present for project and team memory, and for the on/off toggle. **Omitted for user-level memory.**
 - `enabled`: present only when managed auto-memory is turned on or off.
 

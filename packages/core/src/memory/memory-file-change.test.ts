@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   describeMemoryFileChange,
   memoryChangedNoticeFromHookInput,
@@ -18,10 +18,13 @@ import {
   type MemoryChangedNotice,
 } from './memory-file-change.js';
 import {
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
@@ -31,12 +34,19 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 
+import { ensureAutoMemoryScaffold } from './store.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+}));
+
 describe('memory file change hook', () => {
   const originalBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   let tempDir: string | undefined;
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    clearAutoMemoryRootCache();
     if (originalBase === undefined) {
       delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     } else {
@@ -52,7 +62,7 @@ describe('memory file change hook', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-file-change-'));
     process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
     const projectRoot = path.join(tempDir, 'repo');
-    await fs.mkdir(projectRoot, { recursive: true });
+    await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true });
     return projectRoot;
   }
 
@@ -399,7 +409,7 @@ describe('memory file change hook', () => {
       const realRoot = path.join(realParent, 'repo');
       const linkedParent = path.join(tempDir!, 'link');
       const linkedRoot = path.join(linkedParent, 'repo');
-      await fs.mkdir(realRoot, { recursive: true });
+      await fs.mkdir(path.join(realRoot, '.git'), { recursive: true });
       await fs.symlink(realParent, linkedParent, 'dir');
       const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
       process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
@@ -476,6 +486,7 @@ describe('memory file change hook', () => {
       const workspace = path.join(tempDir!, 'link', 'repo');
       const file = path.join(realParent, 'repo/.qwen/team-memory/a.md');
       await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.mkdir(path.join(realParent, 'repo/.git'));
       await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
       const seen: MemoryChangedNotice[] = [];
       const unregister = registerMemoryChangedListener(workspace, (change) => {
@@ -680,6 +691,7 @@ describe('memory file change hook', () => {
       const aliasWorkspace = path.join(tempDir!, 'link', 'repo');
       const file = path.join(canonicalWorkspace, '.qwen/team-memory/a.md');
       await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.mkdir(path.join(canonicalWorkspace, '.git'));
       await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
       const writer: MemoryChangedNotice[] = [];
       const windowSeen: MemoryChangedNotice[] = [];
@@ -1627,11 +1639,8 @@ describe('memory file change hook', () => {
     expect(seen).toEqual([controller.signal]);
   });
 
-  it('labels the first rebuild of a scaffold-created empty index as create', async () => {
+  it('labels a rebuild of an existing empty index as update', async () => {
     const projectRoot = await setup();
-    // ensureAutoMemoryScaffold plants an EMPTY MEMORY.md without notifying;
-    // the first contentful rebuild must announce a create, not an update for
-    // a document the consumer was never told existed.
     const userRoot = getUserAutoMemoryRoot();
     await fs.mkdir(path.join(userRoot, 'user'), { recursive: true });
     await fs.writeFile(getUserAutoMemoryIndexPath(), '');
@@ -1663,7 +1672,7 @@ describe('memory file change hook', () => {
     expect(seen).toEqual([
       expect.objectContaining({
         scope: 'user',
-        operation: 'create',
+        operation: 'update',
         relativePaths: ['MEMORY.md'],
       }),
     ]);
@@ -1704,5 +1713,169 @@ describe('memory file change hook', () => {
         relativePaths: ['user/gone.md'],
       }),
     ]);
+  });
+});
+
+describe('memory change snapshot ordering', () => {
+  let temp: string;
+  let workspace: string;
+  const unregister: Array<() => void> = [];
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+  beforeEach(async () => {
+    temp = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-change-races-'));
+    workspace = path.join(temp, 'repo');
+    await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', temp);
+    clearAutoMemoryRootCache();
+    await fs.mkdir(getUserAutoMemoryRoot(), { recursive: true });
+  });
+  afterEach(async () => {
+    for (const stop of unregister.splice(0)) stop();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    clearAutoMemoryRootCache();
+    await fs.rm(temp, { recursive: true, force: true });
+  });
+  function listener(seen: MemoryChangedNotice[]) {
+    const stop = registerMemoryChangedListener(workspace, (notice) => {
+      seen.push(notice);
+    });
+    unregister.push(stop);
+    return stop.id;
+  }
+  it('ignores outside non-documents and never fabricates their deletion', async () => {
+    const windowNotices: MemoryChangedNotice[] = [];
+    const writerNotices: MemoryChangedNotice[] = [];
+    const windowId = listener(windowNotices);
+    const writerId = listener(writerNotices);
+    const entered = deferred();
+    const done = deferred();
+    const window = withCoalescedMemoryChanges(workspace, windowId, async () => {
+      entered.resolve();
+      await done.promise;
+    });
+    await entered.promise;
+    const file = path.join(getUserAutoMemoryRoot(), 'notes.txt');
+    await fs.writeFile(file, 'still alive');
+    await notifyMemoryFileChange(file, workspace, 'create', writerId);
+    done.resolve();
+    await window;
+    expect(await fs.readFile(file, 'utf8')).toBe('still alive');
+    expect(windowNotices).toEqual([]);
+    expect(writerNotices).toEqual([]);
+  });
+  it('first contentful coalesced scaffold write announces update', async () => {
+    await ensureAutoMemoryScaffold(workspace);
+    const index = getAutoMemoryIndexPath(workspace);
+    expect(await fs.readFile(index, 'utf8')).toBe('');
+    const notices: MemoryChangedNotice[] = [];
+    await withCoalescedMemoryChanges(workspace, listener(notices), async () => {
+      await fs.writeFile(index, '- [role](role.md)\n');
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+  it('indexer refill of an already-announced index remains update', async () => {
+    await ensureAutoMemoryScaffold(workspace);
+    const index = getAutoMemoryIndexPath(workspace);
+    await fs.writeFile(
+      path.join(path.dirname(index), 'role.md'),
+      '---\nname: Role\ndescription: Role description\ntype: user\n---\nEngineer\n',
+    );
+    const notices: MemoryChangedNotice[] = [];
+    const id = listener(notices);
+    await rebuildManagedAutoMemoryIndex(workspace, id);
+    expect(notices.splice(0)).toEqual([
+      expect.objectContaining({ operation: 'update' }),
+    ]);
+    await fs.writeFile(index, '');
+    await notifyMemoryFileChange(index, workspace, 'update', id);
+    notices.splice(0);
+    await rebuildManagedAutoMemoryIndex(workspace, id);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+  it('outside create during closing directory enumeration produces no window delete', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const userRoot = await fs.realpath(getUserAutoMemoryRoot());
+    const file = path.join(userRoot, 'late.md');
+    const held = deferred();
+    const release = deferred();
+    let closing = false;
+    const readdir = fs.readdir;
+    vi.spyOn(fs, 'readdir').mockImplementation(
+      async (...args: Parameters<typeof readdir>) => {
+        const result = await readdir(...args);
+        if (closing && args[0] === userRoot) {
+          held.resolve();
+          await release.promise;
+        }
+        return result;
+      },
+    );
+    const window = withCoalescedMemoryChanges(workspace, id, async () => {
+      closing = true;
+    });
+    await held.promise;
+    await fs.writeFile(file, 'live');
+    await notifyMemoryFileChange(file, workspace, 'create', writerId);
+    release.resolve();
+    await window;
+    expect(await fs.readFile(file, 'utf8')).toBe('live');
+    expect(writer).toEqual([expect.objectContaining({ operation: 'create' })]);
+    expect(seen).toEqual([]);
+  });
+  it('outside delete after closing read produces no window create', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const file = path.join(
+      await fs.realpath(getUserAutoMemoryRoot()),
+      'gone.md',
+    );
+    await fs.writeFile(file, 'present');
+    const held = deferred();
+    const release = deferred();
+    let closing = false;
+    const readFile = fs.readFile;
+    vi.spyOn(fs, 'readFile').mockImplementation(
+      async (...args: Parameters<typeof readFile>) => {
+        const result = await readFile(...args);
+        if (closing && args[0] === file) {
+          held.resolve();
+          await release.promise;
+        }
+        return result;
+      },
+    );
+    const window = withCoalescedMemoryChanges(workspace, id, async () => {
+      closing = true;
+    });
+    await held.promise;
+    await fs.rm(file);
+    await notifyMemoryFileChange(file, workspace, 'delete', writerId);
+    release.resolve();
+    await window;
+    await expect(fs.access(file)).rejects.toThrow();
+    expect(writer).toEqual([expect.objectContaining({ operation: 'delete' })]);
+    expect(seen).toEqual([]);
   });
 });

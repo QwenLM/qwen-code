@@ -409,11 +409,7 @@ async function writeMemoryIndex(
   await notifyMemoryFileChange(
     indexPath,
     projectRoot,
-    // The scaffold plants an EMPTY index (createDefaultAutoMemoryIndex)
-    // without notifying, so '' is 'absent' for the label: the first notice a
-    // consumer receives for the index must not be an update for a document
-    // it was never told was created.
-    existing === undefined || existing === '' ? 'create' : 'update',
+    existing === undefined ? 'create' : 'update',
     options.deliveryId,
     options.signal,
   );

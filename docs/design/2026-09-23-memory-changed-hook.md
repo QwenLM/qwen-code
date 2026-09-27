@@ -38,10 +38,10 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 - `paths`: absolute paths. One file is `[path]`. Files changed together stay in one array, split by scope.
 - `relative_paths`: the same documents, relative to that scope's memory root, using `/`, in the same order as `paths`. This is the stable document key. Absolute sandbox paths are not.
 - `memory_scope`: `user`, `project`, or `team`.
-- `operation`: `create`, `update`, or `delete`.
+- `operation`: `create`, `update`, or `delete`, based on filesystem existence. Writing an existing empty `MEMORY.md` is an `update`, including a scaffold-created index or an index that was cleared and refilled. This event does not replay earlier creations; a mirror must initialize from existing documents and accept updates to documents it has not seen before.
 - `workspace`: absolute workspace directory. Present for project and team memory. Omitted for user memory.
 
-`write_file` and `edit` notify when the target is inside a managed memory root. `/forget` notifies after a delete or rewrite. `MEMORY.md` rebuilds notify after the index write, and skip a byte-identical rewrite. Scheduled dream and extract compare the memory trees before and after the agent, including its index rebuild, and emit the difference once. A shell delete inside that agent is a `delete` event. Manual `/dream` submits a prompt to the main agent, so a shell delete in that turn is not covered by the snapshot. A write that notifies on its own while that comparison is open keeps that event, and the window's difference is taken against what that event reported. If the id passed with the event is not registered on that workspace, the newest registration there receives it. Scheduling files are classified out.
+`write_file` and `edit` notify when the target is inside a managed memory root. `/forget` notifies after a delete or rewrite. `MEMORY.md` rebuilds notify after the index write, and skip a byte-identical rewrite. Scheduled dream and extract compare the memory trees before and after the agent, including its index rebuild, and emit the difference once. A shell delete inside that agent is a `delete` event. Manual `/dream` submits a prompt to the main agent, so a shell delete in that turn is not covered by the snapshot. A write that notifies on its own while that comparison is open keeps that event, and the window's difference is taken against what that event reported. If the id passed with the event is not registered on that workspace, the newest registration there receives it. Only Markdown documents enter both direct notifications and snapshots; scheduling and temporary files are excluded. If an outside notification arrives after the closing snapshot read, the window skips that stale comparison and leaves the event to the writer.
 
 ### On/off toggle
 
@@ -54,7 +54,7 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 }
 ```
 
-`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog writes the workspace setting and emits with that project root. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present. Editing the settings file on disk does not emit this event. Only the Memory dialog and `qwen/settings/setMemory` do.
+`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog commits the workspace setting before changing its displayed state or emitting with that project root. A failed settings write shows an error and emits no toggle. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present. Editing the settings file on disk does not emit this event. Only the Memory dialog and `qwen/settings/setMemory` do.
 
 The base hook input still carries `session_id` and `cwd`. `cwd` is the working directory, not the workspace.
 

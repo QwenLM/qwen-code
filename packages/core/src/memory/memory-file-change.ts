@@ -61,13 +61,21 @@ interface MemoryChangedRegistration {
 }
 
 const listeners = new Set<MemoryChangedRegistration>();
+interface ReportedMemoryContent {
+  content: string | null;
+  sequence: number;
+}
+
+let reportSequence = 0;
 /**
  * The store is the current window's outside-baseline bucket. A notify made
  * inside a window is not delivered; it is still recorded for every OTHER open
  * window so a sibling window's closing diff does not re-report the write
  * under its own attribution.
  */
-const suppressDelivery = new AsyncLocalStorage<Map<string, string | null>>();
+const suppressDelivery = new AsyncLocalStorage<
+  Map<string, ReportedMemoryContent>
+>();
 
 /**
  * Register a listener for one workspace. A write is delivered to the
@@ -113,6 +121,7 @@ export function describeMemoryFileChange(
   projectRoot: string,
 ): MemoryChangedDocument | undefined {
   const absolutePath = path.resolve(filePath);
+  if (!isMemoryDocumentFilename(path.basename(absolutePath))) return undefined;
   const candidates: Array<{
     scope: MemoryChangedScope;
     root: string;
@@ -167,7 +176,7 @@ const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
  * Content already reported while a coalesced window is open, per window.
  * `null` means the path was reported while absent.
  */
-const outsideWindowEmits = new Set<Map<string, string | null>>();
+const outsideWindowEmits = new Set<Map<string, ReportedMemoryContent>>();
 
 /**
  * True when the tree walk can observe `filePath` under `root`: every ancestor
@@ -226,9 +235,10 @@ async function rememberOutsideEmit(
         ? null
         : await fs.readFile(filePath, 'utf-8').catch(() => undefined);
     if (content === undefined) continue;
+    const reported = { content, sequence: ++reportSequence };
     for (const bucket of outsideWindowEmits) {
       if (bucket !== ownBucket) {
-        bucket.set(filePath, content);
+        bucket.set(filePath, reported);
       }
     }
   }
@@ -470,7 +480,8 @@ export async function notifyMemoryEnabledChange(
 }
 
 interface MemoryTreeSnapshot {
-  documents: Map<string, string>;
+  documents: Map<string, { content: string; sequence: number }>;
+  sequence: number;
   /**
    * Paths the walk saw but could not read: 'unknown'. Unknown is never a
    * content difference — a before-side unknown relabels a would-be 'create'
@@ -508,11 +519,12 @@ async function readMemoryTree(
       // walked root must never be announced as a create/update/delete.
       // One unreadable or vanished file must not reject the whole snapshot
       // (the same tolerance scan.ts applies): record it as unknown instead.
+      const sequence = reportSequence;
       const content = await fs.readFile(full, 'utf-8').catch(() => undefined);
       if (content === undefined) {
         snapshot.unreadable.add(path.resolve(full));
       } else {
-        snapshot.documents.set(path.resolve(full), content);
+        snapshot.documents.set(path.resolve(full), { content, sequence });
       }
     }
   }
@@ -523,6 +535,7 @@ async function readMemoryDocuments(
 ): Promise<MemoryTreeSnapshot> {
   const snapshot: MemoryTreeSnapshot = {
     documents: new Map(),
+    sequence: reportSequence,
     unreadable: new Set(),
     complete: true,
   };
@@ -548,7 +561,7 @@ export async function withCoalescedMemoryChanges<T>(
   fn: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const outside = new Map<string, string | null>();
+  const outside = new Map<string, ReportedMemoryContent>();
   outsideWindowEmits.add(outside);
   try {
     const before = await readMemoryDocuments(projectRoot).catch(
@@ -569,9 +582,15 @@ export async function withCoalescedMemoryChanges<T>(
         // An outside emit moves the baseline. It does not hide the path.
         const baseline = (filePath: string) =>
           outside.has(filePath)
-            ? (outside.get(filePath) ?? undefined)
-            : before.documents.get(filePath);
-        for (const [filePath, content] of after.documents) {
+            ? (outside.get(filePath)!.content ?? undefined)
+            : before.documents.get(filePath)?.content;
+        // A report newer than the read owns the change; comparing it with
+        // stale snapshot bytes would invert a create into a delete or vice versa.
+        const reportedAfterRead = (filePath: string) =>
+          (outside.get(filePath)?.sequence ?? 0) >
+          (after.documents.get(filePath)?.sequence ?? after.sequence);
+        for (const [filePath, { content }] of after.documents) {
+          if (reportedAfterRead(filePath)) continue;
           const reported = baseline(filePath);
           if (reported === undefined) {
             // Unknown-before is not absent-before: a document the opening
@@ -589,6 +608,7 @@ export async function withCoalescedMemoryChanges<T>(
           ...before.unreadable,
           ...outside.keys(),
         ])) {
+          if (reportedAfterRead(filePath)) continue;
           // Present-or-unknown is not a delete: a path that was only
           // unreadable in the after snapshot must not be reported gone.
           if (after.documents.has(filePath) || after.unreadable.has(filePath)) {

@@ -38,10 +38,10 @@
 - `paths`：绝对路径。单个文件是 `[path]`。一起改的文件留在同一个数组里，并按 scope 拆开。
 - `relative_paths`：同一批文档，相对于该 scope 的记忆根目录，用 `/`，顺序与 `paths` 一致。这是稳定的文档键。沙箱上的绝对路径不是。
 - `memory_scope`：`user`、`project` 或 `team`。
-- `operation`：`create`、`update` 或 `delete`。
+- `operation`：依据文件是否存在，取 `create`、`update` 或 `delete`。写入已有的空 `MEMORY.md` 属于 `update`，包括脚手架创建的空索引，以及被清空后重新填充的索引。此事件不会重放之前的创建操作；镜像方需要从已有文档初始化，并接受尚未见过的文档的更新。
 - `workspace`：工作区绝对路径。项目和团队记忆带上。用户记忆省略。
 
-`write_file` 和 `edit` 的目标在托管记忆根目录内时发通知。`/forget` 在删除或改写之后发通知。`MEMORY.md` 重建在索引写完后发通知，内容相同时跳过。定时 dream 和 extract 会在 agent（含索引重建）前后比较记忆目录，按差异只发一次。agent 里用 shell 删掉的文件是一条 `delete`。手动 `/dream` 是把提示交给主 agent，这一轮里的 shell 删除不在这次快照里。比较窗口还开着时，另一处已经自行通知的写入保留那条事件，窗口的差异以那条事件报出的内容为基线。传入的 id 没有注册在该工作区时，由该工作区最新的注册接收。调度文件在分类时被排除。
+`write_file` 和 `edit` 的目标在托管记忆根目录内时发通知。`/forget` 在删除或改写之后发通知。`MEMORY.md` 重建在索引写完后发通知，内容相同时跳过。定时 dream 和 extract 会在 agent（含索引重建）前后比较记忆目录，按差异只发一次。agent 里用 shell 删掉的文件是一条 `delete`。手动 `/dream` 是把提示交给主 agent，这一轮里的 shell 删除不在这次快照里。比较窗口还开着时，另一处已经自行通知的写入保留那条事件，窗口的差异以那条事件报出的内容为基线。传入的 id 没有注册在该工作区时，由该工作区最新的注册接收。直接通知和快照都只纳入 Markdown 文档，排除调度文件和临时文件。如果外部通知在收尾快照读取之后到达，窗口会跳过这次过期的比较，由写入方负责该事件。
 
 ### 开关
 
@@ -54,7 +54,7 @@
 }
 ```
 
-只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框写的是工作区设置，事件里的 `workspace` 是该项目根目录。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。直接改 settings 文件不会发这个事件。只有记忆对话框和 `qwen/settings/setMemory` 会发。
+只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框先将工作区设置提交到磁盘，再更新显示状态并以该项目根目录作为 `workspace` 发出通知。设置写入失败时显示错误，不发送开关事件。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。直接改 settings 文件不会发这个事件。只有记忆对话框和 `qwen/settings/setMemory` 会发。
 
 基础 hook 输入仍有 `session_id` 和 `cwd`。`cwd` 是工作目录，不是工作区。
 
