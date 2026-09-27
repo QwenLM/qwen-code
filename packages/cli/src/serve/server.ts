@@ -8,6 +8,7 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
@@ -120,6 +121,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -498,6 +500,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
@@ -1413,7 +1416,8 @@ export function createServeApp(
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -2206,7 +2210,18 @@ export function createServeApp(
       : [];
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
-    mountMcpAppSandbox(app);
+    (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
+      mountMcpAppSandbox(app, (origin, req) => {
+        if (originAllowlist.allows(origin)) return true;
+        if (!opts.token || listenerIdentityOf(req).kind !== 'primary')
+          return false;
+        const scheme =
+          req.socket instanceof TLSSocket && req.socket.encrypted
+            ? 'https'
+            : 'http';
+        // Match the existing self-origin rule; forwarded headers are not authority.
+        return origin === new URL(`${scheme}://${req.headers.host}`).origin;
+      });
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -2395,6 +2410,13 @@ export function createServeApp(
   // both ends connect (gated by `cdpTunnelOverWs`).
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
+
+  registerDaemonUpdateRoutes(app, {
+    currentVersion: deps.qwenCodeVersion,
+    runtimeToken: opts.token,
+    restartForUpdate: deps.restartForUpdate,
+    mutate,
+  });
 
   registerDaemonStatusRoutes(app, {
     opts,
@@ -3804,6 +3826,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
           app.locals as {
@@ -3822,10 +3845,12 @@ export function createServeApp(
         }
       };
       const locals = app.locals as {
+        stopMcpAppSandbox?: () => void;
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
       };
+      stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);

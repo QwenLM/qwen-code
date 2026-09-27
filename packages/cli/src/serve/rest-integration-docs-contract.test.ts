@@ -16,6 +16,10 @@ import { DaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
+import {
+  RESTORE_LOAD_REQUEST_FIELDS,
+  RESTORE_RESUME_REQUEST_FIELDS,
+} from './routes/restore-request-fields.js';
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -794,19 +798,14 @@ describe('REST integration documentation contract', () => {
         (schema['properties'] ?? {}) as Record<string, unknown>,
       ).sort();
     };
+    // Field lists come from the runtime-owned definition, not a second
+    // hardcoded literal, so the published schema cannot drift from what the
+    // handler parses.
     expect(
       requestFields(openApi.paths?.['/session/{id}/resume']?.post),
-    ).toEqual(['approvalMode', 'cwd', 'sourceId', 'sourceType']);
+    ).toEqual(RESTORE_RESUME_REQUEST_FIELDS);
     const loadPost = openApi.paths?.['/session/{id}/load']?.post;
-    expect(requestFields(loadPost)).toEqual([
-      'approvalMode',
-      'compactedReplayMode',
-      'cwd',
-      'historyPageSize',
-      'liveReplayMode',
-      'sourceId',
-      'sourceType',
-    ]);
+    expect(requestFields(loadPost)).toEqual(RESTORE_LOAD_REQUEST_FIELDS);
     const loadSchema = resolveRef(
       openApi,
       (

@@ -4108,30 +4108,45 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalledOnce();
   });
 
-  it('classifies an ID a paired Bridge already hosts as a conflict', async () => {
-    vi.spyOn(
-      SessionService.prototype,
-      'findSessionIdIgnoringCase',
-    ).mockResolvedValue(undefined);
-    const harness = createHarness();
-    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
-      new StandaloneSessionSpawnError(
-        false,
-        new RequestedSessionIdRejectedError('session_id_conflict', sessionId),
-      ),
-    );
+  it.each([
+    ['has not persisted anything', false],
+    ['already wrote its transcript', true],
+  ])(
+    'classifies an ID a paired Bridge already hosts as a conflict when its owner %s',
+    async (_state, ownerPersisted) => {
+      let spawnAttempted = false;
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockImplementation(async () =>
+        ownerPersisted && spawnAttempted ? sessionId : undefined,
+      );
+      const harness = createHarness();
+      harness.bridge.spawnStandaloneSession.mockImplementationOnce(async () => {
+        spawnAttempted = true;
+        throw new StandaloneSessionSpawnError(
+          false,
+          new RequestedSessionIdRejectedError('session_id_conflict', sessionId),
+        );
+      });
 
-    await expect(
-      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
-    ).rejects.toMatchObject({
-      code: 'standalone_session_conflict',
-      retryable: false,
-    });
+      await expect(
+        harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+      ).rejects.toMatchObject({
+        code: 'standalone_session_conflict',
+        retryable: false,
+        creationDiagnostic: {
+          dispatchState: 'not_dispatched',
+          cleanupOutcome: 'not_needed',
+        },
+      });
 
-    expect(harness.bridge.killSession).not.toHaveBeenCalled();
-    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
-    expect(harness.reservation.release).toHaveBeenCalledOnce();
-  });
+      expect(spawnAttempted).toBe(true);
+      expect(harness.bridge.killSession).not.toHaveBeenCalled();
+      expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+      expect(harness.reservation.release).toHaveBeenCalledOnce();
+    },
+  );
 
   it('freezes the UUID and quarantines after dispatched spawn ambiguity', async () => {
     vi.spyOn(

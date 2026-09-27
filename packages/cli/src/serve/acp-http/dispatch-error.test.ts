@@ -21,6 +21,7 @@ import {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
@@ -139,10 +140,14 @@ describe('paired Bridge rejections', () => {
     ['host selection', new SessionExecutionEngineError('id', 'empty')],
     [
       'the ACP child',
-      new RequestError(-32024, 'belongs to managed', {
-        errorKind: 'session_execution_engine_unavailable',
-        sessionId: 'id',
-      }),
+      {
+        code: -32024,
+        message: 'belongs to managed',
+        data: {
+          errorKind: 'session_execution_engine_unavailable',
+          sessionId: 'id',
+        },
+      },
     ],
   ])('maps an owner rejection from %s to 409', (_source, error) => {
     expect(toRpcError(error)).toEqual({
@@ -153,6 +158,32 @@ describe('paired Bridge rejections', () => {
         httpStatus: 409,
         errorKind: 'session_execution_engine_unavailable',
       },
+    });
+  });
+});
+
+describe('transcript snapshot rejections', () => {
+  it.each([
+    [
+      'the daemon',
+      new SessionTranscriptSnapshotUnavailableError('id'),
+      'Transcript snapshot is unavailable for session id',
+    ],
+    [
+      'the ACP child',
+      // What the ACP SDK rejects with: the JSON-RPC error object, not an Error.
+      {
+        code: -32010,
+        message: 'Transcript snapshot is unavailable for session id',
+        data: { errorKind: 'transcript_snapshot_unavailable', sessionId: 'id' },
+      },
+      'Transcript snapshot is unavailable for session id',
+    ],
+  ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message,
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     });
   });
 });

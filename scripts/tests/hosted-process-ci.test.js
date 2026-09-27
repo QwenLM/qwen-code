@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { classifyChangedFiles } from '../../.github/scripts/ci/classify-profile.mjs';
@@ -44,14 +45,32 @@ describe('Hosted real-process gates', () => {
     expect(pkg.scripts[focused]).toContain(
       '--config ./vitest.hosted.config.ts',
     );
+    // Any unlisted path classifies as full, so the check means something only
+    // for paths that exist: none of them may take a PR out of the full profile.
+    expect(
+      classifyChangedFiles([
+        'docs/design/2026-09-26-hosted-no-tool-process-gate.md',
+      ]),
+    ).toBe('docs_only');
     for (const file of [
       'integration-tests/cli/hosted-harness-process.test.ts',
+      'integration-tests/helpers/hosted-harness-process.ts',
       'integration-tests/helpers/hosted-session-store.ts',
       'packages/cli/src/serve/hosted-harness-model.ts',
       '.github/workflows/ci.yml',
     ]) {
-      expect(classifyChangedFiles([file])).toBe('full');
+      expect(existsSync(new URL(`../../${file}`, import.meta.url)), file).toBe(
+        true,
+      );
+      expect(classifyChangedFiles([file]), file).toBe('full');
     }
+  });
+
+  it('keeps the portable smoke filter matched to real cases', () => {
+    // vitest exits 0 when -t matches nothing, so renaming these titles would
+    // turn both platform smokes into silent no-ops.
+    const source = read('integration-tests/cli/hosted-harness-process.test.ts');
+    expect(source.match(/\bit\(\s*'portable startup:/g)).toHaveLength(2);
   });
 
   it.each(['test_macos', 'test_windows'])(
@@ -87,6 +106,7 @@ describe('Hosted real-process gates', () => {
         'packages/sdk-java/**',
         'packages/cli/src/serve/**',
         'packages/core/src/managed-runtime/**',
+        'packages/cli/src/config/**',
         'packages/core/src/config/**',
         'packages/core/src/core/**',
         'pnpm-lock.yaml',
@@ -97,23 +117,49 @@ describe('Hosted real-process gates', () => {
     const run = job.steps.find(
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
-    expect(run.run).toContain(
-      '-Phosted-harness-mysql -Dit.test=HostedHarnessMySqlIT',
-    );
+    expect(run.run).toContain('-Phosted-harness-mysql');
+    // The profile's include selects the tests; -Dit.test would override it.
+    expect(run.run).not.toContain('-Dit.test');
     expect(run.run).toContain(
       '-Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"',
     );
     expect(run.run).toContain('verify checkstyle:check');
     expect(run.run).not.toContain('skip');
     expect(run['continue-on-error']).toBeUndefined();
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml');
-    const profile = pom.split('<id>hosted-harness-mysql</id>')[1];
-    expect(profile).toContain(
-      '<include>**/HostedHarnessMySqlIT.java</include>',
+    const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
+      /<!--[\s\S]*?-->/g,
+      '',
     );
-    expect(profile).toContain('<failIfNoTests>true</failIfNoTests>');
-    expect(pom.split('<id>hosted-harness-mysql</id>')[0]).toContain(
-      '<exclude>**/HostedHarnessMySqlIT.java</exclude>',
+    const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
+    expect(mariadb).toContain('<id>mysql-integration</id>');
+    expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
+    expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
+    expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
+    // The MariaDB job must not narrow its selection either, or an IT outside
+    // the Hosted family would silently run nowhere.
+    const mariadbRun = java.jobs['mysql-integration'].steps.find(
+      (step) =>
+        step.name ===
+        'Run Managed Agent tests, Checkstyle, and MySQL integration',
+    );
+    expect(mariadbRun.run).toContain('-Pmysql-integration');
+    expect(mariadbRun.run).not.toContain('-Dit.test');
+    // Keep the existing integration tests in their families: a renamed Hosted
+    // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
+    const its = readdirSync(
+      new URL(
+        '../../packages/sdk-java/managed-agent-server/src/test/java/',
+        import.meta.url,
+      ),
+      { recursive: true },
+    )
+      .map((file) => path.basename(String(file)))
+      .filter((file) => file.endsWith('IT.java'));
+    expect(its.filter((file) => /^Hosted.*IT\.java$/.test(file))).toContain(
+      'HostedHarnessMySqlIT.java',
+    );
+    expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
+      'ManagedAgentMySqlIT.java',
     );
     const upload = job.steps.find(
       (step) => step.name === 'Upload Hosted process reports',

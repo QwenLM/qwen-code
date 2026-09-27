@@ -159,6 +159,113 @@ describe('ToolRegistry', () => {
     vi.restoreAllMocks();
   });
 
+  const appTool = (
+    server: string,
+    name: string,
+    visibility?: readonly string[],
+    resourceUri = 'ui://app/view',
+  ) =>
+    new DiscoveredMCPTool(
+      createMockCallableTool([]),
+      server,
+      name,
+      'App tool',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      resourceUri,
+      undefined,
+      undefined,
+      visibility,
+    );
+
+  it('keeps App-only tools outside every model lookup and clears them on removal', () => {
+    const tool = appTool('tableau', 'get-token', ['app']);
+    toolRegistry.registerTool(tool);
+    expect(toolRegistry.getMcpAppTool('tableau', 'get-token')).toBe(tool);
+    expect(toolRegistry.getMcpAppTool('other', 'get-token')).toBeUndefined();
+    expect(toolRegistry.getMcpAppTool('tableau', tool.name)).toBeUndefined();
+    expect(toolRegistry.getTool(tool.name)).toBeUndefined();
+    expect(toolRegistry.getAllToolNames()).not.toContain(tool.name);
+    expect(toolRegistry.getAllTools()).not.toContain(tool);
+    expect(toolRegistry.getFunctionDeclarations()).not.toContainEqual(
+      tool.schema,
+    );
+    toolRegistry.removeMcpToolsByServer('tableau');
+    expect(toolRegistry.getMcpAppTool('tableau', 'get-token')).toBeUndefined();
+  });
+
+  it('honors App visibility and disabled rules while retaining model-only App resources', () => {
+    const model = appTool('tableau', 'show', ['model']);
+    const disabled = appTool('tableau', 'disabled', ['app']);
+    vi.spyOn(config, 'getDisabledTools').mockReturnValue(
+      new Set([disabled.name]),
+    );
+    for (const tool of [
+      model,
+      disabled,
+      appTool('tableau', 'empty', []),
+      appTool('tableau', 'unknown', ['unknown']),
+      appTool('tableau', 'default'),
+    ]) {
+      toolRegistry.registerTool(tool);
+    }
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://app/view')).toBe(
+      true,
+    );
+    for (const name of ['show', 'disabled', 'empty', 'unknown']) {
+      expect(toolRegistry.getMcpAppTool('tableau', name)).toBeUndefined();
+    }
+    expect(toolRegistry.getMcpAppTool('tableau', 'default')).toBeDefined();
+    expect(toolRegistry.getTool(model.name)).toBe(model);
+  });
+
+  it('copies App-only tools and model-only source resources, then clears only the re-discovered server', async () => {
+    const source = new ToolRegistry(config);
+    source.registerTool(appTool('tableau', 'token', ['app']));
+    source.registerTool(
+      appTool('tableau', 'source', ['model'], 'ui://model/source'),
+    );
+    source.registerTool(appTool('other', 'token', ['app']));
+    toolRegistry.copyDiscoveredToolsFrom(source);
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeDefined();
+    expect(toolRegistry.getTool('mcp__tableau__token')).toBeUndefined();
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://model/source')).toBe(
+      true,
+    );
+    vi.spyOn(
+      McpClientManager.prototype,
+      'discoverMcpToolsForServer',
+    ).mockResolvedValue();
+    await toolRegistry.discoverToolsForServer('tableau');
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://model/source')).toBe(
+      false,
+    );
+    expect(toolRegistry.getMcpAppTool('other', 'token')).toBeDefined();
+  });
+
+  it('clears App-only tools on full discovery and shutdown', async () => {
+    vi.spyOn(
+      McpClientManager.prototype,
+      'discoverAllMcpTools',
+    ).mockResolvedValue();
+    vi.spyOn(McpClientManager.prototype, 'stop').mockResolvedValue();
+    toolRegistry.registerTool(appTool('tableau', 'token', ['app']));
+    await toolRegistry.discoverMcpTools();
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+    toolRegistry.registerTool(appTool('tableau', 'token', ['app']));
+    await toolRegistry.stop();
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+  });
+
   it('hides a loaded image tool while disabled and restores it when re-enabled', async () => {
     const enabled = vi
       .spyOn(config, 'isImageGenerationEnabled')

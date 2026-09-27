@@ -2035,9 +2035,18 @@ export function registerSessionRoutes(
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
+      const session = await readLoadableConversationSession(sessionId, service);
+      if (session === undefined) return false;
+      // Beyond what the Live-only compatibility adapter admitted, only a
+      // top-level explicit standalone session is in scope here: the dedicated
+      // standalone surface refuses child sessions, so they stay unreachable
+      // from the generic transcript routes.
+      if (session.metadata.parentSessionId === undefined) return true;
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
-        undefined
+        session.kind === 'live' ||
+        (session.kind === 'standalone' &&
+          session.persistence === 'legacy' &&
+          session.parentSource?.persistence === 'legacy')
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -3774,13 +3783,18 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
-      const liveReplayMode = parseReplayMode(body ?? {}, res, 'liveReplayMode');
+      // Load replays history; resume restores the full journal, so the
+      // load-only replay fields are parsed only for load — resume neither
+      // uses nor rejects them (see restore-request-fields.ts).
+      const liveReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'liveReplayMode')
+          : undefined;
       if (liveReplayMode === null) return;
-      const compactedReplayMode = parseReplayMode(
-        body ?? {},
-        res,
-        'compactedReplayMode',
-      );
+      const compactedReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'compactedReplayMode')
+          : undefined;
       if (compactedReplayMode === null) return;
       const restoreSource = parseRequestedSessionSource(body, res);
       if (restoreSource === null) return;
@@ -6530,6 +6544,63 @@ export function registerSessionRoutes(
           .status(200)
           .json(await runtime.bridge.getSessionLspStatus(sessionId));
       },
+    ),
+  );
+
+  app.post(
+    '/session/:id/mcp-app/tools/call',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/mcp-app/tools/call',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!clientId) {
+          res
+            .status(403)
+            .json({ error: 'MCP App calls require a session-bound client id' });
+          return;
+        }
+        const body = safeBody(req);
+        const { serverName, resourceUri, name, arguments: args } = body;
+        if (
+          typeof serverName !== 'string' ||
+          !serverName ||
+          typeof resourceUri !== 'string' ||
+          !resourceUri.startsWith('ui://') ||
+          typeof name !== 'string' ||
+          !name ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          res.status(400).json({ error: 'Invalid MCP App tool call' });
+          return;
+        }
+        const abort = new AbortController();
+        const onClose = () => {
+          if (!res.writableEnded) abort.abort();
+        };
+        res.once('close', onClose);
+        try {
+          res.json(
+            await runtime.bridge.callMcpAppTool(
+              sessionId,
+              {
+                serverName,
+                resourceUri,
+                name,
+                arguments: args as Record<string, unknown>,
+              },
+              abort.signal,
+              { clientId },
+            ),
+          );
+        } finally {
+          res.off('close', onClose);
+        }
+      },
+      { cwdBound: 'always' },
     ),
   );
 

@@ -17,6 +17,12 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return "legacy";
     }
 
+    /** Creates placement identity from trusted embedding configuration. */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return new RuntimeProvisionRequest(scope, isolationKey, kind());
+    }
+
     /**
      * Provisions with credentials the Broker created and persisted, so a
      * later Broker process can prove the same identity. The default ignores
