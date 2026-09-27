@@ -556,11 +556,13 @@ describe('TrajectoryPanel', () => {
 
     it('selects the row a clicked span stands for', async () => {
       const container = await render(async () => page(timedTurns()));
-      const tool = spansIn(container).find((el) => el.dataset['lane'] === '1')!;
+      const firstRequest = spansIn(container)[0]!;
 
-      await pressSpan(container, tool);
+      await pressSpan(container, firstRequest);
 
-      expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+      const selectedRow = text(activeRow(container));
+      expect(selectedRow).toContain('#1');
+      expect(selectedRow).toContain('qwen3.8-max');
     });
 
     describe('time selection', () => {
@@ -657,15 +659,15 @@ describe('TrajectoryPanel', () => {
       it('shows a span pressed outside the time by dropping the selection', async () => {
         const container = await render(async () => page(timedTurns()));
         await drag(container, 0.75, 0.95);
-        const tool = spansIn(container).find(
-          (el) => el.dataset['lane'] === '1',
-        )!;
-        expect(tool.dataset['dimmed']).toBe('true');
+        const firstRequest = spansIn(container)[0]!;
+        expect(firstRequest.dataset['dimmed']).toBe('true');
 
-        await pressSpan(container, tool);
+        await pressSpan(container, firstRequest);
 
         expect(rowCount(container)).toBe(UNFILTERED_ROWS);
-        expect(text(activeRow(container))).toContain('ReadFile: note.txt');
+        const selectedRow = text(activeRow(container));
+        expect(selectedRow).toContain('#1');
+        expect(selectedRow).toContain('qwen3.8-max');
       });
     });
 
