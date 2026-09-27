@@ -36,28 +36,33 @@ describe('createJavaManagedAgentProvider', () => {
     );
   });
 
-  it('does not offer send on any active session without a Turn', async () => {
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 'empty-1',
-          status: 'ACTIVE',
-          createdAt: 1,
-          updatedAt: 1,
-          lastSequence: 0,
+  it.each([false, true])(
+    'allows the first message in an unbound empty session (opt-in: %s)',
+    async (enableWorkspaceBinding) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        productScope: 'tenant-a:actor-a',
+        enableWorkspaceBinding,
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 'empty-1',
+            status: 'ACTIVE',
+            createdAt: 1,
+            updatedAt: 1,
+            lastSequence: 0,
+          }),
+        ),
+      });
+      expect(
+        await provider.getSession('empty-1', { clientId: 'client' }),
+      ).toEqual(
+        expect.objectContaining({
+          phase: 'created',
+          capabilities: { canSend: true, canCancel: false },
         }),
-      ),
-    });
-    expect(
-      await provider.getSession('empty-1', { clientId: 'client' }),
-    ).toEqual(
-      expect.objectContaining({
-        phase: 'created',
-        capabilities: { canSend: false, canCancel: false },
-      }),
-    );
-  });
+      );
+    },
+  );
 
   it('creates a bound empty session without requiring turnId', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>

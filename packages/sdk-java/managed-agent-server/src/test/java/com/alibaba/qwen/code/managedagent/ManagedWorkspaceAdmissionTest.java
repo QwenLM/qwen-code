@@ -110,6 +110,22 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "other"))
                         .param("limit", "1").param("cursor", cursor))
                 .andExpect(status().isBadRequest());
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", "2").param("cursor", cursor))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("invalid_workspace_cursor"));
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "limit", 2, "cursor", cursor))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("invalid_workspace_cursor"));
         String longActor = "界".repeat(512);
         grant(tenant, "b-visible", longActor, true);
         grant(tenant, "d-default", longActor, true);
@@ -179,6 +195,43 @@ class ManagedWorkspaceAdmissionTest {
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isNotFound());
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].workspace_id")
+                        .value("c-readonly"))
+                .andExpect(jsonPath("$.data[1].workspace_id")
+                        .value("d-default"));
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].workspaceId")
+                        .value("c-readonly"))
+                .andExpect(jsonPath("$.data[1].workspaceId")
+                        .value("d-default"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 101})
+    void discoveryRejectsOutOfRangePageSizes(int limit) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .param("limit", Integer.toString(limit)))
+                .andExpect(status().isBadRequest());
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("limit", limit))))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

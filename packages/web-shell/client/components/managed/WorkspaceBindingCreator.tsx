@@ -100,6 +100,14 @@ export function WorkspaceBindingCreator({
   const [pathError, setPathError] = useState<string>();
   const [switchTo, setSwitchTo] = useState<string>();
   const lifetime = useRef<AbortController | undefined>(undefined);
+  // Commands must survive list reloads during same-identity credential refreshes.
+  const commandLifetime = useRef<AbortController | undefined>(undefined);
+
+  useEffect(() => {
+    const abort = new AbortController();
+    commandLifetime.current = abort;
+    return () => abort.abort();
+  }, [pendingKey]);
 
   function updatePending(value?: PendingCreation) {
     pendingRef.current = value;
@@ -111,7 +119,6 @@ export function WorkspaceBindingCreator({
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
-    setBusy(false);
     setLoading(true);
     setError(undefined);
     void (async () => {
@@ -222,7 +229,7 @@ export function WorkspaceBindingCreator({
   }
 
   async function createOrRead() {
-    const abort = lifetime.current;
+    const abort = commandLifetime.current;
     if (!abort || abort.signal.aborted || busy) return;
     let attempt = pendingRef.current;
     const firstSubmission = !attempt;

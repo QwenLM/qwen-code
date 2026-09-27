@@ -202,11 +202,7 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
-      canSend:
-        sessionActive &&
-        turnStatus !== undefined &&
-        !active &&
-        !session.workspace,
+      canSend: sessionActive && !active && !session.workspace,
       canCancel:
         sessionActive &&
         active &&
