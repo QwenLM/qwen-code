@@ -71,6 +71,66 @@ describe('MemoryManager', () => {
   // ─── drain() ──────────────────────────────────────────────────────────────
 
   describe('drain()', () => {
+    it('waits for a trailing extraction queued before drain starts', async () => {
+      const mgr = new MemoryManager();
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let releaseTrailing!: () => void;
+      const trailingGate = new Promise<void>((resolve) => {
+        releaseTrailing = resolve;
+      });
+      let enterTrailing!: () => void;
+      const trailingEntered = new Promise<void>((resolve) => {
+        enterTrailing = resolve;
+      });
+      const result = {
+        touchedTopics: [],
+        cursor: {
+          sessionId: 'session-drain',
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(async () => {
+          await firstGate;
+          return result;
+        })
+        .mockImplementationOnce(async () => {
+          enterTrailing();
+          await trailingGate;
+          return result;
+        });
+      const params = {
+        projectRoot: '/memory-drain-probe',
+        sessionId: 'session-drain',
+        history: [{ role: 'user', parts: [{ text: 'durable fact' }] }],
+      };
+      const first = mgr.scheduleExtract(params);
+      expect((await mgr.scheduleExtract(params)).skippedReason).toBe('queued');
+      let drained = false;
+      const drain = mgr.drain().then((result) => {
+        drained = true;
+        return result;
+      });
+      try {
+        releaseFirst();
+        await first;
+        await trailingEntered;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(drained).toBe(false);
+        releaseTrailing();
+        expect(await drain).toBe(true);
+        await mgr.drain();
+      } finally {
+        releaseFirst();
+        releaseTrailing();
+        await first;
+        await mgr.drain();
+        vi.mocked(runAutoMemoryExtract).mockReset();
+      }
+    });
     it('resolves true immediately when there are no in-flight tasks', async () => {
       const mgr = new MemoryManager();
       expect(await mgr.drain()).toBe(true);
@@ -939,6 +999,65 @@ describe('MemoryManager', () => {
       delete process.env['QWEN_CODE_MEMORY_LOCAL'];
       clearAutoMemoryRootCache();
       await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('keeps drain pending through dream scheduling and execution', async () => {
+      let enterScanner!: () => void;
+      const scannerEntered = new Promise<void>((resolve) => {
+        enterScanner = resolve;
+      });
+      let releaseScanner!: () => void;
+      const scannerGate = new Promise<void>((resolve) => {
+        releaseScanner = resolve;
+      });
+      let releaseDream!: () => void;
+      const dreamGate = new Promise<void>((resolve) => {
+        releaseDream = resolve;
+      });
+      const mgr = new MemoryManager(async () => {
+        enterScanner();
+        await scannerGate;
+        return ['older-session'];
+      });
+      const file = path.join(projectRoot, 'after-drain.md');
+      vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(async () => {
+        await dreamGate;
+        await fs.writeFile(file, 'dream committed\n');
+        return { touchedTopics: [], dedupedEntries: 0 };
+      });
+      const scheduling = mgr.scheduleDream({
+        projectRoot,
+        sessionId: 'dream-after-close',
+        config: makeMockConfig(),
+        now: new Date('2026-04-01T10:00:00.000Z'),
+        minHoursBetweenDreams: 0,
+        minSessionsBetweenDreams: 1,
+      });
+      let drained = false;
+      try {
+        await scannerEntered;
+        const drain = mgr.drain().then((result) => {
+          drained = true;
+          return result;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(drained).toBe(false);
+        releaseScanner();
+        const scheduled = await scheduling;
+        expect(scheduled.status).toBe('scheduled');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(drained).toBe(false);
+        releaseDream();
+        await scheduled.promise;
+        expect(await drain).toBe(true);
+        expect(await fs.readFile(file, 'utf8')).toBe('dream committed\n');
+      } finally {
+        releaseScanner();
+        releaseDream();
+        const scheduled = await scheduling;
+        await scheduled.promise;
+        await mgr.drain();
+      }
     });
 
     it('skips when dream is disabled in config', async () => {

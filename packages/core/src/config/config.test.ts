@@ -6,7 +6,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import type {
   ConfigParameters,
@@ -116,8 +124,10 @@ import {
   notifyMemoryEnabledChange,
   notifyMemoryFileChange,
   registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
   type MemoryChangedNotice,
 } from '../memory/memory-file-change.js';
+import { runAutoMemoryExtract } from '../memory/extract.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
@@ -261,6 +271,9 @@ vi.mock('../memory/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
   readUserAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../memory/extract.js', () => ({
+  runAutoMemoryExtract: vi.fn(),
 }));
 vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
@@ -1289,6 +1302,121 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('memory change listener registration', () => {
+    it.each([false, true])(
+      'retains the closing session listener through a scheduled memory write (idle sibling=%s)',
+      async (withSibling) => {
+        const temp = await mkdtemp(path.join(os.tmpdir(), 'memory-shutdown-'));
+        vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', temp);
+        clearAutoMemoryRootCache();
+        const workspace = path.join(temp, 'repo');
+        await mkdir(path.join(workspace, '.git'), { recursive: true });
+        const config = new Config({
+          ...baseParams,
+          cwd: workspace,
+          targetDir: workspace,
+        });
+        await config.initialize();
+        const hooks = config.getHookSystem()!;
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+        const fire = vi.fn().mockResolvedValue({});
+        hooks.fireMemoryChangedEvent = fire;
+        const sibling = withSibling
+          ? new Config({ ...baseParams, cwd: workspace, targetDir: workspace })
+          : undefined;
+        await sibling?.initialize();
+        const siblingFire = vi.fn().mockResolvedValue({});
+        if (sibling)
+          sibling.getHookSystem()!.fireMemoryChangedEvent = siblingFire;
+        const file = path.join(
+          path.dirname(getAutoMemoryIndexPath(config.getProjectRoot())),
+          'after-close.md',
+        );
+        await mkdir(path.dirname(file), { recursive: true });
+        let enter!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+          async (params) => {
+            await withCoalescedMemoryChanges(
+              params.projectRoot,
+              config.getMemoryHookDeliveryId(),
+              async () => {
+                enter();
+                await gate;
+                await writeFile(file, 'durable fact after close\n');
+              },
+            );
+            return {
+              touchedTopics: ['user'],
+              cursor: {
+                sessionId: params.sessionId,
+                updatedAt: new Date().toISOString(),
+              },
+            };
+          },
+        );
+        const task = config.getMemoryManager().scheduleExtract({
+          projectRoot: config.getProjectRoot(),
+          sessionId: config.getSessionId(),
+          config,
+          history: [
+            { role: 'user', parts: [{ text: 'Keep this durable fact.' }] },
+          ],
+        });
+        try {
+          await entered;
+          await config.shutdown({ shutdownTelemetry: false });
+          await config.shutdown({ shutdownTelemetry: false });
+          release();
+          await task;
+          await config.getMemoryManager().drain();
+          await Promise.resolve();
+          expect(await readFile(file, 'utf8')).toBe(
+            'durable fact after close\n',
+          );
+          expect(fire).toHaveBeenCalledOnce();
+          expect(fire).toHaveBeenCalledWith(
+            expect.objectContaining({
+              operation: 'create',
+              relativePaths: ['after-close.md'],
+            }),
+            undefined,
+          );
+          expect(siblingFire).not.toHaveBeenCalled();
+          const delivered = fire.mock.calls.length;
+          await notifyMemoryEnabledChange(
+            config.getProjectRoot(),
+            false,
+            config.getMemoryHookDeliveryId(),
+          );
+          expect(fire).toHaveBeenCalledTimes(delivered);
+          expect(siblingFire).not.toHaveBeenCalled();
+          if (sibling) {
+            await notifyMemoryEnabledChange(
+              sibling.getProjectRoot(),
+              false,
+              sibling.getMemoryHookDeliveryId(),
+            );
+            expect(siblingFire).toHaveBeenCalledOnce();
+          }
+        } finally {
+          release();
+          await task;
+          await config.shutdown({ shutdownTelemetry: false });
+          await sibling?.shutdown({ shutdownTelemetry: false });
+          vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+          vi.mocked(runAutoMemoryExtract).mockReset();
+          await rm(temp, { recursive: true, force: true });
+          vi.unstubAllEnvs();
+          clearAutoMemoryRootCache();
+        }
+      },
+    );
     it('releases its memory listener after ordinary shutdown', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();

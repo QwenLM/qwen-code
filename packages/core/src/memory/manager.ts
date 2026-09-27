@@ -604,9 +604,14 @@ export class MemoryManager {
 
   /** Wait for all in-flight tasks to settle, with optional timeout. */
   async drain(options: DrainOptions = {}): Promise<boolean> {
-    const promises = [...this.inFlight.values()];
-    if (promises.length === 0) return true;
-    const waitAll = Promise.allSettled(promises).then(() => true);
+    if (this.inFlight.size === 0) return true;
+    const waitAll = (async () => {
+      // A settling extract can start an already-queued trailing extract.
+      while (this.inFlight.size > 0) {
+        await Promise.allSettled([...this.inFlight.values()]);
+      }
+      return true;
+    })();
     if (!options.timeoutMs || options.timeoutMs <= 0) return waitAll;
     return Promise.race<boolean>([
       waitAll,
@@ -1004,6 +1009,13 @@ export class MemoryManager {
    * lock, or duplicate).
    */
   async scheduleDream(
+    params: ScheduleDreamParams,
+  ): Promise<DreamScheduleResult> {
+    // Shutdown can begin while the asynchronous scheduling checks are pending.
+    return this.track(randomUUID(), this.prepareDream(params));
+  }
+
+  private async prepareDream(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
     // `params.config` is optional only because some test paths omit it;

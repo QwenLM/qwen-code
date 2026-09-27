@@ -7179,8 +7179,13 @@ export class Config {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
-      this.unregisterMemoryChanged?.();
+      // Background memory tasks can still commit after the session closes.
+      // Keep their owning listener until their final notifications settle.
+      const unregisterMemoryChanged = this.unregisterMemoryChanged;
       this.unregisterMemoryChanged = undefined;
+      if (unregisterMemoryChanged) {
+        void this.memoryManager.drain().finally(unregisterMemoryChanged);
+      }
       if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
