@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.util.List;
 import java.util.Map;
 
@@ -11,7 +12,17 @@ public final class StoreModels {
             String agentId, String title, String status,
             String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence, long createdAt,
-            long updatedAt, Long deletedAt, long version) {
+            long updatedAt, Long deletedAt, long version,
+            ContextBinding workspace) {
+        public SessionRecord(String tenantId, String sessionId,
+                String agentId, String title, String status,
+                String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long createdAt,
+                long updatedAt, Long deletedAt, long version) {
+            this(tenantId, sessionId, agentId, title, status, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence,
+                    createdAt, updatedAt, deletedAt, version, null);
+        }
     }
 
     public record TurnRecord(String tenantId, String sessionId,

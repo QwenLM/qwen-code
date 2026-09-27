@@ -1,11 +1,13 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.security.Principal;
 import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
@@ -55,7 +57,31 @@ public class TenantContextFilter extends OncePerRequestFilter {
                                     + " safe characters.")));
             return;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId));
+        Principal principal = request.getUserPrincipal();
+        String actorId = null;
+        if (principal instanceof AuthenticatedTenantActor actor) {
+            String claimedActorId = actor.actorId();
+            if (!tenantId.equals(actor.tenantId())
+                    || !validActorId(tenantId, claimedActorId)) {
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                objectMapper.writeValue(response.getOutputStream(), Map.of(
+                        "error", Map.of("code", "actor_scope_mismatch",
+                                "message", "Authenticated actor scope is invalid.")));
+                return;
+            }
+            actorId = claimedActorId;
+        }
+        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
         chain.doFilter(request, response);
+    }
+
+    private static boolean validActorId(String tenantId, String actorId) {
+        try {
+            new WorkspaceActor(tenantId, actorId);
+            return true;
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
     }
 }

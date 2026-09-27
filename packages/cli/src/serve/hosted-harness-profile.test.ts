@@ -12,23 +12,48 @@ const options = {
   mode: 'http-bridge' as const,
 };
 
-describe('unimplemented deployment profiles', () => {
+describe('Hosted Harness profile', () => {
   it('leaves the ordinary daemon available', () => {
     expect(() => validateHostedHarnessProfile(options)).not.toThrow();
   });
 
-  it('rejects hosted mode even with complete deployment credentials', () => {
+  it('accepts loopback no-tool deployment credentials', () => {
     expect(() =>
       validateHostedHarnessProfile({
         ...options,
         profile: 'hosted-harness',
         token: 'harness-secret',
         serveWebShell: false,
-        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
-        managedRuntimeBrokerToken: 'broker-secret',
         hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
       }),
-    ).toThrow('Broker-backed session loop is not implemented');
+    ).not.toThrow();
+  });
+
+  it.each([
+    { hostname: '0.0.0.0', error: 'loopback' },
+    { mode: 'native' as const, error: '--http-bridge' },
+    { token: '', error: 'bearer token' },
+    { serveWebShell: true, error: '--no-web' },
+    { enableSessionShell: true, error: 'WebSocket tunnels' },
+    { clientMcpOverWs: true, error: 'WebSocket tunnels' },
+    { cdpTunnelOverWs: true, error: 'WebSocket tunnels' },
+    { allowOrigins: ['https://example.com'], error: 'browser origins' },
+    {
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+      error: 'does not enable',
+    },
+    { hostedHarnessCapabilityDigest: 'invalid', error: 'sha256' },
+  ])('rejects invalid hosted configuration: %j', ({ error, ...option }) => {
+    expect(() =>
+      validateHostedHarnessProfile({
+        ...options,
+        profile: 'hosted-harness',
+        token: 'harness-secret',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        ...option,
+      }),
+    ).toThrow(error);
   });
 
   it.each([

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.api;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -21,7 +22,8 @@ public final class ApiModels {
                     String agentId,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            Boolean stream) {
+            Boolean stream,
+            JsonNode workspace) {
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -51,6 +53,14 @@ public final class ApiModels {
             @JsonProperty("error_code") String errorCode) {
     }
 
+    public record PublicWorkspace(
+            @JsonProperty("workspace_id") String workspaceId,
+            @JsonProperty("cwd_relative") String cwdRelative) {
+    }
+
+    public record WebShellWorkspace(String workspaceId, String cwdRelative) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicSession(String id, String object,
             @JsonProperty("agent_id") String agentId,
@@ -59,7 +69,8 @@ public final class ApiModels {
             @JsonProperty("updated_at") long updatedAt,
             Map<String, Object> metadata,
             @JsonProperty("active_turn") PublicTurn activeTurn,
-            @JsonProperty("last_event_id") long lastEventId) {
+            @JsonProperty("last_event_id") long lastEventId,
+            @JsonProperty("workspace") PublicWorkspace workspace) {
     }
 
     public record DeletedSession(String id, String object,
@@ -126,7 +137,8 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String agentId,
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
-            Map<String, Object> metadata) {
+            Map<String, Object> metadata,
+            JsonNode workspace) {
     }
 
     public record WebShellSubmitRequest(String requestId,
@@ -154,7 +166,8 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellSession(String sessionId, String title,
             String agentId, String status, long createdAt, long updatedAt,
-            WebShellTurn activeTurn, Object environment, long lastSequence) {
+            WebShellTurn activeTurn, Object environment, long lastSequence,
+            WebShellWorkspace workspace) {
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,

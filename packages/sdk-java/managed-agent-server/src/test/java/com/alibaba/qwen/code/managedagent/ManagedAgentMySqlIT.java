@@ -5,17 +5,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -26,6 +29,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.flywaydb.core.Flyway;
@@ -34,6 +38,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -54,6 +60,10 @@ class ManagedAgentMySqlIT {
                         + " updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 "mysql-upgrade", "session_upgrade", "qwen-code", "IDLE",
                 1L, 1L);
+        jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation,"
+                + " idempotency_key, request_digest, session_id, created_at)"
+                + " VALUES ('mysql-upgrade', 'CREATE_SESSION', 'legacy-key',"
+                + " 'legacy-digest', 'session_upgrade', 1)");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
@@ -63,7 +73,13 @@ class ManagedAgentMySqlIT {
                 "message_projection")).isEqualTo(1);
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                });
+                }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc));
+        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
+                "mysql-upgrade", "actor", "legacy-key", "bound-digest",
+                "qwen-code", null, List.of(), null,
+                new com.alibaba.qwen.code.managedagent.api.WorkspaceSelection("ws-a", ".")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         String tenant = "mysql-projection";
         List<Map<String, Object>> input = List.of(Map.of(
                 "type", "text", "text", "hello"));
@@ -219,11 +235,16 @@ class ManagedAgentMySqlIT {
                                 "managed_session_writer_conflict"));
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"LOCAL", "UTC", "+08:00", "Asia/Shanghai"})
     @Order(2)
-    void shortWriterLeaseKeepsSubsecondDatabasePrecision()
+    void shortWriterLeaseKeepsSubsecondDatabasePrecision(String connectionTimeZone)
             throws InterruptedException {
         DriverManagerDataSource dataSource = dataSource();
+        String url = required("mysql.url");
+        dataSource.setUrl(url + (url.contains("?") ? "&" : "?")
+                + "connectionTimeZone=" + URLEncoder.encode(connectionTimeZone,
+                        StandardCharsets.UTF_8));
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
@@ -268,6 +289,58 @@ class ManagedAgentMySqlIT {
                         + " = ? AND session_id = ?",
                 Long.class, tenant, session);
         assertThat(persistedLeaseMicros).isPositive();
+        assertLeaseDeadline(jdbc, tenant, session, grant);
+
+        WriterGrant reacquired = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 60_000L)));
+        assertThat(reacquired.writerGeneration()).isEqualTo(1);
+        assertThat(reacquired.replayed()).isTrue();
+        assertLeaseDeadline(jdbc, tenant, session, reacquired);
+
+        WriterGrant renewed = inTransaction(transactions,
+                () -> store.renewWriter(tenant, session,
+                        "cccccccccccccccccccccccccccccccc",
+                        new RenewWriterRequest("mysql-lease-workspace",
+                                "mysql-lease-writer", 1, 90_000L)));
+        assertLeaseDeadline(jdbc, tenant, session, renewed);
+
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                        + " writer_lease_until = TIMESTAMPADD(SECOND, -1,"
+                        + " CURRENT_TIMESTAMP(6)) WHERE tenant_id = ?"
+                        + " AND session_id = ?", tenant, session);
+        WriterGrant takenOver = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "dddddddddddddddddddddddddddddddd",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-replacement-writer", 60_000L)));
+        assertThat(takenOver.writerGeneration()).isEqualTo(2);
+        assertLeaseDeadline(jdbc, tenant, session, takenOver);
+
+        inTransaction(transactions,
+                () -> store.sealWriter(tenant, session,
+                        "dddddddddddddddddddddddddddddddd",
+                        new SealWriterRequest("mysql-lease-workspace",
+                                "mysql-replacement-writer", 2)));
+        WriterGrant afterSeal = inTransaction(transactions,
+                () -> store.acquireWriter(tenant, session,
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        new AcquireWriterRequest("mysql-lease-workspace",
+                                "mysql-post-seal-writer", 1_000L)));
+        assertThat(afterSeal.writerGeneration()).isEqualTo(3);
+        assertLeaseDeadline(jdbc, tenant, session, afterSeal);
+    }
+
+    private static void assertLeaseDeadline(JdbcTemplate jdbc, String tenant,
+            String session, WriterGrant grant) {
+        Timestamp persisted = jdbc.queryForObject(
+                "SELECT writer_lease_until FROM qwen_managed_session_journal_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Timestamp.class, tenant, session);
+        assertThat(persisted).isNotNull();
+        assertThat(persisted.getTime()).isEqualTo(grant.leaseUntil());
     }
 
     @Test
@@ -310,7 +383,8 @@ class ManagedAgentMySqlIT {
         ManagedAgentStore store = new ManagedAgentStore(
                 new JdbcTemplate(dataSource), new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {
-                });
+                }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(
+                        new JdbcTemplate(dataSource)));
         Admission lower = store.insertSessionCommand("case-tenant",
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code",
                 null, List.of(), null);
@@ -323,9 +397,180 @@ class ManagedAgentMySqlIT {
                 .isEmpty();
         assertThat(store.findSession("case-tenant", upper.sessionId()))
                 .isEmpty();
-        assertThat(store.listSessions("CASE-TENANT", null, null, 10)
+        assertThat(store.listSessions("CASE-TENANT", null, null, null, 10)
                 .sessions()).extracting(session -> session.sessionId())
                 .containsExactly(upper.sessionId());
+    }
+
+    @Test
+    @Order(5)
+    void replaysOriginalWorkspaceBindingAcrossJvmAfterDefaultChanges()
+            throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc));
+        String tenant = "mysql-workspace-" + UUID.randomUUID();
+        try {
+            for (String id : List.of("workspace-a", "workspace-b")) {
+                jdbc.update("INSERT INTO managed_workspace_registry"
+                                + " (tenant_id, workspace_id,"
+                                + " workspace_generation, storage_id,"
+                                + " display_name, config_ref, policy_ref,"
+                                + " state) VALUES (?, ?, 3, ?, ?, ?, ?,"
+                                + " 'ACTIVE')", tenant, id, "storage-a",
+                        id, "config-a", "policy-a");
+                jdbc.update("INSERT INTO managed_workspace_access"
+                                + " (tenant_id, workspace_id, actor_id,"
+                                + " can_read, can_create)"
+                                + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        tenant, id, "actor-a".getBytes(StandardCharsets.UTF_8));
+            }
+            jdbc.update("INSERT INTO managed_workspace_default"
+                    + " (tenant_id, workspace_id) VALUES (?, ?)",
+                    tenant, "workspace-a");
+            assertProcess(startWorkspaceProcess("create-and-exit", tenant,
+                    null), 23, null);
+            String sessionId = jdbc.queryForObject(
+                    "SELECT session_id FROM managed_workspace_create_command"
+                            + " WHERE tenant_id = ? AND actor_id = ?"
+                            + " AND idempotency_key = ?",
+                    String.class, tenant,
+                    "actor-a".getBytes(StandardCharsets.UTF_8),
+                    "workspace-create");
+            var original = store.requireSession(tenant, sessionId).workspace();
+            jdbc.update("UPDATE managed_workspace_default SET workspace_id = ?"
+                    + " WHERE tenant_id = ?", "workspace-b", tenant);
+            jdbc.update("UPDATE managed_workspace_registry SET"
+                            + " workspace_generation = 4, state = 'DRAINING'"
+                            + " WHERE tenant_id = ? AND workspace_id = ?",
+                    tenant, "workspace-a");
+            assertProcess(startWorkspaceProcess("replay", tenant, sessionId),
+                    0, "W0_PROCESS_REPLAY_OK");
+            assertThat(store.requireSession(tenant, sessionId).workspace())
+                    .isEqualTo(original);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " managed_agent_session WHERE tenant_id = ?",
+                    Integer.class, tenant)).isEqualTo(1);
+        } finally {
+            jdbc.update("DELETE FROM managed_agent_event WHERE tenant_id = ?",
+                    tenant);
+            jdbc.update("DELETE FROM managed_workspace_create_command"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_agent_consumer_progress"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id = ?",
+                    tenant);
+            jdbc.update("DELETE FROM managed_workspace_default"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_workspace_access"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ?", tenant);
+        }
+    }
+
+    @Test
+    @Order(6)
+    void workspaceActorAndCommandKeysStayCaseSensitiveOnMySql() {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedWorkspaceRegistry registry = new ManagedWorkspaceRegistry(jdbc);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, registry);
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-actor-" + UUID.randomUUID();
+        String workspace = "Workspace-A";
+        String actor = "Actor-A";
+        String digest = "sha256:" + "c".repeat(64);
+        try {
+            jdbc.update("INSERT INTO managed_workspace_registry"
+                            + " (tenant_id, workspace_id,"
+                            + " workspace_generation, storage_id,"
+                            + " display_name, config_ref, policy_ref,"
+                            + " state) VALUES (?, ?, 1, 'storage-a',"
+                            + " 'Workspace A', 'config-a', 'policy-a',"
+                            + " 'ACTIVE')", tenant, workspace);
+            jdbc.update("INSERT INTO managed_workspace_access"
+                            + " (tenant_id, workspace_id, actor_id,"
+                            + " can_read, can_create)"
+                            + " VALUES (?, ?, ?, TRUE, TRUE)",
+                    tenant, workspace, actor.getBytes(StandardCharsets.UTF_8));
+            Admission created = transactions.execute(status ->
+                    store.insertWorkspaceSessionCommand(tenant, actor,
+                            "Create-Workspace", digest, "qwen-code", null,
+                            List.of(), null,
+                            new com.alibaba.qwen.code.managedagent.api
+                                    .WorkspaceSelection(workspace, ".")));
+            assertThat(registry.canRead(tenant, actor, workspace)).isTrue();
+            assertThat(registry.canRead(tenant, "actor-a", workspace))
+                    .isFalse();
+            assertThat(registry.canRead(tenant, actor, "workspace-a"))
+                    .isFalse();
+            assertThat(registry.canRead(tenant.toUpperCase(), actor,
+                    workspace)).isFalse();
+            assertThat(store.listSessions(tenant, "actor-a", null, null,
+                    10).sessions()).isEmpty();
+            assertThatThrownBy(() -> transactions.execute(status ->
+                    store.replayWorkspaceSessionCommand(tenant, "actor-a",
+                            "Create-Workspace", digest)))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict"));
+            assertThatThrownBy(() -> transactions.execute(status ->
+                    store.replayWorkspaceSessionCommand(tenant, actor,
+                            "create-workspace", digest)))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict"));
+            assertThat(transactions.execute(status ->
+                    store.replayWorkspaceSessionCommand(tenant, actor,
+                            "Create-Workspace", digest)).sessionId())
+                    .isEqualTo(created.sessionId());
+        } finally {
+            jdbc.update("DELETE FROM managed_agent_event WHERE tenant_id = ?",
+                    tenant);
+            jdbc.update("DELETE FROM managed_workspace_create_command"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_agent_consumer_progress"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id = ?",
+                    tenant);
+            jdbc.update("DELETE FROM managed_workspace_access"
+                    + " WHERE tenant_id = ?", tenant);
+            jdbc.update("DELETE FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ?", tenant);
+        }
+    }
+
+    private static Process startWorkspaceProcess(String action,
+            String tenant, String sessionId) throws IOException {
+        String java = Path.of(System.getProperty("java.home"), "bin",
+                isWindows() ? "java.exe" : "java").toString();
+        String classpath = System.getProperty("surefire.test.class.path");
+        if (classpath == null || classpath.isBlank()) {
+            classpath = System.getProperty("java.class.path");
+        }
+        ProcessBuilder builder = new ProcessBuilder(java, "-cp", classpath,
+                WorkspaceCreationProcessFixtureMain.class.getName())
+                .redirectErrorStream(true);
+        builder.environment().put("W0_MYSQL_URL", required("mysql.url"));
+        builder.environment().put("W0_MYSQL_USER", required("mysql.user"));
+        builder.environment().put("W0_MYSQL_PASSWORD",
+                System.getProperty("mysql.password", ""));
+        builder.environment().put("W0_TENANT", tenant);
+        builder.environment().put("W0_ACTION", action);
+        if (sessionId != null) {
+            builder.environment().put("W0_SESSION", sessionId);
+        }
+        return builder.start();
     }
 
     private static void cleanupProcessFixture(JdbcTemplate jdbc) {

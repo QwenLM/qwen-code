@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import {
   startManagedRuntimeAttestationWorker,
@@ -54,6 +55,16 @@ const HEADERS = {
   'x-qwen-managed-lease-id': 'lease-01',
   'x-qwen-managed-lease-epoch': '4',
 };
+
+/**
+ * A shell command that writes the session and project directory its shell
+ * sees to `file`, in any shell the Shell tool picks.
+ */
+function writeShellEnvironment(file: string): string {
+  const script =
+    "process.stdout.write([process.env.QWEN_CODE_SESSION_ID, process.env.QWEN_CODE_PROJECT_DIR].join('|'))";
+  return `"${process.execPath}" -e "${script}" > ${file}`;
+}
 
 interface ToolSuite {
   readonly route: string;
@@ -256,6 +267,61 @@ describe('Managed Runtime tool worker', () => {
       });
       expect(JSON.stringify(settled)).toContain('file contents');
     }
+  });
+
+  it('takes the workspace at startup, as it always has', async () => {
+    // The workspace is missing at startup, so it never covers a directory
+    // created later, whatever the first call finds.
+    const late = path.join(workspace, 'late');
+    worker = await startManagedRuntimeAttestationWorker({
+      ...BOOT,
+      workspaceCwd: late,
+    });
+    fs.mkdirSync(path.join(late, 'sub'), { recursive: true });
+
+    const response = await fetch(
+      `${worker.ready.url}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          ...executeBody({
+            command: 'echo probe > probe.txt',
+            directory: path.join(late, 'sub'),
+          }),
+          toolName: 'run_shell_command',
+        }),
+      },
+    );
+
+    expect(await response.json()).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'error' },
+    });
+    expect(fs.existsSync(path.join(late, 'sub', 'probe.txt'))).toBe(false);
+  });
+
+  it("gives shells the Runtime's session and project directory, as before", async () => {
+    const origin = await start();
+
+    const response = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          ...executeBody({
+            command: writeShellEnvironment('env.txt'),
+          }),
+          toolName: 'run_shell_command',
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fs.readFileSync(path.join(workspace, 'env.txt'), 'utf8')).toBe(
+      `${BOOT.runtimeInstanceId}|${new Storage(workspace).getProjectDir()}`,
+    );
   });
 
   it('answers unknown for a reference the Runtime never saw', async () => {
