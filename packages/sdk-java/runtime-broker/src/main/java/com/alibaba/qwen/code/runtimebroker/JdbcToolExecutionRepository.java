@@ -114,7 +114,8 @@ public final class JdbcToolExecutionRepository
                             == ToolExecutionRecord.State.UNKNOWN
                     || !current.sameDispatch(expected)
                     || !current.hasLiveDispatchAt(
-                            JdbcRepositorySupport.databaseNow(connection))
+                            JdbcRepositorySupport.databaseNowPrecise(
+                                    connection))
                     || !current.getDispatchOwner().equals(owner)
                     || current.getDispatchGeneration()
                             != dispatchGeneration) {
@@ -156,7 +157,7 @@ public final class JdbcToolExecutionRepository
                             == ToolExecutionRecord.State.UNKNOWN) {
                 return null;
             }
-            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
             if (ownerId.equals(current.getDispatchOwner())
                     && current.getDispatchLeaseUntil().isAfter(now)) {
                 return current;
@@ -174,7 +175,7 @@ public final class JdbcToolExecutionRepository
                 return null;
             }
             ToolExecutionRecord claimed = current.withDispatch(ownerId,
-                    now.plus(duration),
+                    JdbcRepositorySupport.leaseUntil(now, duration),
                     current.getDispatchGeneration() + 1,
                     ToolExecutionRecord.State.DISPATCHING)
                     .withVersion(current.getVersion() + 1);
@@ -199,14 +200,15 @@ public final class JdbcToolExecutionRepository
                             == ToolExecutionRecord.State.UNKNOWN) {
                 return null;
             }
-            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
             if (!ownerId.equals(current.getDispatchOwner())
                     || dispatchGeneration != current.getDispatchGeneration()
                     || !current.getDispatchLeaseUntil().isAfter(now)) {
                 return null;
             }
             ToolExecutionRecord renewed = current.withDispatch(ownerId,
-                    now.plus(duration), dispatchGeneration,
+                    JdbcRepositorySupport.leaseUntil(now, duration),
+                    dispatchGeneration,
                     current.getState())
                     .withVersion(current.getVersion() + 1);
             updateExecution(connection, renewed);
