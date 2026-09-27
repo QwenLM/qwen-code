@@ -44,6 +44,7 @@ try {
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
+  testReleaseMatrixCoversUpdaterPlatforms();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
   testRuntimeNodePtyTargetMapping();
@@ -265,7 +266,10 @@ function testElectronBridgeWorkflow() {
     workflow,
     /windows_installers=\(release-assets\/\*-setup\.exe\)/,
   );
-  assert.match(workflow, /linux_appimages=\(release-assets\/\*\.AppImage\)/);
+  assert.match(
+    workflow,
+    /linux_appimages=\(release-assets\/\*_amd64\.AppImage\)/,
+  );
   assert.match(workflow, /^\s+release-assets\/latest\.yml$/m);
   assert.match(workflow, /^\s+release-assets\/latest-linux\.yml$/m);
   assert.match(workflow, /^\s+"\$\{windows_installers\[0\]\}"$/m);
@@ -282,6 +286,52 @@ function testElectronBridgeWorkflow() {
   ]) {
     assert.match(workflow, new RegExp(artifact.replaceAll('.', '\\.')));
   }
+}
+
+function testReleaseMatrixCoversUpdaterPlatforms() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  const manifestSource = fs.readFileSync(manifestScript, 'utf8');
+  // The matrix speaks in rust targets and the updater feed in Tauri's
+  // `${os}-${arch}` keys, so this table is the only thing tying them together.
+  // A leg nobody taught the manifest about still ships its artifact while the
+  // feed omits it, and nothing downstream fails loudly: that is how an arm64
+  // Linux installer ends up pulling the x86_64 AppImage (#12806).
+  const updaterPlatformByRustTarget = {
+    'aarch64-apple-darwin': 'darwin-aarch64',
+    'x86_64-apple-darwin': 'darwin-x86_64',
+    'x86_64-pc-windows-msvc': 'windows-x86_64',
+    'x86_64-unknown-linux-gnu': 'linux-x86_64',
+    'aarch64-unknown-linux-gnu': 'linux-aarch64',
+  };
+  const built = new Set();
+  for (const [, target] of workflow.matchAll(
+    /^ +rust_target: '([^']+)'\s*$/gm,
+  )) {
+    const platform = updaterPlatformByRustTarget[target];
+    assert.ok(
+      platform,
+      `build matrix target ${target} has no updater platform mapping`,
+    );
+    built.add(platform);
+  }
+  assert.ok(built.size > 0, 'the build matrix must declare rust targets');
+  // Keyed on the `[platform, selectArtifact(` entry shape so a commented-out
+  // entry stops counting as published.
+  const published = new Set();
+  for (const [, platform] of manifestSource.matchAll(
+    /\[\s*'((?:darwin|linux|windows)-(?:x86_64|aarch64))'\s*,/g,
+  )) {
+    published.add(platform);
+  }
+  assert.deepEqual(
+    [...built].sort(),
+    [...published].sort(),
+    'every build matrix leg needs an updater feed entry, and every feed entry ' +
+      'needs a leg that produces it',
+  );
 }
 
 function testDesktopReleaseSigningWorkflow() {
@@ -1295,6 +1345,7 @@ function testUpdateManifest(directory) {
     'Qwen-Code-x86_64-apple-darwin.app.tar.gz',
     'Qwen-Code_0.1.0_x64-setup.exe',
     'Qwen-Code_0.1.0_amd64.AppImage',
+    'Qwen-Code_0.1.0_aarch64.AppImage',
   ];
   for (const artifact of artifacts) {
     assert.ok(
@@ -1328,6 +1379,7 @@ function testUpdateManifest(directory) {
   assert.deepEqual(Object.keys(manifest.platforms).sort(), [
     'darwin-aarch64',
     'darwin-x86_64',
+    'linux-aarch64',
     'linux-x86_64',
     'windows-x86_64',
   ]);
@@ -1336,6 +1388,7 @@ function testUpdateManifest(directory) {
     ['darwin-x86_64', artifacts[1]],
     ['windows-x86_64', artifacts[2]],
     ['linux-x86_64', artifacts[3]],
+    ['linux-aarch64', artifacts[4]],
   ]) {
     assert.equal(
       manifest.platforms[platform].signature,
@@ -1368,12 +1421,62 @@ function testUpdateManifest(directory) {
     ['darwin-x86_64', artifacts[1]],
     ['windows-x86_64', artifacts[2]],
     ['linux-x86_64', artifacts[3]],
+    ['linux-aarch64', artifacts[4]],
   ]) {
     assert.equal(
       mirrorManifest.platforms[platform].url,
       `https://mirror.example/desktop/v0.1.0/${encodeURIComponent(artifact)}`,
     );
   }
+
+  // Re-mirroring an already-published release has to be able to reproduce the
+  // feed that release shipped, so a platform it predates can be named as
+  // optional -- by name, and only when it is genuinely absent (#12806).
+  const runManifest = (...extra) =>
+    spawnSync(
+      process.execPath,
+      [
+        manifestScript,
+        '--assets',
+        assets,
+        '--repository',
+        'QwenLM/qwen-code',
+        '--tag',
+        'desktop-v0.1.0',
+        '--version',
+        '0.1.0',
+        '--output',
+        output,
+        ...extra,
+      ],
+      { encoding: 'utf8' },
+    );
+  fs.rmSync(path.join(assets, artifacts[4]));
+  fs.rmSync(path.join(assets, `${artifacts[4]}.sig`));
+  const missingLeg = runManifest();
+  assert.notEqual(missingLeg.status, 0);
+  assert.match(
+    missingLeg.stderr,
+    /Expected one updater artifact for linux-aarch64, found 0/,
+  );
+  assert.match(
+    runManifest('--allow-missing-platform', 'darwin-x86_64').stderr,
+    /linux-aarch64, found 0/,
+    'the escape hatch is keyed per platform, not a blanket opt-out',
+  );
+  assert.equal(
+    runManifest('--allow-missing-platform', 'linux-aarch64').status,
+    0,
+  );
+  assert.deepEqual(
+    Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+    ['darwin-aarch64', 'darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
+  );
+  fs.writeFileSync(path.join(assets, artifacts[4]), artifacts[4]);
+  fs.writeFileSync(
+    path.join(assets, `${artifacts[4]}.sig`),
+    `signature:${artifacts[4]}\n`,
+  );
 
   fs.rmSync(path.join(assets, `${artifacts[3]}.sig`));
   const failure = spawnSync(
@@ -1412,6 +1515,9 @@ function testElectronBridgeManifest(directory) {
   artifacts.push(
     'Qwen-Code-Desktop_0.1.0_x64-setup.exe',
     'Qwen-Code-Desktop_0.1.0_amd64.AppImage',
+    // Not selected by any platform: the release matrix builds a second Linux
+    // AppImage, and the linux manifest must keep picking the x64 one.
+    'Qwen-Code-Desktop_0.1.0_aarch64.AppImage',
   );
   for (const artifact of artifacts.slice(4)) {
     fs.writeFileSync(path.join(assets, artifact), `contents:${artifact}`);

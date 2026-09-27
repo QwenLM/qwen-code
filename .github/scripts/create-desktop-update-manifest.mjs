@@ -5,6 +5,16 @@ import path from 'node:path';
 
 const options = parseArguments(process.argv.slice(2));
 const assets = fs.readdirSync(options.assets).sort();
+// Platforms a caller accepts as absent instead of fatal. Only the OSS mirror's
+// re-mirror-an-existing-release path passes this, so it can reproduce the feed
+// of a release that predates a platform. Fresh builds stay strict: a missing
+// leg fails the publish instead of shipping a feed without it.
+const allowMissingPlatforms = new Set(
+  (options['allow-missing-platform'] ?? '')
+    .split(',')
+    .map((platform) => platform.trim())
+    .filter(Boolean),
+);
 const platforms = {};
 const platformArtifacts = [
   [
@@ -24,10 +34,20 @@ const platformArtifacts = [
     ),
   ],
   ['windows-x86_64', selectArtifact(assets, /-setup\.exe$/i, 'windows-x86_64')],
-  ['linux-x86_64', selectArtifact(assets, /\.AppImage$/i, 'linux-x86_64')],
+  // Tauri's AppImage arch tokens are `_amd64`/`_aarch64`; the .deb beside them
+  // uses Debian's `_amd64`/`_arm64`. Matching the extension alone is ambiguous.
+  [
+    'linux-x86_64',
+    selectArtifact(assets, /_amd64\.AppImage$/i, 'linux-x86_64'),
+  ],
+  [
+    'linux-aarch64',
+    selectArtifact(assets, /_aarch64\.AppImage$/i, 'linux-aarch64'),
+  ],
 ];
 
 for (const [platform, artifact] of platformArtifacts) {
+  if (!artifact) continue;
   const signatureFile = `${artifact}.sig`;
   if (!assets.includes(signatureFile)) {
     throw new Error(`Missing updater signature for ${artifact}`);
@@ -49,6 +69,7 @@ fs.writeFileSync(options.output, `${JSON.stringify(manifest, null, 2)}\n`);
 
 function selectArtifact(assets, pattern, platform) {
   const matches = assets.filter((asset) => pattern.test(asset));
+  if (matches.length === 0 && allowMissingPlatforms.has(platform)) return null;
   if (matches.length !== 1) {
     throw new Error(
       `Expected one updater artifact for ${platform}, found ${matches.length}: ${matches.join(', ')}`,

@@ -336,6 +336,13 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       '--base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}"',
     );
+    // Only the re-mirror path may treat a platform as optional; the artifact
+    // path is a fresh build and must fail if a leg did not upload (#12806).
+    expect(prepare).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
+    expect(prepare).toContain(`if [ "$SOURCE" = 'release' ]; then`);
+    expect(prepare).toContain(
+      'manifest_args=(--allow-missing-platform linux-aarch64)',
+    );
     expect(prepare).toContain('sha256sum -- * > SHA256SUMS.txt');
 
     const upload = getWorkflowStep(
