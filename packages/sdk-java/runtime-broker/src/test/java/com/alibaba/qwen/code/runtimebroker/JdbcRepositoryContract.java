@@ -31,7 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
-final class JdbcRepositoryContract {
+/**
+ * Contract for the JDBC repositories. It is public so that
+ * managed-agent-server can also run it against its Flyway schema.
+ */
+public final class JdbcRepositoryContract {
     private static final Instant START = Instant.parse(
             "2026-09-20T00:00:00Z");
     private static final Instant HEALTH = START.plusSeconds(30);
@@ -39,7 +43,12 @@ final class JdbcRepositoryContract {
     private JdbcRepositoryContract() {
     }
 
-    static void verify(DataSource dataSource, String prefix) throws Exception {
+    /**
+     * Runs the contract. {@code prefix} namespaces every row it writes, so a
+     * shared database needs a prefix that no earlier run used.
+     */
+    public static void verify(DataSource dataSource, String prefix)
+            throws Exception {
         verifySchema(dataSource);
         verifyBinding(dataSource, prefix);
         verifyProvisionerKindRoundTrip(dataSource, prefix);
