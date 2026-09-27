@@ -154,12 +154,12 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['enter_plan_mode', (c) => new EnterPlanModeTool(c), 1_400],
   ['propose_goal', (c) => new ProposeGoalTool(c), 1_350],
   ['task_update', (c) => new TaskUpdateTool(c), 1_250],
-  ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_250],
   ['notebook_edit', (c) => new NotebookEditTool(c), 1_200],
   ['list_agents', (c) => new ListAgentsTool(c), 1_200],
+  ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_200],
   ['list_directory', (c) => new LSTool(c), 1_100],
-  ['grep_search (fallback)', (c) => new GrepTool(c), 1_100],
-  ['glob', (c) => new GlobTool(c), 900],
+  ['grep_search (fallback)', (c) => new GrepTool(c), 1_050],
+  ['glob', (c) => new GlobTool(c), 800],
   ['task_create', (c) => new TaskCreateTool(c), 650],
   ['tool_call', () => new ToolCallTool(), 650],
   ['team_plan_approval', (c) => new TeamPlanApprovalTool(c), 600],
@@ -270,18 +270,13 @@ describe('trimmed descriptions keep their load-bearing clauses (#12054)', () => 
     [
       'glob',
       (c: Config) => new GlobTool(c),
-      [
-        'Supports glob patterns',
-        'sorted by modification time',
-        'use the Agent tool instead',
-      ],
+      ['Supports glob patterns', 'sorted by modification time'],
     ],
     [
       'grep_search (ripgrep)',
       (c: Config) => new RipGrepTool(c),
       [
         'NEVER invoke `grep` or `rg` as a Bash command',
-        'Use Agent tool for open-ended searches',
         'special regex characters need escaping',
       ],
     ],
@@ -291,7 +286,6 @@ describe('trimmed descriptions keep their load-bearing clauses (#12054)', () => 
       [
         'NEVER invoke `grep` or `rg` as a Bash command',
         'Case-insensitive by default',
-        'Use Agent tool for open-ended searches',
       ],
     ],
     [
