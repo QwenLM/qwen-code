@@ -82,7 +82,7 @@ Start a background development server (recommended approach):
 run_shell_command(command="npm run dev", description="Start development server in background", is_background=true)
 ```
 
-Note: an explicit `&` is not a background mechanism for this tool. A bare trailing `&` is stripped at spawn time (and rejected outright when `is_background: true`), so `command="npm run dev &"` with `is_background=false` runs `npm run dev` in the foreground and blocks the turn. Always use `is_background=true` for a command that should run in the background.
+Note: an explicit `&` is not a managed background mechanism. With `is_background: true` the tool rejects a bare trailing `&` before the command runs; with `is_background=false` the shell detaches the process, so the call returns without the process being tracked — it has no background task entry and `task_stop` cannot reach it. Always use `is_background=true` for a command that should run in the background.
 
 Run a build command in foreground:
 
@@ -162,7 +162,7 @@ When an interactive command is running, you can send input to it from the Qwen C
 
 - **Security:** Be cautious when executing commands, especially those constructed from user input, to prevent security vulnerabilities.
 - **Error handling:** Check the `Stderr`, `Error`, and `Exit Code` fields to determine if a command executed successfully.
-- **Background processes:** Only `is_background=true` runs a command in the background: the tool then returns immediately with the process ID in the `Background PIDs` field, and the process continues to run. A `&` inside the command never makes the tool return early (and a bare trailing one is stripped at spawn time, or rejected when `is_background: true`).
+- **Background processes:** Only `is_background=true` starts a tracked background process: the tool returns immediately with the shell id and PID, and the process keeps running. A shell-level `&` does not create one — with `is_background: true` the tool rejects a bare trailing `&`, and with `is_background=false` the shell detaches the command without the tool tracking it.
 - **Background execution choices:** The `is_background` parameter is optional (the schema requires only `command`); set `is_background: true` for a command that will not stop on its own, because leaving it in the foreground blocks the turn until it times out. Use `is_background` rather than shell-level `&`; it provides clearer intent and the tool manages the background execution setup.
 - **Command descriptions:** When using `is_background=true`, the command description will include a `[background]` indicator to clearly show the execution mode.
 
