@@ -45,6 +45,9 @@ import {
   hashMcpServerConfig,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
+import { LISTENING_LINE_RE, stopDaemon } from '../helpers/daemon-process.js';
+
+export { LISTENING_LINE_RE };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -89,13 +92,10 @@ export interface SpawnedDaemon {
   stdoutBuf: { value: string };
   /** Drain stderr similarly — surface on dispose if exit code != 0. */
   stderrBuf: { value: string };
-  /** Idempotent. Sends SIGTERM, awaits exit (up to 5s). */
+  /** Idempotent. Resolves once the daemon has exited (see `stopDaemon`). */
   dispose: () => Promise<void>;
 }
 
-export const LISTENING_LINE_RE =
-  /^(?<line>.*listening on http:\/\/127\.0\.0\.1:(?<port>\d+).*)$/m;
-const DISPOSE_GRACE_MS = 5_000;
 const MATCHED_DESCENDANT_DEPTH = 4;
 
 export async function spawnDaemon(
@@ -188,27 +188,7 @@ export async function spawnDaemon(
   const base = `http://127.0.0.1:${port}`;
   const client = new DaemonClient({ baseUrl: base, token });
 
-  const dispose = async () => {
-    if (daemon.exitCode !== null) return;
-    daemon.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        // Force kill if SIGTERM didn't take in time. We don't await
-        // exit again — the OS will clean up either way and a 5s
-        // hang here multiplies into 5s × N tests on flaky machines.
-        try {
-          daemon.kill('SIGKILL');
-        } catch {
-          /* already gone */
-        }
-        resolve();
-      }, DISPOSE_GRACE_MS);
-      daemon.once('exit', () => {
-        clearTimeout(t);
-        resolve();
-      });
-    });
-  };
+  const dispose = () => stopDaemon(daemon);
 
   return {
     client,
