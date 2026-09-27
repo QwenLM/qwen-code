@@ -5005,6 +5005,9 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
+  const collaborationAvailable =
+    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
+    true;
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -5027,6 +5030,23 @@ export function App({
       setArtifactPanelOpen(false);
     }
   }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
+  useEffect(() => {
+    if (collaborationAvailable) return;
+    const activityIds = artifactPanelTabs
+      .filter((tab) => tab.kind === 'agent_activity')
+      .map((tab) => tab.id);
+    if (activityIds.length === 0) return;
+    setArtifactPanelTabs((tabs) =>
+      tabs.filter((tab) => tab.kind !== 'agent_activity'),
+    );
+    if (
+      activeArtifactPanelTabId &&
+      activityIds.includes(activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [activeArtifactPanelTabId, artifactPanelTabs, collaborationAvailable]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -6660,7 +6680,7 @@ export function App({
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
                 case 'agent_activity':
-                  return tab;
+                  return collaborationAvailable ? tab : undefined;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -6808,6 +6828,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    collaborationAvailable,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,

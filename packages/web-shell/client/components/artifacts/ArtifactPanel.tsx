@@ -9,6 +9,7 @@ import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
+  useWorkspace,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -548,6 +549,10 @@ export function ArtifactPanel({
   onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
+  const workspace = useWorkspace();
+  const collaborationAvailable =
+    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
+    true;
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string>();
   const sideTaskMenuCloseTimerRef = useRef<ReturnType<
@@ -1356,22 +1361,24 @@ export function ArtifactPanel({
             </div>
           )
         ) : activeTab.kind === 'agent_activity' ? (
-          <ThreadsRoute
-            key={activeTab.id}
-            chat
-            activityOnly
-            initialThreadId={activeTab.threadId}
-            workspaceCwd={activeTab.workspaceCwd}
-            onOpenAgentSession={
-              onOpenCollaborationSession
-                ? (sessionId) =>
-                    onOpenCollaborationSession(
-                      sessionId,
-                      activeTab.workspaceCwd,
-                    )
-                : undefined
-            }
-          />
+          collaborationAvailable ? (
+            <ThreadsRoute
+              key={activeTab.id}
+              chat
+              activityOnly
+              initialThreadId={activeTab.threadId}
+              workspaceCwd={activeTab.workspaceCwd}
+              onOpenAgentSession={
+                onOpenCollaborationSession
+                  ? (sessionId) =>
+                      onOpenCollaborationSession(
+                        sessionId,
+                        activeTab.workspaceCwd,
+                      )
+                  : undefined
+              }
+            />
+          ) : null
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}
