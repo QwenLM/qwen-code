@@ -28,6 +28,7 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { parseAutoMemoryTopicDocument } from './structured-scan.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
@@ -768,6 +769,53 @@ describe('memory metadata migration', () => {
     expect(updated.endsWith('Body.')).toBe(true);
   });
 
+  it('does not carry old scalar comments into generated metadata', async () => {
+    const original =
+      '---\nname: Old title #123\ndescription: Fix #123 and #456\ntype: project\n---\nBody.\n';
+    const filePath = await write('project/legacy.md', original);
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+    const generated = metadata(candidate!);
+    expect(await commitMigratedMemoryMetadata(candidate!, generated)).toBe(
+      'committed',
+    );
+    const updated = await fs.readFile(filePath, 'utf-8');
+    const parsed = parseAutoMemoryTopicDocument(
+      filePath,
+      updated,
+      0,
+      'project/legacy.md',
+      'project',
+    );
+    expect(parsed).toMatchObject({
+      title: generated.name,
+      description: generated.description,
+    });
+    expect(updated).not.toContain('#123');
+    expect(updated.endsWith('---\nBody.\n')).toBe(true);
+  });
+
+  it('refuses to replace anchored metadata rather than changing unknown aliases', async () => {
+    const original =
+      '---\nname: &title Old title\ncustom_note: *title\ntype: project\n---\nBody.\n';
+    const filePath = await write('project/legacy.md', original);
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate) => metadata(candidate),
+    });
+    expect(result).toMatchObject({
+      committed: 0,
+      failed: 1,
+      remainingLegacyFiles: 1,
+    });
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(original);
+  });
+
   it('tells the writer which fields failed validation and retries once', async () => {
     await write('project/legacy.md', legacyContent());
     const prefix = 'x'.repeat(64);
@@ -1092,6 +1140,62 @@ describe('memory metadata migration', () => {
       await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
     },
   );
+
+  it('keeps user vocabulary advisory without hiding an incomplete index', async () => {
+    const root = getUserAutoMemoryRoot();
+    const locked = path.join(root, 'locked');
+    await fs.mkdir(locked, { recursive: true });
+    const filePath = path.join(root, 'legacy.md');
+    await fs.writeFile(filePath, legacyContent());
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root,
+      scope: 'user' as const,
+      generateMetadata,
+    };
+    const readdir = fs.readdir.bind(fs);
+    const readDirectory = vi
+      .spyOn(fs, 'readdir')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === locked) {
+          throw Object.assign(new Error('Permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return readdir(...args);
+      });
+    try {
+      await expect(runMemoryMetadataMigration(params)).rejects.toThrow(
+        'incomplete',
+      );
+      expect(generateMetadata).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(filePath, 'utf-8')).toContain(
+        'name: Migrated memory',
+      );
+      expect(
+        await scanMemoryMetadataCorpusStatus({
+          projectRoot,
+          teamMemoryEnabled: false,
+          trustedProject: true,
+        }),
+      ).toMatchObject({ ready: false });
+    } finally {
+      readDirectory.mockRestore();
+    }
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 0,
+      committed: 0,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(path.join(root, 'MEMORY.md'), 'utf-8')).toContain(
+      'legacy.md',
+    );
+  });
 
   it('repairs a failed index write on retry without regenerating metadata', async () => {
     await write('project/legacy.md', legacyContent());

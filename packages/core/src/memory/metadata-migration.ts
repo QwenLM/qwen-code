@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isMap, parseDocument } from 'yaml';
+import { isMap, isNode, parseDocument } from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -32,7 +32,6 @@ import {
 } from './trusted-memory-filesystem.js';
 import {
   parseAutoMemoryTopicDocument,
-  scanAllUserAutoMemoryTopicDocuments,
   scanAutoMemorySnapshot,
   validateStructuredAutoMemoryDocument,
   type ScannedAutoMemoryDocument,
@@ -335,7 +334,12 @@ function mergeMetadata(
     if (document.errors.length === 0) {
       try {
         for (const key of OWNED_FRONTMATTER_KEYS) {
-          document.set(key, metadata[key]);
+          const previous = document.get(key, true);
+          // Replacing an anchor would change aliases in unowned fields.
+          if (isNode(previous) && 'anchor' in previous && previous.anchor) {
+            return null;
+          }
+          document.set(key, document.createNode(metadata[key]));
         }
         renderedYaml = document.toString();
       } catch {
@@ -543,7 +547,12 @@ export async function runMemoryMetadataMigration(params: {
             })
           ).docs
         : params.scope === 'user'
-          ? await scanAllUserAutoMemoryTopicDocuments()
+          ? (
+              await scanAutoMemorySnapshot(params.projectRoot, {
+                scopes: ['user'],
+                uncapped: true,
+              })
+            ).docs
           : (
               await scanAutoMemorySnapshot(params.projectRoot, {
                 scopes: ['team'],
