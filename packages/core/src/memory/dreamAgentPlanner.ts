@@ -25,6 +25,8 @@ import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabula
 import {
   MEMORY_CATEGORY_SECTION,
   MEMORY_FRONTMATTER_EXAMPLE,
+  TYPES_SECTION_INDIVIDUAL,
+  WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
 
 const MAX_TURNS = 8;
@@ -47,6 +49,12 @@ Rules:
 - Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
 - Do not edit MEMORY.md. The runtime rebuilds it after your work.
 - If nothing needs consolidation, do nothing and say so.
+
+${TYPES_SECTION_INDIVIDUAL.join('\n')}
+
+${MEMORY_CATEGORY_SECTION.join('\n')}
+
+${WHAT_NOT_TO_SAVE_SECTION.join('\n')}
 
 Memory file format reference:
 ${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;

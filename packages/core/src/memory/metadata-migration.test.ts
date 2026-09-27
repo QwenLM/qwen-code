@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -27,6 +28,7 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { parseAutoMemoryTopicDocument } from './structured-scan.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
@@ -742,6 +744,8 @@ describe('memory metadata migration', () => {
       '# hand-maintained note',
       'custom_field: &flag custom value',
       'alias_field: *flag',
+      'description: &description Curated description',
+      'custom_note: *description',
       'notes: "quoted: value # kept"',
       'type: project',
       'title: Legacy title',
@@ -762,9 +766,59 @@ describe('memory metadata migration', () => {
     expect(updated).toContain('# hand-maintained note');
     expect(updated).toContain('custom_field: &flag custom value');
     expect(updated).toContain('alias_field: *flag');
+    expect(updated).toContain('description: &description Curated description');
+    expect(updated).toContain('custom_note: *description');
     expect(updated).toContain('notes: "quoted: value # kept"');
     expect(updated).toContain('name: Migrated memory');
     expect(updated.endsWith('Body.')).toBe(true);
+  });
+
+  it('preserves valid curated metadata instead of accepting model replacements', async () => {
+    const original =
+      '---\nname: Old title #123\ndescription: Fix #123 and #456\ntype: reference\n---\nBody.\n';
+    const filePath = await write('project/legacy.md', original);
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+    const generated = metadata(candidate!);
+    expect(await commitMigratedMemoryMetadata(candidate!, generated)).toBe(
+      'committed',
+    );
+    const updated = await fs.readFile(filePath, 'utf-8');
+    const parsed = parseAutoMemoryTopicDocument(
+      filePath,
+      updated,
+      0,
+      'project/legacy.md',
+      'project',
+    );
+    expect(parsed).toMatchObject({
+      title: 'Old title #123',
+      description: 'Fix #123 and #456',
+      type: 'reference',
+    });
+    expect(updated).toContain('keywords:');
+    expect(updated.endsWith('---\nBody.\n')).toBe(true);
+  });
+
+  it('refuses to replace invalid anchored metadata rather than changing unknown aliases', async () => {
+    const original =
+      '---\ncategory: &category invalid_category\ncustom_note: *category\ntype: project\n---\nBody.\n';
+    const filePath = await write('project/legacy.md', original);
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate) => metadata(candidate),
+    });
+    expect(result).toMatchObject({
+      committed: 0,
+      failed: 1,
+      remainingLegacyFiles: 1,
+    });
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(original);
   });
 
   it('tells the writer which fields failed validation and retries once', async () => {
@@ -1092,6 +1146,62 @@ describe('memory metadata migration', () => {
     },
   );
 
+  it('keeps user vocabulary advisory without hiding an incomplete index', async () => {
+    const root = getUserAutoMemoryRoot();
+    const locked = path.join(root, 'locked');
+    await fs.mkdir(locked, { recursive: true });
+    const filePath = path.join(root, 'legacy.md');
+    await fs.writeFile(filePath, legacyContent());
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root,
+      scope: 'user' as const,
+      generateMetadata,
+    };
+    const readdir = fs.readdir.bind(fs);
+    const readDirectory = vi
+      .spyOn(fs, 'readdir')
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === locked) {
+          throw Object.assign(new Error('Permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return readdir(...args);
+      });
+    try {
+      await expect(runMemoryMetadataMigration(params)).rejects.toThrow(
+        'incomplete',
+      );
+      expect(generateMetadata).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(filePath, 'utf-8')).toContain(
+        'name: Migrated memory',
+      );
+      expect(
+        await scanMemoryMetadataCorpusStatus({
+          projectRoot,
+          teamMemoryEnabled: false,
+          trustedProject: true,
+        }),
+      ).toMatchObject({ ready: false });
+    } finally {
+      readDirectory.mockRestore();
+    }
+    await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 0,
+      committed: 0,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(path.join(root, 'MEMORY.md'), 'utf-8')).toContain(
+      'legacy.md',
+    );
+  });
+
   it('repairs a failed index write on retry without regenerating metadata', async () => {
     await write('project/legacy.md', legacyContent());
     const index = path.join(memoryRoot, 'MEMORY.md');
@@ -1328,5 +1438,177 @@ describe('memory metadata migration', () => {
     await expect(
       fs.readFile(path.join(memoryRoot, 'MEMORY.md'), 'utf-8'),
     ).resolves.toContain('Migrated memory');
+  });
+
+  it('accepts metadata returned in a fenced code block', async () => {
+    await write('project/legacy.md', legacyContent());
+    // Real models routinely wrap the JSON object in a ```json fence; the
+    // parser must strip it or every real migration degrades to failed.
+    vi.mocked(runForkedAgent).mockImplementationOnce(async (params) => {
+      const relativePath = /relativePath: (.+)/.exec(params.taskPrompt)?.[1];
+      const sourceHash = /sourceHash: (.+)/.exec(params.taskPrompt)?.[1];
+      return {
+        status: 'completed',
+        finalText: `\`\`\`json\n${JSON.stringify({
+          relativePath,
+          sourceHash,
+          name: 'Migrated memory',
+          description: 'Complete migrated metadata',
+          type: 'project',
+          category: 'project_introduction',
+          keywords: ['memory migration', 'frontmatter migration'],
+          usage_scenarios: ['Migrating legacy memories'],
+        })}\n\`\`\``,
+        filesTouched: [],
+      };
+    });
+
+    const result = await runMemoryMetadataMigration({
+      config: {
+        getMemoryAgentTimeoutMinutes: () => undefined,
+      } as unknown as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+    });
+
+    expect(result).toMatchObject({ attempted: 1, committed: 1, failed: 0 });
+    const updated = await fs.readFile(
+      path.join(memoryRoot, 'project', 'legacy.md'),
+      'utf-8',
+    );
+    expect(updated).toContain('name: Migrated memory');
+  });
+
+  it('caps the content handed to the agent, not just the reported char count', async () => {
+    await write('project/large.md', legacyContent('x'.repeat(50_000)));
+    let receivedContentLength = -1;
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) => {
+        receivedContentLength = candidate.content.length;
+        return metadata(candidate);
+      },
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(result).toMatchObject({ attempted: 1, committed: 1 });
+    expect(receivedContentLength).toBe(40_000);
+  });
+
+  it('detects an intervening edit inside the atomic write commit window', async () => {
+    const filePath = await write('project/race.md', legacyContent('Race'));
+    const [candidate] = await scanMemoryMetadataMigrationCandidates(
+      memoryRoot,
+      'project',
+    );
+    let commitChecks = 0;
+    // The second canCommit invocation comes from inside atomicWriteFile,
+    // after the outer hash check: mutating there must be caught by the
+    // commit-time re-read, and the file must keep the intervening edit.
+    const status = await commitMigratedMemoryMetadata(
+      candidate,
+      metadata(candidate),
+      () => {
+        commitChecks += 1;
+        if (commitChecks === 2) {
+          fsSync.writeFileSync(filePath, legacyContent('Intervening edit'));
+        }
+        return true;
+      },
+    );
+
+    expect(status).toBe('conflict');
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toContain(
+      'Intervening edit',
+    );
+  });
+
+  it('counts a failed file and still migrates the rest of the run', async () => {
+    await write('project/a-bad.md', legacyContent('Bad'));
+    await write('project/b-good.md', legacyContent('Good'));
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) => {
+        if (candidate.relativePath.endsWith('a-bad.md')) {
+          throw new Error('agent call failed');
+        }
+        return metadata(candidate);
+      },
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(result).toMatchObject({
+      attempted: 2,
+      committed: 1,
+      failed: 1,
+      remainingLegacyFiles: 1,
+    });
+    await expect(
+      fs.readFile(path.join(memoryRoot, 'project', 'b-good.md'), 'utf-8'),
+    ).resolves.toContain('name: Migrated memory');
+    await expect(
+      fs.readFile(path.join(memoryRoot, 'project', 'a-bad.md'), 'utf-8'),
+    ).resolves.not.toContain('name: Migrated memory');
+  });
+
+  it('stops after one informed retry when metadata keeps failing validation', async () => {
+    const filePath = await write('project/stubborn.md', legacyContent());
+    const original = await fs.readFile(filePath, 'utf-8');
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) => ({
+        ...metadata(candidate),
+        keywords: ['invalid'],
+      }),
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata,
+    });
+
+    expect(generateMetadata).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ attempted: 1, committed: 0, failed: 1 });
+    await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe(original);
+  });
+
+  it('preserves CRLF line endings inside the merged frontmatter', async () => {
+    const filePath = await write(
+      'project/crlf.md',
+      ['---', 'type: project', 'title: Legacy title', '---', 'Body.', ''].join(
+        '\r\n',
+      ),
+    );
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: vi.fn(
+        async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+          metadata(candidate),
+      ),
+    });
+
+    expect(result).toMatchObject({ attempted: 1, committed: 1 });
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toContain('name: Migrated memory');
+    expect(updated.replaceAll('\r\n', '')).not.toContain('\n');
   });
 });

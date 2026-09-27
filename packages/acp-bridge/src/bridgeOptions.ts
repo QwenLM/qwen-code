@@ -16,6 +16,7 @@ import type {
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
@@ -28,8 +29,9 @@ import type {
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
 
-export type BridgeExecutionEngine = 'legacy' | 'managed';
-export const SESSION_EXECUTION_ENGINE_META_KEY = 'qwen.session.executionEngine';
+export type BridgeExecutionEngine = SessionExecutionEngine;
+// The ACP host writes this receipt and the Bridge checks it: one definition.
+export { SESSION_EXECUTION_ENGINE_META_KEY } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 
 export type BridgeExecutionSelection = {
   readonly daemonOwnedStandalone: boolean;
@@ -289,6 +291,14 @@ export interface BridgeOptions {
       context: BridgeExecutionSelection,
     ): BridgeExecutionEngine | Promise<BridgeExecutionEngine>;
   };
+  /**
+   * How long a quarantined channel of a paired Bridge may drain before its
+   * running turns are cancelled and it is terminated. Measured once from the
+   * start of the quarantine and never extended by activity. Defaults to five
+   * minutes. Validated on every Bridge, but only a Bridge with
+   * `executionEngines` quarantines this way.
+   */
+  quarantineDrainTimeoutMs?: number;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** Daemon-global admission for the process-wide MCP OAuth callback port. */

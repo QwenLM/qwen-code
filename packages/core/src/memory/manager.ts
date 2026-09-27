@@ -798,6 +798,7 @@ export class MemoryManager {
           )
         : [root];
     const domain = `${params.scope}:${root}`;
+    const stalledAttempts = this.migrationStallCountByDomain.get(domain) ?? 0;
     const existingId = this.migrationInFlightByDomain.get(domain);
     if (existingId || activeMigrationDomains.has(domain)) {
       return {
@@ -808,14 +809,12 @@ export class MemoryManager {
     }
     if (
       params.scope !== 'team' &&
-      params.config.getMemoryRecallMode() === 'structured'
+      params.config.getMemoryRecallMode() === 'structured' &&
+      stalledAttempts === 0
     ) {
       return { status: 'skipped', skippedReason: 'complete' };
     }
-    if (
-      (this.migrationStallCountByDomain.get(domain) ?? 0) >=
-      MIGRATION_STALL_LIMIT
-    ) {
+    if (stalledAttempts >= MIGRATION_STALL_LIMIT) {
       return { status: 'skipped', skippedReason: 'stalled' };
     }
     // Register the abort controller (under a reserved id) together with the
@@ -856,7 +855,7 @@ export class MemoryManager {
       activeMigrationDomains.delete(domain);
       return { status: 'skipped', skippedReason: 'cancelled' };
     }
-    if (!candidatesFound) {
+    if (!candidatesFound && stalledAttempts === 0) {
       activeMigrationDomains.delete(domain);
       return { status: 'skipped', skippedReason: 'complete' };
     }
@@ -982,6 +981,10 @@ export class MemoryManager {
         );
         return record;
       }
+      this.migrationStallCountByDomain.set(
+        domain,
+        (this.migrationStallCountByDomain.get(domain) ?? 0) + 1,
+      );
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),

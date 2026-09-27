@@ -95,7 +95,13 @@ async function buildCleanMemorySystemPrompt(
       {
         forceFullProtocol: true,
         keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
-          await scanUserAutoMemoryTopicDocuments().catch(() => []),
+          // The vocabulary is advisory prompt context: an unreadable user
+          // root must not fail the run, but the failure is logged so a
+          // silently empty vocabulary stays diagnosable.
+          await scanUserAutoMemoryTopicDocuments().catch((error) => {
+            debugLogger.error('User memory vocabulary scan failed:', error);
+            return [];
+          }),
           { scopes: ['user'] },
         ),
       },
@@ -119,10 +125,18 @@ async function buildCleanMemorySystemPrompt(
   }
   const [projectIndex, projectDocs, userDocs] = await Promise.all([
     readAutoMemoryIndex(projectRoot),
-    scanAutoMemoryTopicDocuments(projectRoot),
+    // The vocabulary is advisory prompt context on the project side too:
+    // an unreadable project memory root must not fail the run either.
+    scanAutoMemoryTopicDocuments(projectRoot).catch((error) => {
+      debugLogger.error('Project memory vocabulary scan failed:', error);
+      return [];
+    }),
     scope === 'project'
       ? Promise.resolve([])
-      : scanUserAutoMemoryTopicDocuments().catch(() => []),
+      : scanUserAutoMemoryTopicDocuments().catch((error) => {
+          debugLogger.error('User memory vocabulary scan failed:', error);
+          return [];
+        }),
   ]);
 
   return buildManagedAutoMemoryPrompt(

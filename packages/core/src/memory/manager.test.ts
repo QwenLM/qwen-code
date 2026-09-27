@@ -528,6 +528,91 @@ describe('MemoryManager', () => {
       expect(manager.getTask(retry.taskId!)?.status).toBe('completed');
     });
 
+    it.each(['legacy', 'structured'] as const)(
+      'repairs a failed index after every file has migrated in %s mode',
+      async (mode) => {
+        const root = getAutoMemoryRoot(projectRoot);
+        await writeLegacy(root, 'project.md');
+        const index = path.join(root, 'MEMORY.md');
+        await fs.rm(index, { force: true });
+        await fs.mkdir(index);
+        const runMigration = metadataMigration.runMemoryMetadataMigration;
+        const generateMetadata = vi.fn(
+          async (
+            _config: Config,
+            candidate: metadataMigration.MemoryMetadataMigrationCandidate,
+          ) => ({
+            relativePath: candidate.relativePath,
+            sourceHash: candidate.sourceHash,
+            name: 'Project memory',
+            description: 'Project context',
+            type: 'project',
+            category: 'project_introduction',
+            keywords: ['project context', 'memory migration'],
+            usage_scenarios: ['Working on this project'],
+          }),
+        );
+        vi.spyOn(
+          metadataMigration,
+          'runMemoryMetadataMigration',
+        ).mockImplementation((params) =>
+          runMigration({ ...params, generateMetadata }),
+        );
+        const manager = new MemoryManager();
+        const params = {
+          projectRoot,
+          scope: 'project' as const,
+          config: makeMockConfig(),
+        };
+        const first = await manager.scheduleMetadataMigration(params);
+        await first.promise;
+        expect(manager.getTask(first.taskId!)?.status).toBe('failed');
+        expect(
+          await metadataMigration.scanMemoryMetadataMigrationCandidates(
+            root,
+            'project',
+          ),
+        ).toEqual([]);
+        await fs.rmdir(index);
+        vi.spyOn(params.config, 'getMemoryRecallMode').mockReturnValue(mode);
+        const retry = await manager.scheduleMetadataMigration(params);
+        expect(retry.status).toBe('scheduled');
+        await retry.promise;
+        expect(manager.getTask(retry.taskId!)?.status).toBe('completed');
+        expect(await fs.readFile(index, 'utf-8')).toContain('project.md');
+        expect(generateMetadata).toHaveBeenCalledTimes(1);
+        await expect(
+          manager.scheduleMetadataMigration(params),
+        ).resolves.toMatchObject({
+          status: 'skipped',
+          skippedReason: 'complete',
+        });
+      },
+    );
+
+    it('stops retrying migration exceptions after three failed attempts', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const run = vi
+        .spyOn(metadataMigration, 'runMemoryMetadataMigration')
+        .mockRejectedValue(new Error('index write failed'));
+      const manager = new MemoryManager();
+      const params = {
+        projectRoot,
+        scope: 'project' as const,
+        config: makeMockConfig(),
+      };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const result = await manager.scheduleMetadataMigration(params);
+        expect(result.status).toBe('scheduled');
+        await result.promise;
+        expect(manager.getTask(result.taskId!)?.status).toBe('failed');
+      }
+      await expect(
+        manager.scheduleMetadataMigration(params),
+      ).resolves.toMatchObject({ status: 'skipped', skippedReason: 'stalled' });
+      expect(run).toHaveBeenCalledTimes(3);
+    });
+
     it('pauses project and user dream while their legacy files remain', async () => {
       await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
       await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
