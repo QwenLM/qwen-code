@@ -85,7 +85,7 @@ A Goal is only as good as its completion condition. See [Goals](./goals.md) for 
 
 Runtime-scheduled Goal continuation segments do not count against `--max-session-turns`, but real user prompts still do. Explicit `--max-wall-time` and `--max-tool-calls` budgets continue to apply; exceeding either pauses active Goal work before the run exits with the budget-specific error.
 
-With `--output-format stream-json`, each Goal status change emits a `stream_event` whose `event.type` is `goal_state`. This canonical state event is emitted even without `--include-partial-messages`. When partial messages are enabled, the older `active_goal` event follows as a compatibility projection; automation should treat `goal_state` as authoritative.
+With `--output-format stream-json`, each Goal status change emits a `stream_event` whose `event.type` is `goal_state`. This state event is emitted even without `--include-partial-messages`. The `active_goal` event that used to follow it as a compatibility projection is no longer emitted; automation reads `goal_state`.
 
 > [!note]
 >

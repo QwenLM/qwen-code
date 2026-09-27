@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const extensionsToCopy = ['.md', '.json', '.sb'];
 
@@ -46,15 +47,16 @@ function copyFilesRecursive(source, target, rootSourceDir) {
   for (const item of items) {
     const sourcePath = path.join(source, item.name);
     const targetPath = path.join(target, item.name);
+    const relativePath = path.relative(rootSourceDir, sourcePath);
+    const normalizedPath = relativePath.replace(/\\/g, '/');
 
     if (item.isDirectory()) {
+      if (normalizedPath === 'skills/bundled/browser-use/runtime') continue;
       copyFilesRecursive(sourcePath, targetPath, rootSourceDir);
     } else {
       const ext = path.extname(item.name);
       // Copy standard extensions, or .js files in i18n/locales directory
       // Use path.relative for precise matching to avoid false positives
-      const relativePath = path.relative(rootSourceDir, sourcePath);
-      const normalizedPath = relativePath.replace(/\\/g, '/');
       const isLocaleJs =
         ext === '.js' && normalizedPath.startsWith('i18n/locales/');
       if (
@@ -78,8 +80,17 @@ export function copyFiles({ root = process.cwd() } = {}) {
 
   copyFilesRecursive(sourceDir, targetDir, sourceDir);
 
-  // Copy example extensions into the bundle.
   const packageName = path.basename(root);
+  if (
+    packageName === 'core' &&
+    fs.existsSync(path.join(sourceDir, 'skills/bundled/browser-use/SKILL.md'))
+  ) {
+    copyBrowserUseAssets(
+      path.resolve(root, '../..'),
+      path.join(targetDir, 'skills/bundled/browser-use'),
+    );
+  }
+  // Copy example extensions into the bundle.
   if (packageName === 'cli') {
     const examplesSource = path.join(
       sourceDir,

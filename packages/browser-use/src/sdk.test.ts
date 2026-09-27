@@ -31,6 +31,7 @@ const backend = vi.hoisted(() => ({
       return { chooserId: 'chooser-1', multiple: true };
     if (method === 'fileChooser.setFiles') return null;
     if (method === 'tab.goto') return null;
+    if (method === 'tabs.finalize') return null;
     if (method === 'tab.dialog.accept' || method === 'tab.dialog.dismiss')
       return null;
     if (method === 'locator.click' || method === 'locator.downloadMedia')
@@ -534,6 +535,24 @@ describe('Browser SDK in the existing Node REPL', () => {
     expect(backend.calls.at(-1)).toEqual({
       method: 'tabs.selected',
       args: { browserId: 'chrome' },
+    });
+  });
+
+  it('maps tab dispositions to the shared command contract', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+
+    await browser.tabs.finalize({
+      keep: [{ tab, status: 'handoff' }],
+    });
+
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'tabs.finalize',
+      args: {
+        browserId: 'chrome',
+        keep: [{ tabId: 'tab-1', status: 'handoff' }],
+      },
     });
   });
 

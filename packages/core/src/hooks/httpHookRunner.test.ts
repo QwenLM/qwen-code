@@ -8,6 +8,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HookEventName, HookType } from './types.js';
 import type { HttpHookConfig, HookInput } from './types.js';
 import { HttpHookRunner } from './httpHookRunner.js';
+import {
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  describeHookTimeout,
+} from './hook-timeout.js';
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -495,6 +499,255 @@ describe('HttpHookRunner', () => {
       expect(result.success).toBe(false);
       expect(result.error?.message).toContain('metadata');
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('outcome', () => {
+    const jsonResponse = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+
+    /** A fetch that only settles when its request signal aborts. */
+    const hangUntilAborted = () =>
+      mockFetch.mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason),
+            );
+          }),
+      );
+
+    it('reports a non-2xx response as a non-blocking error without failing the hook', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error?.message).toContain('500');
+    });
+
+    it('keeps a non-2xx response non-blocking', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.output?.continue).toBe(true);
+      expect(result.success).toBe(true);
+    });
+
+    it('reports its own timeout as timeout when the caller did not abort', async () => {
+      hangUntilAborted();
+      const controller = new AbortController();
+
+      const result = await httpRunner.execute(
+        createMockConfig({ timeout: 0.02 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+
+      expect(result.outcome).toBe('timeout');
+      expect(result.success).toBe(true);
+      expect(result.error?.message).toContain('20ms');
+    });
+
+    it('reports a caller abort during the request as cancelled', async () => {
+      hangUntilAborted();
+      const controller = new AbortController();
+
+      const execution = httpRunner.execute(
+        createMockConfig({ timeout: 60 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+      controller.abort();
+      const result = await execution;
+
+      expect(result.outcome).toBe('cancelled');
+      expect(result.success).toBe(true);
+    });
+
+    it('reports a connection failure as a non-blocking error carrying the fetch error', async () => {
+      const connectionError = new TypeError('fetch failed');
+      mockFetch.mockRejectedValueOnce(connectionError);
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.error).toBe(connectionError);
+    });
+
+    it('reports a 2xx deny as blocking while the hook still succeeds', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ decision: 'deny', reason: 'Blocked by policy' }),
+      );
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('blocking');
+    });
+
+    it('reports a plain 2xx response as success', async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ continue: true }));
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+    });
+
+    it('lets a PreToolUse permission decision override the generic decision, as progress reporting does', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          decision: 'deny',
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+          },
+        }),
+      );
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+    });
+
+    it('reports a caller abort before the request as cancelled', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+      );
+
+      expect(result.outcome).toBe('cancelled');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a URL outside the allowlist as a failed non-blocking error', async () => {
+      const result = await httpRunner.execute(
+        createMockConfig({ url: 'https://other.com/hook' }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('timeout matches describeHookTimeout', () => {
+    const hangAndCaptureSignal = () => {
+      const seen: { signal?: AbortSignal } = {};
+      mockFetch.mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_, reject) => {
+            seen.signal = init.signal ?? undefined;
+            init.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason),
+            );
+          }),
+      );
+      return seen;
+    };
+
+    const abortedAfter = async (
+      config: HttpHookConfig,
+      pendingMs: number,
+    ): Promise<{ abortedBefore: boolean; abortedAfter: boolean }> => {
+      const seen = hangAndCaptureSignal();
+      const caller = new AbortController();
+      const execution = httpRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        caller.signal,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.signal).toBeDefined();
+      await vi.advanceTimersByTimeAsync(pendingMs);
+      const abortedBefore = seen.signal?.aborted === true;
+      await vi.advanceTimersByTimeAsync(1);
+      const after = seen.signal?.aborted === true;
+      caller.abort();
+      await execution;
+      return { abortedBefore, abortedAfter: after };
+    };
+
+    it('aborts a configured value in seconds at the described delay', async () => {
+      expect(describeHookTimeout(HookType.Http, 60).timeoutMs).toBe(60_000);
+      vi.useFakeTimers();
+      try {
+        expect(
+          await abortedAfter(createMockConfig({ timeout: 60 }), 59_999),
+        ).toEqual({ abortedBefore: false, abortedAfter: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('aborts an unconfigured hook at the described default', async () => {
+      expect(describeHookTimeout(HookType.Http, undefined).timeoutMs).toBe(
+        DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000,
+      );
+      vi.useFakeTimers();
+      try {
+        expect(
+          await abortedAfter(
+            createMockConfig(),
+            DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000 - 1,
+          ),
+        ).toEqual({ abortedBefore: false, abortedAfter: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never aborts a negative timeout, as described', async () => {
+      expect(describeHookTimeout(HookType.Http, -1).timeoutMs).toBeNull();
+      vi.useFakeTimers();
+      try {
+        expect(
+          await abortedAfter(createMockConfig({ timeout: -1 }), 10 * 60_000),
+        ).toEqual({ abortedBefore: false, abortedAfter: false });
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

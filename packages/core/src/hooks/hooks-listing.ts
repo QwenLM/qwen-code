@@ -5,8 +5,9 @@
  */
 
 import type { Config } from '../config/config.js';
-import type { HookConfig, HookEventName } from './types.js';
-import { HookType, HooksConfigSource } from './types.js';
+import type { HookConfig } from './types.js';
+import { hookRegistryIdentity } from './hookRegistry.js';
+import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 /**
  * Where a listed hook lives. `registry` rows come from settings files and
@@ -17,6 +18,18 @@ import { HookType, HooksConfigSource } from './types.js';
  */
 export type HooksListingOrigin = 'registry' | 'session';
 
+/**
+ * Why a listed hook will not run. Checked outermost-first: the inner toggles
+ * are unobservable once an outer gate is closed, so a row reports the gate the
+ * user has to open first.
+ */
+export type HooksListingDisabledReason =
+  | 'bareMode'
+  | 'safeMode'
+  | 'allHooksDisabled'
+  | 'untrusted'
+  | 'registryDisabled';
+
 /** One configured hook, flattened for display. */
 export interface HooksListingRow {
   eventName: HookEventName;
@@ -25,7 +38,21 @@ export interface HooksListingRow {
   sequential?: boolean;
   source: HooksConfigSource;
   origin: HooksListingOrigin;
+  /** Whether this hook would run now, with every gate below applied. */
   enabled: boolean;
+  /** Set exactly when `enabled` is false. */
+  disabledReason?: HooksListingDisabledReason;
+  /**
+   * Registered from repository-controlled configuration (a project skill's
+   * frontmatter) and therefore run only while the folder is trusted.
+   */
+  trustGated?: boolean;
+  /**
+   * The subagent that attached this entry while it runs. Present only on
+   * ephemeral per-agent registry entries; a consumer must not present these as
+   * the user's own session hooks.
+   */
+  agentScope?: string;
   hookType: HookType;
   /** One-line identity, the text the ink /hooks handler list shows. */
   displayText: string;
@@ -53,6 +80,13 @@ export interface HooksListingRow {
   config: HookConfig;
 }
 
+/**
+ * Under `disableAllHooks` there is no hook system, so rows come from the
+ * settings the session was built with and all of them are disabled. Safe and
+ * bare mode load no hook settings at all, so their listing has no rows: a
+ * consumer must use `safeMode` / `bareMode` to say that no hooks are loaded in
+ * that mode, never that zero hooks are configured.
+ */
 export interface HooksListing {
   rows: HooksListingRow[];
   /**
@@ -71,6 +105,11 @@ export type HooksListingConfig = Pick<
   | 'isSafeMode'
   | 'getBareMode'
   | 'getSessionId'
+  | 'isTrustedFolder'
+  | 'getSystemHooks'
+  | 'getUserHooks'
+  | 'getProjectHooks'
+  | 'getExtensions'
 >;
 
 const PROMPT_DISPLAY_LIMIT = 50;
@@ -122,12 +161,49 @@ interface RowPlacement {
   sequential?: boolean;
   source: HooksConfigSource;
   origin: HooksListingOrigin;
-  enabled: boolean;
+  /** The entry's own switch; `true` for entries that have none. */
+  entryEnabled: boolean;
+  trustGated?: boolean;
+  agentScope?: string;
   hookId?: string;
   skillRoot?: string;
 }
 
-function toRow(config: HookConfig, placement: RowPlacement): HooksListingRow {
+/** The session-wide switches a row's enabled state depends on. */
+export interface HooksListingGates {
+  bareMode: boolean;
+  safeMode: boolean;
+  allDisabled: boolean;
+  trustedFolder: boolean;
+}
+
+/**
+ * Whether a hook with this placement would run, and if not, the outermost
+ * reason: bare mode, then safe mode, then `disableAllHooks`, then folder trust
+ * for trust-gated entries, then the entry's own switch.
+ */
+export function resolveRowEnabled(
+  placement: { entryEnabled: boolean; trustGated?: boolean },
+  gates: HooksListingGates,
+): { enabled: true } | { enabled: false; reason: HooksListingDisabledReason } {
+  if (gates.bareMode) return { enabled: false, reason: 'bareMode' };
+  if (gates.safeMode) return { enabled: false, reason: 'safeMode' };
+  if (gates.allDisabled) return { enabled: false, reason: 'allHooksDisabled' };
+  if (placement.trustGated === true && !gates.trustedFolder) {
+    return { enabled: false, reason: 'untrusted' };
+  }
+  if (!placement.entryEnabled) {
+    return { enabled: false, reason: 'registryDisabled' };
+  }
+  return { enabled: true };
+}
+
+function toRow(
+  config: HookConfig,
+  placement: RowPlacement,
+  gates: HooksListingGates,
+): HooksListingRow {
+  const state = resolveRowEnabled(placement, gates);
   const commandText = commandTextFor(config);
   const runsInBackground =
     config.type === HookType.Command && config.async === true;
@@ -141,7 +217,12 @@ function toRow(config: HookConfig, placement: RowPlacement): HooksListingRow {
       : {}),
     source: placement.source,
     origin: placement.origin,
-    enabled: placement.enabled,
+    enabled: state.enabled,
+    ...(state.enabled ? {} : { disabledReason: state.reason }),
+    ...(placement.trustGated === true ? { trustGated: true } : {}),
+    ...(placement.agentScope !== undefined
+      ? { agentScope: placement.agentScope }
+      : {}),
     hookType: config.type,
     displayText: describeHookConfig(config),
     ...(commandText !== undefined ? { commandText } : {}),
@@ -164,11 +245,134 @@ function toRow(config: HookConfig, placement: RowPlacement): HooksListingRow {
   };
 }
 
+const HOOK_EVENT_NAMES: readonly string[] = Object.values(HookEventName);
+
+/** The field each settings hook type must carry, as the registry requires. */
+const LITERAL_FIELD: Readonly<Record<string, string>> = {
+  [HookType.Command]: 'command',
+  [HookType.Http]: 'url',
+  [HookType.Prompt]: 'prompt',
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * Lists every hook the session can run: the registry's entries with their
- * real enabled state, followed by the hooks registered for the current
- * session. Rows are not dropped when hooks are disabled, so a caller can show
- * what is configured but switched off; without a hook system there are none.
+ * A display-safe copy of one hook read straight from settings, or undefined
+ * when the registry would not have accepted it. Function hooks cannot come
+ * from settings JSON. Nothing validated these values, so every one that
+ * reaches display text is coerced to a string.
+ */
+function displayableSettingsHook(raw: unknown): HookConfig | undefined {
+  if (!isRecord(raw)) return undefined;
+  const literalField = LITERAL_FIELD[String(raw['type'])];
+  const literal = literalField === undefined ? undefined : raw[literalField];
+  if (typeof literal !== 'string' || literal === '') return undefined;
+  const copy: Record<string, unknown> = { ...raw };
+  for (const field of ['name', 'description', 'statusMessage', 'if']) {
+    if (copy[field] === undefined || copy[field] === null) delete copy[field];
+    else copy[field] = String(copy[field]);
+  }
+  if (typeof raw['timeout'] !== 'number') delete copy['timeout'];
+  if (typeof raw['async'] !== 'boolean') delete copy['async'];
+  if (typeof raw['once'] !== 'boolean') delete copy['once'];
+  return copy as unknown as HookConfig;
+}
+
+/**
+ * Rows for hooks configured in settings and extensions, read without a hook
+ * system. Nothing here registers or runs anything: a malformed definition is
+ * skipped for display only.
+ */
+function rowsFromSettings(
+  config: HooksListingConfig,
+  gates: HooksListingGates,
+): HooksListingRow[] {
+  const rows: HooksListingRow[] = [];
+  // The registry drops a hook whose source, event, identity, matcher and
+  // `sequential` all equal an earlier entry's, comparing the raw values with
+  // `===`. Mirror that so this listing shows the rows the registry would keep.
+  // A value `===` cannot match (an object or array) never collapses.
+  const seen = new Set<string>();
+  const keyPart = (value: unknown): string | undefined =>
+    value === null || typeof value !== 'object'
+      ? `${typeof value}:${String(value)}`
+      : undefined;
+  const isDuplicate = (
+    eventName: string,
+    source: HooksConfigSource,
+    raw: unknown,
+    definition: Record<string, unknown>,
+  ): boolean => {
+    const parts = [
+      keyPart(hookRegistryIdentity(raw as HookConfig)),
+      keyPart(definition['matcher']),
+      keyPart(definition['sequential']),
+    ];
+    if (parts.some((part) => part === undefined)) return false;
+    const key = JSON.stringify([eventName, source, ...parts]);
+    if (seen.has(key)) return true;
+    seen.add(key);
+    return false;
+  };
+  const addScope = (hooks: unknown, source: HooksConfigSource) => {
+    if (!isRecord(hooks)) return;
+    for (const [eventName, definitions] of Object.entries(hooks)) {
+      // Also skips the non-event keys `enabled`, `disabled`, `notifications`.
+      if (!HOOK_EVENT_NAMES.includes(eventName)) continue;
+      if (!Array.isArray(definitions)) continue;
+      for (const definition of definitions as unknown[]) {
+        if (!isRecord(definition) || !Array.isArray(definition['hooks'])) {
+          continue;
+        }
+        const matcher =
+          typeof definition['matcher'] === 'string'
+            ? definition['matcher']
+            : undefined;
+        const sequential =
+          typeof definition['sequential'] === 'boolean'
+            ? definition['sequential']
+            : undefined;
+        for (const raw of definition['hooks'] as unknown[]) {
+          const hookConfig = displayableSettingsHook(raw);
+          if (!hookConfig) continue;
+          if (isDuplicate(eventName, source, raw, definition)) continue;
+          rows.push(
+            toRow(
+              hookConfig,
+              {
+                eventName: eventName as HookEventName,
+                matcher,
+                sequential,
+                source,
+                origin: 'registry',
+                entryEnabled: true,
+              },
+              gates,
+            ),
+          );
+        }
+      }
+    }
+  };
+
+  addScope(config.getSystemHooks(), HooksConfigSource.System);
+  addScope(config.getUserHooks(), HooksConfigSource.User);
+  addScope(config.getProjectHooks(), HooksConfigSource.Project);
+  for (const extension of config.getExtensions()) {
+    if (extension.isActive && extension.hooks) {
+      addScope(extension.hooks, HooksConfigSource.Extensions);
+    }
+  }
+  return rows;
+}
+
+/**
+ * Lists every hook the session can run: the registry's entries, followed by
+ * the hooks registered for the current session. Each row says whether the hook
+ * would run now and, when it would not, why. Rows are not dropped when hooks
+ * are disabled, so a caller can show what is configured but switched off.
  */
 export function buildHooksListing(config: HooksListingConfig): HooksListing {
   const listing: HooksListing = {
@@ -177,21 +381,42 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
     safeMode: config.isSafeMode(),
     bareMode: config.getBareMode(),
   };
+  const gates: HooksListingGates = {
+    bareMode: listing.bareMode,
+    safeMode: listing.safeMode,
+    allDisabled: listing.allDisabled,
+    trustedFolder: config.isTrustedFolder(),
+  };
   const hookSystem = config.getHookSystem();
   if (!hookSystem) {
+    // Hooks are off, so there is no registry to read. Under disableAllHooks
+    // rows still come from the settings the session was built with, so a user
+    // can see WHAT is switched off and why. Nothing here registers or runs
+    // anything. Safe and bare mode load no hook settings, so they list
+    // nothing, and a Config without a hook system for another reason (not
+    // initialized yet, or a helper that skips hooks) lists nothing rather
+    // than rows that claim to be enabled.
+    if (listing.allDisabled && !listing.safeMode && !listing.bareMode) {
+      listing.rows.push(...rowsFromSettings(config, gates));
+    }
     return listing;
   }
 
   for (const entry of hookSystem.getAllHooks()) {
     listing.rows.push(
-      toRow(entry.config, {
-        eventName: entry.eventName,
-        matcher: entry.matcher,
-        sequential: entry.sequential,
-        source: entry.source,
-        origin: 'registry',
-        enabled: entry.enabled,
-      }),
+      toRow(
+        entry.config,
+        {
+          eventName: entry.eventName,
+          matcher: entry.matcher,
+          sequential: entry.sequential,
+          source: entry.source,
+          origin: 'registry',
+          entryEnabled: entry.enabled,
+          agentScope: entry.agentScope,
+        },
+        gates,
+      ),
     );
   }
 
@@ -202,16 +427,22 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
       .getAllSessionHooks(sessionId);
     for (const entry of sessionHooks) {
       listing.rows.push(
-        toRow(entry.config, {
-          eventName: entry.eventName,
-          matcher: entry.matcher,
-          sequential: entry.sequential,
-          source: HooksConfigSource.Session,
-          origin: 'session',
-          enabled: true,
-          hookId: entry.hookId,
-          skillRoot: entry.skillRoot,
-        }),
+        toRow(
+          entry.config,
+          {
+            eventName: entry.eventName,
+            matcher: entry.matcher,
+            sequential: entry.sequential,
+            source: HooksConfigSource.Session,
+            origin: 'session',
+            // Session hooks have no switch of their own.
+            entryEnabled: true,
+            trustGated: entry.trustGated,
+            hookId: entry.hookId,
+            skillRoot: entry.skillRoot,
+          },
+          gates,
+        ),
       );
     }
   }

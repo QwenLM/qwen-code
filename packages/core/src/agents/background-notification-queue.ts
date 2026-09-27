@@ -39,7 +39,9 @@ export type BackgroundNotificationKind =
   | 'shell'
   | 'monitor'
   | 'workflow'
-  | 'cron';
+  | 'cron'
+  /** A message from another session, accepted by this one's inbound gate. */
+  | 'peer';
 
 /** The slice of a queued notification the admission rule looks at. */
 export interface AdmissibleNotification {
@@ -136,9 +138,11 @@ function droppedNoun(
           ? 'workflow result'
           : kind === 'cron'
             ? 'scheduled prompt'
-            : interim
-              ? 'monitor pulse'
-              : 'monitor result';
+            : kind === 'peer'
+              ? 'cross-session message'
+              : interim
+                ? 'monitor pulse'
+                : 'monitor result';
   return count === 1 ? singular : `${singular}s`;
 }
 
@@ -149,6 +153,7 @@ const GROUP_ORDER = {
   shell: [false],
   monitor: [false, true],
   cron: [false],
+  peer: [false],
 } as const satisfies Record<BackgroundNotificationKind, readonly boolean[]>;
 
 /** At most this many task ids are named per group before eliding the rest. */
@@ -220,6 +225,7 @@ export class DroppedNotificationTally {
     let recordedCount = 0;
     let hasInspectableLoss = false;
     let hasCronLoss = false;
+    let hasPeerLoss = false;
     for (const kind of Object.keys(
       GROUP_ORDER,
     ) as BackgroundNotificationKind[]) {
@@ -241,8 +247,11 @@ export class DroppedNotificationTally {
             supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
           } else {
             clauses.push(`${group.count} ${noun}${names}`);
-            hasInspectableLoss ||= kind !== 'cron';
+            // A cron prompt and a peer message are not tasks: neither has
+            // an entry in the task registry for the model to go and read.
+            hasInspectableLoss ||= kind !== 'cron' && kind !== 'peer';
             hasCronLoss ||= kind === 'cron';
+            hasPeerLoss ||= kind === 'peer';
           }
         }
       }
@@ -293,6 +302,11 @@ export class DroppedNotificationTally {
     if (hasCronLoss) {
       summaryParts.push(
         'The scheduled prompts were not delivered and will not be retried.',
+      );
+    }
+    if (hasPeerLoss) {
+      summaryParts.push(
+        'The cross-session messages were not delivered and will not be redelivered.',
       );
     }
     const summary = summaryParts.join(' ');

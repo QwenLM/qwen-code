@@ -185,6 +185,14 @@ export class AgentHeadless implements SubagentExecutor {
     taskName?: string,
     subagentId?: string,
   ): Promise<AgentHeadless> {
+    if (
+      runtimeContext.getAgentExecutionBackend?.() === 'container' &&
+      !runtimeContext.getExecutionEnvironment?.()
+    ) {
+      throw new Error(
+        'Container execution is required, but this agent has no execution environment. Start a supported regular subagent.',
+      );
+    }
     const core = new AgentCore(
       name,
       runtimeContext,

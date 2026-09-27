@@ -178,10 +178,14 @@ Body.
   describe('loadRules', () => {
     it('returns empty when no rules directory exists', async () => {
       const result = await loadRules(projectRoot, true);
+      // The whole response shape on purpose: this is the one test that pins
+      // what `loadRules` returns, so a field added to the contract belongs
+      // here rather than being hidden from it (#12030).
       expect(result).toEqual({
         content: '',
         ruleCount: 0,
         conditionalRules: [],
+        ignoredExtensionRules: [],
       });
     });
 
@@ -359,6 +363,127 @@ Use hooks.`,
   // ─────────────────────────────────────────────────────────────────────────
   // ConditionalRulesRegistry
   // ─────────────────────────────────────────────────────────────────────────
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Extension-contributed rules (#12030)
+  // ───────────────────────────────────────────────────────────────────────
+
+  describe('extension rules', () => {
+    async function writeExtensionRule(
+      extensionName: string,
+      fileName: string,
+      content: string,
+    ) {
+      const dir = path.join(testRootDir, 'extensions', extensionName, 'rules');
+      await createTestFile(path.join(dir, fileName), content);
+      return { name: extensionName, dir };
+    }
+
+    it('takes a conditional rule from an extension', async () => {
+      const source = await writeExtensionRule(
+        'charts',
+        'charting.md',
+        `---
+paths:
+  - 'src/**/*.tsx'
+---
+
+Use the chart palette.`,
+      );
+
+      const result = await loadRules(projectRoot, true, [], [source]);
+
+      // Conditional: it must not be in the session-start content.
+      expect(result.ruleCount).toBe(0);
+      expect(result.content).toBe('');
+      expect(result.conditionalRules).toHaveLength(1);
+      expect(result.conditionalRules[0].content).toContain(
+        'Use the chart palette.',
+      );
+      expect(result.ignoredExtensionRules).toEqual([]);
+    });
+
+    /**
+     * The whole point of the mechanism: a baseline rule is resident on every
+     * request, which is the cost an extension's context file already imposes.
+     * Accepting one here would recreate #12030 inside its own fix, so it is
+     * dropped — and reported, or the author sees nothing happen.
+     */
+    it('drops an extension rule with no paths, and names it', async () => {
+      const source = await writeExtensionRule(
+        'charts',
+        'always.md',
+        'Always follow the chart palette.',
+      );
+
+      const result = await loadRules(projectRoot, true, [], [source]);
+
+      expect(result.ruleCount).toBe(0);
+      expect(result.content).toBe('');
+      expect(result.conditionalRules).toEqual([]);
+      expect(result.ignoredExtensionRules).toEqual(['charts:rules/always.md']);
+    });
+
+    it('labels an extension rule by extension, not by a path out of the project', async () => {
+      const source = await writeExtensionRule(
+        'charts',
+        'charting.md',
+        `---
+paths:
+  - 'src/**/*.tsx'
+---
+
+Use the chart palette.`,
+      );
+
+      const result = await loadRules(projectRoot, true, [], [source]);
+      const registry = new ConditionalRulesRegistry(
+        result.conditionalRules,
+        projectRoot,
+      );
+      const injected = await registry.matchAndConsume(
+        path.join(projectRoot, 'src', 'Chart.tsx'),
+      );
+
+      expect(injected).toContain('--- Rule from: charts:rules/charting.md ---');
+      // A path relative to the project root would be a stack of `../`.
+      expect(injected).not.toContain('..');
+    });
+
+    it('is unaffected by a missing rules directory', async () => {
+      const result = await loadRules(
+        projectRoot,
+        true,
+        [],
+        [{ name: 'no-rules', dir: path.join(testRootDir, 'nowhere', 'rules') }],
+      );
+
+      expect(result.conditionalRules).toEqual([]);
+      expect(result.ignoredExtensionRules).toEqual([]);
+    });
+
+    it('honours exclude patterns for extension rules too', async () => {
+      const source = await writeExtensionRule(
+        'charts',
+        'charting.md',
+        `---
+paths:
+  - 'src/**'
+---
+
+Use the chart palette.`,
+      );
+
+      const result = await loadRules(
+        projectRoot,
+        true,
+        ['**/extensions/charts/**'],
+        [source],
+      );
+
+      expect(result.conditionalRules).toEqual([]);
+    });
+  });
 
   describe('ConditionalRulesRegistry', () => {
     const rule = (fp: string, pats: string[], body: string) => ({

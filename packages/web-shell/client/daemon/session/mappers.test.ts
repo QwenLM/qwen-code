@@ -1135,9 +1135,9 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
   });
 
-  it('carries checkpoint health through from the wire', () => {
-    // Same pin as limitKind: the field-by-field rebuild must not drop the
-    // stall streak or the failure the Goals dialog shows before a stop.
+  it('drops the checkpoint health an older daemon still sends', () => {
+    // Goals no longer run evidence checkpoints and no surface draws these
+    // two fields, so the field-by-field rebuild leaves them behind.
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
       {
@@ -1171,11 +1171,9 @@ describe('updateConnectionFromDaemonEvent', () => {
       } as DaemonEvent,
     );
 
-    expect(next.goalState?.goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 2,
-      lastCheckpointFailure: 'Error: provider failed',
-    });
+    expect(next.goalState?.goal).toMatchObject({ status: 'active' });
+    expect(next.goalState?.goal).not.toHaveProperty('checkpointStalls');
+    expect(next.goalState?.goal).not.toHaveProperty('lastCheckpointFailure');
   });
 
   it('drops an unknown limitKind rather than passing it through', () => {

@@ -673,7 +673,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private executeStep(step: CleanupStep): void {
     switch (step) {
       case 'clear_file_cache': {
-        this.coreConfig.getFileReadCache().clear();
+        this.coreConfig.getFileReadCache().dropEntries();
         debugLogger.debug('FileReadCache cleared');
         break;
       }

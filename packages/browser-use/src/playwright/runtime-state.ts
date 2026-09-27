@@ -49,6 +49,7 @@ export interface TabState {
   dialogTrace: DialogTraceEntry[];
   fileChoosers: Map<string, FileChooser>;
   navigationWaiters: Map<string, Promise<unknown>>;
+  ownership: 'created' | 'claimed';
   /**
    * Refs the latest snapshot on this tab actually emitted. Playwright
    * restarts ref numbering on every new document, so a ref is valid only

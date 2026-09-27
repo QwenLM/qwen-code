@@ -79,6 +79,27 @@ describe('restoreCommand', () => {
     );
   });
 
+  it('rejects direct restore before creating directories or restoring files in tool sandbox', async () => {
+    const command = restoreCommand(mockConfig);
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    await fs.rm(checkpointsDir, { recursive: true, force: true });
+
+    expect(await command?.action?.(mockContext, 'checkpoint')).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'File restore is unavailable in tool sandbox.',
+    });
+    expect(
+      mockConfig.storage.getProjectTempCheckpointsDir,
+    ).not.toHaveBeenCalled();
+    expect(mockRewind).not.toHaveBeenCalled();
+    await expect(fs.stat(checkpointsDir)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   describe('action', () => {
     it('should return an error if temp dir is not found', async () => {
       vi.mocked(

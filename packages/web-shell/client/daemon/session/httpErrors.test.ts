@@ -9,6 +9,7 @@ import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   extractHttpStatus,
   isRecord,
+  isRecoverableAcpCapacityError,
   isAcpChildCapacityError,
 } from './httpErrors';
 
@@ -61,4 +62,36 @@ describe('httpErrors', () => {
     expect(isRecord([])).toBe(false);
     expect(isRecord(null)).toBe(false);
   });
+});
+
+it('only resumes a standalone creation after confirmed rollback', () => {
+  const capacity = { code: 'acp_child_capacity_exhausted' };
+  for (const code of [
+    'standalone_creation_outcome_unknown',
+    'standalone_creation_rollback_failed',
+  ]) {
+    expect(
+      isRecoverableAcpCapacityError(
+        new DaemonHttpError(503, { code, capacity, retryable: true }, code),
+      ),
+    ).toBe(false);
+  }
+  expect(
+    isRecoverableAcpCapacityError(
+      new DaemonHttpError(
+        503,
+        { code: 'standalone_creation_rolled_back', capacity, retryable: true },
+        'capacity',
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    isRecoverableAcpCapacityError(
+      new DaemonHttpError(
+        503,
+        { data: { errorKind: capacity.code } },
+        'capacity',
+      ),
+    ),
+  ).toBe(true);
 });

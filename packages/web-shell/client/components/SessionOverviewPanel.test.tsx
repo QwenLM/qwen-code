@@ -3230,6 +3230,28 @@ describe('SessionOverviewPanel polling', () => {
     expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
   });
 
+  it('keeps polling when a Live workspace has no session live-state route', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+    render();
+    await flushAsync();
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
+  });
+
   it('subscribes live state for every visible workspace', async () => {
     connectionState.capabilities = {
       features: ['workspace_session_live_state'],

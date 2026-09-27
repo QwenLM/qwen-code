@@ -225,6 +225,39 @@ describe('SavedWorkflowLoader', () => {
     expect('args' in result.toolArgs).toBe(false);
   });
 
+  // The Workflow tool refuses a scriptPath in a name-only session, so the
+  // interactive command has to dispatch by name there — and only there, since a
+  // path keeps grants written as Workflow(scriptPath:...) matching.
+  it('dispatches by name in a name-only session', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+        extensionName: 'gcp',
+      }),
+    ]);
+    const [locked] = await new SavedWorkflowLoader(
+      makeConfig({ isWorkflowNameOnly: () => true }),
+    ).loadCommands(signal);
+    expect(await locked.action!(ctx, '{"scope":"src"}')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: { name: 'gcp:audit', args: { scope: 'src' } },
+    });
+
+    const [unlocked] = await new SavedWorkflowLoader(
+      makeConfig({ isWorkflowNameOnly: () => false }),
+    ).loadCommands(signal);
+    expect(await unlocked.action!(ctx, '')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: {
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+      },
+    });
+  });
+
   it('treats a context without an execution mode as the interactive UI', async () => {
     listMock.mockResolvedValue([entry()]);
     const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(

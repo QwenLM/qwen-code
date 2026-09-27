@@ -579,10 +579,7 @@ describe('containerCommand', () => {
   });
 
   it("reads rootlessness out of either runtime's info document", () => {
-    // The negative case is a LIVE rootful docker's actual `info` output
-    // (docker 29.5.2), not a hand-written stub: the marker search only holds
-    // if the word genuinely does not occur in a rootful document, and a stub
-    // written by the same hand that wrote the matcher cannot show that.
+    // Captured from a rootful Docker 29.5.2 runtime.
     expect(
       hasRootlessMarker(
         '{"SecurityOptions":["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"],"ServerVersion":"29.5.2","OperatingSystem":"Ubuntu 24.04.4 LTS"}',
@@ -594,8 +591,7 @@ describe('containerCommand', () => {
         '{"SecurityOptions":["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]}',
       ),
     ).toBe(true);
-    // ...podman as a field under Host.Security, which is why this searches the
-    // document rather than one runtime's schema path.
+    // ...podman as a field under Host.Security.
     expect(
       hasRootlessMarker(
         '{"host":{"security":{"rootless":true,"seccompEnabled":true}}}',
@@ -609,6 +605,14 @@ describe('containerCommand', () => {
     expect(hasRootlessMarker('{"Host":{"Security":{"Rootless":true}}}')).toBe(
       true,
     );
+  });
+
+  it.each([
+    '{"Labels":["name=rootless"],"SecurityInfo":{"Rootless":false}}',
+    '{"Plugins":{"Rootless":true}}',
+    '{"Registries":{"rootless":true}}',
+  ])('does not accept rootless markers outside security fields: %s', (info) => {
+    expect(hasRootlessMarker(info)).toBe(false);
   });
 
   it('mounts the review temp dir, not the tree the command runs in', () => {

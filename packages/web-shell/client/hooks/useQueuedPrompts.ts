@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -55,8 +56,12 @@ interface RefBox<T> {
 }
 
 interface UseQueuedPromptsArgs {
+  /** Synchronous caller policy, checked again immediately before SDK dispatch.
+   * Return a message to reject locally; undefined permits dispatch. */
+  getPromptDispatchError?: (text: string) => string | undefined;
   connected: boolean;
   writeBlocked?: boolean;
+  runtimeStopped?: boolean;
   sessionId?: string;
   workspaceCwd?: string;
   clientId?: string;
@@ -92,6 +97,8 @@ interface UseQueuedPromptsArgs {
   reportError: (error: unknown, fallback: string) => void;
   t: ReturnType<typeof getTranslator>;
 }
+
+class PromptDispatchBlockedError extends Error {}
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
@@ -498,8 +505,10 @@ export interface UseQueuedPromptsResult {
 }
 
 export function useQueuedPrompts({
+  getPromptDispatchError,
   connected,
   writeBlocked = false,
+  runtimeStopped = false,
   sessionId,
   workspaceCwd,
   clientId,
@@ -510,12 +519,34 @@ export function useQueuedPrompts({
   streamingState,
   sessionHasActivePrompt = false,
   holdQueuedPromptsLocally = false,
-  sessionActions,
+  sessionActions: unguardedSessionActions,
   store,
   editorRef,
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const dispatchPolicyRef = useRef(getPromptDispatchError);
+  dispatchPolicyRef.current = getPromptDispatchError;
+  const sessionActions = useMemo<DaemonSessionActions>(
+    () => ({
+      ...unguardedSessionActions,
+      submitPrompt: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.submitPrompt(text, options);
+      },
+      enqueueMidTurnMessage: (text, options) => {
+        const error = dispatchPolicyRef.current?.(text);
+        if (error !== undefined) {
+          return Promise.reject(new PromptDispatchBlockedError(error));
+        }
+        return unguardedSessionActions.enqueueMidTurnMessage(text, options);
+      },
+    }),
+    [unguardedSessionActions],
+  );
   const writeBlockedRef = useRef(writeBlocked);
   writeBlockedRef.current = writeBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
@@ -524,9 +555,11 @@ export function useQueuedPrompts({
   const ownerTokenRef = useRef({
     sessionId,
     workspaceCwd,
+    runtimeStopped,
     snapshot: sessionOwnerGuard.capture(),
   });
   if (
+    ownerTokenRef.current.runtimeStopped !== runtimeStopped ||
     ownerTokenRef.current.sessionId !== sessionId ||
     ownerTokenRef.current.workspaceCwd !== workspaceCwd ||
     !ownerTokenRef.current.snapshot.isCurrent()
@@ -534,6 +567,7 @@ export function useQueuedPrompts({
     ownerTokenRef.current = {
       sessionId,
       workspaceCwd,
+      runtimeStopped,
       snapshot: sessionOwnerGuard.capture(),
     };
   }
@@ -562,6 +596,7 @@ export function useQueuedPrompts({
     tail: Promise<void>;
   } | null>(null);
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
+  const stoppedHeldOwnersRef = useRef(new Set<string>());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
@@ -667,12 +702,14 @@ export function useQueuedPrompts({
    * confirmation snapshot ever landed, mapped to that row's id. From that
    * return on, no in-flight admission will echo the message, so the
    * settle-time last-chance echo must not defer to a row that merely renders
-   * the same text; the id also lets the settle drop a still-unbound row. A
-   * row carrying images or files cannot bind once its text is non-blank — the
-   * attachment route refuses it, and the started event carries no content to
-   * compare — and a text-less image row that has not bound by settle time has
-   * no later snapshot left to bind from. An annotation-only row does bind, by
-   * exact text, so it is no longer unbound by then.
+   * the same text; the id also lets the settle drop a still-unbound row.
+   * It is also that row's remaining identity: a row carrying images or files
+   * renders as a placeholder no content comparison can own, so a later
+   * snapshot listing this id rebinds this exact row instead of leaving it a
+   * phantom. The association is therefore dropped only once it is spent — by
+   * that rebind, by the settle, or by an owner or session change — and never
+   * by a size bound, which could delete the only holder of the id while the
+   * row it names is still alive.
    */
   const returnedUnboundPromptIdsRef = useRef<Map<string, number>>(new Map());
 
@@ -771,18 +808,58 @@ export function useQueuedPrompts({
           (server) => server.promptId === p.serverPromptId,
         );
       });
+      // A row whose submit body already returned this id is the prompt the id
+      // names, whatever that row renders as: an attachment row renders as a
+      // placeholder no content comparison can own. The daemon-issued id is the
+      // stronger identity, so a still-unbound row it points at is bound here
+      // rather than left a phantom.
+      const returnedUnboundRowId = (serverPromptId: string) => {
+        const rowId = returnedUnboundPromptIdsRef.current.get(serverPromptId);
+        if (rowId === undefined) return undefined;
+        const row = next.find((item) => item.id === rowId);
+        if (
+          !row ||
+          row.serverState !== 'submitting' ||
+          row.serverPromptId ||
+          row.midTurnMessageId
+        ) {
+          return undefined;
+        }
+        return rowId;
+      };
+      // Entries that can still rebind are visited first: until their row
+      // binds it counts as an in-flight attachment submission, and that count
+      // suppresses every other possibly-ours prompt in the same snapshot from
+      // materializing.
+      const reboundable: DaemonPendingPromptSummary[] = [];
+      const rest: DaemonPendingPromptSummary[] = [];
       for (const serverPrompt of serverQueued) {
+        if (returnedUnboundRowId(serverPrompt.promptId) === undefined) {
+          rest.push(serverPrompt);
+        } else {
+          reboundable.push(serverPrompt);
+        }
+      }
+      for (const serverPrompt of [...reboundable, ...rest]) {
         if (
           removingServerPromptIdsRef.current.has(serverPrompt.promptId) ||
           settledServerPromptIdsRef.current.has(serverPrompt.promptId)
         ) {
           continue;
         }
-        const existingIndex = next.findIndex(
+        const returnedRowId = returnedUnboundRowId(serverPrompt.promptId);
+        const boundIndex = next.findIndex(
           (p) =>
             p.serverPromptId === serverPrompt.promptId ||
             p.midTurnMessageId === serverPrompt.promptId,
         );
+        const returnedIndex =
+          returnedRowId === undefined
+            ? -1
+            : next.findIndex((p) => p.id === returnedRowId);
+        // A row already bound to the id keeps it: the recovered row is a
+        // different message whose body is still in flight.
+        const existingIndex = boundIndex !== -1 ? boundIndex : returnedIndex;
         const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
           serverPrompt.promptId,
         );
@@ -806,6 +883,11 @@ export function useQueuedPrompts({
           if (hasDisplayedPrompt) {
             next.splice(existingIndex, 1);
             continue;
+          }
+          if (existingIndex === returnedIndex) {
+            // Spent: the row now carries the id itself, so neither the
+            // settle's still-unbound drop nor a later pass can claim it.
+            returnedUnboundPromptIdsRef.current.delete(serverPrompt.promptId);
           }
           next[existingIndex] = {
             ...next[existingIndex]!,
@@ -1698,6 +1780,45 @@ export function useQueuedPrompts({
       previousOwner.workspaceCwd,
       previousOwner.sessionId,
     );
+    if (runtimeStopped) {
+      for (const key of heldPromptsByOwnerRef.current.keys()) {
+        // Compare the workspace half of the key, not a prefix: a stash
+        // written while its cwd was still unresolved keys as
+        // `\u0000<sessionId>` and can belong to the stopped workspace.
+        // Fencing an empty half degrades to handing those prompts back to
+        // the editor; missing them would re-queue them to auto-run on
+        // resume, which is what this fence exists to prevent.
+        const workspaceHalf = key.slice(0, key.indexOf('\u0000'));
+        if (
+          workspaceHalf === '' ||
+          (workspaceCwd !== undefined && workspaceHalf === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(key);
+      }
+      if (
+        previousOwner.workspaceCwd === workspaceCwd &&
+        previousOwner.sessionId === sessionId
+      ) {
+        restoreQueuedPromptsToEditorRef.current(
+          queuedPromptsRef.current.filter(
+            (prompt) =>
+              isLocallyHeldPrompt(prompt) ||
+              unreleasedPromptIdsRef.current.has(prompt.id) ||
+              (prompt.midTurnState === 'submitting' &&
+                prompt.midTurnMessageId === undefined) ||
+              prompt.midTurnFailedAction === 'edit',
+          ),
+        );
+        if (previousOwnerKey) {
+          heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+          stoppedHeldOwnersRef.current.delete(previousOwnerKey);
+        }
+        // Nothing queued before an explicit runtime stop may auto-run on resume.
+        queuedPromptsRef.current = [];
+        pendingMidTurnAdmissionsRef.current.clear();
+        clearedUnconfirmedPromptIdsRef.current.clear();
+      }
+    }
     if (previousOwnerKey) {
       const heldPrompts = queuedPromptsRef.current
         .filter(
@@ -1724,6 +1845,14 @@ export function useQueuedPrompts({
         );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
+        // An unresolved previous-owner cwd can still belong to the stopped
+        // workspace; fence conservatively (see the stash scan above).
+        if (
+          runtimeStopped &&
+          (previousOwner.workspaceCwd === undefined ||
+            previousOwner.workspaceCwd === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(previousOwnerKey);
       } else {
         heldPromptsByOwnerRef.current.delete(previousOwnerKey);
       }
@@ -1769,6 +1898,8 @@ export function useQueuedPrompts({
       for (const [key, prompts] of [...heldPromptsByOwnerRef.current]) {
         if (key === nextOwnerKey || !key.endsWith(suffix)) continue;
         heldPromptsByOwnerRef.current.delete(key);
+        if (stoppedHeldOwnersRef.current.delete(key))
+          stoppedHeldOwnersRef.current.add(nextOwnerKey);
         relocated.push(...prompts);
       }
       if (relocated.length > 0) {
@@ -1779,6 +1910,11 @@ export function useQueuedPrompts({
         ].sort((a, b) => a.id - b.id);
         heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
       }
+    }
+    if (nextOwnerKey && stoppedHeldOwnersRef.current.delete(nextOwnerKey)) {
+      restoreQueuedPromptsToEditorRef.current(heldPrompts);
+      heldPromptsByOwnerRef.current.delete(nextOwnerKey);
+      heldPrompts = [];
     }
     // Daemon-owned rows are re-rendered from the next queue snapshot; only the
     // locally held Goal queue survives an owner change.
@@ -1822,7 +1958,7 @@ export function useQueuedPrompts({
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
-  }, [ownerToken, sessionId, workspaceCwd]);
+  }, [ownerToken, sessionId, workspaceCwd, runtimeStopped]);
 
   const pendingPromptVersion = useSyncExternalStore(
     subscribePendingPromptVersion,
@@ -2523,13 +2659,6 @@ export function useQueuedPrompts({
                   result.promptId,
                   localId,
                 );
-                while (returnedUnboundPromptIdsRef.current.size > 200) {
-                  const oldestReturned = returnedUnboundPromptIdsRef.current
-                    .keys()
-                    .next().value;
-                  if (typeof oldestReturned !== 'string') break;
-                  returnedUnboundPromptIdsRef.current.delete(oldestReturned);
-                }
                 if (prompt.onComplete) {
                   // The daemon already holds the prompt, so its callback
                   // must be registered now or no terminal event will ever
@@ -2781,7 +2910,10 @@ export function useQueuedPrompts({
           );
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
-          if (!admissionStarted) {
+          if (
+            !admissionStarted &&
+            !(error instanceof PromptDispatchBlockedError)
+          ) {
             restoreQueuedPromptsToEditor([prompt], targetSessionId);
           }
           // A message now visible in the transcript was admitted and started,
@@ -3012,7 +3144,7 @@ export function useQueuedPrompts({
         let uploadedAttachmentReferences: DaemonSessionAttachmentReference[] =
           [];
         const removeUploadedAttachments = async () => {
-          await Promise.allSettled(
+          const removals = await Promise.allSettled(
             uploadedAttachmentReferences.map((reference) =>
               sessionActions.removeAttachment(reference.attachmentId, {
                 sessionId: targetSessionId,
@@ -3020,53 +3152,84 @@ export function useQueuedPrompts({
             ),
           );
           uploadedAttachmentReferences = [];
+          // A failed compensating delete leaves the refused prompt's bytes
+          // in the session attachment store; surface it instead of dropping.
+          // A fulfilled `false` — the daemon refused the unlink — counts too,
+          // even though it can also mean both copies were already gone.
+          const failedRemoval = removals.find(
+            (result) => result.status === 'rejected' || result.value === false,
+          );
+          // Every sibling report in this chain is gated on still owning the
+          // work; a toast about a session the user already left is noise.
+          if (failedRemoval && targetIsCurrent()) {
+            const message = t('queue.attachmentCleanupFailed');
+            reportError(
+              new Error(message, {
+                cause:
+                  failedRemoval.status === 'rejected'
+                    ? failedRemoval.reason
+                    : 'removeAttachment returned false',
+              }),
+              message,
+            );
+          }
         };
-        void Promise.allSettled([
-          ...imageList.map(
-            async (image) =>
-              await sessionActions.uploadAttachment(
-                {
-                  data: image.data,
-                  mimeType: image.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...fileList.map(
-            async (file) =>
-              await sessionActions.uploadAttachment(
-                {
-                  name: file.name,
-                  data: file.data,
-                  text: file.text,
-                  mimeType: file.media_type,
-                },
-                { signal: abort.signal, sessionId: targetSessionId },
-              ),
-          ),
-          ...annotatedFileList.map(async (file, index) => {
-            const filePath = annotated!.paths[index]!;
-            const data = await readWorkspaceFileAsBlob(
-              (path, options) =>
-                workspaceFileActions!.readFileBytes(path, options),
-              filePath,
-              file.media_type,
-              {
-                statFile: (path) => workspaceFileActions!.stat(path),
-                isCancelled: () => abort.signal.aborted,
-                maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
-              },
+        // Check the caller policy before paying for reads and uploads; the
+        // SDK wrapper still re-checks the latest policy at dispatch time.
+        void Promise.resolve()
+          .then(() => {
+            const blocked = dispatchPolicyRef.current?.(
+              annotated?.displayText ?? trimmed,
             );
-            return await sessionActions.uploadAttachment(
-              {
-                name: file.name,
-                data,
-                mimeType: file.media_type,
-              },
-              { signal: abort.signal, sessionId: targetSessionId },
-            );
-          }),
-        ])
+            if (blocked !== undefined)
+              throw new PromptDispatchBlockedError(blocked);
+            return Promise.allSettled([
+              ...imageList.map(
+                async (image) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      data: image.data,
+                      mimeType: image.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...fileList.map(
+                async (file) =>
+                  await sessionActions.uploadAttachment(
+                    {
+                      name: file.name,
+                      data: file.data,
+                      text: file.text,
+                      mimeType: file.media_type,
+                    },
+                    { signal: abort.signal, sessionId: targetSessionId },
+                  ),
+              ),
+              ...annotatedFileList.map(async (file, index) => {
+                const filePath = annotated!.paths[index]!;
+                const data = await readWorkspaceFileAsBlob(
+                  (path, options) =>
+                    workspaceFileActions!.readFileBytes(path, options),
+                  filePath,
+                  file.media_type,
+                  {
+                    statFile: (path) => workspaceFileActions!.stat(path),
+                    isCancelled: () => abort.signal.aborted,
+                    maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
+                  },
+                );
+                return await sessionActions.uploadAttachment(
+                  {
+                    name: file.name,
+                    data,
+                    mimeType: file.media_type,
+                  },
+                  { signal: abort.signal, sessionId: targetSessionId },
+                );
+              }),
+            ]);
+          })
           .then(async (results) => {
             uploadedAttachmentReferences = results.flatMap((result) =>
               result.status === 'fulfilled' ? [result.value] : [],
@@ -3204,6 +3367,8 @@ export function useQueuedPrompts({
             }
           })
           .catch(async (error: unknown) => {
+            if (error instanceof PromptDispatchBlockedError)
+              enqueueStarted = false;
             if (!enqueueStarted) await removeUploadedAttachments();
             if (!targetIsCurrent()) {
               completionCallbacksRef.current.delete(midTurnMessageId);
@@ -3214,7 +3379,9 @@ export function useQueuedPrompts({
                 // return: restore it to the current editor instead of
                 // leaking it across the session switch.
                 if (pendingAdmissionStillOwned) {
-                  restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  if (!(error instanceof PromptDispatchBlockedError)) {
+                    restoreQueuedPromptsToEditor([restoreAdmission], undefined);
+                  }
                   reportError(error, t('queue.queueFailed'));
                 }
               }
@@ -3235,7 +3402,12 @@ export function useQueuedPrompts({
               );
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
-              restoreQueuedPromptsToEditor([restoreAdmission], targetSessionId);
+              if (!(error instanceof PromptDispatchBlockedError)) {
+                restoreQueuedPromptsToEditor(
+                  [restoreAdmission],
+                  targetSessionId,
+                );
+              }
               reportError(error, t('queue.queueFailed'));
               return;
             }
@@ -4271,7 +4443,8 @@ export function useQueuedPrompts({
       // next snapshot that still lists it queued cancels the message the
       // user just cleared. The returned-unbound record itself must survive:
       // the settle-time echo exemption still needs it, and its own cleanup
-      // (the settle, or the size bound) owns the delete.
+      // (the rebind, the settle, or an owner or session change) owns the
+      // delete.
       for (const prompt of submittingPrompts) {
         for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
           if (rowId === prompt.id) {

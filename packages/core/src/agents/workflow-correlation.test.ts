@@ -64,7 +64,11 @@ describe('native workflow correlation', () => {
         config.storage.getWorkflowRunJournalPath(task.runId),
         'utf8',
       );
-      expect(JSON.parse(text.split('\n')[0])).toEqual({
+      // Both records are on disk before the first agent is dispatched: the
+      // run's `launched` line, then the source it was started from.
+      const lines = text.split('\n');
+      expect(JSON.parse(lines[0])).toEqual({ type: 'launched', version: 1 });
+      expect(JSON.parse(lines[1])).toEqual({
         type: 'source',
         version: 1,
         sourceRef,

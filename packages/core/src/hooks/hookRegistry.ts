@@ -15,6 +15,26 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
 /**
+ * The identity the registry uses to spot a duplicate hook within one source,
+ * event, matcher and `sequential` setting: the hook's name when it has one,
+ * otherwise its full command, URL, function id or prompt. Exported so a
+ * listing read straight from settings collapses the same entries the registry
+ * would.
+ */
+export function hookRegistryIdentity(config: HookConfig): string {
+  if (config.name) return config.name;
+  if (config.type === 'command')
+    return (config as { command?: string }).command || 'unknown-command';
+  if (config.type === 'http')
+    return (config as { url?: string }).url || 'unknown-url';
+  if (config.type === 'function')
+    return (config as { id?: string }).id || 'unknown-function';
+  if (config.type === 'prompt')
+    return (config as { prompt?: string }).prompt || 'prompt-hook';
+  return 'unknown-hook';
+}
+
+/**
  * Extension with hooks support
  */
 export interface ExtensionWithHooks {
@@ -29,6 +49,7 @@ export interface ExtensionWithHooks {
 export interface HookRegistryConfig {
   getProjectRoot(): string;
   isTrustedFolder(): boolean;
+  getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getExtensions(): ExtensionWithHooks[];
@@ -100,10 +121,23 @@ export class HookRegistry {
     try {
       this.entries = [...agentEntries];
       this.processHooksFromConfig();
+      const restoredKeys = new Set<string>();
       for (const entry of this.entries) {
-        const enabled = enabledSnapshot.get(this.getHookStateKey(entry));
+        const key = this.getHookStateKey(entry);
+        const enabled = enabledSnapshot.get(key);
         if (enabled !== undefined) {
           entry.enabled = enabled;
+          restoredKeys.add(key);
+        }
+      }
+
+      for (const [key, enabled] of enabledSnapshot) {
+        if (!enabled && !restoredKeys.has(key)) {
+          debugLogger.warn(
+            `A previously disabled hook (key=${key}) did not match any entry ` +
+              'after reload; its enabled state was not carried over. If the ' +
+              'hook still exists, re-disable it by name.',
+          );
         }
       }
     } catch (err) {
@@ -185,8 +219,10 @@ export class HookRegistry {
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
     const updated = this.entries.filter((entry) => {
-      const name = this.getHookName(entry);
-      if (name === hookName) {
+      if (!entry.config.name) {
+        return false;
+      }
+      if (entry.config.name === hookName) {
         entry.enabled = enabled;
         return true;
       }
@@ -198,7 +234,11 @@ export class HookRegistry {
         `${enabled ? 'Enabled' : 'Disabled'} ${updated.length} hook(s) matching "${hookName}"`,
       );
     } else {
-      debugLogger.warn(`No hooks found matching "${hookName}"`);
+      debugLogger.warn(
+        `No hooks found matching "${hookName}" to ${enabled ? 'enable' : 'disable'}. ` +
+          'Only hooks with a "name" field can be toggled individually; add a ' +
+          '"name" to the hook definition if it is unnamed.',
+      );
     }
   }
 
@@ -209,17 +249,7 @@ export class HookRegistry {
   private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    const config = entry.config;
-    if (config.name) return config.name;
-    if (config.type === 'command')
-      return (config as { command?: string }).command || 'unknown-command';
-    if (config.type === 'http')
-      return (config as { url?: string }).url || 'unknown-url';
-    if (config.type === 'function')
-      return (config as { id?: string }).id || 'unknown-function';
-    if (config.type === 'prompt')
-      return (config as { prompt?: string }).prompt || 'prompt-hook';
-    return 'unknown-hook';
+    return hookRegistryIdentity(entry.config);
   }
 
   /**
@@ -242,7 +272,7 @@ export class HookRegistry {
       entry.eventName,
       entry.source,
       entry.agentScope ?? null,
-      this.getHookIdentity(entry),
+      entry.config.name ?? null,
       entry.matcher ?? null,
       entry.sequential ?? null,
     ]);
@@ -252,6 +282,15 @@ export class HookRegistry {
    * Process hooks from the config that was already loaded by the CLI
    */
   private processHooksFromConfig(): void {
+    // System hooks, from the System and SystemDefaults settings files. Like
+    // user hooks they load regardless of folder trust. Registration order does
+    // not decide execution order: getHooksForEvent sorts by source priority
+    // (Project, User, System, Extensions).
+    const systemHooks = this.config.getSystemHooks();
+    if (systemHooks) {
+      this.processHooksConfiguration(systemHooks, HooksConfigSource.System);
+    }
+
     // Load user hooks (always available, regardless of folder trust)
     const userHooks = this.config.getUserHooks();
     if (userHooks) {
