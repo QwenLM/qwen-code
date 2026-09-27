@@ -236,6 +236,28 @@ export function extensionConsentString(
 }
 
 /**
+ * Names of the workflows present in both versions whose script content
+ * differs, compared by {@link ExtensionWorkflowDefinition.contentDigest}.
+ */
+function changedWorkflowScripts(
+  workflows: ExtensionWorkflowDefinition[],
+  previousWorkflows: ExtensionWorkflowDefinition[],
+): string[] {
+  const previousDigests = new Map(
+    previousWorkflows.map((workflow) => [
+      workflow.name,
+      workflow.contentDigest,
+    ]),
+  );
+  return workflows
+    .filter((workflow) => {
+      const previous = previousDigests.get(workflow.name);
+      return previous !== undefined && previous !== workflow.contentDigest;
+    })
+    .map((workflow) => workflow.name);
+}
+
+/**
  * Requests consent from the user to install an extension (extensionConfig), if
  * there is any difference between the consent string for `extensionConfig` and
  * `previousExtensionConfig`.
@@ -270,6 +292,11 @@ export const requestConsentOrFail = async (
     originSource,
     workflows,
   );
+  // The consent text lists names and descriptions only, so an update that
+  // changes nothing but a script's code would otherwise install silently.
+  const changedScripts = previousExtensionConfig
+    ? changedWorkflowScripts(workflows, previousWorkflows)
+    : [];
   if (previousExtensionConfig) {
     const previousExtensionConsent = extensionConsentString(
       previousExtensionConfig,
@@ -279,11 +306,21 @@ export const requestConsentOrFail = async (
       originSource,
       previousWorkflows,
     );
-    if (previousExtensionConsent === extensionConsent) {
+    if (
+      previousExtensionConsent === extensionConsent &&
+      changedScripts.length === 0
+    ) {
       return;
     }
   }
-  if (!(await requestConsent(extensionConsent))) {
+  const consent =
+    changedScripts.length > 0
+      ? `${extensionConsent}\n${t(
+          'These workflow scripts changed since the installed version: {{names}}.',
+          { names: changedScripts.join(', ') },
+        )}`
+      : extensionConsent;
+  if (!(await requestConsent(consent))) {
     throw new Error(
       t('Installation cancelled for "{{name}}".', {
         name: extensionConfig.name,

@@ -92,7 +92,13 @@ if (!qwenSandbox) {
   qwenSandbox = process.env.QWEN_SANDBOX;
 }
 
-qwenSandbox = (qwenSandbox || '').toLowerCase();
+qwenSandbox = (qwenSandbox || '').trim().toLowerCase();
+if (qwenSandbox === 'bwrap' || process.env.SANDBOX === 'bwrap') {
+  console.error(
+    'Whole-CLI bwrap has been removed. Configure tools.executionSandbox in User or System settings and restart outside the old sandbox.',
+  );
+  process.exit(1);
+}
 
 const commandExists = (cmd) => {
   // Pass `cmd` as a separate argv element (never interpolated into a shell

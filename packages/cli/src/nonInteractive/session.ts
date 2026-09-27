@@ -555,6 +555,7 @@ class Session {
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory: historyTail,
+      completedToolCallIds: chat.getCompletedToolCallIds?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,

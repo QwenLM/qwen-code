@@ -25,9 +25,9 @@ COPY . /home/node/app
 WORKDIR /home/node/app
 
 # Install dependencies, build workspaces, bundle into a single distributable, and pack.
-# QWEN_SKIP_PREPARE=1 stops npm ci's prepare script from building and bundling —
+# QWEN_SKIP_PREPARE=1 stops the install's prepare script from building and bundling —
 # the explicit build and bundle steps below already do that.
-RUN QWEN_SKIP_PREPARE=1 npm ci \
+RUN QWEN_SKIP_PREPARE=1 corepack pnpm install --frozen-lockfile --reporter=append-only \
   && npm run build \
   && npm run bundle \
   && npm run prepare:package \

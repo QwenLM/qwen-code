@@ -42,6 +42,7 @@ export {
   logApiCancel,
   logApiResponse,
   logFlashFallback,
+  logGoalState,
   logSlashCommand,
   logConversationFinishedEvent,
   logKittySequenceOverflow,
@@ -67,7 +68,12 @@ export {
   logMemoryRecall,
   logMemoryRecallDelivery,
 } from './loggers.js';
-export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
+export type {
+  SlashCommandEvent,
+  ChatCompressionEvent,
+  GoalStateEvent,
+  GoalStateEventCause,
+} from './types.js';
 export {
   SlashCommandStatus,
   EndSessionEvent,
@@ -99,7 +105,16 @@ export {
   MemoryRecallDeliveryEvent,
   RepeatedToolFailureGuardEvent,
 } from './types.js';
-export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
+export {
+  makeSlashCommandEvent,
+  makeChatCompressionEvent,
+  makeGoalStateEvent,
+  GOAL_STATE_EVENT_CAUSES,
+} from './types.js';
+export {
+  goalStateEventFromSnapshot,
+  isGoalStateEventCause,
+} from './goal-events.js';
 export type {
   ArenaSessionStartedEvent,
   ArenaAgentCompletedEvent,
@@ -141,6 +156,7 @@ export {
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
+  recordGoalStateMetrics,
   // Auto-Memory metrics functions
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,

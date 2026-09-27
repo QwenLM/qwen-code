@@ -2018,6 +2018,7 @@ describe('DaemonSessionClient', () => {
     await expect(
       session.enqueueMidTurnMessage('shared message', {
         messageId: 'stable-1',
+        eventDetailMode: 'summary',
       }),
     ).resolves.toEqual({ accepted: true, messageId: 'stable-1' });
     expect(calls[0]?.url).toBe(
@@ -2028,6 +2029,7 @@ describe('DaemonSessionClient', () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       message: 'shared message',
       messageId: 'stable-1',
+      eventDetailMode: 'summary',
     });
   });
 

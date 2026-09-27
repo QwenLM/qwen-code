@@ -64,6 +64,15 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  // The name-only lock is a deployment policy: a repo-shipped .env, or a
+  // mid-session edit of one, must not overwrite the operator's exported =1
+  // and silently let the model run workflow scripts again.
+  it('keeps the named-workflows-only lock operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WORKFLOW_NAME_ONLY',
+    );
+  });
+
   it('keeps daemon memory scope operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_CODE_MEMORY_PROJECT_SCOPE',

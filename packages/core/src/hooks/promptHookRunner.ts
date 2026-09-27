@@ -7,6 +7,8 @@
 import { z } from 'zod';
 import { createChildAbortController } from '../utils/abortController.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
 import type {
   PromptHookConfig,
   LLMHookResponse,
@@ -87,7 +89,8 @@ export class PromptHookRunner {
       };
     }
 
-    const timeoutMs = (hookConfig.timeout ?? 30) * 1000;
+    const timeoutMs =
+      (hookConfig.timeout ?? DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS) * 1000;
 
     try {
       debugLogger.debug(`Executing prompt hook: ${hookName}`);
@@ -129,11 +132,22 @@ export class PromptHookRunner {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
 
-      // Check for timeout/abort errors
-      if (
-        errorMessage.includes('timed out') ||
-        errorMessage.includes('aborted')
-      ) {
+      // Timeout first, then a caller abort. Every abort rejection, ours or the
+      // provider's own abort error, happens only once the caller's signal has
+      // fired, so the signal decides. Anything else is a failure, even if its
+      // message mentions an abort.
+      if (error instanceof HookTimeoutError) {
+        debugLogger.warn(`Prompt hook ${hookName} timed out: ${errorMessage}`);
+        return {
+          hookConfig,
+          eventName,
+          success: false,
+          outcome: 'timeout',
+          error,
+          duration,
+        };
+      }
+      if (signal?.aborted) {
         debugLogger.warn(`Prompt hook ${hookName} cancelled: ${errorMessage}`);
         return {
           hookConfig,
@@ -232,19 +246,25 @@ export class PromptHookRunner {
     // Create timeout promise that also aborts the request
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let abortHandler: (() => void) | undefined;
+    const timeoutError = new HookTimeoutError(
+      `Prompt hook timed out after ${timeoutMs}ms`,
+    );
+    let timedOut = false;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
+        timedOut = true;
         internalAbortController.abort();
-        reject(new Error(`Prompt hook timed out after ${timeoutMs}ms`));
+        reject(timeoutError);
       }, timeoutMs);
     });
     const abortPromise = new Promise<never>((_, reject) => {
       if (!signal) return;
       if (signal.aborted) {
-        reject(new Error('Prompt hook execution aborted'));
+        reject(new HookAbortError('Prompt hook execution aborted'));
         return;
       }
-      abortHandler = () => reject(new Error('Prompt hook execution aborted'));
+      abortHandler = () =>
+        reject(new HookAbortError('Prompt hook execution aborted'));
       signal.addEventListener('abort', abortHandler, { once: true });
     });
 
@@ -341,6 +361,13 @@ export class PromptHookRunner {
 
       // Parse response
       return this.parseResponse(text);
+    } catch (error) {
+      // Aborting the request on timeout can make the provider reject before
+      // the timeout promise does; the timeout is still what happened.
+      if (timedOut) {
+        throw timeoutError;
+      }
+      throw error;
     } finally {
       if (timeoutId) {
         clearTimeout(timeoutId);

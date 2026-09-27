@@ -447,6 +447,16 @@ describe('groupParallelAgents', () => {
   });
 });
 
+function labelsOf(items: DisplayItem[]): string[] {
+  return items.map((item) =>
+    item.type === 'message'
+      ? item.message.id
+      : item.type === 'turn_outputs'
+        ? 'turn_outputs'
+        : item.type,
+  );
+}
+
 describe('attachTurnOutputs', () => {
   it('keeps outputs for a transcript that starts before a user turn', () => {
     const message = makeMultiToolGroup('tg1');
@@ -505,6 +515,146 @@ describe('attachTurnOutputs', () => {
       turnId: 'x1',
       changes,
     });
+  });
+
+  it('keeps the turn outputs above a trailing recap message', () => {
+    const message = makeMultiToolGroup('tg1');
+    const recap: Extract<Message, { role: 'system' }> = {
+      id: 'local-recap-1',
+      role: 'system',
+      content: '※ Recap: earlier work',
+      variant: 'info',
+      source: 'recap',
+    };
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-tg1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const items = attachTurnOutputs(
+      [
+        { type: 'message', key: message.id, message },
+        { type: 'message', key: recap.id, message: recap },
+      ],
+      false,
+      new Map([[message.id, changes]]),
+    );
+
+    expect(labelsOf(items)).toEqual(['tg1', 'turn_outputs', 'local-recap-1']);
+  });
+
+  it('keeps a turn boundary outputs row above the recap that follows it', () => {
+    const first = makeUserMessage('u1');
+    const recap: Extract<Message, { role: 'system' }> = {
+      id: 'local-recap-1',
+      role: 'system',
+      content: '※ Recap: earlier work',
+      variant: 'info',
+      source: 'recap',
+    };
+    const second = makeUserMessage('u2');
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-u1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const items = attachTurnOutputs(
+      [
+        { type: 'message', key: first.id, message: first },
+        { type: 'message', key: recap.id, message: recap },
+        { type: 'message', key: second.id, message: second },
+      ],
+      false,
+      new Map([[first.id, changes]]),
+    );
+
+    expect(labelsOf(items)).toEqual([
+      'u1',
+      'turn_outputs',
+      'local-recap-1',
+      'u2',
+    ]);
+  });
+
+  it('keeps the turn outputs above a recap that a later status message follows', () => {
+    const message = makeMultiToolGroup('tg1');
+    const recap: Extract<Message, { role: 'system' }> = {
+      id: 'local-recap-1',
+      role: 'system',
+      content: '※ Recap: earlier work',
+      variant: 'info',
+      source: 'recap',
+    };
+    const notice: Extract<Message, { role: 'system' }> = {
+      id: 'bg-1',
+      role: 'system',
+      content: 'Background agent completed.',
+      variant: 'info',
+      source: 'background_notification',
+    };
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-tg1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const items = attachTurnOutputs(
+      [
+        { type: 'message', key: message.id, message },
+        { type: 'message', key: recap.id, message: recap },
+        { type: 'message', key: notice.id, message: notice },
+      ],
+      false,
+      new Map([[message.id, changes]]),
+    );
+
+    expect(labelsOf(items)).toEqual([
+      'tg1',
+      'turn_outputs',
+      'local-recap-1',
+      'bg-1',
+    ]);
+  });
+
+  it('keeps the turn outputs last when no recap trails the turn', () => {
+    const message = makeMultiToolGroup('tg1');
+    const notice: Extract<Message, { role: 'system' }> = {
+      id: 'bg-1',
+      role: 'system',
+      content: 'Background agent completed.',
+      variant: 'info',
+      source: 'background_notification',
+    };
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-tg1-a',
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+
+    const items = attachTurnOutputs(
+      [
+        { type: 'message', key: message.id, message },
+        { type: 'message', key: notice.id, message: notice },
+      ],
+      false,
+      new Map([[message.id, changes]]),
+    );
+
+    expect(labelsOf(items)).toEqual(['tg1', 'bg-1', 'turn_outputs']);
   });
 });
 

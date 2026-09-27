@@ -13,6 +13,7 @@ export default {
   skills: 'Skills',
   memory: 'Memory',
   headless: 'Headless Mode',
+  batch: 'Batch Mode (DashScope)',
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
   'approval-mode': 'Approval Mode',
@@ -23,6 +24,8 @@ export default {
   lsp: 'LSP (Language Server Protocol)',
   'computer-use': 'Computer Use',
   'token-caching': 'Token Caching',
+  'context-cost': 'Resident Context Cost',
+  rules: 'Rules',
   sandbox: 'Sandboxing',
   language: 'i18n',
   channels: 'Channels',
@@ -31,4 +34,5 @@ export default {
   'scheduled-tasks': 'Scheduled Tasks',
   goals: 'Goals',
   tips: 'Contextual Tips',
+  'omni-media-policies': 'Omni Media Policies',
 };

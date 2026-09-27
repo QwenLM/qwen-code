@@ -9,6 +9,7 @@ import { LlmContentGenerator } from './llm-content-generator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import type { AuthType } from '../contentGenerator.js';
 
 const mockReportLlmRequest = vi.hoisted(() => vi.fn());
 const mockReportLlmResponse = vi.hoisted(() => vi.fn());
@@ -47,6 +48,51 @@ describe('LlmContentGenerator', () => {
     });
     mockGoogleGenAI = vi.mocked(GoogleGenAI).mock.results[0].value;
   });
+
+  it.each([false, true])(
+    'uses the declared Gemini default while respecting request opt-out=%s',
+    async (off) => {
+      const config = {
+        getResolvedModelConfig: vi.fn().mockReturnValue({
+          capabilities: {
+            reasoning: {
+              profile: 'gemini',
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          },
+        }),
+      } as unknown as Config;
+      const configured = new LlmContentGenerator(
+        { apiKey: 'dummy' },
+        { model: 'company-alias', authType: 'gemini' as AuthType },
+        config,
+      );
+      await configured.generateContent(
+        {
+          model: 'company-alias',
+          contents: [],
+          ...(off
+            ? {
+                config: {
+                  thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+                },
+              }
+            : {}),
+        },
+        'prompt',
+      );
+      expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            thinkingConfig: off
+              ? { includeThoughts: false, thinkingBudget: 0 }
+              : { includeThoughts: true, thinkingLevel: 'MEDIUM' },
+          }),
+        }),
+      );
+    },
+  );
 
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();

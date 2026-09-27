@@ -13,6 +13,7 @@ import {
   MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS,
   MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
 } from './workflow-extension.js';
+import { computeWorkflowScriptDigest } from './workflow-saved.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -67,6 +68,8 @@ describe('loadExtensionWorkflows', () => {
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'a-review.js'),
         description: 'Runs a-review',
+        whenToUse: 'on review',
+        contentDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
       },
       {
         name: 'gcp:b-audit',
@@ -74,8 +77,23 @@ describe('loadExtensionWorkflows', () => {
         extensionDisplayName: 'Google Cloud',
         scriptPath: path.join(root, 'workflows', 'b-audit.js'),
         description: 'Runs b-audit',
+        contentDigest: expect.stringMatching(/^[0-9a-f]{16}$/),
       },
     ]);
+  });
+
+  // Install consent compares this digest, so it has to move with the code
+  // even when the meta block, and so the consent text, stays the same.
+  it('records a content digest that follows the script code', async () => {
+    const source = workflowSource('audit');
+    await write('workflows/audit.js', source);
+    const [first] = await loadExtensionWorkflows(root, owner, undefined);
+    expect(first?.contentDigest).toBe(computeWorkflowScriptDigest(source));
+
+    await write('workflows/audit.js', source.replace('return 1;', 'return 2;'));
+    const [second] = await loadExtensionWorkflows(root, owner, undefined);
+    expect(second?.description).toBe(first?.description);
+    expect(second?.contentDigest).not.toBe(first?.contentDigest);
   });
 
   it('reads one directory level only', async () => {
@@ -284,6 +302,34 @@ describe('loadExtensionWorkflows', () => {
     expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
     expect(chars.at(-1)).toBe('…');
     expect(chars.slice(0, -1).every((c) => c === '😀')).toBe(true);
+  });
+
+  // `whenToUse` decides whether the model may start the workflow on its own,
+  // so a blank one must read as absent rather than as an empty condition.
+  it('keeps whenToUse only when it says something, shortened like the description', async () => {
+    const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
+    await write(
+      'workflows/blank.js',
+      workflowSource('blank', ", whenToUse: '   '"),
+    );
+    await write(
+      'workflows/long.js',
+      workflowSource('long', `, whenToUse: '  ${long}  '`),
+    );
+    await write('workflows/none.js', workflowSource('none'));
+
+    const byName = new Map(
+      (await loadExtensionWorkflows(root, owner, undefined)).map((w) => [
+        w.name,
+        w,
+      ]),
+    );
+    expect('whenToUse' in byName.get('gcp:blank')!).toBe(false);
+    expect('whenToUse' in byName.get('gcp:none')!).toBe(false);
+    const chars = Array.from(byName.get('gcp:long')!.whenToUse!);
+    expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
+    expect(chars[0]).toBe('😀');
+    expect(chars.at(-1)).toBe('…');
   });
 
   it.skipIf(isWindows)(

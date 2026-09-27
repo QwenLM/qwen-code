@@ -92,6 +92,7 @@ import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
@@ -177,8 +178,8 @@ export interface OpenTuiAppProps {
   /** Aborts the in-flight turn (Esc while streaming). */
   onInterrupt?: () => void;
   approvalMode?: ApprovalMode;
-  /** Mid-turn queued prompts (composer badge + Esc pop-back). */
-  queueLength?: number;
+  /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
+  messageQueue?: readonly string[];
   onPopQueue?: () => string | null;
   /**
    * Scheduler calls parked in `awaiting_approval`. The shell renders the
@@ -240,7 +241,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     isReceivingContent,
     onInterrupt,
     approvalMode,
-    queueLength,
+    messageQueue,
     onPopQueue,
     waitingToolCalls,
     onToolCallSettled,
@@ -249,6 +250,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onPromptSuggestionDismiss,
     onPromptSuggestionAbort,
   } = props;
+
+  const queueLength = messageQueue?.length ?? 0;
 
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
     props.initialDialog ?? null,
@@ -915,136 +918,190 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     [host, host.getVersion()],
   );
 
+  // ink's Composer drops the phrase (not the row) when this setting is off.
+  const showLoadingPhrases =
+    config.getAccessibility()?.enableLoadingPhrases !== false;
+
   return (
     <OpenTuiErrorBoundary
       recordForExitEcho
       onError={(error) => onRenderError?.(error)}
     >
-      <box flexDirection="column" flexGrow={1} flexShrink={0}>
-        <OpenTuiBanner config={config} settings={settings} />
-        {renderMain ? renderMain() : null}
-        {!dialog &&
-        !activeModal &&
-        !activeToolCall &&
-        !mcpApproval.isMcpApprovalDialogOpen &&
-        updateNotice ? (
-          <text>{updateNotice}</text>
-        ) : null}
-        {noticeText ? <text>{noticeText}</text> : null}
-        {mcpApproval.isMcpApprovalDialogOpen &&
-        mcpApproval.currentMcpApproval ? (
-          // ink ranks the gated-server approval above both the shell and the
-          // tool confirmation, so it takes the slot outright.
-          <OpenTuiMcpApprovalDialog
-            key={`mcp-${mcpApproval.currentMcpApproval.name}`}
-            server={mcpApproval.currentMcpApproval}
-            pendingServers={mcpApproval.pendingMcpApprovals}
-            remaining={mcpApproval.mcpApprovalRemaining}
-            onSelect={mcpApproval.handleMcpApprovalSelect}
-          />
-        ) : activeToolCall ? (
-          <OpenTuiToolConfirmation
-            key={activeToolCall.callId}
-            call={activeToolCall}
-            config={config}
-            onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
-          />
-        ) : activeModal ? (
-          activeModal.kind === 'shell' ? (
-            <OpenTuiShellConfirmation
-              key={`shell-${activeModal.id}`}
-              commands={activeModal.commands}
-              onResolve={(resolution) =>
-                closeShellModal(activeModal, resolution)
-              }
+      <box flexDirection="column" height={terminalHeight} flexShrink={0}>
+        {/* Everything that flows lives here, and it is the alt-screen stand-in
+            for ink's <Static>: the column is bounded by the terminal, so the
+            region keeps only the tail of the conversation, pinned to its last
+            row until the user scrolls away from the bottom.
+
+            `focusable={false}` because a scroll region is not an input target
+            here. @opentui auto-focuses the first focusable ancestor under a
+            left mouse-down, and its ScrollBox is focusable by default, so
+            clicking the conversation — the most natural gesture on a page of
+            transcript — moved the focus off the composer's editor and nothing
+            moved it back: `focused` is unchanged so the reconciler skips it.
+            The editor then kept the printable keys (the composer's own global
+            handler feeds them) but lost every key only the focused editor
+            handles: the caret stopped moving, and a paste no longer reached
+            the buffer. ink parses mouse reports too, but only into handlers a
+            surface subscribes to and hit-tests against its own rows, and none
+            of them can write the composer's focus — that is a React prop — so
+            a click there changes nothing. */}
+        <scrollbox
+          flexGrow={1}
+          flexShrink={1}
+          minHeight={0}
+          stickyScroll
+          stickyStart="bottom"
+          focusable={false}
+        >
+          <OpenTuiBanner config={config} settings={settings} />
+          {renderMain ? renderMain() : null}
+          {!dialog &&
+          !activeModal &&
+          !activeToolCall &&
+          !mcpApproval.isMcpApprovalDialogOpen &&
+          updateNotice ? (
+            <text>{updateNotice}</text>
+          ) : null}
+          {noticeText ? <text>{noticeText}</text> : null}
+        </scrollbox>
+        {/* The chrome below the scroll region must be locked against shrinking:
+            Yoga otherwise spreads the scroll region's content height over the
+            column and squeezes the composer's three border rows into one row
+            painted three times. */}
+        <box flexDirection="column" flexShrink={0}>
+          {mcpApproval.isMcpApprovalDialogOpen &&
+          mcpApproval.currentMcpApproval ? (
+            // ink ranks the gated-server approval above both the shell and the
+            // tool confirmation, so it takes the slot outright.
+            <OpenTuiMcpApprovalDialog
+              key={`mcp-${mcpApproval.currentMcpApproval.name}`}
+              server={mcpApproval.currentMcpApproval}
+              pendingServers={mcpApproval.pendingMcpApprovals}
+              remaining={mcpApproval.mcpApprovalRemaining}
+              onSelect={mcpApproval.handleMcpApprovalSelect}
             />
+          ) : activeToolCall ? (
+            <box key="tool-confirm-area" flexDirection="column">
+              <OpenTuiToolConfirmation
+                key={activeToolCall.callId}
+                call={activeToolCall}
+                config={config}
+                onSettled={() => onToolCallSettled?.(activeToolCall.callId)}
+              />
+              {/* ink's Composer marginTop: one blank between the confirmation's
+                own bottom padding and the waiting row. */}
+              <box marginTop={1}>
+                <OpenTuiLoadingIndicator
+                  streaming={Boolean(streaming)}
+                  waiting
+                  showPhrase={showLoadingPhrases}
+                />
+              </box>
+            </box>
+          ) : activeModal ? (
+            activeModal.kind === 'shell' ? (
+              <OpenTuiShellConfirmation
+                key={`shell-${activeModal.id}`}
+                commands={activeModal.commands}
+                onResolve={(resolution) =>
+                  closeShellModal(activeModal, resolution)
+                }
+              />
+            ) : (
+              <OpenTuiActionConfirmation
+                key={`action-${activeModal.id}`}
+                prompt={activeModal.prompt}
+                onResolve={(confirmed) =>
+                  closeActionModal(activeModal, confirmed)
+                }
+              />
+            )
+          ) : dialog ? (
+            // ink's layout wraps every popup in a two-column margin and caps its
+            // width, so a dialog's border runs from column 2 to column 97 instead
+            // of spanning the terminal. The confirmations stay outside: their
+            // body reads the terminal width to estimate line wrapping.
+            //
+            // The keys on this branch and the composer's are load-bearing: both
+            // are a `<box>` in the same slot, so without them React reuses one
+            // instance and diffs props — and @opentui's margin/width setters
+            // ignore the `null` its reconciler passes for a removed prop, leaving
+            // the previous branch's layout stuck on the node.
+            <box
+              key="dialog-area"
+              marginLeft={2}
+              width={dialogAreaWidth(terminalWidth)}
+            >
+              <OpenTuiDialogMount
+                key={dialog.dialog}
+                request={dialog}
+                host={host}
+                config={config}
+                settings={settings}
+                commands={commandList}
+                onClose={() => setDialog(null)}
+                notify={notify}
+                fillInput={fillComposer}
+                onSelectSetting={handleSelectSetting}
+                onApprovalModeChanged={adoptApprovalMode}
+                availableTerminalHeight={props.availableTerminalHeight}
+              />
+            </box>
           ) : (
-            <OpenTuiActionConfirmation
-              key={`action-${activeModal.id}`}
-              prompt={activeModal.prompt}
-              onResolve={(confirmed) =>
-                closeActionModal(activeModal, confirmed)
-              }
-            />
-          )
-        ) : dialog ? (
-          // ink's layout wraps every popup in a two-column margin and caps its
-          // width, so a dialog's border runs from column 2 to column 97 instead
-          // of spanning the terminal. The confirmations stay outside: their
-          // body reads the terminal width to estimate line wrapping.
-          //
-          // The keys on this branch and the composer's are load-bearing: both
-          // are a `<box>` in the same slot, so without them React reuses one
-          // instance and diffs props — and @opentui's margin/width setters
-          // ignore the `null` its reconciler passes for a removed prop, leaving
-          // the previous branch's layout stuck on the node.
-          <box
-            key="dialog-area"
-            marginLeft={2}
-            width={dialogAreaWidth(terminalWidth)}
-          >
-            <OpenTuiDialogMount
-              key={dialog.dialog}
-              request={dialog}
-              host={host}
-              config={config}
-              settings={settings}
-              commands={commandList}
-              onClose={() => setDialog(null)}
-              notify={notify}
-              fillInput={fillComposer}
-              onSelectSetting={handleSelectSetting}
-              onApprovalModeChanged={adoptApprovalMode}
-              availableTerminalHeight={props.availableTerminalHeight}
-            />
-          </box>
-        ) : (
-          <box key="composer" flexDirection="column" marginTop={1}>
-            <OpenTuiLoadingIndicator
-              streaming={Boolean(streaming)}
-              streamingCharsRef={streamingCharsRef}
-              isReceivingContent={isReceivingContent}
-            />
-            <OpenTuiInputPrompt
-              onSubmit={(text, imagePaths) => {
-                void onSubmit(text, imagePaths);
-              }}
-              userMessages={userMessages}
-              config={config}
-              focus
-              streaming={streaming}
-              onInterrupt={onInterrupt}
-              approvalMode={currentApprovalMode}
-              queueLength={queueLength}
-              onPopQueue={onPopQueue}
-              composerHandle={props.composerHandle}
-              promptSuggestion={promptSuggestion}
-              onPromptSuggestionDismiss={onPromptSuggestionDismiss}
-              onPromptSuggestionAbort={onPromptSuggestionAbort}
-              shellModeActive={shellModeActive}
-              onToggleShellMode={toggleShellMode}
-              onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
-              onCycleApprovalMode={cycleApprovalMode}
-            />
-          </box>
-        )}
-        {/* An armed quit warning forces the footer to mount: a dialog unmounts
+            <box key="composer" flexDirection="column" marginTop={1}>
+              <OpenTuiLoadingIndicator
+                streaming={Boolean(streaming)}
+                streamingCharsRef={streamingCharsRef}
+                isReceivingContent={isReceivingContent}
+                showPhrase={showLoadingPhrases}
+              />
+              <OpenTuiQueuedMessageDisplay messageQueue={messageQueue ?? []} />
+              <OpenTuiInputPrompt
+                onSubmit={(text, imagePaths) => {
+                  void onSubmit(text, imagePaths);
+                }}
+                userMessages={userMessages}
+                config={config}
+                focus
+                streaming={streaming}
+                onInterrupt={onInterrupt}
+                approvalMode={currentApprovalMode}
+                queueLength={queueLength}
+                onPopQueue={onPopQueue}
+                composerHandle={props.composerHandle}
+                promptSuggestion={promptSuggestion}
+                onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+                onPromptSuggestionAbort={onPromptSuggestionAbort}
+                shellModeActive={shellModeActive}
+                onToggleShellMode={toggleShellMode}
+                onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+                onCycleApprovalMode={cycleApprovalMode}
+              />
+            </box>
+          )}
+          {/* An armed quit warning forces the footer to mount: a dialog unmounts
             the composer, so nothing intercepts Ctrl+C and the app-level guard
             still arms — hiding the footer here would drop the only row telling
             the user that a second press exits. With the warning set the footer
             returns just that row, so nothing else appears. */}
-        {exitHint ||
-        (!dialog && !activeModal && !activeToolCall && !showSuggestions) ? (
-          <OpenTuiFooter
-            config={config}
-            streaming={Boolean(streaming)}
-            approvalMode={currentApprovalMode}
-            queueLength={queueLength}
-            sessionName={host.sessionName}
-            shellModeActive={shellModeActive}
-            exitHint={exitHint}
-          />
-        ) : null}
+          {exitHint ||
+          (!dialog &&
+            !activeModal &&
+            !activeToolCall &&
+            !mcpApproval.isMcpApprovalDialogOpen &&
+            !showSuggestions) ? (
+            <OpenTuiFooter
+              config={config}
+              streaming={Boolean(streaming)}
+              approvalMode={currentApprovalMode}
+              queueLength={queueLength}
+              sessionName={host.sessionName}
+              shellModeActive={shellModeActive}
+              exitHint={exitHint}
+            />
+          ) : null}
+        </box>
       </box>
     </OpenTuiErrorBoundary>
   );

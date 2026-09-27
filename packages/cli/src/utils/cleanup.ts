@@ -12,8 +12,10 @@ let exitCleanupPromise: Promise<void> | undefined;
 
 export function registerCleanup(
   fn: (() => void) | (() => Promise<void>),
+  options: { first?: boolean } = {},
 ): () => void {
-  cleanupFunctions.push(fn);
+  if (options.first) cleanupFunctions.unshift(fn);
+  else cleanupFunctions.push(fn);
   return () => {
     const index = cleanupFunctions.indexOf(fn);
     if (index !== -1) cleanupFunctions.splice(index, 1);

@@ -50,10 +50,19 @@ export class WebViewContent {
     // the webview unless it is injected here.
     const language = escapeHtml(vscode.env.language || 'en');
 
+    // In a remote window the daemon URL handed to the shell has been resolved
+    // through VS Code's tunnel, which lands on the client's own `localhost`
+    // rather than on `127.0.0.1`. The shell upgrades that URL to the matching
+    // `ws:` origin for its WebSocket transports, so both are granted. A local
+    // window keeps the narrower loopback-only policy.
+    const connectSrc = vscode.env.remoteName
+      ? 'http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*'
+      : 'http://127.0.0.1:* ws://127.0.0.1:*';
+
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
     // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
     // grants both wasm-unsafe-eval and data: fonts.
-    const csp = `default-src 'none'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
+    const csp = `default-src 'none'; connect-src ${connectSrc}; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="${language}">

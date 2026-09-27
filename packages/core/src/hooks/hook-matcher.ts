@@ -55,6 +55,30 @@ function splitListEntries(pattern: string): string[] {
 }
 
 /**
+ * Removes padding whitespace around the whole matcher without eating
+ * whitespace the expression escapes: a trailing whitespace char preceded by
+ * an odd number of backslashes is part of the regular expression (`\.env\ `
+ * matches "a.env "), so trimming it would leave a trailing backslash that
+ * fails to compile. An even number of backslashes is an escaped backslash, so
+ * the whitespace after it stays padding. Leading escaped whitespace starts
+ * with a backslash, so `trimStart` can never touch it.
+ */
+function trimMatcherEdges(matcher: string): string {
+  let end = matcher.length;
+  while (end > 0 && /\s/.test(matcher[end - 1])) {
+    let backslashes = 0;
+    for (let i = end - 2; i >= 0 && matcher[i] === '\\'; i--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) {
+      break;
+    }
+    end--;
+  }
+  return matcher.slice(0, end).trimStart();
+}
+
+/**
  * Removes the padding around a list entry. Trailing whitespace preceded by an
  * odd run of backslashes is escaped, so it belongs to the expression and
  * stays; after an even run the backslashes escape each other, so `C:\\ `
@@ -103,7 +127,7 @@ export function matchesHookPattern(
   subject: string,
   options: HookPatternOptions = {},
 ): boolean {
-  const pattern = matcher.trim();
+  const pattern = trimMatcherEdges(matcher);
   if (pattern === '' || pattern === '*' || pattern === '.*') {
     return true;
   }

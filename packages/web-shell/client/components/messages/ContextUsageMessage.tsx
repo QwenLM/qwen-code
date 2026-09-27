@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react';
 import type {
   DaemonContextMemoryDetail,
   DaemonContextSkillDetail,
@@ -213,13 +214,12 @@ function SkillsSection({
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
-    active: string;
     bodyLoaded: string;
     tokens: string;
   };
 }) {
   const sorted = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
   });
   if (sorted.length === 0) return null;
@@ -232,9 +232,6 @@ function SkillsSection({
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
               {skill.name}
-              {skill.loaded && (
-                <span className={styles.success}> {labels.active}</span>
-              )}
             </span>
             <span className={styles.value}>
               {formatTokens(skill.tokens)} {labels.tokens}
@@ -266,6 +263,7 @@ export function ContextUsageMessage({
   compact?: boolean;
 }) {
   const { t } = useI18n();
+  const [collapsed, setCollapsed] = useState(false);
   const { usage } = status;
   const { breakdown, contextWindowSize } = usage;
   const hasTokenCount = usage.totalTokens > 0;
@@ -289,11 +287,26 @@ export function ContextUsageMessage({
       className={`${styles.panel}${compact ? ` ${styles.compact}` : ''}`}
       role={compact ? undefined : 'group'}
       aria-label={compact ? undefined : t('contextUsage.title')}
+      data-collapsed={!compact && collapsed}
     >
       {!compact && (
         <div className={styles.header}>
           <div className={styles.title}>{t('contextUsage.title')}</div>
           <span className={styles.secondary}>{t('contextUsage.snapshot')}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={collapsed ? t('common.expand') : t('common.collapse')}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? (
+              <ChevronDownIcon aria-hidden="true" />
+            ) : (
+              <ChevronUpIcon aria-hidden="true" />
+            )}
+          </Button>
         </div>
       )}
       <div className={styles.metaLine}>
@@ -303,11 +316,17 @@ export function ContextUsageMessage({
       </div>
       {!hasTokenCount ? (
         <>
+          {/* After /model, /restore or a resume the estimate includes the
+              conversation, so the base-overhead captions would be false. */}
           <div className={styles.estimateHint}>
-            {t('contextUsage.usageUnavailable')}
+            {breakdown.messages > 0
+              ? t('contextUsage.usageEstimatedWithConversation')
+              : t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
-            {t('contextUsage.estimatedOverhead')}
+            {breakdown.messages > 0
+              ? t('contextUsage.estimatedUsage')
+              : t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
             {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}
@@ -358,6 +377,15 @@ export function ContextUsageMessage({
             symbolClassName={isOverLimit ? styles.error : styles.accent}
             isOverLimit={isOverLimit}
           />
+          {/* Annotation, not a category: the cached prefix spans several categories. */}
+          {(breakdown.cachedTokens ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.cachedPrefix')}
+              tokens={breakdown.cachedTokens!}
+              symbolClassName={styles.secondary}
+            />
+          )}
           <CategoryRow
             {...categoryProps}
             label={t('contextUsage.free')}
@@ -432,18 +460,32 @@ export function ContextUsageMessage({
               <SkillsSection
                 skills={usage.skills}
                 labels={{
-                  active: t('contextUsage.active'),
                   bodyLoaded: t('contextUsage.bodyLoaded'),
                   tokens: t('contextUsage.tokens'),
                 }}
               />
             ) : undefined}
           </CategoryRow>
-          {hasTokenCount && (
+          {(breakdown.startupContext ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.startupContext')}
+              tokens={breakdown.startupContext!}
+            />
+          )}
+          {(hasTokenCount || breakdown.messages > 0) && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}
               tokens={breakdown.messages}
+            />
+          )}
+          {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.unattributed')}
+              tokens={breakdown.unattributed!}
+              symbolClassName={styles.secondary}
             />
           )}
         </div>

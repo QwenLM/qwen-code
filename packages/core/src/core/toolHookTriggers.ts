@@ -640,6 +640,27 @@ export function appendAdditionalContext(
     return content + '\n\n' + additionalContext;
   }
 
+  const single =
+    Array.isArray(content) && content.length === 1 ? content[0] : content;
+  if (
+    typeof single === 'object' &&
+    !Array.isArray(single) &&
+    single.functionResponse
+  ) {
+    const response = single.functionResponse;
+    const updated: Part = {
+      ...single,
+      functionResponse: {
+        ...response,
+        response: {
+          ...response.response,
+          output: `${response.response?.['output'] ?? ''}\n\n${additionalContext}`,
+        },
+      },
+    };
+    return Array.isArray(content) ? [updated] : updated;
+  }
+
   // For PartListUnion content, append as an additional text part
   if (Array.isArray(content)) {
     return [...content, { text: additionalContext } as Part];

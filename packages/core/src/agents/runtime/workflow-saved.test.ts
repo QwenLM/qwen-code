@@ -21,6 +21,7 @@ import {
   findActiveExtensionWorkflowByPath,
   findActiveExtensionWorkflowByPathCanonical,
   getWorkflowScriptRoots,
+  isWorkflowRunId,
   listSavedWorkflows,
   parseExtensionWorkflowName,
   persistInlineWorkflowScript,
@@ -774,6 +775,21 @@ describe('workflow-saved — extension tier', () => {
       description: 'Runs audit',
       scriptPath: path.join(extensionRoot, 'workflows', 'audit.js'),
     });
+    expect('whenToUse' in entries[0]).toBe(false);
+  });
+
+  it('carries the whenToUse of an extension workflow onto its entry', async () => {
+    await writeWorkflow(
+      path.join(extensionRoot, 'workflows'),
+      'audit',
+      `export const meta = { name: 'audit', description: 'Runs audit', whenToUse: 'When the user asks for a dependency audit' };\nreturn 1;\n`,
+    );
+    const [entry] = await listSavedWorkflows(configWith(await loadGcp()));
+
+    expect(entry).toMatchObject({
+      name: 'gcp:audit',
+      whenToUse: 'When the user asks for a dependency audit',
+    });
   });
 
   it('resolves an extension workflow by its qualified name', async () => {
@@ -991,5 +1007,24 @@ describe('workflow-saved — extension tier', () => {
     await expect(
       resolveSavedWorkflowScript('Not-Valid', config),
     ).rejects.toThrow(/Invalid workflow name/);
+  });
+});
+
+describe('isWorkflowRunId', () => {
+  it('accepts the generated wf_<hex> shape and nothing that could leave its directory', () => {
+    expect(isWorkflowRunId('wf_0123abcdef456789')).toBe(true);
+    for (const value of [
+      '',
+      'wf_',
+      'wf_ABCD',
+      'wf_zz',
+      '../wf_1234',
+      'wf_1234/../x',
+      'wf_1234\0',
+      ' wf_1234',
+      'run_1234',
+    ]) {
+      expect(isWorkflowRunId(value)).toBe(false);
+    }
   });
 });

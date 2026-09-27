@@ -6,13 +6,9 @@
 import type {
   ModelInfo,
   AvailableCommand,
-  RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
-import type {
-  AskUserQuestionRequest,
-  SlashCommandNotification,
-} from './acpTypes.js';
+import type { SlashCommandNotification } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -75,10 +71,6 @@ export interface QwenAgentCallbacks {
   onThoughtChunk?: (chunk: string) => void;
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
-  onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
-  onAskUserQuestion?: (
-    request: AskUserQuestionRequest,
-  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string, source?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;

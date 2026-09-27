@@ -331,7 +331,8 @@ describe('CommandService', () => {
   const extensionWorkflowCommand = (name: string): SlashCommand => ({
     ...createMockCommand(name, CommandKind.FILE),
     source: 'workflow-command',
-    supportedModes: ['interactive'],
+    modelInvocable: true,
+    whenToUse: 'When the user asks for an audit',
     extensionName: 'gcp',
     workflowName: name,
   });
@@ -352,13 +353,14 @@ describe('CommandService', () => {
     expect(commandNamed(service, 'gcp.gcp:audit')?.source).toBe(
       'workflow-command',
     );
-    // The skill keeps the surfaces an interactive-only workflow cannot serve.
-    expect(service.getCommandsForMode('acp').map((cmd) => cmd.name)).toContain(
-      'gcp:audit',
+    // Both stay reachable in every mode and for the model, under distinct
+    // names; the renamed workflow command still runs `gcp:audit` by name.
+    expect(service.getCommandsForMode('acp').map((cmd) => cmd.name)).toEqual(
+      expect.arrayContaining(['gcp:audit', 'gcp.gcp:audit']),
     );
-    expect(
-      service.getModelInvocableCommands().map((cmd) => cmd.name),
-    ).toContain('gcp:audit');
+    expect(service.getModelInvocableCommands().map((cmd) => cmd.name)).toEqual(
+      expect.arrayContaining(['gcp:audit', 'gcp.gcp:audit']),
+    );
 
     const disabled = await CommandService.create(
       loaders(),

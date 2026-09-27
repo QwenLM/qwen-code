@@ -20,6 +20,12 @@ import {
   type CallableTool,
 } from '@google/genai';
 import type OpenAI from 'openai';
+import {
+  InMemoryImagePayloadStore,
+  buildReattachParts,
+  replaceImagePayloadsInPlace,
+  trailingReattachPartCount,
+} from '../../services/image-payload-references.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
@@ -1390,6 +1396,47 @@ describe('OpenAIContentConverter', () => {
       expect(name).not.toContain('.');
     });
 
+    // DashScope places its cache breakpoint `trailingReattachPartCount`
+    // blocks before the end of the last message (#11627), so every part of
+    // the reattach region, labels included, must stay exactly one block.
+    it('emits one wire block per reattach region part', () => {
+      const store = new InMemoryImagePayloadStore();
+      const history: Content[] = ['a', 'b'].map((data) => ({
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data } }],
+      }));
+      const replaced = replaceImagePayloadsInPlace(history, store);
+      const contents: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: 'what changed?' },
+            { inlineData: { mimeType: 'image/png', data: 'new-shot' } },
+            ...buildReattachParts(replaced, 2),
+          ],
+        },
+      ];
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        { model: 'models/test', contents },
+        requestContext,
+      );
+      const content = messages.at(-1)?.content as Array<{ type: string }>;
+      const regionCount = trailingReattachPartCount(contents);
+
+      expect(regionCount).toBe(5);
+      expect(content.map((block) => block.type)).toEqual([
+        'text',
+        'image_url',
+        'text',
+        'text',
+        'image_url',
+        'text',
+        'image_url',
+      ]);
+      expect(content.length - regionCount).toBe(2);
+    });
+
     it('preserves ordered multi-part startup reminder user content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -1623,6 +1670,180 @@ describe('OpenAIContentConverter', () => {
       expect(imagePart?.image_url?.url).toBe(
         'data:image/png;base64,base64encodedimagedata',
       );
+    });
+
+    it('moves an omni degradation disclosure together with its media part when splitting tool media', () => {
+      // The omni pipeline emits a disclosure text Part IMMEDIATELY before
+      // each lossy derivative's media Part. When splitToolMedia relocates
+      // the media into the follow-up user message, the disclosure must move
+      // WITH it — stranded in the text-only tool message, the model could
+      // not attribute it to the media. Ordinary text parts stay behind.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                  parts: [
+                    { text: 'ordinary tool text' },
+                    { text: '【媒体降质】photo.png：downsampled to 1568px' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'base64encodedimagedata',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('Image content\nordinary tool text');
+
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[0].text).toBe(
+        '(attached media from previous tool call)',
+      );
+      // Disclosure sits immediately before its media part.
+      expect(userContent[1].text).toBe(
+        '【媒体降质】photo.png：downsampled to 1568px',
+      );
+      expect(userContent[2].image_url?.url).toBe(
+        'data:image/png;base64,base64encodedimagedata',
+      );
+    });
+
+    it('moves a bare keyframe timestamp marker together with its frame', () => {
+      // Per-frame markers (`<MM:SS>`) carry no 【媒体降质】 prefix — the
+      // degradation notice rode once on the first frame's header — but they
+      // must still migrate WITH their image so each frame keeps its label.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'frames' },
+                  parts: [
+                    { text: '<00:34>' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: 'framebytes',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      // The marker did NOT stay stranded in the tool message text.
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('frames');
+
+      const userContent = messages.find((m) => m.role === 'user')
+        ?.content as Array<{ type: string; text?: string }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('<00:34>');
+    });
+
+    it('gives a disclosure only to the media part directly following it', () => {
+      // Two media parts after one disclosure: only the adjacent one owns
+      // it — the second media part must not pull the disclosure past the
+      // first (prev-tracking, not "last disclosure seen").
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'two images' },
+                  parts: [
+                    { text: '【媒体降质】a.png：lossy' },
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('【媒体降质】a.png：lossy');
+      expect(userContent[2].image_url?.url).toBe('data:image/png;base64,first');
     });
 
     it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
@@ -2470,6 +2691,176 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should pass oss:// video fileData in a user message through to video_url unchanged (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Describe this video' },
+              {
+                fileData: {
+                  mimeType: 'video/mp4',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+                  displayName: 'video.mp4',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeDefined();
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        video_url?: { url: string };
+      }>;
+      const videoPart = contentArray.find((p) => p.type === 'video_url');
+      expect(videoPart?.video_url?.url).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-video.mp4',
+      );
+    });
+
+    it('should convert oss:// audio fileData to input_audio with the bare URL (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'What is this sound?' },
+              {
+                fileData: {
+                  mimeType: 'audio/mpeg',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+                  displayName: 'tone.mp3',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertLlmRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        input_audio?: { data: string; format: string };
+      }>;
+      const audioPart = contentArray.find((p) => p.type === 'input_audio');
+      // Bare oss URL — no data: prefix (unlike the inline branch).
+      expect(audioPart?.input_audio?.data).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+      );
+      expect(audioPart?.input_audio?.format).toBe('mp3');
+    });
+
+    it('should convert flac/ogg/m4a audio fileData instead of textifying', () => {
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  fileData: {
+                    mimeType: mime,
+                    fileUri: 'oss://bucket/key',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertLlmRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported file media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
+    it('should convert inline flac/ogg/m4a audio instead of textifying', () => {
+      // Mirrors the fileData case above: the inline branch shares
+      // getAudioFormat, and a regression that re-textifies inline
+      // flac/ogg/m4a must not ship green.
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mime,
+                    data: 'YXVkaW8=',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertLlmRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(audioPart?.input_audio?.data).toBe(
+          `data:${mime};base64,YXVkaW8=`,
+        );
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported inline media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
     it('should render unsupported inlineData file types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -2531,7 +2922,7 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[1].text).toContain('archive.zip');
     });
 
-    it('should render unsupported fileData types (including audio) as a text block', () => {
+    it('should render unsupported fileData types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -2558,9 +2949,9 @@ describe('OpenAIContentConverter', () => {
                   parts: [
                     {
                       fileData: {
-                        mimeType: 'audio/mpeg',
-                        fileUri: 'https://example.com/audio.mp3',
-                        displayName: 'audio.mp3',
+                        mimeType: 'application/zip',
+                        fileUri: 'https://example.com/archive.zip',
+                        displayName: 'archive.zip',
                       },
                     },
                   ],
@@ -2588,8 +2979,8 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[0].text).toBe('File content');
       expect(contentArray[1].type).toBe('text');
       expect(contentArray[1].text).toContain('Unsupported file media type');
-      expect(contentArray[1].text).toContain('audio/mpeg');
-      expect(contentArray[1].text).toContain('audio.mp3');
+      expect(contentArray[1].text).toContain('application/zip');
+      expect(contentArray[1].text).toContain('archive.zip');
     });
 
     it('should create tool message with text-only content when no media parts', () => {

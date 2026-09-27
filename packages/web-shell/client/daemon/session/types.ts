@@ -7,6 +7,7 @@
 import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
+  DaemonBranchSessionRequest,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -39,6 +40,8 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -92,6 +95,14 @@ export interface DaemonStandaloneConnectionState {
 
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
+  runtimeStopped?: boolean;
+  runtimeStopPersistenceUnconfirmed?: boolean;
+  capacityRecovery?: {
+    error: unknown;
+    sessionId: string;
+    sessionContext?: DaemonProductSessionContext;
+    mode: 'load' | 'resume';
+  };
   sessionId?: string;
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
@@ -255,6 +266,31 @@ export interface DaemonSessionProviderProps {
 }
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
+
+export type DaemonPromptSettlementOutcome =
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface DaemonPromptSettledEvent {
+  sessionId: string;
+  promptId: string;
+  outcome: DaemonPromptSettlementOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export type DaemonPromptSettledListener = (
+  event: DaemonPromptSettledEvent,
+) => void;
+
+export type DaemonPromptSettlementSubscribe = (
+  listener: DaemonPromptSettledListener,
+) => () => void;
 
 export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
 
@@ -546,6 +582,7 @@ export interface DaemonSessionActions {
    */
   createSession(options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
@@ -554,7 +591,7 @@ export interface DaemonSessionActions {
     branch?: { name: string };
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
-  clearSession(): Promise<void>;
+  clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -673,13 +710,18 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  /**
+   * Register an artifact this client knows about — a file a slash command
+   * reported it wrote, for example. The store owns identity, so re-registering
+   * the same workspace path updates the existing entry instead of duplicating.
+   */
+  addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult>;
   listSources(): Promise<SessionSourcesResult>;
   upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
   removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;
-  branchSession(
-    name?: string,
-    atRecordId?: string,
-  ): Promise<{
+  branchSession(options?: DaemonBranchSessionRequest): Promise<{
     sessionId: string;
     displayName: string;
     switchStarted: boolean;

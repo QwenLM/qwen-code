@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import {
   extractStructuredResult,
+  formatToolArgs,
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
@@ -29,6 +30,8 @@ interface SessionPart {
 }
 interface SessionLine {
   type?: string;
+  /** ISO 8601 record time; ink's resume stamps it on the first display run. */
+  timestamp?: string;
   message?: { role?: string; parts?: SessionPart[] };
 }
 
@@ -151,6 +154,8 @@ export function transcribeSession(
     }
     if (o.type === 'assistant') {
       let thinkingOpen = false;
+      const recorded = o.timestamp ? Date.parse(o.timestamp) : NaN;
+      let stamped = false;
       for (const p of parts) {
         if (p.thought && p.text) {
           events.push({ type: 'thinking', delta: p.text });
@@ -173,8 +178,17 @@ export function transcribeSession(
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
+            const args = formatToolArgs(
+              p.functionCall.args as Record<string, unknown> | undefined,
+            );
+            if (args) events.push({ type: 'tool-args', id, args });
           } else if (p.text) {
-            events.push({ type: 'text', delta: p.text });
+            const stamp =
+              !stamped && Number.isFinite(recorded)
+                ? { timestamp: recorded }
+                : {};
+            stamped = true;
+            events.push({ type: 'text', delta: p.text, ...stamp });
           }
         }
       }

@@ -388,6 +388,45 @@ describe('AgentCore skill-gate inputs', () => {
       expect(exec?.description).toContain('tools.run_shell_command');
     });
 
+    // The shape a workflow agent({ tools }) dispatch produces: a declaration
+    // allowlist without `exec` and without an execution allowlist. The agent
+    // keeps exec, and exec can call only the listed tools.
+    it('keeps exec and narrows its bindings for a tools-only CodeModeOnly agent', async () => {
+      const config = makeFakeConfig({ codeModeOnly: true });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.SHELL }));
+      const core = new AgentCore(
+        'workflow-narrowed-code-mode',
+        config,
+        { systemPrompt: '' } as never,
+        { model: 'test-model' } as never,
+        { max_turns: 1 } as never,
+        { tools: [ToolNames.READ_FILE] },
+      );
+
+      const declarations = await core.prepareTools();
+      const exec = declarations.find(
+        (declaration) => declaration.name === ToolNames.EXEC,
+      );
+
+      expect(exec).toBeDefined();
+      expect(executable(core, ToolNames.EXEC)).toBe(true);
+      expect(exec?.description).toContain('tools.read_file');
+      expect(exec?.description).not.toContain('tools.write_file');
+      expect(exec?.description).not.toContain('tools.run_shell_command');
+      expect(
+        (
+          core as unknown as {
+            codeModeAllowedToolNames?: readonly string[];
+          }
+        ).codeModeAllowedToolNames,
+      ).toEqual([ToolNames.READ_FILE]);
+    });
+
     it('keeps disallowed tools out of a restricted CodeModeOnly gateway', async () => {
       const config = makeFakeConfig({ codeModeOnly: true });
       const registry = new ToolRegistry(config);

@@ -12,7 +12,11 @@ import {
   extractSessionListItems,
   QwenAgentManager,
 } from './qwenAgentManager.js';
-import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type {
+  ModelInfo,
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from '../types/acpTypes.js';
 
 vi.mock('vscode', () => ({
   window: {
@@ -59,6 +63,55 @@ describe('extractSessionListItems', () => {
     expect(extractSessionListItems({ sessions: 'not-array' })).toEqual([]);
     expect(extractSessionListItems({ items: 123 })).toEqual([]);
     expect(extractSessionListItems({})).toEqual([]);
+  });
+});
+
+describe('QwenAgentManager input fallbacks', () => {
+  it('cancels when no input callbacks are registered', async () => {
+    const manager = new QwenAgentManager();
+    const connection = (
+      manager as unknown as {
+        connection: {
+          onPermissionRequest: (
+            request: RequestPermissionRequest,
+          ) => Promise<{ optionId: string }>;
+          onAskUserQuestion: (
+            request: AskUserQuestionRequest,
+          ) => Promise<{ optionId: string }>;
+        };
+      }
+    ).connection;
+
+    await expect(
+      connection.onPermissionRequest({
+        sessionId: 'session-1',
+        options: [
+          {
+            optionId: 'proceed_once',
+            name: 'Allow once',
+            kind: 'allow_once',
+          },
+          {
+            optionId: 'reject_once',
+            name: 'Reject',
+            kind: 'reject_once',
+          },
+        ],
+        toolCall: {
+          toolCallId: 'tool-call-1',
+          title: 'Run command',
+          kind: 'execute',
+          status: 'pending',
+        },
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
+
+    await expect(
+      connection.onAskUserQuestion({
+        sessionId: 'session-1',
+        questions: [],
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
   });
 });
 

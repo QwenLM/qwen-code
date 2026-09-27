@@ -103,6 +103,7 @@ function makeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   } as unknown as LlmChat;
   const startChat = vi
     .spyOn(client, 'startChat')

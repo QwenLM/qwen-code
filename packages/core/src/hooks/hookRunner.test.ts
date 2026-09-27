@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { HookRunner } from './hookRunner.js';
 import {
   HookEventName,
@@ -657,6 +658,43 @@ describe('HookRunner', () => {
   });
 
   describe('executeHooksParallel', () => {
+    it('ends an async hook whose hand-off throws instead of rejecting the batch', async () => {
+      vi.spyOn(
+        hookRunner.getAsyncRegistry(),
+        'canAcceptMore',
+      ).mockImplementation(() => {
+        throw new Error('registry unavailable');
+      });
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo background',
+          async: true,
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const onHookStart = vi.fn();
+      const onHookEnd = vi.fn();
+
+      const results = await hookRunner.executeHooksParallel(
+        hookConfigs,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        onHookStart,
+        onHookEnd,
+      );
+
+      expect(onHookStart).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: false }),
+        0,
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].error?.message).toContain('registry unavailable');
+    });
+
     it('should execute multiple hooks in parallel', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -2243,6 +2281,46 @@ describe('HookRunner', () => {
       expect(process.listeners('SIGTERM')).toEqual(sigtermListenersBefore);
     });
 
+    it.each([0, 1, -1, -42, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+      'never signals a process group for invalid child PID %s',
+      async (pid) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+        const before = process.listeners('exit');
+        const child = createControllableMockProcess(pid);
+        mockSpawn.mockReturnValue(child);
+        const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+        const controller = new AbortController();
+        const result = hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput(),
+          controller.signal,
+        );
+        try {
+          const onExit = process
+            .listeners('exit')
+            .find((fn) => !before.includes(fn));
+          onExit?.(0);
+          controller.abort();
+        } finally {
+          child.emit('close', null);
+          await result;
+        }
+        expect(killSpy).not.toHaveBeenCalled();
+        expect(process.listeners('exit')).toEqual(before);
+        // A rejected pid leaves the group running, so the skip must not vanish
+        // without a trace. 0 and NaN are already short-circuited by the `!pid`
+        // branch in terminatePosixHookProcessTree and never reach this guard.
+        if (pid) {
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `hook process group ${pid}: not a safe integer greater than 1`,
+            ),
+          );
+        }
+      },
+    );
+
     it('kills active hooks while leaving parent signals to an application handler', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       const exitListenersBefore = process.listeners('exit');
@@ -2515,6 +2593,42 @@ describe('HookRunner', () => {
         expect(args[args.indexOf('--eval') + 3]).toBe(expectedArg);
       },
     );
+
+    it('rejects broadcast PIDs inside the detached supervisor too', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess());
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.SessionDelete,
+        createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+      );
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      const source = args[args.indexOf('--eval') + 1];
+      const start = source.indexOf('const signalGroup =');
+      const end = source.indexOf('const waitForGroupExit =');
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      for (const pid of [
+        0,
+        1,
+        -1,
+        1.5,
+        NaN,
+        Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+      ]) {
+        const kill = vi.fn();
+        const childKill = vi.fn();
+        runInNewContext(
+          source.slice(start, end) + '\nsignalGroup("SIGKILL"); groupAlive();',
+          {
+            hook: { pid, kill: childKill },
+            process: { platform: 'linux', kill },
+          },
+        );
+        expect(kill).not.toHaveBeenCalled();
+        expect(childKill).not.toHaveBeenCalled();
+      }
+    });
 
     it('registers async hooks with the resolved millisecond timeout', async () => {
       mockSpawn.mockImplementation(() => createMockProcess());
@@ -2971,6 +3085,69 @@ describe('HookRunner', () => {
       expect(spawnArgs[0]).toBe('powershell');
       expect(spawnArgs[1]).toContain('-Command');
       expect(spawnArgs[2].shell).toBe(false);
+    });
+  });
+
+  describe('outcome of results produced outside the runners', () => {
+    const asyncHook: HookConfig = {
+      type: HookType.Command,
+      command: 'background-job',
+      source: HooksConfigSource.Project,
+      async: true,
+    };
+
+    it('reports an unknown hook type as a non-blocking error', async () => {
+      const result = await hookRunner.executeHook(
+        { type: 'unknown' } as unknown as HookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports an async hook refused by the concurrency limit as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'canAcceptMore').mockReturnValue(
+        false,
+      );
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('reports an async hook whose registration loses the race as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'register').mockReturnValue(null);
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+    });
+
+    it('reports an async hook handed to the background as success', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess());
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+      expect(result.isAsync).toBe(true);
+      expect(result.success).toBe(true);
     });
   });
 });

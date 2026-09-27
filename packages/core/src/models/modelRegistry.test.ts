@@ -1071,6 +1071,32 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
   });
 
+  it('keeps realtimeOnly routes out of the selectable list but resolvable by id', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'omni-realtime', name: 'Omni Realtime', realtimeOnly: true },
+      ],
+    });
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI).map((m) => m.id),
+    ).toEqual(['gpt-4o']);
+    // Still resolvable, so naming it as a chat model fails with a clear error
+    // instead of "not found".
+    expect(
+      registry.getModel(AuthType.USE_OPENAI, 'omni-realtime')?.realtimeOnly,
+    ).toBe(true);
+  });
+
+  it('never picks a realtimeOnly route as the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [{ id: 'omni-realtime', realtimeOnly: true }],
+    });
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.USE_OPENAI),
+    ).toBeUndefined();
+  });
+
   it('should propagate imageOnly flag to AvailableModel', () => {
     const config: ModelProvidersConfig = {
       openai: [

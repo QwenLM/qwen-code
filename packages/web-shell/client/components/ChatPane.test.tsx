@@ -37,6 +37,9 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptDispatchError:
+  | ((text: string) => string | undefined)
+  | undefined;
 let queuedPromptStreamingState: string | undefined;
 let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
@@ -81,7 +84,9 @@ const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
+const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  loadSession,
   sendPrompt,
   submitPermission,
   respondToPermission,
@@ -161,9 +166,11 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
+    getPromptDispatchError?: (text: string) => string | undefined;
     streamingState: string;
     sessionHasActivePrompt?: boolean;
   }) => {
+    queuedPromptDispatchError = args.getPromptDispatchError;
     queuedPromptStreamingState = args.streamingState;
     queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
     return {
@@ -1691,7 +1698,7 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
-  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+  it('keeps the workspace in the split header and only shows the toolbar chip when embedded', () => {
     connectionState.capabilities = {
       features: [],
       workspaceCwd: '/work/web-shell',
@@ -1708,6 +1715,19 @@ describe('ChatPane', () => {
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]')?.textContent,
+    ).toContain('Payments API');
+
+    rerender({
+      title: 'Add pagination',
+      workspaceCwd: '/work/api',
+      embedded: true,
+    });
+    expect(container!.querySelector('header')).toBeNull();
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
     expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
@@ -3092,6 +3112,107 @@ describe('ChatPane', () => {
     ]);
   });
 
+  it('hides model setup dynamically while preserving model and session commands', () => {
+    connectionState.commands = [
+      { name: 'auth', description: 'Configure models' },
+      { name: 'model', description: 'Select model' },
+      { name: 'delete', description: 'Delete session' },
+    ];
+    render();
+    const names = () =>
+      latestChatEditorProps.commands.map(
+        (command: { name: string }) => command.name,
+      );
+    expect(names()).toContain('auth');
+    rerender({ modelManagement: { allowAdd: false } });
+    expect(names()).not.toContain('auth');
+    expect(names()).toContain('model');
+    expect(names()).toContain('delete');
+    rerender({ modelManagement: { allowDelete: false } });
+    expect(names()).toContain('auth');
+  });
+
+  it.each([false, true])(
+    'refuses model setup only after the host handler declines (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => false);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Adding models is disabled by the host.',
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'lets the host take over a disabled model setup command (busy=%s)',
+    (busy) => {
+      sessionHasActivePromptValue = busy;
+      const onSlashCommand = vi.fn(() => true);
+      const onImageIngestionNotice = vi.fn();
+      render({
+        modelManagement: { allowAdd: false },
+        onSlashCommand,
+        onImageIngestionNotice,
+      });
+      let accepted;
+      act(() => {
+        accepted = latestOnSubmit!('/auth');
+      });
+      expect(accepted).toBe(true);
+      expect(onSlashCommand).toHaveBeenCalledWith({
+        command: 'auth',
+        args: '',
+        input: '/auth',
+      });
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses current model management policy in a retained submit callback', () => {
+    const onSlashCommand = vi.fn(() => false);
+    render({ onSlashCommand });
+    const retainedSubmit = latestOnSubmit!;
+    const retainedDispatchPolicy = queuedPromptDispatchError!;
+    expect(retainedDispatchPolicy('/auth')).toBeUndefined();
+    rerender({ onSlashCommand, modelManagement: { allowAdd: false } });
+    expect(retainedDispatchPolicy('/auth')).toBe(
+      'Adding models is disabled by the host.',
+    );
+    expect(retainedDispatchPolicy('/model')).toBeUndefined();
+    act(() => {
+      expect(retainedSubmit('/auth')).toBe(true);
+    });
+    // The host saw the command first and declined; the policy refused it.
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'auth',
+      args: '',
+      input: '/auth',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
   it("lists the pane session's own commands in the slash menu", () => {
     connectionState.commands = [
       { name: 'clear', description: 'Clear', source: 'builtin-command' },
@@ -3686,3 +3807,145 @@ describe('ChatPane continuation errors', () => {
     },
   );
 });
+
+it('requires an explicit resume for a stopped pane', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  connectionState.sessionId = 'stopped';
+  connectionState.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+  loadSession.mockClear();
+  render();
+  expect(testid('workspace-runtime-stopped')).not.toBeNull();
+  expect(loadSession).not.toHaveBeenCalled();
+  await act(async () => {
+    [...container!.querySelectorAll('button')]
+      .find((node) => node.textContent === 'Resume conversation')!
+      .click();
+  });
+  expect(loadSession).toHaveBeenCalledWith('stopped', {
+    sessionContext: { kind: 'workspace', cwd: '/workspace' },
+  });
+});
+
+it('fences pane submits while the runtime is stopped and says why', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  // The parked state retains sessionId, so the status-based submit guard
+  // alone does not catch this.
+  connectionState.sessionId = 'stopped';
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  await act(async () => {
+    testid('pane-submit')!.click();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+});
+
+it('does not submit a deferred /plan prompt after the runtime stops', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  render();
+  act(() => {
+    latestOnSubmit!('/plan explain the migration');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  // The runtime stops while the plan-mode switch is still in flight; the
+  // deferred continuation must re-check the fence before submitting.
+  connectionState = {
+    ...connectionState,
+    runtimeStopped: true,
+    status: 'disconnected',
+  };
+  rerender();
+  await act(async () => prepared.resolve({ mode: 'plan' }));
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it.each(['/auth', '/login', '/connect'])(
+  'blocks rewritten /plan %s before changing mode',
+  (command) => {
+    const notice = vi.fn();
+    connectionState.commands = [
+      {
+        name: 'auth',
+        source: 'builtin-command',
+        altNames: ['login', 'connect'],
+      },
+    ];
+    render({
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice: notice,
+    });
+    act(() => {
+      expect(latestOnSubmit!(`/plan ${command}`)).toBe(true);
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith(
+      'warning',
+      'Adding models is disabled by the host.',
+    );
+  },
+);
+it('rechecks model policy after asynchronous plan preparation', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  act(() => {
+    latestOnSubmit!('/plan /auth');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  rerender({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  await act(async () => {
+    prepared.resolve({ mode: 'yolo' });
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+});
+it('preserves a stopped pane draft even when model setup is disabled', () => {
+  connectionState.runtimeStopped = true;
+  const notice = vi.fn();
+  render({
+    modelManagement: { allowAdd: false },
+    onImageIngestionNotice: notice,
+  });
+  act(() => {
+    expect(latestOnSubmit!('/auth')).toBe(false);
+  });
+  expect(notice).toHaveBeenCalledExactlyOnceWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+it.each(['builtin-command', 'project', 'missing'])(
+  'uses loaded %s identity for the auth menu and dispatch',
+  async (source) => {
+    connectionState.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      // A ready snapshot without any auth entry (disabled list, SSH
+      // whitelist) must fail closed exactly like the builtin identity does.
+      ...(source === 'missing' ? [] : [{ name: 'auth', source }]),
+    ];
+    render({ modelManagement: { allowAdd: false } });
+    const names = latestChatEditorProps.commands.map(
+      (command: { name: string }) => command.name,
+    );
+    expect(names.includes('auth')).toBe(source === 'project');
+    await act(async () => {
+      latestOnSubmit!('/auth');
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
+  },
+);

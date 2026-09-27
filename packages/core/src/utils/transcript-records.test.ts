@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isTranscriptConversationRecord,
   prepareTranscriptRecords,
   projectUserTranscriptForDisplay,
   wrapUserPromptSubmitContext,
@@ -195,6 +196,22 @@ describe('prepareTranscriptRecords', () => {
     expect(prepared.diagnostics).toEqual([]);
   });
 
+  it('accepts Omni recall metadata without marking history incomplete', () => {
+    const prepared = prepareTranscriptRecords([
+      record('recall', null, {
+        type: 'system',
+        subtype: 'omni_recall',
+        message: undefined,
+        systemPayload: {
+          resourceIds: ['media-1'],
+          selectedEntryIds: ['entry-1'],
+        },
+      }),
+      record('root', 'recall'),
+    ]);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
   it('accepts session source metadata as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('source', null, {
@@ -306,6 +323,35 @@ describe('prepareTranscriptRecords', () => {
         code: 'unknown_record_or_part',
         path: 'subtype',
       }),
+    );
+  });
+
+  it.each([
+    'managed_session_header_v1',
+    'managed_session_event_v1',
+    'managed_session_commit_v1',
+  ])('keeps %s out of ordinary conversation projection', (subtype) => {
+    const managedRecord = record('managed', 'root', {
+      type: 'system',
+      subtype,
+      message: undefined,
+      systemPayload: { managedSession: {} },
+    });
+    const prepared = prepareTranscriptRecords([
+      record('root', null),
+      managedRecord,
+    ]);
+
+    expect(prepared.records.map((item) => item.uuid)).toEqual(['root']);
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'managed',
+        path: 'subtype',
+      }),
+    );
+    expect(isTranscriptConversationRecord({ type: 'system', subtype })).toBe(
+      false,
     );
   });
 
