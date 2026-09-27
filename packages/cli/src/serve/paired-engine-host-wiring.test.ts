@@ -249,19 +249,21 @@ describe('a paired embedded serve host', () => {
   });
 
   it('runs every session on Legacy and refuses Managed owners without a Managed engine', async () => {
-    const { legacy, managed, post } = await pairedHost({ withManaged: false });
+    const { legacy, post } = await pairedHost({ withManaged: false });
 
     expect((await post('/session')).status).toBe(200);
     expect(legacy.created()).toBe(1);
 
     const managedId = crypto.randomUUID();
     await writeOwner(managedId, 'managed');
+    const before = await readFile(transcriptPath(managedId), 'utf8');
     const refused = await post(`/session/${managedId}/resume`);
     expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({
       code: 'session_execution_engine_unavailable',
     });
     expect(legacy.restored()).toEqual([]);
-    expect(managed.channels).toEqual([]);
+    expect(legacy.channels).toHaveLength(1);
+    expect(await readFile(transcriptPath(managedId), 'utf8')).toBe(before);
   });
 });

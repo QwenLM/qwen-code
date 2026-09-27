@@ -168,8 +168,11 @@ branch/side-task requests reject before mutating history.
 | Session routing     | `session-control-plane.ts`, `BridgeClient` callbacks                                       |
 | Verification        | Collocated Bridge/lifecycle tests and isolated process test script                         |
 
-Existing daemon, Channels and embedded constructors remain on the single-factory
-path. There are no new daemon routes. Workspace control is workspace scoped;
+Every constructor stays on the single-factory path unless
+`qwen serve --experimental-paired-engines` pairs the daemon's ordinary workspace
+runtimes and the serve app's default Bridge
+([paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)). There
+are no new daemon routes. Workspace control is workspace scoped;
 all session operations belong to the live session owner. A missing or failed
 Managed owner must never resolve through a Legacy or primary-runtime fallback.
 
@@ -196,5 +199,5 @@ factory/connection calls and pending teardown, not only final session counts.
 The owner persistence dependency and production host receipt implementation
 remain the integration questions posted in #12380; the Bridge seam is usable
 for contract tests while those are resolved. The B2a follow-up implements the
-Legacy receipt and the restore selector; host wiring is designed in B2d and
-remains unimplemented.
+Legacy receipt and the restore selector; B2d wires paired engines into ordinary
+hosts behind an experimental opt-in, with no Managed engine registered yet.

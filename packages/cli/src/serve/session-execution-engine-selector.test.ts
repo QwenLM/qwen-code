@@ -65,6 +65,15 @@ function owner(sessionId: string, engine: unknown, version: unknown = 1) {
   });
 }
 
+// A record core writes through its recorder; ownership must not depend on it.
+function textElements(sessionId = SESSION_ID) {
+  return record(sessionId, {
+    type: 'system',
+    subtype: 'user_text_elements',
+    systemPayload: { content: 'hello', textElements: [] },
+  });
+}
+
 function transcriptPath(fileSessionId = SESSION_ID): string {
   return new SessionService(workspaceCwd, {
     runtimeBaseDir,
@@ -88,7 +97,9 @@ async function writeTranscript(
 function managedEngine(
   result:
     | ManagedExecutionEngineCompatibility
-    | (() => ManagedExecutionEngineCompatibility),
+    | (() =>
+        | ManagedExecutionEngineCompatibility
+        | Promise<ManagedExecutionEngineCompatibility>),
 ) {
   const evaluate = vi.fn((_selection: BridgeExecutionSelection) =>
     typeof result === 'function' ? result() : result,
@@ -200,6 +211,13 @@ describe('createSessionExecutionEngineSelector: new sessions', () => {
     });
     await expect(spawn(managed)).resolves.toBe('legacy');
   });
+
+  it('creates on Legacy when an asynchronous compatibility check rejects', async () => {
+    const managed = managedEngine(async () => {
+      throw new Error('evaluation rejected');
+    });
+    await expect(spawn(managed)).resolves.toBe('legacy');
+  });
 });
 
 describe('createSessionExecutionEngineSelector: cold restore', () => {
@@ -209,6 +227,22 @@ describe('createSessionExecutionEngineSelector: cold restore', () => {
       await writeTranscript([record(SESSION_ID)]);
       await expect(restore(operation)).resolves.toBe('legacy');
       await expect(restore(operation, managedEngine(COMPATIBLE))).resolves.toBe(
+        'legacy',
+      );
+    },
+  );
+
+  it.each([
+    ['without an owner record', () => [record(SESSION_ID), textElements()]],
+    [
+      'with a Legacy owner',
+      () => [owner(SESSION_ID, 'legacy'), record(SESSION_ID), textElements()],
+    ],
+  ])(
+    'restores a Legacy history that recorded text elements %s',
+    async (_name, lines) => {
+      await writeTranscript(lines());
+      await expect(restore('load', managedEngine(COMPATIBLE))).resolves.toBe(
         'legacy',
       );
     },
@@ -265,13 +299,23 @@ describe('createSessionExecutionEngineSelector: cold restore', () => {
         throw new Error('evaluation crashed');
       },
     ],
+    [
+      'rejecting',
+      async () => {
+        throw new Error('evaluation rejected');
+      },
+    ],
   ] as const)(
     'refuses a Managed owner whose configuration is %s instead of using Legacy',
     async (_name, result) => {
       await writeTranscript([owner(SESSION_ID, 'managed'), record(SESSION_ID)]);
       const selection = restore(
         'load',
-        managedEngine(result as () => ManagedExecutionEngineCompatibility),
+        managedEngine(
+          result as () =>
+            | ManagedExecutionEngineCompatibility
+            | Promise<ManagedExecutionEngineCompatibility>,
+        ),
       );
       await expect(selection).rejects.toBeInstanceOf(
         SessionExecutionEngineError,
