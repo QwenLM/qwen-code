@@ -31,10 +31,12 @@ const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 
 /**
- * models.dev providers whose entries feed the catalog. Conflicting normalized
- * ids are omitted so endpoint-specific limits fall back to existing tables.
- * Third-party routers are left out — they republish vendor models under
- * their own aliases and limits.
+ * models.dev providers whose token limits feed the catalog. Conflicting
+ * normalized ids lose their limits so endpoint-specific values fall back to
+ * existing tables. Third-party routers are left out — they republish vendor
+ * models under their own aliases and limits. Modalities are not gated by
+ * this list: they describe the weights, not the endpoint, so every provider
+ * that serves a model contributes them (see trimModelsDevCatalog).
  */
 export const MODELS_DEV_PROVIDERS: readonly string[] = [
   'anthropic',
@@ -70,29 +72,32 @@ const MODALITIES: ReadonlyArray<keyof InputModalities> = [
   'video',
 ];
 
-function toEntry(model: ModelsDevModel): ModelCatalogEntry | undefined {
-  const entry: ModelCatalogEntry = {};
+type Limits = Pick<ModelCatalogEntry, 'context' | 'output'>;
+
+function toLimits(model: ModelsDevModel): Limits | undefined {
+  const limits: Limits = {};
   const context = model.limit?.input || model.limit?.context;
   if (context !== undefined && Number.isSafeInteger(context) && context > 0) {
-    entry.context = context;
+    limits.context = context;
   }
   if (
     model.limit?.output !== undefined &&
     Number.isSafeInteger(model.limit.output) &&
     model.limit.output > 0
   ) {
-    entry.output = model.limit.output;
+    limits.output = model.limit.output;
   }
+  return Object.keys(limits).length > 0 ? limits : undefined;
+}
+
+function toModalities(model: ModelsDevModel): InputModalities | undefined {
   const modalities: InputModalities = {};
   for (const modality of MODALITIES) {
     if (model.modalities?.input?.includes(modality)) {
       modalities[modality] = true;
     }
   }
-  if (Object.keys(modalities).length > 0) {
-    entry.modalities = modalities;
-  }
-  return Object.keys(entry).length > 0 ? entry : undefined;
+  return Object.keys(modalities).length > 0 ? modalities : undefined;
 }
 
 function sortedModels(
@@ -118,7 +123,7 @@ function servesAgentTurns(model: ModelsDevModel): boolean {
   );
 }
 
-/** `toEntry` builds its keys in a fixed order, so this compares by value. */
+/** `toLimits` builds its keys in a fixed order, so this compares by value. */
 function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -130,27 +135,35 @@ function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
  *
  * Two ids can land on the same key, either because they normalize together
  * (`qwen3-max` and `qwen3-max-20260123`) or because several providers serve
- * the same model. If any of these entries disagree, the key is
- * dropped rather than guessed: a context window or output limit is a property
- * of the endpoint, not of the weights, and the catalog cannot tell which
- * endpoint a request will reach. DashScope caps GLM-5 output at 16,384 while
- * Z.ai allows 131,072, and both numbers are correct for their own endpoint.
- * Recording either one would be wrong for half of the users, so such models
- * keep the answer the regex tables give them today.
+ * the same model. Limits and modalities follow different trust rules:
+ *
+ * A context window or output limit is a property of the endpoint, not of the
+ * weights — DashScope caps GLM-5 output at 16,384 while Z.ai allows 131,072,
+ * and both numbers are correct for their own endpoint — so only allowlisted
+ * providers contribute limits, and if any of them disagree the limits are
+ * dropped rather than guessed: the catalog cannot tell which endpoint a
+ * request will reach, so such models keep the answer the regex tables give
+ * them today.
+ *
+ * Modalities describe the weights, so every provider that serves the model
+ * contributes them, unioned: a first-party vendor outside the allowlist (or a
+ * custom endpoint's vendor, e.g. issue #8558's thinkingmachines/inkling)
+ * still surfaces image/pdf support. A catalog modality is not a guarantee on
+ * every endpoint — the lookup-side corrections handle the endpoint-specific
+ * exceptions — so a stray router report can only widen, never replace, what
+ * the regex tables and the vendor tables already allow.
  */
 export function trimModelsDevCatalog(
   api: ModelsDevApi,
   fetchedAt: string,
   source: string = MODELS_DEV_URL,
 ): ModelCatalog {
-  const candidates = new Map<string, ModelCatalogEntry[]>();
-  for (const provider of MODELS_DEV_PROVIDERS) {
-    for (const model of Object.values(api[provider]?.models ?? {})) {
+  const limitCandidates = new Map<string, Limits[]>();
+  const modalityCandidates = new Map<string, InputModalities[]>();
+  for (const [provider, bucket] of Object.entries(api)) {
+    const trustedForLimits = MODELS_DEV_PROVIDERS.includes(provider);
+    for (const model of Object.values(bucket?.models ?? {})) {
       if (typeof model.id !== 'string' || !servesAgentTurns(model)) {
-        continue;
-      }
-      const entry = toEntry(model);
-      if (!entry) {
         continue;
       }
       const key = normalize(model.id);
@@ -161,19 +174,47 @@ export function trimModelsDevCatalog(
       if (normalize(key) !== key) {
         continue;
       }
-      const existing = candidates.get(key);
-      if (existing) {
-        existing.push(entry);
-      } else {
-        candidates.set(key, [entry]);
+      const modalities = toModalities(model);
+      if (modalities) {
+        const existing = modalityCandidates.get(key);
+        if (existing) {
+          existing.push(modalities);
+        } else {
+          modalityCandidates.set(key, [modalities]);
+        }
+      }
+      if (trustedForLimits) {
+        const limits = toLimits(model);
+        if (limits) {
+          const existing = limitCandidates.get(key);
+          if (existing) {
+            existing.push(limits);
+          } else {
+            limitCandidates.set(key, [limits]);
+          }
+        }
       }
     }
   }
   const agreed: Array<readonly [string, ModelCatalogEntry]> = [];
-  for (const [key, all] of candidates) {
-    const first = all[0]!;
-    if (all.every((entry) => sameEntry(entry, first))) {
-      agreed.push([key, first]);
+  for (const key of new Set([
+    ...limitCandidates.keys(),
+    ...modalityCandidates.keys(),
+  ])) {
+    const entry: ModelCatalogEntry = {};
+    const limits = limitCandidates.get(key);
+    if (
+      limits &&
+      limits.every((candidate) => sameEntry(candidate, limits[0]!))
+    ) {
+      Object.assign(entry, limits[0]);
+    }
+    const allModalities = modalityCandidates.get(key);
+    if (allModalities) {
+      entry.modalities = Object.assign({}, ...allModalities);
+    }
+    if (Object.keys(entry).length > 0) {
+      agreed.push([key, entry]);
     }
   }
   return { source, fetchedAt, models: sortedModels(agreed) };

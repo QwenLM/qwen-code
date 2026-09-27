@@ -103,6 +103,16 @@ const api: ModelsDevApi = {
       'router-only': chat('router-only', { context: 9, output: 9 }),
     },
   },
+  thinkingmachines: {
+    models: {
+      // First-party vendor outside the allowlist (issue #8558): its
+      // modalities project, its endpoint limits do not.
+      inkling: chat('inkling', { context: 65536, output: 65536 }, [
+        'text',
+        'image',
+      ]),
+    },
+  },
 };
 
 const trimmed = {
@@ -112,6 +122,7 @@ const trimmed = {
     modalities: { image: true, pdf: true },
   },
   'gpt-x': { context: 272000, output: 128000, modalities: { image: true } },
+  inkling: { modalities: { image: true } },
   'qwen-x': {
     context: 1000000,
     output: 65536,
@@ -127,7 +138,7 @@ const ENV_NAMES = [
 ];
 
 describe('trimModelsDevCatalog', () => {
-  it('keeps only limits and modalities from first-party providers, keyed by normalized id', () => {
+  it('keeps limits from allowlisted providers and unions modalities across all of them, keyed by normalized id', () => {
     expect(trimModelsDevCatalog(api, NOW)).toEqual({
       source: MODELS_DEV_URL,
       fetchedAt: NOW,
@@ -182,6 +193,35 @@ describe('trimModelsDevCatalog', () => {
     const models = trimModelsDevCatalog(api, NOW).models;
     expect(models).not.toHaveProperty('nothing-known');
     expect(models).not.toHaveProperty('router-only');
+  });
+
+  it('projects modalities, but not limits, for a first-party vendor outside the allowlist', () => {
+    // issue #8558: thinkingmachines/inkling's image support was invisible
+    // because the allowlist gated the whole entry.
+    expect(trimModelsDevCatalog(api, NOW).models['inkling']).toEqual({
+      modalities: { image: true },
+    });
+  });
+
+  it('unions modalities across providers instead of dropping on disagreement', () => {
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-x': chat('glm-x', { context: 204800 }, ['text', 'image']),
+          },
+        },
+        openrouter: {
+          models: { 'glm-x': chat('glm-x', { context: 999 }, ['text', 'pdf']) },
+        },
+      },
+      NOW,
+    ).models;
+    // The router's limit is untrusted, but its modality report still unions.
+    expect(models['glm-x']).toEqual({
+      context: 204800,
+      modalities: { image: true, pdf: true },
+    });
   });
 
   it('records the source it was trimmed from', () => {

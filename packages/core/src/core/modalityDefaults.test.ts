@@ -4,21 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { invalidateModelCatalog } from '../models/model-catalog.js';
 import {
   defaultModalities,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from './modalityDefaults.js';
 
-vi.mock('../models/model-catalog.js', () => {
-  const entries: Record<string, { modalities?: Record<string, boolean> }> = {
-    'qwen-catalog-vision': { modalities: { image: true } },
-    'qwen3-vl-catalog': { modalities: { pdf: true } },
-    'catalog-only-model': { modalities: { audio: true } },
-    'catalog-vision-model': { modalities: { image: true } },
-  };
-  return { lookupModelCatalog: (model: string) => entries[model] };
+// Run against the real bundled catalog (the production default). QWEN_HOME is
+// pinned to an empty dir so a host's refreshed cache cannot replace the
+// bundle, and deleting the kill-switch opts back out of the test-setup's
+// regex-only default.
+let tempDir: string;
+let previousHome: string | undefined;
+let previousSwitch: string | undefined;
+
+beforeAll(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'modality-defaults-'));
+  previousHome = process.env['QWEN_HOME'];
+  previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+  process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
+  delete process.env['QWEN_CODE_MODELS_DEV'];
+  invalidateModelCatalog();
+});
+
+afterAll(() => {
+  if (previousHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = previousHome;
+  }
+  if (previousSwitch === undefined) {
+    delete process.env['QWEN_CODE_MODELS_DEV'];
+  } else {
+    process.env['QWEN_CODE_MODELS_DEV'] = previousSwitch;
+  }
+  invalidateModelCatalog();
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
 describe('defaultModalities', () => {
@@ -184,10 +210,13 @@ describe('defaultModalities', () => {
       expect(defaultModalities('qwen3.7-max')).toEqual({});
     });
 
-    it('returns image for qwen3.8-max', () => {
-      const m = defaultModalities('qwen3.8-max');
-      expect(m.image).toBe(true);
-      expect(m.video).toBeUndefined();
+    it('returns image + video for qwen3.8-max', () => {
+      // The bundled catalog adds video; its pdf stays endpoint-gated by the
+      // lookupModelCatalog correction.
+      expect(defaultModalities('qwen3.8-max')).toEqual({
+        image: true,
+        video: true,
+      });
     });
 
     it('returns image for qwen3.8-max-preview (provider-prefixed)', () => {
@@ -258,16 +287,20 @@ describe('defaultModalities', () => {
       expect(m.pdf).toBeUndefined();
     });
 
-    it('returns image for glm-5v-turbo', () => {
-      const m = defaultModalities('glm-5v-turbo');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
+    it('returns image + pdf + video for glm-5v-turbo', () => {
+      expect(defaultModalities('glm-5v-turbo')).toEqual({
+        image: true,
+        pdf: true,
+        video: true,
+      });
     });
 
-    it('returns image for glm-5.3-flash', () => {
-      const m = defaultModalities('glm-5.3-flash');
-      expect(m.image).toBe(true);
-      expect(m.pdf).toBeUndefined();
+    it('returns image + pdf + video for glm-5.3-flash', () => {
+      expect(defaultModalities('glm-5.3-flash')).toEqual({
+        image: true,
+        pdf: true,
+        video: true,
+      });
     });
 
     it('returns text-only for glm-5', () => {
@@ -411,30 +444,5 @@ describe('isTieredEffortWireModel', () => {
     expect(isTieredEffortWireModel('coder-model')).toBe(false);
     expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
     expect(isTieredEffortWireModel(undefined)).toBe(false);
-  });
-});
-
-describe('models.dev catalog', () => {
-  it('adds catalog modalities to a text-only family', () => {
-    expect(defaultModalities('qwen-catalog-vision')).toEqual({ image: true });
-  });
-
-  it('merges catalog and regex modalities instead of replacing them', () => {
-    expect(defaultModalities('qwen3-vl-catalog')).toEqual({
-      image: true,
-      video: true,
-      pdf: true,
-    });
-  });
-
-  it('uses the catalog alone for a model no family pattern matches', () => {
-    expect(defaultModalities('catalog-only-model')).toEqual({ audio: true });
-    expect(defaultModalities('unknown-model')).toEqual({});
-  });
-
-  it('looks the catalog up by normalized id', () => {
-    expect(defaultModalities('provider/Catalog-Vision-Model:free')).toEqual({
-      image: true,
-    });
   });
 });
