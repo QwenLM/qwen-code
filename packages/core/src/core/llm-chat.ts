@@ -415,7 +415,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
 
   const flushThoughtEpisode = () => {
     if (!hasOpenEpisode) return;
-    const text = openEpisodeText.trim();
+    const text = openEpisodeText;
     // A signature-only episode (no text) is kept, not dropped: it is
     // still potentially replayable per Anthropic's spec, and this is
     // the ACTIVE (latest) turn's thinking, which must replay byte-exact
@@ -423,7 +423,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
     // this same empty-text shape but only from non-latest turns, where
     // the rationale is that prior-turn thinking is disposable, not that
     // an empty-text signed block is inherently invalid.
-    if (text !== '' || openEpisodeSignature !== '') {
+    if (text.trim() !== '' || openEpisodeSignature !== '') {
       const episodePart: Part = { text, thought: true };
       if (openEpisodeSignature) {
         episodePart.thoughtSignature = openEpisodeSignature;

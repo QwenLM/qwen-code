@@ -6,6 +6,10 @@ import {
 } from 'react';
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_ZH,
+} from './settings/messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -96,6 +100,42 @@ const EN: Messages = {
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
+  'managed.title': 'Managed Agents',
+  'managed.sessions': 'Managed sessions',
+  'managed.conversation': 'Managed conversation',
+  'managed.new': 'New managed task',
+  'managed.refresh': 'Refresh',
+  'managed.empty': 'No managed tasks yet.',
+  'managed.loading': 'Loading…',
+  'managed.more': 'Load more',
+  'managed.prompt': 'Message the managed agent',
+  'managed.runtime': 'Environment',
+  'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
+  'managed.send': 'Send',
+  'managed.sending': 'Submitting…',
+  'managed.elapsed': (v) => `${v?.seconds ?? 0}s elapsed`,
+  'managed.runningHint':
+    'This turn is running. Sending another message is paused.',
+  'managed.retry': 'Retry the same request',
+  'managed.cancel': 'Cancel turn',
+  'managed.uncertain':
+    'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.newRequired': 'Start a new task to send another message.',
+  'managed.truncated': '[Details truncated]',
+  'managed.phase.admitted': 'Accepted',
+  'managed.phase.runtime_starting': 'Preparing environment',
+  'managed.phase.agent_running': 'Thinking / responding',
+  'managed.phase.waiting_runtime': 'Waiting for environment',
+  'managed.phase.tool_running': 'Executing tool',
+  'managed.phase.cancelling': 'Cancelling',
+  'managed.phase.completed': 'Completed',
+  'managed.phase.failed': 'Failed',
+  'managed.phase.cancelled': 'Cancelled',
+  'managed.runtime.unknown': 'Unknown',
+  'managed.runtime.starting': 'Preparing',
+  'managed.runtime.ready': 'Ready',
+  'managed.runtime.failed': 'Preparation failed',
+
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -122,6 +162,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.worktrees': 'Worktrees…',
   'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
@@ -266,6 +307,69 @@ const EN: Messages = {
   'gitLog.allBranches': 'All branches',
   'gitLog.search': 'Search message, author, or hash',
   'gitLog.noMatches': 'No commits match',
+  'gitWorktrees.title': 'Worktrees',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} worktrees`,
+  'gitWorktrees.loading': 'Loading worktrees…',
+  'gitWorktrees.error': 'Failed to load worktrees',
+  'gitWorktrees.unavailable': 'Git is not available for this workspace',
+  'gitWorktrees.empty': 'No worktrees',
+  'gitWorktrees.noMatches': 'No worktrees match',
+  'gitWorktrees.filter': 'Filter by path or branch',
+  'gitWorktrees.newSession': 'New worktree session…',
+  'gitWorktrees.main': 'main',
+  'gitWorktrees.current': 'this workspace',
+  'gitWorktrees.detached': 'detached HEAD',
+  'gitWorktrees.bare': 'bare',
+  'gitWorktrees.locked': 'locked',
+  'gitWorktrees.prunable': 'stale',
+  'gitWorktrees.clean': 'clean',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} change(s)`,
+  'gitWorktrees.statusError': 'status unavailable',
+  'gitWorktrees.remove': 'Remove',
+  'gitWorktrees.removeLabel': (v) => `Remove worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': 'Removing…',
+  'gitWorktrees.cancel': 'Cancel',
+  'gitWorktrees.confirm':
+    'Remove this worktree? Its directory is deleted from disk; the branch is kept.',
+  'gitWorktrees.confirmStale':
+    'Remove this stale entry? Git stops tracking worktrees it can no longer find. Whatever is left in its directory stays; the bookkeeping git keeps for it does not.',
+  'gitWorktrees.confirmDetached':
+    'Remove this worktree? Its directory is deleted from disk. It is on a detached HEAD, so there is no branch to keep.',
+  'gitWorktrees.blockedDirty': (v) =>
+    `${v?.count ?? 0} uncommitted change(s) would be discarded.`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} running session(s) would lose their checkout.`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `Could not read where ${v?.count ?? 0} running session(s) are working. Any working here would lose their checkout.`,
+  'gitWorktrees.blockedUnknown':
+    'The working tree could not be checked for uncommitted changes, and any there would be discarded.',
+  'gitWorktrees.blockedOperation': (v) =>
+    `An unfinished ${v?.operation ?? 'git'} would be lost.`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `No branch keeps the commits here; ${String(v?.head ?? '').slice(0, 7)} would be left for git to collect.`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason
+      ? `This worktree is locked: ${v.reason}`
+      : 'This worktree is locked.',
+  'gitWorktrees.blockedRefused': 'Git refused to remove this worktree.',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `The workspace ${v.name} lives in this worktree, so removing it would take the workspace too. Remove the workspace first.`
+      : 'A registered workspace lives in this worktree, so removing it would take the workspace too. Remove the workspace first.',
+  'gitWorktrees.blockedSubmodules':
+    'A submodule of this worktree keeps a repository of its own, and removing the worktree deletes that repository too.',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    'Whether a submodule of this worktree keeps a repository of its own could not be checked. If one does, removing the worktree deletes it too.',
+  'gitWorktrees.refreshFailed':
+    'The list could not be refreshed, so it may be out of date.',
+  'gitWorktrees.removeAnyway': 'Remove anyway',
+  'gitWorktrees.removeFailed': 'Failed to remove the worktree',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git no longer tracks ${v?.name ?? ''}, but its directory is still on disk.`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `Removing ${v?.name ?? ''} was refused while you were looking elsewhere: ${v.reason}`
+      : `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -677,6 +781,9 @@ const EN: Messages = {
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
   'composerAdd.plan.busy': 'Switching mode',
+  'composerAdd.btw.label': 'Ask a side question',
+  'composerAdd.btw.description': 'Keep the main task running',
+  'composerAdd.btw.textOnly': 'Remove attachments first',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -930,6 +1037,9 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated base overhead',
+  'contextUsage.estimatedUsage': 'Estimated usage, including the conversation',
+  'contextUsage.usageEstimatedWithConversation':
+    'No provider usage yet. The estimates below include the conversation.',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -1161,7 +1271,8 @@ const EN: Messages = {
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
   'daemon.usage.dailySessionsSub': 'active session counts per day',
-  'delete.cannotCurrent': 'Cannot delete the current active session.',
+  'delete.cannotCurrent':
+    'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,
@@ -1598,6 +1709,8 @@ const EN: Messages = {
   'attachment.loadingPreview': 'Loading preview...',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
+  'sideTask.commandsLoadingTimedOut':
+    'Command information is still unavailable. Your side-task prompt has been kept and will be checked when it loads.',
   'sideTask.promptFailed': 'Failed to send the side-task question',
   'sideTask.renameFailed': 'Failed to name side task',
   'turnOutputs.preview': 'Preview',
@@ -1627,6 +1740,7 @@ const EN: Messages = {
   'sidebar.sessionSource.channels': 'Channels',
   'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
+  'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
@@ -1768,6 +1882,12 @@ const EN: Messages = {
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
   'sidebar.settings': 'Settings',
+  'update.button': 'Update',
+  'update.restarting': 'Restarting…',
+  'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.failed':
+    'Update could not finish. Check the service connection and retry.',
+
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
@@ -1806,7 +1926,10 @@ const EN: Messages = {
   'sidebar.deleteFailed': 'Failed to delete session',
   'sidebar.newSessionFailed': 'Failed to create a new chat',
   'sidebar.switchFailed': 'Failed to switch session',
-  'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
+  'sidebar.currentDeleteDisabled':
+    'The current session is running and cannot be deleted',
+  'sidebar.currentStandaloneDeleteDisabled':
+    'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
@@ -1895,6 +2018,7 @@ const EN: Messages = {
       : `${count} queued shell commands will not run.`;
   },
   'queue.queueFailed': 'Failed to queue message',
+  'queue.attachmentCleanupFailed': 'Failed to discard uploaded attachments',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
   'queue.insertFailed': 'Failed to insert queued message',
@@ -2032,6 +2156,31 @@ const EN: Messages = {
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
+  'turnCalls.open': 'View tool calls',
+  'turnCalls.title': 'Tool calls',
+  'turnCalls.count': (v) => `${v?.count ?? 0} tool calls`,
+  'turnCalls.tool': 'Tool call',
+  'turnCalls.elapsed': (v) => `Elapsed: ${v?.duration ?? ''}`,
+  'turnCalls.startedAt': (v) => `Start time: ${v?.time ?? ''}`,
+  'turnCalls.endedAt': (v) => `End time: ${v?.time ?? ''}`,
+  'turnCalls.empty': 'No tool call records for this turn',
+  'turnCalls.arguments': 'Arguments',
+  'turnCalls.result': 'Result',
+  'turnCalls.other': 'Other',
+  'turnCalls.completed': 'Completed',
+  'turnCalls.unknown': 'Unknown status',
+  'turnCalls.loading': 'Loading this turn’s call records…',
+  'turnCalls.loadError': 'Could not load all call records for this turn.',
+  'turnCalls.indexError': 'Could not refresh the prompt list.',
+  'turnCalls.unresolved':
+    'Could not locate this prompt in the session history. Try refreshing.',
+  'turnCalls.running': 'Running',
+  'turnCalls.pending': 'Pending',
+  'turnCalls.cancelled': 'Cancelled',
+  'turnCalls.filter': 'Filter by tool type',
+  'turnCalls.prompt': 'Prompt',
+  'turnCalls.refresh': 'Refresh',
+  'turnCalls.all': 'All tools',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -2771,22 +2920,7 @@ const EN: Messages = {
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
     'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
-  'settings.models.editWindow': 'Edit context window',
-  'settings.models.windowHint':
-    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
-  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
-  'settings.models.saved': 'Saved',
   'model.setAdvisor': 'Set Advisor Model',
-  'settings.label.advisorModel': 'Advisor Model',
-  'settings.label.imageModel': 'Image Model',
-  'settings.label.voiceModel': 'Voice Model',
-  'settings.description.advisorModel':
-    'Model used to review recent conversation progress. Leave empty to use the main model.',
-  'settings.description.imageModel':
-    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
-  'settings.description.voiceModel':
-    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
-
   'model.setImage': 'Set Image Model',
   'model.useMain': 'Use main model',
   'model.disabled': 'Disabled',
@@ -3009,7 +3143,14 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated': 'Showing the most recent records of this session.',
+  'trajectory.truncated':
+    'Showing the most recent records; earlier history is not loaded.',
+  'trajectory.loadingPages': (v) =>
+    `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
+  'trajectory.olderFailed': (v) =>
+    `Earlier records could not be read: ${v?.message ?? ''}`,
+  'trajectory.olderPartial':
+    'Earlier records could only be read in part, so they are left out.',
   'trajectory.loadFailed': (v) =>
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
@@ -3036,6 +3177,32 @@ const EN: Messages = {
   'trajectory.badge.cancelled': 'stop',
   'trajectory.badge.other': 'other',
   'trajectory.cancelled': 'Turn cancelled',
+  'trajectory.overview.label': (v) =>
+    `Timeline of ${plural(v?.spans, 'timed record')}, ${v?.busy ?? ''} of activity`,
+  'trajectory.overview.busy': (v) => `${v?.duration ?? ''} active`,
+  'trajectory.range.status': (v) =>
+    `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
+  'trajectory.range.clear': 'Clear time selection',
+  'trajectory.range.empty': 'No request or tool ran in the selected time.',
+  'trajectory.mode.clock': 'Real time, idle included',
+  'trajectory.clock.window': (v) =>
+    `${v?.elapsed ?? ''} elapsed, ${v?.active ?? ''} active`,
+  'trajectory.clock.label': (v) =>
+    `Timeline of ${v?.spans ?? 0} timed records over ${v?.elapsed ?? ''}, ${v?.active ?? ''} of activity`,
+  'trajectory.clock.status': 'Showing real time, idle included',
+  'trajectory.active.status': 'Showing active time only',
+  'trajectory.zoom.in': 'Zoom in',
+  'trajectory.zoom.out': 'Zoom out',
+  'trajectory.zoom.reset': 'Show the whole run',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} of ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `, zoomed to ${v?.from ?? ''}–${v?.to ?? ''}`,
+  'trajectory.zoom.status': (v) =>
+    `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
+  'trajectory.range.aria': (v) =>
+    `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
+  'trajectory.overview.lane.requests': 'req',
+  'trajectory.overview.lane.tools': 'tool',
+  'trajectory.overview.lane.subagents': 'sub',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -3547,7 +3714,6 @@ const EN: Messages = {
   'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
-  'settings.title': 'Settings',
   'channels.title': 'Channels',
   'channels.description':
     'Connect Qwen Code to the places where your team already works.',
@@ -3661,13 +3827,6 @@ const EN: Messages = {
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
-  'channels.editor.field.github.senderPolicy': 'Sender Policy',
-  'channels.editor.field.github.senderPolicy.description':
-    'Use "Allowlist" with allowed users on public repos',
-  'channels.editor.field.github.allowedUsers':
-    'Allowed Users (comma-separated)',
-  'channels.editor.field.github.allowedUsers.description':
-    'GitHub usernames, used by Allowlist and Pairing policies',
   'channels.editor.field.github.reasonFilter': 'Reason Filter',
   'channels.editor.field.github.reasonFilter.description':
     'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
@@ -3680,13 +3839,6 @@ const EN: Messages = {
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
-  'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
-  'channels.editor.field.gitlab.senderPolicy.description':
-    'Use "Allowlist" with allowed users on public projects',
-  'channels.editor.field.gitlab.allowedUsers':
-    'Allowed Users (comma-separated)',
-  'channels.editor.field.gitlab.allowedUsers.description':
-    'GitLab usernames, used by Allowlist and Pairing policies',
   'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
   'channels.editor.field.gitlab.action_prompt_template.description':
     'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
@@ -3723,23 +3875,19 @@ const EN: Messages = {
   'channels.editor.field.shared.outputMode.option.per_response': 'Per response',
   'channels.editor.field.shared.outputMode.option.per_turn':
     'Per turn (default)',
-  'channels.editor.field.shared.senderPolicy': 'Direct message policy',
-  'channels.editor.field.dws.senderPolicy': 'Sender policy',
-  'channels.editor.field.dws.senderPolicy.description':
-    'Controls which users can start tasks. Group pairing and chat access are checked separately.',
-  'channels.editor.field.dws.dmPolicy': 'Direct message access',
-  'channels.editor.field.dws.dmPolicy.description':
-    'Allow direct messages and document notifications to start tasks, subject to the existing authorization rules.',
-  'channels.editor.field.dws.dmPolicy.option.open': 'Open',
-  'channels.editor.field.dws.dmPolicy.option.disabled': 'Disabled',
-  'channels.editor.field.shared.senderPolicy.description':
+  'channels.editor.field.shared.privatePolicy': 'Direct message policy',
+  'channels.editor.field.dws.privatePolicy': 'Direct message policy',
+  'channels.editor.field.dws.privatePolicy.description':
+    'Controls which users can start direct-message, document-notification, and native-todo tasks.',
+  'channels.editor.field.shared.privatePolicy.description':
     'Choose who can start a direct conversation with this Channel.',
-  'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
-  'channels.editor.field.shared.senderPolicy.option.allowlist': 'Allowlist',
-  'channels.editor.field.shared.senderPolicy.option.open': 'Open',
+  'channels.editor.field.shared.privatePolicy.option.disabled': 'Disabled',
+  'channels.editor.field.shared.privatePolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.privatePolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.privatePolicy.option.open': 'Open',
   'channels.editor.field.shared.allowedUsers': 'Allowed user IDs',
   'channels.editor.field.shared.allowedUsers.description':
-    'Comma-separated stable user IDs that can access the Channel without pairing.',
+    'Comma-separated stable user IDs that can start private conversations without pairing.',
   'channels.editor.field.shared.groupPolicy': 'Group policy',
   'channels.editor.field.shared.groupPolicy.description':
     'Choose which group conversations can use this Channel.',
@@ -3752,6 +3900,20 @@ const EN: Messages = {
     'Comma-separated stable chat or repository IDs allowed to use this Channel.',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': 'Who can talk in groups',
+  'channels.editor.field.shared.groupSenders.description':
+    'Applies to every admitted group. Set a single group differently in settings.json.',
+  'channels.editor.field.shared.groupSenders.option.open': 'Any group member',
+  'channels.editor.field.shared.groupSenders.option.allowlist':
+    'Listed members only',
+  'channels.editor.field.shared.groupAllowedUsers': 'Allowed group member IDs',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    'Comma-separated stable user IDs who can talk in groups. Separate from the allowed user IDs for direct messages.',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': 'Session operators',
+  'channels.editor.field.shared.operators.description':
+    'Comma-separated user IDs who can approve tool use and run /cancel, /clear or /loop in shared sessions. Leave empty to grant no shared-session operator permissions.',
   'channels.editor.field.shared.sessionScope': 'Conversation isolation',
   'channels.editor.field.shared.sessionScope.description':
     'Choose how conversations share persistent agent context.',
@@ -3775,6 +3937,12 @@ const EN: Messages = {
     'Guidance injected into the context of each channel session. Some channels replace their own default guidance when this is set.',
   'channels.editor.field.shared.multiSession.description':
     'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
+  'channels.editor.policy.disabled.title': 'Disabled',
+  'channels.editor.policy.disabled.description':
+    'Disable private conversations.',
+  'channels.editor.policy.allowlist.title': 'Allowlist',
+  'channels.editor.policy.allowlist.description':
+    'Only listed users can start private conversations.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -3847,40 +4015,6 @@ const EN: Messages = {
   'channels.editor.reloadLatest': 'Reload latest',
   'channels.editor.cancel': 'Cancel',
   'channels.editor.save': 'Save',
-  'settings.loading': 'Loading settings...',
-  'settings.empty': 'No settings available.',
-  'settings.footer':
-    '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
-  'settings.footer.edit': 'Enter Save  ESC Cancel',
-  'settings.footer.theme': '↑↓ Navigate  Enter Select  ESC Back',
-  'settings.scope.user': 'User',
-  'settings.scope.workspace': 'Workspace',
-  'settings.value.on': 'ON',
-  'settings.value.off': 'OFF',
-  'settings.action.edit': 'Edit',
-  'settings.action.select': 'Select',
-  'settings.action.save': 'Save',
-  'settings.modifiedIn': (v) => `(Modified in ${v?.scope ?? ''})`,
-  'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
-  'settings.invalidNumber': 'Invalid number',
-  'settings.requiresRestart': 'This change requires a restart to take effect.',
-  'settings.localControl.title': 'Local Control',
-  'settings.localControl.description':
-    'Continue this Qwen Code session from a phone on the same trusted network.',
-  'settings.localControl.on': 'On',
-  'settings.localControl.off': 'Off',
-  'settings.localControl.network': 'Local network',
-  'settings.localControl.selectNetwork': 'Choose a network',
-  'settings.localControl.qr': 'Local Control QR code',
-  'settings.localControl.enable': 'Turn on Local Control',
-  'settings.localControl.disable': 'Disconnect phone access',
-  'settings.localControl.encrypted': 'Encrypted',
-  'settings.localControl.unencrypted':
-    'Unencrypted — trusted networks only; re-enable after network changes',
-  'settings.localControl.awake': 'This Mac will stay awake',
-  'settings.localControl.maySleep': 'This Mac may sleep',
-  'settings.localControl.urlRedacted':
-    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
   'localControl.expires': (v) =>
     `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
@@ -3899,34 +4033,6 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'settings.models.title': 'Models',
-  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
-  'settings.models.credentialEnv': 'Key environment variable',
-  'settings.models.add': '+ Add Model',
-  'settings.models.setCurrent': 'Set current',
-  'settings.models.current': 'Current',
-  'settings.models.runtime': 'Runtime',
-  'settings.models.savedConfiguration': 'Saved configuration',
-  'settings.models.ambiguousWindow':
-    'Multiple configurations share this route. Its context window cannot be edited here.',
-  'settings.models.delete': 'Delete',
-  'settings.models.confirmDelete': 'Confirm',
-  'settings.models.cancel': 'Cancel',
-  'settings.models.empty': 'No configured models yet.',
-  'settings.models.loading': 'Loading models…',
-  'settings.models.deleteFailed': 'Failed to delete model',
-  'settings.models.runtimeSyncFailed':
-    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-  'settings.models.fallbacks.title': 'Model Fallbacks',
-  'settings.models.fallbacks.hint': (v) =>
-    `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
-  'settings.models.fallbacks.confirm': 'Confirm',
-  'settings.models.fallbacks.empty': 'No selectable models.',
-  'settings.models.fallbacks.saveFailed': 'Failed to save fallback models',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
-  'settings.corrupted': (v) =>
-    `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
     'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
@@ -3950,17 +4056,6 @@ const EN: Messages = {
     'Unable to enable or show notifications. Check your browser and system settings.',
   'browserNotifications.temporary':
     'This setting is saved for the current page only.',
-  'settings.label.ui.chatWidth': 'Chat width',
-  'settings.description.ui.chatWidth':
-    'Frontend-only chat content width. Stored in this browser.',
-  'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
-  'settings.description.ui.enableFollowupSuggestions':
-    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
-  'settings.option.ui.chatWidth.1000': 'Regular',
-  'settings.option.ui.chatWidth.wide': 'Ultra wide',
-  'settings.label.visionModel': 'Vision Model',
-  'settings.description.visionModel':
-    'Image-capable model used as the vision bridge. Leave empty to auto-select.',
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -3968,6 +4063,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
+  ...SETTINGS_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -4033,6 +4129,40 @@ const ZH: Messages = {
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
+  'managed.title': '托管 Agent',
+  'managed.sessions': '托管会话',
+  'managed.conversation': '托管会话内容',
+  'managed.new': '新建托管任务',
+  'managed.refresh': '刷新',
+  'managed.empty': '暂无托管任务。',
+  'managed.loading': '加载中…',
+  'managed.more': '加载更多',
+  'managed.prompt': '向托管 Agent 发送消息',
+  'managed.runtime': '执行环境',
+  'managed.unavailable': '当前 daemon 未启用托管 Agent。',
+  'managed.send': '发送',
+  'managed.sending': '提交中…',
+  'managed.elapsed': (v) => `已用时 ${v?.seconds ?? 0} 秒`,
+  'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
+  'managed.retry': '重试同一请求',
+  'managed.cancel': '取消本轮',
+  'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.newRequired': '请新建任务后发送消息。',
+  'managed.truncated': '[详情已截断]',
+  'managed.phase.admitted': '已接收',
+  'managed.phase.runtime_starting': '环境准备中',
+  'managed.phase.agent_running': '思考／生成中',
+  'managed.phase.waiting_runtime': '等待执行环境',
+  'managed.phase.tool_running': '执行工具中',
+  'managed.phase.cancelling': '取消中',
+  'managed.phase.completed': '已完成',
+  'managed.phase.failed': '失败',
+  'managed.phase.cancelled': '已取消',
+  'managed.runtime.unknown': '未知',
+  'managed.runtime.starting': '准备中',
+  'managed.runtime.ready': '已就绪',
+  'managed.runtime.failed': '准备失败',
+
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -4059,6 +4189,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.worktrees': '管理 Worktree…',
   'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
@@ -4195,6 +4326,64 @@ const ZH: Messages = {
   'gitLog.allBranches': '全部分支',
   'gitLog.search': '搜索提交信息、作者或哈希',
   'gitLog.noMatches': '没有匹配的提交',
+  'gitWorktrees.title': 'Worktree',
+  'gitWorktrees.subtitle': (v) => `${v?.count ?? 0} 个 worktree`,
+  'gitWorktrees.loading': '加载 worktree 中…',
+  'gitWorktrees.error': '加载 worktree 失败',
+  'gitWorktrees.unavailable': '此工作区不可用 Git',
+  'gitWorktrees.empty': '没有 worktree',
+  'gitWorktrees.noMatches': '没有匹配的 worktree',
+  'gitWorktrees.filter': '按路径或分支过滤',
+  'gitWorktrees.newSession': '新建 worktree 会话…',
+  'gitWorktrees.main': '主工作树',
+  'gitWorktrees.current': '当前工作区',
+  'gitWorktrees.detached': '游离 HEAD',
+  'gitWorktrees.bare': '裸仓库',
+  'gitWorktrees.locked': '已锁定',
+  'gitWorktrees.prunable': '已失效',
+  'gitWorktrees.clean': '干净',
+  'gitWorktrees.dirty': (v) => `${v?.count ?? 0} 处改动`,
+  'gitWorktrees.statusError': '状态不可用',
+  'gitWorktrees.remove': '删除',
+  'gitWorktrees.removeLabel': (v) => `删除 worktree ${v?.name ?? ''}`,
+  'gitWorktrees.removing': '删除中…',
+  'gitWorktrees.cancel': '取消',
+  'gitWorktrees.confirm': '删除这个 worktree？其目录会从磁盘删除，分支保留。',
+  'gitWorktrees.confirmStale':
+    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree。目录里剩下的东西会保留，但 git 为它保存的记录不会。',
+  'gitWorktrees.confirmDetached':
+    '删除这个 worktree？其目录会从磁盘删除。它处于游离 HEAD，因此没有分支可留。',
+  'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
+  'gitWorktrees.blockedInUse': (v) =>
+    `${v?.count ?? 0} 个运行中的会话将失去其检出。`,
+  'gitWorktrees.blockedInUseUnknown': (v) =>
+    `无法读取 ${v?.count ?? 0} 个运行中会话所在的位置。若有会话在这里，将失去其检出。`,
+  'gitWorktrees.blockedUnknown':
+    '无法检查该工作树是否有未提交改动，若有也将一并丢弃。',
+  'gitWorktrees.blockedOperation': (v) =>
+    `尚未完成的 ${v?.operation ?? 'git'} 操作将会丢失。`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `没有分支保住这里的提交；${String(v?.head ?? '').slice(0, 7)} 将被 git 回收。`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason ? `该 worktree 已加锁：${v.reason}` : '该 worktree 已加锁。',
+  'gitWorktrees.blockedRefused': 'Git 拒绝删除这个 worktree。',
+  'gitWorktrees.blockedWorkspaceHere': (v) =>
+    v?.name
+      ? `工作区 ${v.name} 就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。`
+      : '有已注册的工作区就在这个 worktree 里，删掉它会把该工作区一并带走。请先移除该工作区。',
+  'gitWorktrees.blockedSubmodules':
+    '该 worktree 的子模块有自己的仓库，删除这个 worktree 会把那个仓库一并删掉。',
+  'gitWorktrees.blockedSubmodulesUnknown':
+    '无法确认该 worktree 的子模块是否有自己的仓库。如果有，删除这个 worktree 会把它一并删掉。',
+  'gitWorktrees.refreshFailed': '列表未能刷新，可能已过时。',
+  'gitWorktrees.removeAnyway': '仍然删除',
+  'gitWorktrees.removeFailed': '删除 worktree 失败',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git 已不再跟踪 ${v?.name ?? ''}，但它的目录仍在磁盘上。`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    v?.reason
+      ? `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了：${v.reason}`
+      : `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4215,7 +4404,7 @@ const ZH: Messages = {
   // a wire name with no entry here falls back to the English display name via
   // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
   'toolName.exec': '执行代码',
-  'toolName.edit': '编辑',
+  'toolName.edit': '编辑文件',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
   'toolName.zoom_image': '图片放大',
@@ -4229,6 +4418,7 @@ const ZH: Messages = {
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': '智能体',
+  'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -4670,6 +4860,9 @@ const ZH: Messages = {
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
   'composerAdd.plan.busy': '模式切换中',
+  'composerAdd.btw.label': '顺带一问',
+  'composerAdd.btw.description': '临时提问，不打断任务',
+  'composerAdd.btw.textOnly': '请先移除附件',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -4892,6 +5085,9 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '基础开销估算',
+  'contextUsage.estimatedUsage': '估算用量（含对话）',
+  'contextUsage.usageEstimatedWithConversation':
+    '尚未收到 provider 用量。下方估算包含对话。',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -5119,7 +5315,7 @@ const ZH: Messages = {
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
   'daemon.usage.dailySessionsSub': '每日活跃会话数',
-  'delete.cannotCurrent': '无法删除当前活动会话。',
+  'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,
@@ -5515,6 +5711,8 @@ const ZH: Messages = {
   'attachment.loadingPreview': '正在加载预览...',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
+  'sideTask.commandsLoadingTimedOut':
+    '命令信息尚未就绪。侧任务提示词已保留，将在信息加载后重新检查。',
   'sideTask.promptFailed': '发送侧边任务问题失败',
   'sideTask.renameFailed': '侧边任务命名失败',
   'turnOutputs.preview': '预览',
@@ -5541,6 +5739,7 @@ const ZH: Messages = {
   'sidebar.sessionSource.channels': '频道',
   'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
+  'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -5668,6 +5867,11 @@ const ZH: Messages = {
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
   'sidebar.settings': '设置',
+  'update.button': '更新',
+  'update.restarting': '重启中…',
+  'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.failed': '未能完成更新，请检查服务连接后重试。',
+
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',
@@ -5705,7 +5909,9 @@ const ZH: Messages = {
   'sidebar.deleteFailed': '删除会话失败',
   'sidebar.newSessionFailed': '创建新对话失败',
   'sidebar.switchFailed': '切换会话失败',
-  'sidebar.currentDeleteDisabled': '不能删除当前会话',
+  'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
+  'sidebar.currentStandaloneDeleteDisabled':
+    '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
@@ -5785,6 +5991,7 @@ const ZH: Messages = {
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
+  'queue.attachmentCleanupFailed': '清理已上传附件失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
   'queue.insertFailed': '插入排队消息失败',
@@ -5910,6 +6117,30 @@ const ZH: Messages = {
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
+  'turnCalls.open': '查看工具调用',
+  'turnCalls.title': '工具调用',
+  'turnCalls.count': (v) => `共 ${v?.count ?? 0} 次工具调用`,
+  'turnCalls.tool': '工具调用',
+  'turnCalls.elapsed': (v) => `耗时：${v?.duration ?? ''}`,
+  'turnCalls.startedAt': (v) => `开始时间：${v?.time ?? ''}`,
+  'turnCalls.endedAt': (v) => `结束时间：${v?.time ?? ''}`,
+  'turnCalls.empty': '本轮没有工具调用记录',
+  'turnCalls.arguments': '参数',
+  'turnCalls.result': '结果',
+  'turnCalls.other': '其他',
+  'turnCalls.completed': '已完成',
+  'turnCalls.unknown': '状态未知',
+  'turnCalls.loading': '正在加载工具调用记录…',
+  'turnCalls.loadError': '未能加载本轮完整调用记录。',
+  'turnCalls.indexError': '未能刷新提示词列表。',
+  'turnCalls.unresolved': '未能在会话历史中定位这条提示词，请尝试刷新。',
+  'turnCalls.running': '运行中',
+  'turnCalls.pending': '等待中',
+  'turnCalls.cancelled': '已取消',
+  'turnCalls.filter': '按工具类型筛选',
+  'turnCalls.prompt': '提示词',
+  'turnCalls.refresh': '刷新',
+  'turnCalls.all': '全部工具',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -6590,21 +6821,7 @@ const ZH: Messages = {
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
     '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
-  'settings.models.editWindow': '配置窗口大小',
-  'settings.models.windowHint':
-    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
-  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
-  'settings.models.saved': '已保存',
   'model.setAdvisor': '设置顾问模型',
-  'settings.label.advisorModel': '顾问模型',
-  'settings.label.imageModel': '生图模型',
-  'settings.label.voiceModel': '语音转写模型',
-  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
-  'settings.description.imageModel':
-    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
-  'settings.description.voiceModel':
-    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
-
   'model.setImage': '设置生图模型',
   'model.useMain': '使用主模型',
   'model.disabled': '不启用',
@@ -6813,7 +7030,10 @@ const ZH: Messages = {
   'trajectory.description': '查看这次运行把时间和 token 花在了哪里',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示这个会话最近的记录。',
+  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
+  'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
+  'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
+  'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>
@@ -6838,6 +7058,31 @@ const ZH: Messages = {
   'trajectory.badge.cancelled': '中断',
   'trajectory.badge.other': '其他',
   'trajectory.cancelled': '本轮已取消',
+  'trajectory.overview.label': (v) =>
+    `时间轴：${v?.spans ?? 0} 条有计时的记录，活跃 ${v?.busy ?? ''}`,
+  'trajectory.overview.busy': (v) => `活跃 ${v?.duration ?? ''}`,
+  'trajectory.range.status': (v) =>
+    `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
+  'trajectory.range.clear': '清除时间区间',
+  'trajectory.range.empty': '所选区间内没有请求或工具运行。',
+  'trajectory.mode.clock': '真实时间（含空闲）',
+  'trajectory.clock.window': (v) =>
+    `历时 ${v?.elapsed ?? ''}，活跃 ${v?.active ?? ''}`,
+  'trajectory.clock.label': (v) =>
+    `${v?.spans ?? 0} 条计时记录，历时 ${v?.elapsed ?? ''}，活跃 ${v?.active ?? ''}`,
+  'trajectory.clock.status': '已切换为真实时间，含空闲',
+  'trajectory.active.status': '已切换为只看活跃时间',
+  'trajectory.zoom.in': '放大',
+  'trajectory.zoom.out': '缩小',
+  'trajectory.zoom.reset': '显示整段',
+  'trajectory.zoom.window': (v) => `${v?.to ?? ''} / ${v?.busy ?? ''}`,
+  'trajectory.zoom.aria': (v) => `，已放大到 ${v?.from ?? ''}–${v?.to ?? ''}`,
+  'trajectory.zoom.status': (v) =>
+    `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
+  'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
+  'trajectory.overview.lane.requests': '请求',
+  'trajectory.overview.lane.tools': '工具',
+  'trajectory.overview.lane.subagents': '子代理',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -7311,7 +7556,6 @@ const ZH: Messages = {
   'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
-  'settings.title': '设置',
   'channels.title': '频道',
   'channels.description': '让 Qwen Code 在团队日常使用的平台中收发消息。',
   'channels.summary': (v) =>
@@ -7414,12 +7658,6 @@ const ZH: Messages = {
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
-  'channels.editor.field.github.senderPolicy': '发送者策略',
-  'channels.editor.field.github.senderPolicy.description':
-    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
-  'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
-  'channels.editor.field.github.allowedUsers.description':
-    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.github.reasonFilter': '通知原因过滤',
   'channels.editor.field.github.reasonFilter.description':
     '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
@@ -7432,12 +7670,6 @@ const ZH: Messages = {
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
-  'channels.editor.field.gitlab.senderPolicy': '发送者策略',
-  'channels.editor.field.gitlab.senderPolicy.description':
-    '公开项目建议使用 "Allowlist" 并指定允许的用户',
-  'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
-  'channels.editor.field.gitlab.allowedUsers.description':
-    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.gitlab.action_prompt_template': '动作模板',
   'channels.editor.field.gitlab.action_prompt_template.description':
     '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
@@ -7472,23 +7704,19 @@ const ZH: Messages = {
   'channels.editor.field.shared.outputMode.option.per_task': '按任务',
   'channels.editor.field.shared.outputMode.option.per_response': '按回复',
   'channels.editor.field.shared.outputMode.option.per_turn': '按轮（默认）',
-  'channels.editor.field.shared.senderPolicy': '私聊策略',
-  'channels.editor.field.dws.senderPolicy': '发送者策略',
-  'channels.editor.field.dws.senderPolicy.description':
-    '控制哪些用户可以启动任务。群聊配对和聊天访问分别检查。',
-  'channels.editor.field.dws.dmPolicy': '私聊访问',
-  'channels.editor.field.dws.dmPolicy.description':
-    '允许私聊消息和文档通知启动任务，仍遵守现有授权规则。',
-  'channels.editor.field.dws.dmPolicy.option.open': '开放',
-  'channels.editor.field.dws.dmPolicy.option.disabled': '禁用',
-  'channels.editor.field.shared.senderPolicy.description':
+  'channels.editor.field.shared.privatePolicy': '私聊策略',
+  'channels.editor.field.dws.privatePolicy': '私聊策略',
+  'channels.editor.field.dws.privatePolicy.description':
+    '控制哪些用户可以通过私聊、文档通知和原生待办启动任务。',
+  'channels.editor.field.shared.privatePolicy.description':
     '选择哪些用户可以通过私聊使用此频道。',
-  'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
-  'channels.editor.field.shared.senderPolicy.option.allowlist': '白名单',
-  'channels.editor.field.shared.senderPolicy.option.open': '开放',
+  'channels.editor.field.shared.privatePolicy.option.disabled': '禁用',
+  'channels.editor.field.shared.privatePolicy.option.pairing': '配对',
+  'channels.editor.field.shared.privatePolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.privatePolicy.option.open': '开放',
   'channels.editor.field.shared.allowedUsers': '允许的用户 ID',
   'channels.editor.field.shared.allowedUsers.description':
-    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可访问频道。',
+    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可发起私聊。',
   'channels.editor.field.shared.groupPolicy': '群聊策略',
   'channels.editor.field.shared.groupPolicy.description':
     '选择哪些群聊可以使用此频道。',
@@ -7501,6 +7729,19 @@ const ZH: Messages = {
     '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
+  'channels.editor.field.shared.groupSenders': '群内谁能发言',
+  'channels.editor.field.shared.groupSenders.description':
+    '对所有已放行的群生效。如需单独设置某个群，请在 settings.json 中配置。',
+  'channels.editor.field.shared.groupSenders.option.open': '任何群成员',
+  'channels.editor.field.shared.groupSenders.option.allowlist': '仅名单内成员',
+  'channels.editor.field.shared.groupAllowedUsers': '允许发言的群成员 ID',
+  'channels.editor.field.shared.groupAllowedUsers.description':
+    '用英文逗号分隔可以在群内发言的稳定用户 ID；与私聊的允许用户 ID 相互独立。',
+  'channels.editor.field.shared.groupAllowedUsers.placeholder':
+    'user-a, user-b',
+  'channels.editor.field.shared.operators': '会话管理者',
+  'channels.editor.field.shared.operators.description':
+    '用英文逗号分隔可以在共享会话中批准工具调用、执行 /cancel、/clear 或 /loop 的用户 ID。留空则不授予共享会话管理权限。',
   'channels.editor.field.shared.sessionScope': '会话隔离方式',
   'channels.editor.field.shared.sessionScope.description':
     '选择不同对话如何共享持久化的智能体上下文。',
@@ -7524,6 +7765,10 @@ const ZH: Messages = {
     '注入到每个频道会话上下文中的指引。部分频道在设置后会用它替换自身的默认指引。',
   'channels.editor.field.shared.multiSession.description':
     '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
+  'channels.editor.policy.disabled.title': '禁用',
+  'channels.editor.policy.disabled.description': '禁用私聊。',
+  'channels.editor.policy.allowlist.title': '白名单',
+  'channels.editor.policy.allowlist.description': '仅名单内用户可以发起私聊。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -7592,39 +7837,6 @@ const ZH: Messages = {
   'channels.editor.reloadLatest': '加载最新配置',
   'channels.editor.cancel': '取消',
   'channels.editor.save': '保存',
-  'settings.loading': '正在加载设置...',
-  'settings.empty': '暂无可用设置。',
-  'settings.footer': '↑↓ 导航  Enter 切换  Tab 切换作用域  r 刷新  ESC 关闭',
-  'settings.footer.edit': 'Enter 保存  ESC 取消',
-  'settings.footer.theme': '↑↓ 导航  Enter 选择  ESC 返回',
-  'settings.scope.user': '用户',
-  'settings.scope.workspace': '工作区',
-  'settings.value.on': '开',
-  'settings.value.off': '关',
-  'settings.action.edit': '编辑',
-  'settings.action.select': '选择',
-  'settings.action.save': '保存',
-  'settings.modifiedIn': (v) => `（已在${v?.scope ?? ''}中修改）`,
-  'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
-  'settings.invalidNumber': '无效数字',
-  'settings.requiresRestart': '此更改需要重启后才能生效。',
-  'settings.localControl.title': '本地控制',
-  'settings.localControl.description':
-    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
-  'settings.localControl.on': '已开启',
-  'settings.localControl.off': '关闭',
-  'settings.localControl.network': '本地网络',
-  'settings.localControl.selectNetwork': '选择网络',
-  'settings.localControl.qr': '本地控制二维码',
-  'settings.localControl.enable': '开启本地控制',
-  'settings.localControl.disable': '断开手机访问',
-  'settings.localControl.encrypted': '已加密',
-  'settings.localControl.unencrypted':
-    '未加密，仅限受信任网络；网络变化后请重新启用',
-  'settings.localControl.awake': '这台 Mac 将保持唤醒',
-  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
-  'settings.localControl.urlRedacted':
-    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
   'localControl.expires': (v) =>
     `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
@@ -7642,34 +7854,6 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'settings.models.title': '模型',
-  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
-  'settings.models.credentialEnv': '密钥环境变量',
-  'settings.models.add': '+ 增加模型',
-  'settings.models.setCurrent': '设为当前',
-  'settings.models.current': '当前',
-  'settings.models.runtime': '运行时',
-  'settings.models.savedConfiguration': '已保存配置',
-  'settings.models.ambiguousWindow':
-    '多个配置共用此模型端点，无法在此修改窗口大小。',
-  'settings.models.delete': '删除',
-  'settings.models.confirmDelete': '确认删除',
-  'settings.models.cancel': '取消',
-  'settings.models.empty': '暂无配置的模型。',
-  'settings.models.loading': '正在加载模型…',
-  'settings.models.deleteFailed': '删除模型失败',
-  'settings.models.runtimeSyncFailed':
-    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
-  'settings.models.fallbacks.title': '模型回退',
-  'settings.models.fallbacks.hint': (v) =>
-    `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
-  'settings.models.fallbacks.confirm': '确认',
-  'settings.models.fallbacks.empty': '暂无可选模型。',
-  'settings.models.fallbacks.saveFailed': '保存回退模型失败',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
-  'settings.corrupted': (v) =>
-    `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
     '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
@@ -7687,108 +7871,12 @@ const ZH: Messages = {
   'browserNotifications.requesting': '等待你的授权…',
   'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
   'browserNotifications.temporary': '设置仅在当前页面有效。',
-  'settings.label.ui.chatWidth': '屏宽',
-  'settings.description.ui.chatWidth':
-    '纯前端的聊天内容宽度设置，保存在当前浏览器中。',
-  'settings.option.ui.chatWidth.1000': '常规',
-  'settings.option.ui.chatWidth.wide': '超宽',
-  'settings.category.General': '通用',
-  'settings.category.UI': '界面',
-  'settings.category.Privacy': '隐私',
-  'settings.category.Model': '模型',
-  'settings.category.Context': '上下文',
-  'settings.category.Tools': '工具',
-  'settings.category.Daemon': '守护进程',
-  'settings.category.Connections': '连接',
-  'settings.category.Experimental': '实验性',
-  'settings.category.Advanced': '高级',
-  'settings.label.general.enableAutoUpdate': '启用自动更新',
-  'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
-  'settings.label.general.showSessionRecap': '显示会话回顾',
-  'settings.description.general.showSessionRecap':
-    '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
-  'settings.label.general.sessionRecapAwayThresholdMinutes':
-    '会话回顾离开阈值（分钟）',
-  'settings.description.general.sessionRecapAwayThresholdMinutes':
-    '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
-  'settings.label.general.cleanupPeriodDays': '清理周期（天）',
-  'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
-  'settings.label.general.gitCoAuthor.commit': '归因：commit',
-  'settings.description.general.gitCoAuthor.commit':
-    '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
-  'settings.label.general.gitCoAuthor.pr': '归因：PR',
-  'settings.description.general.gitCoAuthor.pr':
-    '运行 gh pr create 时，在 PR 描述中追加 Qwen Code 归因行。',
-  'settings.label.general.language': '语言：界面',
-  'settings.description.general.language':
-    '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
-  'settings.description.general.preventSystemSleep':
-    '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
-  'settings.label.ui.theme': '主题',
-  'settings.description.ui.theme': '界面的颜色主题。',
-  'settings.label.ui.hideTips': '隐藏提示',
-  'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
-  'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
-  'settings.description.ui.enableWelcomeBack':
-    '回到有历史会话的项目时显示欢迎回来对话框。选择“开始新的聊天会话”后，在项目摘要变化前不会再次显示。',
-  'settings.label.ui.enableUserFeedback': '启用用户反馈',
-  'settings.description.ui.enableUserFeedback':
-    '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
-  'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
-  'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
-  'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
-  'settings.description.ui.shellOutputMaxLines':
-    '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
-  'settings.label.privacy.usageStatisticsEnabled': '启用使用统计',
-  'settings.description.privacy.usageStatisticsEnabled': '启用使用统计收集。',
-  'settings.label.fastModel': '快速模型',
-  'settings.description.fastModel':
-    '用于生成提示建议和推测执行的模型。留空则使用主模型。较小/更快的模型（例如 qwen3-coder-flash）可以降低延迟和成本。',
-  'settings.label.visionModel': '视觉模型',
-  'settings.description.visionModel':
-    '用于视觉桥接的图像能力模型。留空则自动选择。',
-  'settings.label.context.fileFiltering.respectGitIgnore': '遵守 .gitignore',
-  'settings.description.context.fileFiltering.respectGitIgnore':
-    '搜索时遵守 .gitignore 文件。',
-  'settings.label.context.fileFiltering.respectQwenIgnore': '遵守 .qwenignore',
-  'settings.description.context.fileFiltering.respectQwenIgnore':
-    '搜索时遵守 .qwenignore 文件。',
-  'settings.label.context.fileFiltering.enableFuzzySearch': '启用模糊搜索',
-  'settings.description.context.fileFiltering.enableFuzzySearch':
-    '搜索文件时启用模糊搜索。',
-  'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
-  'settings.description.tools.toolSearch.enabled':
-    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
-  'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
-  'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
-  'settings.label.policy.permissionStrategy': '权限协调策略',
-  'settings.description.policy.permissionStrategy':
-    '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
-  'settings.option.policy.permissionStrategy.first-responder': '先响应者',
-  'settings.option.policy.permissionStrategy.designated': '指定发起方',
-  'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
-  'settings.option.policy.permissionStrategy.local-only': '仅本机',
-  'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
-  'settings.description.experimental.enableCronTools':
-    '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
-  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
-  'settings.description.experimental.sessionWorkflow':
-    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
-  'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
-  'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
-  'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
-  'settings.description.agents.arena.preserveArtifacts':
-    '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
+  ...SETTINGS_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

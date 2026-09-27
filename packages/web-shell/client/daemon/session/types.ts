@@ -590,7 +590,7 @@ export interface DaemonSessionActions {
     branch?: { name: string };
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
-  clearSession(): Promise<void>;
+  clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;

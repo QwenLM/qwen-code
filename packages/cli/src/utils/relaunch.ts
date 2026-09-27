@@ -9,6 +9,7 @@ import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
+  getRelaunchExecArgv,
 } from './processUtils.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -17,6 +18,12 @@ interface RelaunchOptions {
   childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
   replaceProcess?: boolean;
+  /**
+   * `.env` files or `settings.env` injected values after this process's
+   * modules (and Node itself, e.g. NODE_EXTRA_CA_CERTS) read the environment,
+   * so only a fresh image sees them.
+   */
+  environmentChangedSinceBoot?: boolean;
 }
 
 export async function relaunchOnExitCode(
@@ -56,7 +63,7 @@ export async function relaunchAppInChildProcess(
   const script = process.argv[1];
   const scriptArgs = process.argv.slice(2);
   const nodeArgs = [
-    ...process.execArgv,
+    ...getRelaunchExecArgv(),
     ...additionalNodeArgs,
     script,
     ...additionalScriptArgs,
@@ -84,6 +91,20 @@ export async function relaunchAppInChildProcess(
     typeof process.execve === 'function' &&
     !['win32', 'os400'].includes(process.platform)
   ) {
+    // With no new Node or script arguments and no environment change since
+    // boot, the replacement image would be this process booted a second
+    // time: continue in place instead.
+    // `childEnv` only carries state (env provenance) that a fresh image must
+    // re-read and this process already holds, so only the no-relaunch guard
+    // is published.
+    if (
+      additionalNodeArgs.length === 0 &&
+      additionalScriptArgs.length === 0 &&
+      !options?.environmentChangedSinceBoot
+    ) {
+      process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+      return;
+    }
     try {
       return process.execve(
         process.execPath,

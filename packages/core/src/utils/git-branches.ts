@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -134,17 +134,128 @@ export function gitEnv(
   return env;
 }
 
-export function runGit(
+/**
+ * Run git and hand each NUL-separated record to `onRecord` as it arrives.
+ *
+ * For output whose size follows the repository rather than the question —
+ * the index is the one that matters here. `execFile` buffers the whole of it
+ * and fails past `maxBuffer`, which on a safety check reads as "nothing
+ * found"; this holds only the record being read, and stops the moment
+ * `onRecord` says it has seen enough.
+ *
+ * Records are bytes. git writes a path as the bytes it is, and `-z` output
+ * does not quote it, so decoding the stream before splitting it replaces a
+ * byte that is not UTF-8 and hands the reader a path that names some other
+ * file. A reader decodes what it needs, and can tell when that failed.
+ *
+ * Settles exactly once: `true` when the reader stopped early, `false` when
+ * git finished without it, a rejection when git failed, timed out, or the
+ * reader threw — including on the last record, which has no separator after
+ * it and so is only seen once git has closed.
+ */
+export function streamGitRecords(
+  cwd: string,
+  args: string[],
+  onRecord: (record: Buffer) => boolean,
+  env?: Readonly<Record<string, string | undefined>>,
+  options: { timeoutMs?: number } = {},
+): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, {
+      cwd,
+      env: gitEnv(env),
+      windowsHide: true,
+    });
+    let settled = false;
+    const settle = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      outcome();
+    };
+    // The subcommand, for messages: the arguments begin with `-c` pairs.
+    const subcommand =
+      args.find((arg, i) => !arg.startsWith('-') && args[i - 1] !== '-c') ??
+      'git';
+    const timer = setTimeout(
+      () => settle(() => reject(new Error(`git ${subcommand} timed out`))),
+      options.timeoutMs ?? GIT_TIMEOUT_MS,
+    );
+    // Whether the reader has seen enough — or, when it threw, the throw.
+    const deliver = (record: Buffer): boolean => {
+      try {
+        if (!onRecord(record)) return false;
+        settle(() => resolve(true));
+      } catch (err) {
+        settle(() => reject(err));
+      }
+      return true;
+    };
+    let pending = Buffer.alloc(0);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let at = pending.indexOf(0);
+      while (at !== -1) {
+        const record = pending.subarray(0, at);
+        pending = pending.subarray(at + 1);
+        if (deliver(record)) return;
+        at = pending.indexOf(0);
+      }
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      // Bounded: a failure's first words are what a caller reports.
+      if (stderr.length < 8192) stderr += chunk;
+    });
+    child.on('error', (err) => settle(() => reject(err)));
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (code !== 0) {
+        settle(() =>
+          reject(
+            new Error(
+              stderr.trim() ||
+                `git ${subcommand} exited with ${code ?? signal}`,
+            ),
+          ),
+        );
+        return;
+      }
+      // A final record with no separator after it still counts.
+      if (pending.length > 0 && deliver(pending)) return;
+      settle(() => resolve(false));
+    });
+  });
+}
+
+/**
+ * Both streams, for the handful of subcommands that report on stderr.
+ *
+ * `git worktree prune -v` is one: everything it says it would remove goes to
+ * stderr, so a caller reading only stdout is told nothing at all.
+ */
+export function runGitCapture(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
+): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
     env: gitEnv(env),
-  }).then(({ stdout }) => stdout);
+  }).then(({ stdout, stderr }) => ({ stdout, stderr }));
+}
+
+export function runGit(
+  cwd: string,
+  args: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return runGitCapture(cwd, args, env).then(({ stdout }) => stdout);
 }
 
 const SEPARATOR = '\x00';

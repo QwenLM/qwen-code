@@ -74,9 +74,12 @@ export function computeModelDialogMaxItems(
   );
 }
 
+export const ADVISOR_OFF_OPTION = '$advisor-off';
+
 export type ModelDialogMode =
   | 'primary'
   | 'fast'
+  | 'advisor'
   | 'voice'
   | 'vision'
   | 'compaction'
@@ -191,9 +194,11 @@ export function modelDialogTitle(
           ? t('Select Compaction Model')
           : mode === 'image'
             ? t('Select Image Model')
-            : mode === 'fast'
-              ? t('Select Fast Model')
-              : t('Select Model');
+            : mode === 'advisor'
+              ? t('Select Advisor Model')
+              : mode === 'fast'
+                ? t('Select Fast Model')
+                : t('Select Model');
   const suffix =
     persistScope === 'workspace'
       ? t(' (this project)')
@@ -221,6 +226,7 @@ export interface OpenTuiModelEntry extends DialogListItem<string> {
 
 /** Plain-text row title (colors are applied at render time). */
 export function formatModelOptionLabel(entry: OpenTuiModelEntry): string {
+  if (entry.key === ADVISOR_OFF_OPTION) return entry.label;
   let label = `[${entry.authType}] ${entry.label}`;
   if (entry.modelId !== entry.label) label += ` (${entry.modelId})`;
   if (entry.isRuntime) label += ' (Runtime)';
@@ -349,7 +355,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
         </box>
       )}
 
-      {highlightedEntry && (
+      {highlightedEntry && highlightedEntry.key !== ADVISOR_OFF_OPTION && (
         <box flexDirection="column" marginTop={1}>
           <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
           {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (

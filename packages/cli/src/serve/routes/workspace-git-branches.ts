@@ -312,8 +312,61 @@ function readHead(
   }
 }
 
-function redactGitMessage(detail: string, cwd: string): string {
-  return redactGitPaths(detail, cwd).slice(0, GIT_ERROR_MESSAGE_MAX);
+/**
+ * The client-visible bound, applied to every string this module hands out.
+ *
+ * It counts UTF-16 units, so it can land between the halves of an astral
+ * character and leave a lone surrogate that JSON carries and a browser draws
+ * as a replacement glyph. Drop the orphan.
+ */
+function boundForClient(full: string): string {
+  const bounded = full.slice(0, GIT_ERROR_MESSAGE_MAX);
+  const last = bounded.charCodeAt(bounded.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? bounded.slice(0, -1) : bounded;
+}
+
+/**
+ * Workspace paths out, and bounded to what a client may be shown. For text
+ * that reaches a browser but did not come from a git *failure* — a lock
+ * reason, say, which anyone who can run git in the repository writes.
+ */
+export function redactGitMessage(detail: string, cwd: string): string {
+  return boundForClient(redactGitPaths(detail, cwd));
+}
+
+/**
+ * git's own words for a failure, with workspace paths redacted.
+ *
+ * `full` is what classification reads and `message` is what a client may
+ * see: slicing before matching would cut a long lock line's second line off
+ * before its `could not …` prefix (a deeply nested workspace path pushes the
+ * two-line lock chain past the cap) and misread a config-write failure as an
+ * unclassified 500. Only the client-visible half is bounded.
+ */
+export function gitErrorText(
+  err: unknown,
+  cwd: string,
+): { full: string; message: string } {
+  // Read stdout + stderr rather than err.message, which embeds the full
+  // command line and would false-positive on flags like --set-upstream
+  // present in every push invocation. Redacting first also avoids false
+  // positives when the workspace path itself contains a keyword ("dirty").
+  let detail: string;
+  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
+    const e = err as { stdout?: string; stderr?: string };
+    // Empty parts are dropped so a genuine single-line message always sits
+    // at line 1: the anchored shapes in `sendGitError` match line 1 (or the
+    // documented two-line lock chain) ONLY, because a config-chosen value (a
+    // URL or a fetch refspec) can carry a real newline and inject a
+    // line-initial prefix of the attacker's choice deeper in the text.
+    detail = [e.stdout, e.stderr]
+      .filter((part) => typeof part === 'string' && part.length > 0)
+      .join('\n');
+  } else {
+    detail = err instanceof Error ? err.message : String(err);
+  }
+  const full = redactGitPaths(detail, cwd);
+  return { full, message: boundForClient(full) };
 }
 
 export function sendGitError(
@@ -323,34 +376,7 @@ export function sendGitError(
   sendBridgeError: SendBridgeError,
   cwd: string,
 ): void {
-  // Classify on the path-redacted message (derived from stdout + stderr),
-  // not err.message, which embeds the full command line and would
-  // false-positive on flags like --set-upstream present in every push
-  // invocation. Testing the redacted form also avoids false positives
-  // when the workspace path itself contains a keyword (e.g. "dirty").
-  let detail: string;
-  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
-    const e = err as { stdout?: string; stderr?: string };
-    // Empty parts are dropped so a genuine single-line message always sits
-    // at line 1: the anchored shapes below match line 1 (or the documented
-    // two-line lock chain) ONLY, because a config-chosen value (a URL or a
-    // fetch refspec) can carry a real newline and inject a line-initial
-    // prefix of the attacker's choice deeper in the text.
-    detail = [e.stdout, e.stderr]
-      .filter((part) => typeof part === 'string' && part.length > 0)
-      .join('\n');
-  } else {
-    detail = err instanceof Error ? err.message : String(err);
-  }
-
-  // Classification reads the FULL redacted detail: slicing before
-  // matching would cut a long lock line's second line off before its
-  // `could not …` prefix (a deeply nested workspace path pushes the
-  // two-line lock chain past 512 chars) and misread a config-write
-  // failure as an unclassified 500. Only the client-visible message is
-  // bounded.
-  const fullMessage = redactGitPaths(detail, cwd);
-  const message = fullMessage.slice(0, GIT_ERROR_MESSAGE_MAX);
+  const { full: fullMessage, message } = gitErrorText(err, cwd);
 
   // git's remote config-write failures echo the name as `remote.<name>`
   // (no space) and the URL verbatim. Every remote-shape branch below is

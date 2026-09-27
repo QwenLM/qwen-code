@@ -69,7 +69,7 @@ const lastWriteByDir = new Map<string, number>();
 
 /**
  * Initialize CPU profiler. Call once at process start.
- * Always registers SIGUSR1 handler (for ad-hoc profiling).
+ * Registers the SIGUSR1 handler (for ad-hoc profiling) on non-Windows platforms.
  * When QWEN_CODE_CPU_PROFILE=1, also starts recording immediately.
  */
 export function initCpuProfiler(): void {

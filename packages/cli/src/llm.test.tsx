@@ -230,6 +230,16 @@ vi.mock('./utils/relaunch.js', () => ({
   relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
 
+vi.mock('./utils/processUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/processUtils.js')>()),
+  superviseInProcess: vi.fn(),
+}));
+
+vi.mock('./config/environment.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/environment.js')>()),
+  hasLoadedEnvironmentValues: vi.fn(() => false),
+}));
+
 vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
 }));
@@ -1279,22 +1289,25 @@ describe('llm.tsx main function', () => {
   // standalone installs in-process or prints manual instructions and never
   // emits a relaunch exit code, so it keeps the execve optimization like any
   // other one-shot prompt.
-  describe('replaceProcess predicate', () => {
+  describe('relaunch routing', () => {
+    // 'in-process': no relaunch at all; otherwise the replaceProcess flag
+    // passed to the supervised relaunch.
     const rows: Array<{
       label: string;
       argv: Partial<CliArgs>;
       dualOutputInputFile?: string;
-      expected: boolean;
+      envFileValues?: boolean;
+      expected: 'in-process' | boolean;
     }> = [
       {
         label: 'plain one-shot prompt',
         argv: { prompt: 'summarize this repository' },
-        expected: true,
+        expected: 'in-process',
       },
       {
         label: 'headless slash-command prompt',
         argv: { prompt: '/update' },
-        expected: true,
+        expected: 'in-process',
       },
       {
         label: 'acp mode',
@@ -1304,7 +1317,7 @@ describe('llm.tsx main function', () => {
       {
         label: 'interactive prompt (-i)',
         argv: { prompt: 'hi', promptInteractive: 'follow-up' },
-        expected: false,
+        expected: 'in-process',
       },
       {
         label: 'file input',
@@ -1328,18 +1341,31 @@ describe('llm.tsx main function', () => {
         expected: false,
       },
       {
-        // The term that keeps an interactive TUI launch off execve: with no
-        // prompt the supervisor must survive so in-session relaunch exit
-        // codes still have a consumer.
+        // In-session restarts re-exec this process in place instead of
+        // going through a supervising parent.
         label: 'plain interactive launch (no prompt)',
         argv: {},
+        expected: 'in-process',
+      },
+      {
+        // Modules loaded before .env / settings.env were applied read the old
+        // environment; only a fresh image sees those values.
+        label: 'plain one-shot prompt with env-file values',
+        argv: { prompt: 'hi' },
+        envFileValues: true,
+        expected: true,
+      },
+      {
+        label: 'plain interactive launch with env-file values',
+        argv: {},
+        envFileValues: true,
         expected: false,
       },
     ];
 
     it.each(rows)(
-      'passes replaceProcess=$expected to relaunchAppInChildProcess for $label',
-      async ({ argv, dualOutputInputFile, expected }) => {
+      'routes $label to $expected',
+      async ({ argv, dualOutputInputFile, envFileValues, expected }) => {
         const originalIsTTY = Object.getOwnPropertyDescriptor(
           process.stdin,
           'isTTY',
@@ -1355,6 +1381,13 @@ describe('llm.tsx main function', () => {
         const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
         const { relaunchAppInChildProcess } = await import(
           './utils/relaunch.js'
+        );
+        const { superviseInProcess } = await import('./utils/processUtils.js');
+        const { hasLoadedEnvironmentValues } = await import(
+          './config/environment.js'
+        );
+        vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(
+          envFileValues ?? false,
         );
         vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
         vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
@@ -1376,19 +1409,22 @@ describe('llm.tsx main function', () => {
           getProjectHooks: () => undefined,
         } as never);
 
-        let replaceProcess: boolean | undefined;
+        let route: 'in-process' | boolean | undefined;
         vi.mocked(relaunchAppInChildProcess).mockImplementation(
           async (_memoryArgs, _extraArgs, options) => {
-            replaceProcess = options?.replaceProcess;
-            throw new Error('stop after replaceProcess check');
+            route = options?.replaceProcess;
+            throw new Error('stop after routing check');
           },
         );
+        vi.mocked(superviseInProcess).mockImplementation(() => {
+          route = 'in-process';
+          throw new Error('stop after routing check');
+        });
 
         try {
-          await expect(main()).rejects.toThrow(
-            'stop after replaceProcess check',
-          );
+          await expect(main()).rejects.toThrow('stop after routing check');
         } finally {
+          vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(false);
           vi.unstubAllEnvs();
           if (originalIsTTY) {
             Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
@@ -1397,10 +1433,87 @@ describe('llm.tsx main function', () => {
           }
         }
 
-        expect(replaceProcess).toBe(expected);
+        expect(route).toBe(expected);
       },
     );
   });
+
+  // The synchronous 'auto' baseline runs `defaults read` on macOS, which
+  // blocks the event loop; a run that renders no theme colors must not pay it.
+  it.each([
+    { stdoutIsTTY: false, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: 'true', expectAuto: true },
+  ])(
+    'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
+    async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
+      const stubIsTTY = (
+        stream: { isTTY?: unknown },
+        value: boolean | undefined,
+      ): (() => void) => {
+        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+        return () => {
+          if (original) {
+            Object.defineProperty(stream, 'isTTY', original);
+          } else {
+            delete stream.isTTY;
+          }
+        };
+      };
+      const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
+      // `-i` exits early unless stdin is a terminal.
+      const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      const { themeManager, AUTO_THEME_NAME } = await import(
+        './ui/themes/theme-manager.js'
+      );
+      const setActiveTheme = vi
+        .spyOn(themeManager, 'setActiveTheme')
+        .mockReturnValue(true);
+      vi.mocked(parseArguments).mockResolvedValue({
+        prompt: 'hi',
+        outputFormat: 'json',
+        promptInteractive,
+      } as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+        throw new Error('stop after theme baseline');
+      });
+      // A plain one-shot run supervises itself in-process instead.
+      const { superviseInProcess } = await import('./utils/processUtils.js');
+      vi.mocked(superviseInProcess).mockImplementation(() => {
+        throw new Error('stop after theme baseline');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after theme baseline');
+        expect(
+          setActiveTheme.mock.calls.some(([name]) => name === AUTO_THEME_NAME),
+        ).toBe(expectAuto);
+      } finally {
+        setActiveTheme.mockRestore();
+        vi.unstubAllEnvs();
+        restoreStdoutIsTTY();
+        restoreStdinIsTTY();
+      }
+    },
+  );
 
   // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
   // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
