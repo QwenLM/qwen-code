@@ -15,8 +15,10 @@ import {
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionMarkerStrictSync,
+  replaceWorktreeSessionMarker,
   transferWorktreeSessionMarkerOwner,
   WorktreeMarkerCommittedError,
+  WorktreeSessionMarkerOwnerChangedError,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
 
@@ -85,7 +87,7 @@ describe('daemon worktree session markers', () => {
       path.join(repo, '.git', 'info', 'exclude'),
       'utf8',
     );
-    expect(exclude.split(/\r?\n/)).toContain(WORKTREE_SESSION_FILE);
+    expect(exclude.split(/\r?\n/)).toContain(`/${WORKTREE_SESSION_FILE}`);
     await execFileAsync('git', ['add', '-A'], { cwd: worktree });
 
     const { stdout } = await execFileAsync(
@@ -556,7 +558,7 @@ describe('transferWorktreeSessionMarkerOwner', () => {
 
     await expect(
       transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
-    ).rejects.toThrow('does not match');
+    ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
     await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toMatchObject({
       state: 'valid',
       sessionId: 'session-other',
@@ -568,7 +570,7 @@ describe('transferWorktreeSessionMarkerOwner', () => {
 
     await expect(
       transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
-    ).rejects.toThrow('does not match');
+    ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
     await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
       state: 'missing',
     });
@@ -641,8 +643,8 @@ describe('transferWorktreeSessionMarkerOwner', () => {
       'utf8',
     );
     const rules = exclude.split(/\r?\n/);
-    expect(rules).toContain(WORKTREE_SESSION_FILE);
-    expect(rules).toContain(`${WORKTREE_SESSION_FILE}.*.tmp`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}.*.tmp`);
     await execFileAsync('git', ['add', '-A'], { cwd: worktree });
     const { stdout } = await execFileAsync(
       'git',
@@ -701,7 +703,7 @@ describe('transferWorktreeSessionMarkerOwner', () => {
     },
   );
 
-  it('aborts the rename when the marker is swapped in the commit window', async () => {
+  it('types a replace race when the marker is swapped in the commit window', async () => {
     const dir = await tempDir();
     await createWorktreeSessionMarkerExclusive(dir, 'session-old');
     const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
@@ -728,8 +730,8 @@ describe('transferWorktreeSessionMarkerOwner', () => {
 
     try {
       await expect(
-        transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
-      ).rejects.toThrow('Worktree marker changed during ownership transfer');
+        replaceWorktreeSessionMarker(dir, 'session-old', 'session-new'),
+      ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
       // The aborted rename leaves the raced marker — never the stale owner
       // this call was about to commit — and cleans up the staged temp file.
       await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
