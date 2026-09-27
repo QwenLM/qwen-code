@@ -1675,7 +1675,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart.",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1689,9 +1689,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         },
         "parameters": [
@@ -1719,7 +1716,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope.",
+            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1733,9 +1730,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         }
       }
@@ -1755,7 +1749,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. 409 cursor_expired means that the cursor is older than the retained events; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that reads the task Artifacts and then the retained events from the start (without after) misses no output; joining the two without overlap is defined with output segmentation in Stage H3.",
+            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. 409 cursor_expired means that the cursor is older than the retained events; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that reads the task Artifacts and then the retained events from the start (without after) misses no output; joining the two without overlap is defined with output segmentation in Stage H3. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1772,9 +1766,6 @@
           },
           "409": {
             "$ref": "#/components/responses/CursorExpired"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         },
         "parameters": [
@@ -1802,7 +1793,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Cancel durably recorded for the task owner. A retry by the same actor with the same Idempotency-Key and request replays the original operation after the caller's access is re-checked and before any task-state or action_capabilities check, even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. 400 invalid_request when Idempotency-Key is missing or malformed; 403 task_forbidden when the caller can read the task but may not cancel it; a new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict.",
+            "description": "Cancel durably recorded for the task owner. Checks run in this order: access (404, then 403 task_forbidden when the caller can read the task but may not cancel it), idempotent replay, then task state. A retry by the same actor with the same Idempotency-Key and request therefore replays the original operation even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. 400 invalid_request when Idempotency-Key is missing and invalid_idempotency_key when it is malformed, as on the other idempotent routes. A new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1852,9 +1843,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         },
         "requestBody": {
@@ -1890,9 +1878,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         },
         "requestBody": {
@@ -1931,9 +1916,6 @@
           },
           "409": {
             "$ref": "#/components/responses/CursorExpired"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
           }
         },
         "requestBody": {
@@ -5580,7 +5562,7 @@
         "type": "string",
         "enum": ["cancel", "send_input", "read_output"],
         "x-qwen-implementation-status": "planned",
-        "description": "cancel: the cancel route accepts a command for this task. send_input: reserved for a later capability route. read_output: the task events route returns output events for this task; without it the route returns only state and Artifact events."
+        "description": "Actions the task supports now, the same for every caller; whether a caller may use one is an authorization check (403). cancel: the cancel route accepts a new command for this task. send_input: reserved for a later capability route. read_output: the task events route returns output events for this task; without it the route returns only state and Artifact events."
       },
       "PublicTask": {
         "type": "object",
@@ -5780,7 +5762,8 @@
               "required": ["next_cursor"],
               "properties": {
                 "next_cursor": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 }
               }
             }
@@ -6128,7 +6111,8 @@
               "required": ["nextCursor"],
               "properties": {
                 "nextCursor": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 }
               }
             }
@@ -6304,7 +6288,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event the server examined, including events this caller does not receive, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event the server examined, including events the route does not return, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6403,7 +6387,7 @@
         "minLength": 1,
         "maxLength": 128,
         "x-qwen-implementation-status": "planned",
-        "description": "state_changed, output or artifact. The set is open: later versions may add types, and clients ignore types they do not know, as with Session events."
+        "description": "state_changed, output or artifact. The set is open: a later minor version may add a type together with the optional fields it needs, and clients ignore types they do not know."
       },
       "PublicTaskEventList": {
         "type": "object",
@@ -6427,7 +6411,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event the server examined, including events this caller does not receive, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The position after the last event the server examined, including events the route does not return, so an empty page can still advance; when nothing was examined, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"

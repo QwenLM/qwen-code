@@ -37,7 +37,10 @@ class PlannedTaskContractTest {
     void taskViewKeepsItsStateInvariants() {
         accept("running", task("running", 2L, null, "cancel", "read_output"));
         accept("pending", task("pending", null, null, "cancel"));
+        accept("waiting", task("waiting", 2L, null, "cancel"));
+        accept("degraded", task("degraded", 2L, null, "read_output"));
         accept("completed", task("completed", 2L, 3L, "read_output"));
+        accept("failed after start", task("failed", 2L, 3L));
         accept("cancelled before start", task("cancelled", null, 3L));
         accept("recovery_blocked may cancel",
                 task("recovery_blocked", 2L, null, "cancel"));
@@ -53,6 +56,8 @@ class PlannedTaskContractTest {
         reject("recovery_blocked takes input",
                 task("recovery_blocked", 2L, null, "send_input"));
         reject("running without started_at", task("running", null, null));
+        reject("waiting without started_at", task("waiting", null, null));
+        reject("degraded without started_at", task("degraded", null, null));
         reject("completed without started_at", task("completed", null, 3L));
         reject("pending with started_at", task("pending", 2L, null));
         reject("duplicate capability",
@@ -81,6 +86,10 @@ class PlannedTaskContractTest {
         check("PublicTaskEvent", "a later event type",
                 event("input_received"), true);
 
+        check("PublicTaskEvent", "state_changed without state",
+                event("state_changed"), false);
+        check("PublicTaskEvent", "artifact without artifact_id",
+                event("artifact"), false);
         check("PublicTaskEvent", "state_changed with text",
                 event("state_changed").put("state", "running")
                         .put("text", "x"), false);
@@ -109,6 +118,9 @@ class PlannedTaskContractTest {
         tasks.putArray("data").add(task("running", 2L, null));
         tasks.putNull("next_cursor");
         check("PublicTaskList", "more tasks without a cursor", tasks, false);
+        tasks.put("next_cursor", "");
+        check("PublicTaskList", "more tasks with an empty cursor", tasks,
+                false);
         tasks.put("next_cursor", "cursor-1");
         check("PublicTaskList", "more tasks with a cursor", tasks, true);
 
